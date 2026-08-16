@@ -307,7 +307,7 @@ final class KokoroEngine: NSObject, SpeechEngine {
         audioEngineRunning = false
         try? AVAudioSession.sharedInstance().setActive(
             false,
-            with: .notifyOthersOnDeactivation
+            options: .notifyOthersOnDeactivation
         )
         generatedBuffers = [:]
         scheduledUpTo = -1

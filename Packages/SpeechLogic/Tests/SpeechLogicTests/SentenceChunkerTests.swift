@@ -101,7 +101,7 @@ final class SentenceChunkerTests: XCTestCase {
 
     func testDecimalsAreNotSplit() {
         XCTAssertEqual(SentenceChunker.firstChunk(in: "Pi is 3.14 rounded.")?.text, "Pi is 3.14 rounded.")
-        XCTAssertEqual(SentenceChunker.firstChunk(in: "Version v1.2 shipped today.")?.text, "Version v1.2 shipped today. ")
+        XCTAssertEqual(SentenceChunker.firstChunk(in: "Version v1.2 shipped today.")?.text, "Version v1.2 shipped today.")
         XCTAssertEqual(SentenceChunker.chunks(for: "Build 1.2.3 passed tests. Great.").map(\.text),
                        ["Build 1.2.3 passed tests. ", "Great."])
         assertReconstructs("Pi is 3.14 rounded. Build 1.2.3 shipped.")

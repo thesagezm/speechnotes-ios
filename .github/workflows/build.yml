@@ -23,7 +23,13 @@ jobs:
       - name: Show failure summary
         if: failure()
         run: |
-          grep -E "error:|failed|XCTAssert" logic-tests.log | tail -n 30 || true
+          grep -E "error:|failed|XCTAssert" logic-tests.log | tail -n 30 > summary.txt || true
+          echo "----- LOGIC TEST FAILURE SUMMARY (last 30 matching lines) -----"
+          cat summary.txt
+          echo "-------------------------------------------------------------------"
+          if [ -s summary.txt ]; then
+            python3 -c "import pathlib; t = pathlib.Path('summary.txt').read_text()[:5500]; print('::error title=Logic tests failure::' + t.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A'))"
+          fi
 
       - name: Upload logic test log
         if: always()
