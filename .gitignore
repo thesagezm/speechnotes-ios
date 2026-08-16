@@ -8,6 +8,10 @@ dist/
 DerivedData/
 .build/
 
+# Copied into the spike package by CI right before swift test — the vendored
+# App/Sources/Engine/Supertonic/Helper.swift is the single source of truth
+Tests/SupertonicSpike/Tests/SupertonicSpikeTests/Helper.swift
+
 # Xcode user state
 xcuserdata/
 *.xcuserstate

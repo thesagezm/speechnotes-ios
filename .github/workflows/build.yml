@@ -118,6 +118,71 @@ jobs:
           path: kitten-spike.log
           if-no-files-found: warn
 
+  supertonic-spike:
+    name: Supertonic spike (validates ONNX contract)
+    runs-on: macos-latest
+    timeout-minutes: 20
+    # Informative and non-blocking by design (matches kitten-spike; the phone
+    # is the real bench) — but read this job's results via the API before
+    # trusting the engine. This spike is the RSS gate for the A14 device.
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Supertonic model assets
+        run: |
+          mkdir -p ~/supertonic-spike/onnx ~/supertonic-spike/voice_styles
+          BASE="https://huggingface.co/Supertone/supertonic-3/resolve/main"
+          for f in duration_predictor.onnx text_encoder.onnx vector_estimator.onnx vocoder.onnx tts.json unicode_indexer.json; do
+            curl -L --retry 3 --progress-bar -o ~/supertonic-spike/onnx/$f "$BASE/onnx/$f"
+          done
+          for v in M1 F1; do
+            curl -L --retry 3 --progress-bar -o ~/supertonic-spike/voice_styles/$v.json "$BASE/voice_styles/$v.json"
+          done
+          ls -lh ~/supertonic-spike/onnx ~/supertonic-spike/voice_styles
+
+      - name: Copy vendored Helper.swift into the spike package
+        run: |
+          cp App/Sources/Engine/Supertonic/Helper.swift \
+             Tests/SupertonicSpike/Tests/SupertonicSpikeTests/Helper.swift
+          echo "Spike compiles the exact vendored file the app ships ($(wc -l < Tests/SupertonicSpike/Tests/SupertonicSpikeTests/Helper.swift) lines)"
+
+      - name: Run Supertonic spike test
+        run: |
+          set -o pipefail
+          cd Tests/SupertonicSpike
+          swift test 2>&1 | tee ../../supertonic-spike.log
+
+      - name: Show failure summary
+        if: always()
+        run: |
+          grep -E "SUPERTONIC-SPIKE|error:|failed|Fatal|Crash|unexpected exit|Executed" supertonic-spike.log \
+            | grep -vE "warning:" \
+            | tail -n 40 > supertonic-summary.txt || true
+          echo "----- SUPERTONIC SPIKE SUMMARY -----"
+          cat supertonic-summary.txt
+          echo "------------------------------------"
+          if [ -s supertonic-summary.txt ]; then
+            python3 -c "import pathlib; t = pathlib.Path('supertonic-summary.txt').read_text()[:5500]; print('::error title=Supertonic spike failure::' + t.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A'))"
+          fi
+
+      - name: Upload sample audio
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: supertonic-sample
+          path: ~/supertonic-spike/sample.wav
+          if-no-files-found: error
+
+      - name: Upload spike log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: supertonic-spike-log
+          path: supertonic-spike.log
+          if-no-files-found: warn
+
   build-ipa:
     name: Build unsigned IPA
     runs-on: macos-latest
