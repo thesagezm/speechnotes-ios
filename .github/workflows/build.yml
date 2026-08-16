@@ -94,27 +94,31 @@ jobs:
       - name: Generate Xcode project
         run: xcodegen generate
 
-      # KokoroSwift's manifest declares `type: .dynamic`, which produces an
-      # unembedded KokoroSwift.framework that crashes at launch inside
-      # LiveContainer ("Library not loaded: @rpath/KokoroSwift.framework").
-      # LiveContainer needs a fully static binary, so we delete that one line
-      # from the package checkout before building. Pins in Package.resolved
-      # are untouched, so the build still uses KokoroSwift 1.0.11.
-      - name: Patch KokoroSwift to link statically
+      # Some of our SPM dependencies declare `type: .dynamic` in their
+      # manifests (KokoroSwift 1.0.11 and its dep MisakiSwift 1.0.6 both do).
+      # Dynamic SPM products become unembedded *.framework refs that crash at
+      # launch inside LiveContainer ("Library not loaded: @rpath/…"), so we
+      # strip that declaration from EVERY package checkout before building.
+      # Pins in Package.resolved are untouched — same versions, static linkage.
+      - name: Patch SPM packages to link statically
         run: |
           xcodebuild -resolvePackageDependencies \
             -project SpeechnotesIOS.xcodeproj \
             -scheme SpeechnotesIOS \
             -derivedDataPath build/DerivedData >/dev/null
-          MANIFEST=build/DerivedData/SourcePackages/checkouts/kokoro-ios/Package.swift
-          test -f "$MANIFEST" || { echo "::error::kokoro-ios checkout not found at $MANIFEST"; exit 1; }
-          if grep -q "type: .dynamic" "$MANIFEST"; then
-            sed -i '' "/type: .dynamic,/d" "$MANIFEST"
-            echo "Patched KokoroSwift to a static library:"
-            grep -A3 "\.library(" "$MANIFEST" | head -5
-          else
-            echo "KokoroSwift no longer declares .dynamic — patch not needed (upstream fixed it?)"
-          fi
+          CHECKOUTS=build/DerivedData/SourcePackages/checkouts
+          test -d "$CHECKOUTS" || { echo "::error::package checkouts not found at $CHECKOUTS"; exit 1; }
+          PATCHED=0
+          for MANIFEST in "$CHECKOUTS"/*/Package.swift; do
+            if grep -q "type: .dynamic" "$MANIFEST"; then
+              sed -i '' "/type: .dynamic/d" "$MANIFEST"
+              echo "Patched to static: $(basename "$(dirname "$MANIFEST")")"
+              PATCHED=$((PATCHED + 1))
+            fi
+          done
+          echo "$PATCHED package manifest(s) patched."
+          # The verify step after the archive enforces the outcome; a count of
+          # 0 here is fine (upstream may have fixed their manifests).
 
       - name: Archive (unsigned, generic iOS device)
         run: |
