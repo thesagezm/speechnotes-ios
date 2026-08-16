@@ -7,9 +7,12 @@ on:
 
 jobs:
   kokoro-spike:
-    name: Kokoro engine spike (macOS)
+    name: Kokoro spike (experimental — non-blocking)
     runs-on: macos-latest
     timeout-minutes: 30
+    # Experimental side-quest: proves Kokoro generation in CI. Failures here
+    # must never block or worry us — the app is tested on the real device.
+    continue-on-error: true
     steps:
       - name: Checkout
         uses: actions/checkout@v4

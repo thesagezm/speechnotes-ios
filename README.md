@@ -3,9 +3,11 @@
 An offline, Speech Note (Linux)-style app for iPhone — built entirely from Linux,
 compiled on GitHub Actions macOS runners, sideloaded via SideStore + LiveContainer.
 
-**Current status: Phase 2 — Kokoro engine spike in CI.**
-Phase 1 (notes UI + system TTS + logs) works on device. The `kokoro-spike`
-CI job runs Kokoro on a macOS runner and uploads `sample.wav` as an artifact.
+**Current status: Phase 3 — Kokoro on the phone.**
+The app now contains a full Kokoro engine: pick the engine in Speech Settings,
+download the ~342 MB model once (on-device, with progress), pick a voice
+(am_eric et al.), and notes are spoken fully offline. The CI spike is
+non-blocking garnish — the iPhone is the real test bench.
 
 ## v1 target
 

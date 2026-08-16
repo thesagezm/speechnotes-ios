@@ -7,6 +7,7 @@ struct NoteEditorView: View {
     @EnvironmentObject private var player: SpeechPlayer
     @State private var draft: String = ""
     @State private var didLoad = false
+    @State private var showingSettings = false
 
     private var currentNote: Note? {
         notes.notes.first { $0.id == noteId }
@@ -14,9 +15,15 @@ struct NoteEditorView: View {
 
     private var playIcon: String {
         switch player.state {
+        case .generating: return "hourglass"
         case .speaking: return "pause.fill"
         case .paused, .idle: return "play.fill"
         }
+    }
+
+    private var playButtonDisabled: Bool {
+        player.state == .idle
+            && draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     var body: some View {
@@ -30,6 +37,18 @@ struct NoteEditorView: View {
         }
         .navigationTitle(currentNote?.title ?? "Note")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button {
+                    showingSettings = true
+                } label: {
+                    Image(systemName: "speaker.wave.2")
+                }
+            }
+        }
+        .sheet(isPresented: $showingSettings) {
+            SettingsView()
+        }
         .onAppear {
             guard !didLoad else { return }
             draft = currentNote?.text ?? ""
@@ -45,13 +64,19 @@ struct NoteEditorView: View {
             Button {
                 player.togglePlay(draft)
             } label: {
-                Image(systemName: playIcon)
-                    .font(.title2)
-                    .frame(width: 44, height: 44)
+                Group {
+                    if player.state == .generating {
+                        ProgressView()
+                    } else {
+                        Image(systemName: playIcon)
+                    }
+                }
+                .font(.title2)
+                .frame(width: 44, height: 44)
             }
-            .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && player.state == .idle)
+            .disabled(playButtonDisabled)
 
-            if player.state != .idle {
+            if player.state == .speaking || player.state == .paused || player.state == .generating {
                 Button {
                     player.stop()
                 } label: {

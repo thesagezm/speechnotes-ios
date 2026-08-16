@@ -2,6 +2,7 @@ import Foundation
 
 enum SpeechState: Equatable {
     case idle
+    case generating
     case speaking
     case paused
 }
