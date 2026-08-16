@@ -3,9 +3,9 @@
 An offline, Speech Note (Linux)-style app for iPhone — built entirely from Linux,
 compiled on GitHub Actions macOS runners, sideloaded via SideStore + LiveContainer.
 
-**Current status: Phase 0 — pipeline proof.**
-The goal of this phase is simple: prove that `git push` → cloud build → unsigned
-`.ipa` → LiveContainer on the phone works end-to-end, with a hello-world app.
+**Current status: Phase 1 — notes UI + system TTS.**
+Notes list, editor with autosave, playback via Apple's system voice, and an
+on-device Logs tab. Kokoro lands in Phase 2.
 
 ## v1 target
 

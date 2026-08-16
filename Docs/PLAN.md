@@ -169,12 +169,11 @@ You can contribute small tweaks immediately (labels, colors, layout) — low-ris
 
 ## 10. Kickoff checklist — progress
 
-- [x] Questions answered (see above)
-- [x] Phase 0 scaffolded & committed locally at `~/.zcode/workspace/default/speechnotes-ios` (hello-world SwiftUI app, XcodeGen project, CI workflow, unsigned-IPA packaging script, icon, docs)
-- [ ] You create repo `speechnotes-ios` (public) on GitHub and push (see `speechnotes-ios/Docs/SETUP.md`)
-- [ ] First green Actions build produces the `SpeechnotesIOS` artifact
-- [ ] You import the IPA into LiveContainer → app opens → screenshot
-- [ ] Phase 1 begins (notes UI + system TTS)
+- [x] Questions answered (2026-08-16, see above)
+- [x] Phase 0 scaffolded, pushed, built on Actions, **installed via LiveContainer and confirmed working on the phone** (2026-08-16 — "said hello to the cloud")
+- [x] Phase 1 built & committed (v0.2.0): notes list + editor with autosave (JSON persistence in Documents), `SpeechEngine` protocol + `SystemEngine` (AVSpeechSynthesizer with pause/resume/stop + speed slider), SpeechPlayer wrapper (engine-swappable — Kokoro drops in here), on-device Logs tab with share
+- [ ] Phase 1 on-device acceptance: create note → system voice reads it aloud (play/pause/stop/speed) → note survives app restart
+- [ ] Phase 2 begins (Kokoro engine integration + CI test that generates sample.wav)
 
 ---
 
