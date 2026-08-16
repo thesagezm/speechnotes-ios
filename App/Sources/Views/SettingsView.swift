@@ -132,7 +132,7 @@ struct SettingsView: View {
             }
             .onAppear {
                 guard systemVoices.isEmpty else { return }
-                systemVoices = AVSpeechSynthesisVoice.speechSynthesisVoices()
+                systemVoices = AVSpeechSynthesisVoice.speechVoices()
                     .sorted { lhs, rhs in
                         if lhs.language != rhs.language { return lhs.language < rhs.language }
                         return lhs.name < rhs.name

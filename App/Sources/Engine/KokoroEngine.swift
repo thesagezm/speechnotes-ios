@@ -41,8 +41,17 @@ final class KokoroEngine: NSObject, SpeechEngine {
     private let timePitch = AVAudioUnitTimePitch()
     private var audioNodesAttached = false
     private var audioEngineRunning = false
+    /// The graph is wired exactly once per format — reconnecting while the
+    /// engine runs and the node plays drops scheduled buffers (the "cut off
+    /// after the first chunk" bug).
+    private var connectedFormat: AVAudioFormat?
 
     private var playbackGeneration = 0
+
+    /// How many chunks beyond the playback cursor the producer may generate
+    /// ahead. Generation outruns playback (RTF ≈ 0.5), so 3 keeps the queue
+    /// gapless while bounding audio-buffer + MLX-cache memory.
+    private static let generationAheadLimit = 3
 
     // Streaming pipeline state — main thread only.
     private var chunks: [Chunk] = []
@@ -192,8 +201,15 @@ final class KokoroEngine: NSObject, SpeechEngine {
                 return
             }
 
-            // Producer: generate chunks in order while the consumer plays them.
+            // Producer: generate chunks in order while the consumer plays
+            // them. Generation is capped a few chunks ahead of playback so
+            // buffers and MLX intermediates never pile up on long notes
+            // (unbounded accumulation killed LiveContainer via jetsam).
             for (index, chunk) in allChunks.enumerated() {
+                while self.playbackGeneration == generation,
+                      index > self.scheduledUpTo + Self.generationAheadLimit {
+                    Thread.sleep(forTimeInterval: 0.05)
+                }
                 guard self.playbackGeneration == generation else { return }
                 do {
                     let started = Date()
@@ -202,6 +218,9 @@ final class KokoroEngine: NSObject, SpeechEngine {
                         language: language,
                         text: chunk.text
                     )
+                    // MLX caches intermediate buffers between operations;
+                    // without this, memory climbs with every chunk generated.
+                    MLX.GPU.clearCache()
                     let elapsed = Date().timeIntervalSince(started)
                     let duration = Double(audio.count) / Double(KokoroTTS.Constants.samplingRate)
                     Log.shared.info("KokoroEngine: chunk \(index + 1)/\(allChunks.count) — \(String(format: "%.1f", duration))s audio in \(String(format: "%.1f", elapsed))s")
@@ -249,11 +268,16 @@ final class KokoroEngine: NSObject, SpeechEngine {
             let next = scheduledUpTo + 1
             guard next < chunks.count, let buffer = generatedBuffers[next] else { return }
             scheduledUpTo = next
-            schedule(buffer: buffer, isLast: next == chunks.count - 1, generation: generation)
+            schedule(
+                buffer: buffer,
+                index: next,
+                isLast: next == chunks.count - 1,
+                generation: generation
+            )
         }
     }
 
-    private func schedule(buffer: AVAudioPCMBuffer, isLast: Bool, generation: Int) {
+    private func schedule(buffer: AVAudioPCMBuffer, index: Int, isLast: Bool, generation: Int) {
         ensureAudioEngineRunning(format: buffer.format)
 
         let charsDone = chunks.prefix(scheduledUpTo + 1).reduce(0) { $0 + $1.length }
@@ -270,18 +294,28 @@ final class KokoroEngine: NSObject, SpeechEngine {
             DispatchQueue.main.async {
                 guard let self, self.playbackGeneration == generation else { return }
                 if isLast {
+                    // Free the final buffer before tearing down.
+                    self.generatedBuffers[index] = nil
                     if self.state == .speaking || self.state == .paused || self.state == .generating {
                         self.onProgress?(1.0)
                         self.state = .idle
                     }
                     return
                 }
+                // Played chunks are released as the cursor moves past them —
+                // memory stays bounded at the generation-ahead window.
+                self.generatedBuffers[index] = nil
                 self.scheduleReadyChunks(generation: generation)
             }
         }
 
         if state == .generating {
             state = .speaking
+            playerNode.play()
+        } else if state == .speaking, !playerNode.isPlaying {
+            // Safety net: the node stopped underneath us (e.g. an engine
+            // hiccup) — restart consumption. Paused state deliberately not
+            // touched here.
             playerNode.play()
         }
     }
@@ -292,8 +326,11 @@ final class KokoroEngine: NSObject, SpeechEngine {
             audioEngine.attach(timePitch)
             audioNodesAttached = true
         }
-        audioEngine.connect(playerNode, to: timePitch, format: format)
-        audioEngine.connect(timePitch, to: audioEngine.mainMixerNode, format: format)
+        if connectedFormat != format {
+            audioEngine.connect(playerNode, to: timePitch, format: format)
+            audioEngine.connect(timePitch, to: audioEngine.mainMixerNode, format: format)
+            connectedFormat = format
+        }
         timePitch.rate = rate
         if !audioEngine.isRunning {
             do {
@@ -370,6 +407,9 @@ final class KokoroEngine: NSObject, SpeechEngine {
                         language: language,
                         text: chunk.text
                     )
+                    // Same memory discipline as streaming playback — long
+                    // exports died to jetsam without this.
+                    MLX.GPU.clearCache()
                     samples.append(contentsOf: audio)
                     let charsDone = renderChunks.prefix(index + 1).reduce(0) { $0 + $1.length }
                     let progress = min(1.0, Double(charsDone) / Double(total))
