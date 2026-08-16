@@ -46,6 +46,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.speechnotes.kokorospike-tests
         MACOSX_DEPLOYMENT_TARGET: "15.0"
+        GENERATE_INFOPLIST_FILE: "YES"
 schemes:
   SpeechnotesIOS:
     build:
