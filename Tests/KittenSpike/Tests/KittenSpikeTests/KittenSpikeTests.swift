@@ -77,7 +77,7 @@ final class KittenSpikeTests: XCTestCase {
                 "style": styleTensor,
                 "speed": speedTensor,
             ],
-            outputNames: outputNames,
+            outputNames: Set(outputNames),
             runOptions: nil
         )
         guard let waveform = outputs[outputNames.first ?? ""] else {
@@ -96,8 +96,17 @@ final class KittenSpikeTests: XCTestCase {
             samples = Array(samples[0..<(samples.count - 5_000)])
         }
         let duration = Double(samples.count) / 24_000
-        let rms = sqrt(samples.reduce(0) { $0 + Double($1) * Double($1) } / Double(max(1, samples.count)))
-        print("KITTEN-SPIKE duration=\(String(format: "%.2f", duration))s rtf=\(String(format: "%.3f", elapsed / max(duration, 0.001))) rms=\(String(format: "%.4f", rms))")
+        var sumSquares: Double = 0
+        for sample in samples {
+            let value = Double(sample)
+            sumSquares += value * value
+        }
+        let rms = sqrt(sumSquares / Double(max(1, samples.count)))
+        let durationText = String(format: "%.2f", duration)
+        let rtf = elapsed / max(duration, 0.001)
+        let rtfText = String(format: "%.3f", rtf)
+        let rmsText = String(format: "%.4f", rms)
+        print("KITTEN-SPIKE duration=\(durationText)s rtf=\(rtfText) rms=\(rmsText)")
 
         XCTAssertGreaterThan(samples.count, 24_000, "expected at least 1s of audio")
         XCTAssertGreaterThan(rms, 0.005, "audio looks silent")

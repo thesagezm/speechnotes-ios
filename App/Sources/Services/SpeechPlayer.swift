@@ -97,6 +97,7 @@ final class SpeechPlayer: ObservableObject {
             engineKind = EngineKind(rawValue: storedEngine ?? "") ?? .system
         }
         voice = defaults.string(forKey: "voice") ?? "am_eric"
+        kittenVoice = defaults.string(forKey: "kittenVoice") ?? KittenEngine.defaultVoice
         systemVoiceIdentifier = defaults.string(forKey: "systemVoiceIdentifier")
 
         rebuildEngine()
@@ -104,7 +105,7 @@ final class SpeechPlayer: ObservableObject {
         ModelManager.shared.onReady = { [weak self] in
             self?.rebuildEngine()
         }
-        Log.shared.info("SpeechPlayer initialised (engine=\(engineKind.rawValue), voice=\(voice))")
+        Log.shared.info("SpeechPlayer initialised (engine=\(engineKind.rawValue), voice=\(voice), kittenVoice=\(kittenVoice))")
     }
 
     var activeEngineName: String {

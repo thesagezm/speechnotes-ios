@@ -9,10 +9,13 @@ final class KittenTokenizerTests: XCTestCase {
         XCTAssertEqual(KittenTokenizer.vocabulary.count, 175)
         XCTAssertEqual(KittenTokenizer.vocabulary["$"], 0)          // pad
         XCTAssertEqual(KittenTokenizer.vocabulary[";"], 1)
-        XCTAssertEqual(KittenTokenizer.vocabulary[" "], 12)         // trailing punct entry
+        XCTAssertEqual(KittenTokenizer.vocabulary[" "], 16)         // after the quote cluster (12 is «)
         XCTAssertEqual(KittenTokenizer.vocabulary["…"], 10)         // EOS symbol
         XCTAssertEqual(KittenTokenizer.vocabulary["A"], 17)
         XCTAssertEqual(KittenTokenizer.vocabulary["a"], 43)
+        // Reference builds its dict last-wins: duplicates keep their final id.
+        XCTAssertEqual(KittenTokenizer.vocabulary["\""], 15)        // '"' also occupies 11 and 14
+        XCTAssertEqual(KittenTokenizer.vocabulary["'"], 176)        // "'" also occupies 174
         // IPA stress marks are word-ish letters late in the table.
         XCTAssertNotNil(KittenTokenizer.vocabulary["ˈ"])
         XCTAssertNotNil(KittenTokenizer.vocabulary["ː"])
@@ -37,10 +40,10 @@ final class KittenTokenizerTests: XCTestCase {
     func testSpacingRegularizedBetweenRuns() {
         // Punctuation splits from letters; spacing collapses to one gap.
         let spaced = KittenTokenizer.ids(for: "haˈloʊ, wɜːld!")
-        // The comma and space both map to table ids (',' = 3, ' ' = 12).
+        // The comma and space both map to table ids (',' = 3, ' ' = 16).
         XCTAssertTrue(spaced.contains(3))
-        XCTAssertTrue(spaced.contains(12))
-        XCTAssertEqual(spaced.filter { $0 == 12 }.count, 3) // 2 gaps + 1 before '!'
+        XCTAssertTrue(spaced.contains(16))
+        XCTAssertEqual(spaced.filter { $0 == 16 }.count, 3) // 2 gaps + 1 before '!'
     }
 
     func testEmptyPhonemesStillProduceWrappers() {

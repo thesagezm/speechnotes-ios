@@ -75,7 +75,26 @@ jobs:
         run: |
           set -o pipefail
           cd Tests/KokoroSpike
-          swift test 2>&1 | tee ../../spike.log
+          swift build --build-tests
+          # Under `swift test` the xctest bundle is the main bundle, and mlx's
+          # metallib loader checks mainBundle first, then the mlx-swift_Cmlx
+          # bundle — SPM copies neither into the xctest. Copy both in, then
+          # run without rebuilding (a rebuild would regenerate the xctest).
+          XCTEST=".build/debug/KokoroSpikePackageTests.xctest"
+          mkdir -p "$XCTEST/Contents/Resources"
+          METALLIB="$(find .build -name 'default.metallib' -path '*debug*' | head -1)"
+          if [ -n "$METALLIB" ]; then
+            cp "$METALLIB" "$XCTEST/Contents/Resources/"
+          else
+            echo "warning: default.metallib not found in .build — spike will likely fail"
+          fi
+          CMLX_BUNDLE="$(find .build -name 'mlx-swift_Cmlx.bundle' -path '*debug*' -type d | head -1)"
+          if [ -n "$CMLX_BUNDLE" ]; then
+            cp -R "$CMLX_BUNDLE" "$XCTEST/Contents/Resources/"
+          else
+            echo "warning: mlx-swift_Cmlx.bundle not found in .build"
+          fi
+          swift test --skip-build 2>&1 | tee ../../spike.log
 
       - name: Show failure summary
         if: always()
