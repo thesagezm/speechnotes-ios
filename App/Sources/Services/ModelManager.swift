@@ -55,8 +55,13 @@ final class ModelManager: ObservableObject {
         let fm = FileManager.default
         guard let modelSize = (try? fm.attributesOfItem(atPath: onnxModelFileURL.path))?[.size] as? Int64,
               modelSize > 40_000_000 else { return false }
-        guard let tokenizerSize = (try? fm.attributesOfItem(atPath: onnxTokenizerFileURL.path))?[.size] as? Int64,
-              tokenizerSize > 10_000 else { return false }
+        // tokenizer.json is tiny (~3.5 KB) — validate by parsing it the same
+        // way the engine does, not by size. (A >10 KB size check rejected
+        // every successful download.)
+        guard let data = try? Data(contentsOf: onnxTokenizerFileURL),
+              let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let vocab = (json["model"] as? [String: Any])?["vocab"] as? [String: Int],
+              vocab.count > 100 else { return false }
         return true
     }
 
@@ -141,12 +146,16 @@ final class ModelManager: ObservableObject {
                 try await self?.download(
                     from: Self.modelURL,
                     to: Self.modelFileURL,
-                    progressRange: 0.0...0.95
+                    expectedBytes: 327_115_152,
+                    progressRange: 0.0...0.95,
+                    publishingTo: { [weak self] value in self?.reportProgress(value) }
                 )
                 try await self?.download(
                     from: Self.voicesURL,
                     to: Self.voicesFileURL,
-                    progressRange: 0.95...1.0
+                    expectedBytes: 14_629_684,
+                    progressRange: 0.95...1.0,
+                    publishingTo: { [weak self] value in self?.reportProgress(value) }
                 )
                 await MainActor.run {
                     guard let self else { return }
@@ -191,12 +200,16 @@ final class ModelManager: ObservableObject {
                 try await self?.download(
                     from: Self.onnxModelURL,
                     to: Self.onnxModelFileURL,
-                    progressRange: 0.0...0.95
+                    expectedBytes: 86_033_585,
+                    progressRange: 0.0...0.95,
+                    publishingTo: { [weak self] value in self?.reportOnnxProgress(value) }
                 )
                 try await self?.download(
                     from: Self.onnxTokenizerURL,
                     to: Self.onnxTokenizerFileURL,
-                    progressRange: 0.95...1.0
+                    expectedBytes: 3_497,
+                    progressRange: 0.95...1.0,
+                    publishingTo: { [weak self] value in self?.reportOnnxProgress(value) }
                 )
                 await MainActor.run {
                     guard let self else { return }
@@ -249,6 +262,12 @@ final class ModelManager: ObservableObject {
         }
     }
 
+    private func reportOnnxProgress(_ value: Double) {
+        if case .downloading = onnxState {
+            onnxState = .downloading(progress: value)
+        }
+    }
+
     /// Downloads one file with progress, retry, and resume support.
     ///
     /// The completed temp file MUST be moved inside the delegate's
@@ -256,10 +275,16 @@ final class ModelManager: ObservableObject {
     /// that method returns, which is exactly the race that produced
     /// "CFNetworkDownload_*.tmp couldn't be moved" on device when the move
     /// ran after an async hop back into the task.
+    ///
+    /// `expectedBytes` is the known remote size: some CDN responses carry no
+    /// Content-Length (totalBytesExpected == -1), which would leave the
+    /// progress bar at 0% for the whole transfer — fall back to it then.
     nonisolated private func download(
         from source: URL,
         to destination: URL,
-        progressRange: ClosedRange<Double>
+        expectedBytes: Int64,
+        progressRange: ClosedRange<Double>,
+        publishingTo sink: (@MainActor (Double) -> Void)?
     ) async throws {
         let directory = destination.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -278,14 +303,13 @@ final class ModelManager: ObservableObject {
                 let session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
                 defer { session.finishTasksAndInvalidate() }
 
-                delegate.onProgress = { [weak self] written, total in
-                    guard total > 0 else { return }
-                    let fraction = min(1.0, Double(written) / Double(total))
+                delegate.onProgress = { written, total in
+                    let denominator = total > 0 ? total : expectedBytes
+                    guard denominator > 0 else { return }
+                    let fraction = min(1.0, Double(written) / Double(denominator))
                     let value = progressRange.lowerBound
                         + (progressRange.upperBound - progressRange.lowerBound) * fraction
-                    Task { @MainActor [weak self] in
-                        self?.reportProgress(value)
-                    }
+                    Task { @MainActor in sink?(value) }
                 }
 
                 if attempt > 1 {
