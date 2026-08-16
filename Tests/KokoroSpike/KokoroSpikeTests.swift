@@ -2,6 +2,7 @@ import XCTest
 import KokoroSwift
 import MLX
 import MLXUtilsLibrary
+import Metal
 
 /// Phase 2 spike: proves the full Kokoro pipeline (model + voices + G2P + MLX)
 /// runs on Apple silicon and produces audible speech. Runs on CI (macOS),
@@ -12,6 +13,15 @@ final class KokoroSpikeTests: XCTestCase {
     }
 
     func testGenerateSpeech() throws {
+        // Environment diagnostics — lets a failure in the log explain itself.
+        let device = MTLCreateSystemDefaultDevice()
+        print("KOKORO-SPIKE metal-device=\(device?.name ?? "NONE")")
+        for name in ["kokoro-v1_0.safetensors", "voices.npz"] {
+            let url = modelDir.appendingPathComponent(name)
+            let size = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int ?? 0
+            print("KOKORO-SPIKE file=\(name) size=\(size)")
+        }
+
         let modelPath = modelDir.appendingPathComponent("kokoro-v1_0.safetensors")
         let voicesURL = modelDir.appendingPathComponent("voices.npz")
         XCTAssertTrue(
