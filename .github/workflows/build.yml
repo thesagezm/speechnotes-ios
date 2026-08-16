@@ -63,21 +63,23 @@ jobs:
           mkdir -p ~/kitten-spike
           curl -L --retry 3 --progress-bar \
             -o ~/kitten-spike/model.onnx \
-            "https://huggingface.co/onnx-community/kitten-tts-nano-0.1-ONNX/resolve/main/onnx/model_quantized.onnx"
+            "https://huggingface.co/KittenML/kitten-tts-mini-0.8/resolve/main/kitten_tts_mini_v0_8.onnx"
           curl -L --retry 3 --progress-bar \
             -o /tmp/kitten-voices.npz \
-            "https://huggingface.co/KittenML/kitten-tts-nano-0.1/resolve/main/voices.npz"
-          # Extract expr-voice-5-m ("Leo") as one raw float32 row — keeps the
-          # spike test free of npz/MLX dependencies.
+            "https://huggingface.co/KittenML/kitten-tts-mini-0.8/resolve/main/voices.npz"
+          # mini-0.8 stores a [400, 256] float32 style matrix per voice —
+          # extract row 0 as the raw vector the engine would select for
+          # short inputs, keeping the spike free of npz/MLX dependencies.
           python3 -c "
-          import zipfile
+          import zipfile, struct, os
           z = zipfile.ZipFile('/tmp/kitten-voices.npz')
           data = z.read('expr-voice-5-m.npy')
           hlen = int.from_bytes(data[8:10], 'little')
           body = data[10 + hlen:]
-          assert len(body) == 256 * 4, len(body)
-          import os
-          open(os.path.expanduser('~/kitten-spike/voice.f32'), 'wb').write(body)
+          assert len(body) == 400 * 256 * 4, len(body)
+          row = body[:256 * 4]
+          print('CI voice head:', ', '.join(f'{v:.4f}' for v in struct.unpack('<4f', row[:16])))
+          open(os.path.expanduser('~/kitten-spike/voice.f32'), 'wb').write(row)
           "
           ls -lh ~/kitten-spike
 

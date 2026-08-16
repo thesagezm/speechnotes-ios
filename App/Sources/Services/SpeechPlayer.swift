@@ -16,7 +16,7 @@ final class SpeechPlayer: ObservableObject {
             switch self {
             case .system: return "Apple (system)"
             case .kokoroOnnx: return "Kokoro (on-device, offline)"
-            case .kitten: return "Kitten (on-device, tiny)"
+            case .kitten: return "Kitten (experimental — tiny)"
             }
         }
     }
@@ -78,6 +78,41 @@ final class SpeechPlayer: ObservableObject {
     /// Set when a WAV export succeeds — the editor presents the share sheet
     /// and clears this when it dismisses.
     @Published var shareURL: URL?
+
+    /// Title of the note currently being spoken (drives the mini-player).
+    @Published private(set) var nowPlayingTitle: String?
+    /// Identity of the note currently being spoken — mini-player taps
+    /// navigate to it.
+    @Published private(set) var nowPlayingNoteId: UUID?
+    /// Codename of the voice an in-picker audition is sampling, if any.
+    @Published private(set) var auditioningVoice: String?
+    /// Engine/voice to restore when the running audition finishes; nil once
+    /// the user makes an explicit selection mid-audition.
+    private var preAuditionState: (kind: EngineKind, voice: String, kittenVoice: String)?
+
+    /// True while an audition sample is sounding.
+    var isAuditioning: Bool { auditioningVoice != nil }
+    /// The compact player bar is shown while real speech is active (never
+    /// for picker auditions).
+    var showMiniPlayer: Bool {
+        (state == .speaking || state == .paused || state == .generating) && !isAuditioning
+    }
+
+    /// Friendly description of the voice the active engine will use.
+    var currentVoiceDescription: String {
+        switch engineKind {
+        case .system:
+            return "Apple voice"
+        case .kokoroOnnx:
+            return usingSystemFallback
+                ? "Apple voice (model missing)"
+                : VoiceCatalog.subtitle(for: voice, kind: .kokoroOnnx)
+        case .kitten:
+            return usingSystemFallback
+                ? "Apple voice (model missing)"
+                : VoiceCatalog.subtitle(for: kittenVoice, kind: .kitten)
+        }
+    }
 
     private var engine: (any SpeechEngine)?
     private var onnxEngine: OnnxKokoroEngine?
@@ -150,6 +185,9 @@ final class SpeechPlayer: ObservableObject {
                 self?.state = newState
                 if newState == .idle {
                     self?.spokenRange = nil
+                    self?.nowPlayingTitle = nil
+                    self?.nowPlayingNoteId = nil
+                    self?.finishAuditionIfActive()
                 }
             }
         }
@@ -165,7 +203,14 @@ final class SpeechPlayer: ObservableObject {
         }
     }
 
-    func togglePlay(_ text: String) {
+    /// Play/pause/stop the note's text. `note` feeds the mini-player's title
+    /// and jump-to-note tap; omitting it plays anonymous text.
+    func togglePlay(_ text: String, note: Note? = nil) {
+        if isAuditioning {
+            // A note taking control mid-audition ends the sample first.
+            stop()
+            return
+        }
         switch state {
         case .generating:
             // Tapping during generation cancels it.
@@ -175,12 +220,66 @@ final class SpeechPlayer: ObservableObject {
         case .paused:
             engine?.resume()
         case .idle:
+            nowPlayingTitle = note?.title
+            nowPlayingNoteId = note?.id
             engine?.speak(text, rateMultiplier: rateMultiplier)
         }
     }
 
     func stop() {
         engine?.stop()
+    }
+
+    // MARK: - Voice auditions
+
+    /// Speaks a short sample with a voice WITHOUT committing the selection —
+    /// the picker's audition button. Tapping the sounding audition stops it;
+    /// engine/voice are restored when the sample ends. No-op while a note is
+    /// playing or the engine's model isn't downloaded.
+    func audition(voice codename: String) {
+        guard state == .idle, !isExporting else { return }
+        if auditioningVoice == codename {
+            stop()
+            return
+        }
+        let modelReady = engineKind == .kitten
+            ? ModelManager.shared.kittenIsReady
+            : ModelManager.shared.isReady
+        guard modelReady else { return }
+
+        if preAuditionState == nil {
+            preAuditionState = (engineKind, voice, kittenVoice)
+        }
+        if engineKind == .kitten {
+            kittenVoice = codename
+        } else {
+            voice = codename
+        }
+        auditioningVoice = codename
+        let name = VoiceCatalog.shortName(for: codename, kind: engineKind)
+        Log.shared.info("SpeechPlayer: auditioning \(codename)")
+        engine?.speak(VoiceCatalog.auditionText(for: name), rateMultiplier: 1.0)
+    }
+
+    /// An explicit selection made while an audition is still sounding wins:
+    /// drop the queued restore (the sample keeps playing to its end).
+    func cancelAuditionRestore() {
+        preAuditionState = nil
+    }
+
+    /// Idle transition hook — restores whatever the audition changed, unless
+    /// the user selected a voice mid-audition.
+    private func finishAuditionIfActive() {
+        guard auditioningVoice != nil else { return }
+        if let saved = preAuditionState {
+            preAuditionState = nil
+            auditioningVoice = nil
+            voice = saved.voice
+            kittenVoice = saved.kittenVoice
+            engineKind = saved.kind
+        } else {
+            auditioningVoice = nil
+        }
     }
 
     // MARK: - WAV export

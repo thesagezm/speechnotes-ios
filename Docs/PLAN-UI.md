@@ -4,6 +4,18 @@
 > single neural engine; 28 voices; notes/editor/import/export/read-along all
 > working). This plan is UI-only: no engine changes, no new downloads.
 > Companion doc: `Docs/PLAN-NEW-VOICES.md` (Kitten + Supertonic engines).
+>
+> **STATUS (2026-08-16, v0.9.0):** UI-1, UI-2, UI-3 and UI-4 all implemented
+> in one build: VoiceCatalog friendly names, searchable VoicePickerSheet with
+> tap-to-audition + recents, notes list with previews/search/sort/sections/
+> swipe-export/drag-&-drop, persistent MiniPlayerBar (list + logs, hidden in
+> editor), editor redesign (gradient play button, voice chip → picker,
+> keyboard Speak bar + word count/listen estimate), haptics, import overhaul
+> (iCloud-aware coordinated reads, encoding battery, per-step logging,
+> clipboard channel). Remaining from the known issues: intra-chunk highlight
+> interpolation (UI-1's stretch goal) is NOT done — highlighting is still
+> chunk-granular; voice smoothness now also has the bigger models lever
+> (v0.9.0 ships Kokoro uint8 + Kitten mini-0.8).
 
 ## Current state (what we're building on)
 

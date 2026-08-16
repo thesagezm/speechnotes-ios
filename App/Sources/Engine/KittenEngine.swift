@@ -170,6 +170,12 @@ final class KittenEngine: NSObject, SpeechEngine {
             }
             voices = flat
             Log.shared.info("KittenEngine: \(flat.count) voices ready")
+            // Debugging aid for voice-quality reports: the first four style
+            // floats, comparable against the kitten-spike CI log line.
+            if let sample = flat["expr-voice-5-m.npy"] ?? flat.first?.value {
+                let head = sample.prefix(4).map { String(format: "%.4f", $0) }.joined(separator: ",")
+                Log.shared.info("KittenEngine: voice head [\(head)] count \(sample.count)")
+            }
             guard !flat.isEmpty else {
                 ortSession = nil
                 Log.shared.error("KittenEngine: voice bank is empty or unreadable")
@@ -339,6 +345,9 @@ final class KittenEngine: NSObject, SpeechEngine {
         guard let phonemes = phonemize(text), !phonemes.isEmpty else {
             throw KittenEngineError.phonemizationFailed
         }
+        // Debugging aid for voice-quality reports: the exact phoneme string
+        // fed to the tokenizer (compare against the spike's espeak dialect).
+        Log.shared.info("KittenEngine: phonemes «\(phonemes)»")
         let tokens = tokenize(phonemes)
         let started = Date()
         let samples = try synthesize(tokens: tokens, voiceFlat: voiceFlat)

@@ -131,3 +131,38 @@ note plays through (streaming parity); download ≤ ~270 MB with progress.
 
 V-1 Kitten (small, fast, expressive) → V-3 blending (tiny) → V-2 Supertonic
 (big, multilingual). Each ends with a device acceptance round.
+
+## Model size research (2026-08-16, drove the v0.9.0 swaps)
+
+User verdict after hearing nano-0.1 on device: **Kitten voices terrible.**
+Research result — the KittenTTS lineup is bigger than we shipped:
+
+| KittenTTS variant | Params | Size | Notes |
+|---|---|---|---|
+| nano-0.1 int8 (what v0.8 shipped) | 15M | ~24 MB | original, distilled from Kokoro-82M |
+| nano-0.8 int8 / fp32 | 15M | ~25 / ~50 MB | newer training run, "SOTA tiny" |
+| micro-0.8 | 40M | ~40 MB | |
+| **mini-0.8 (v0.9.0 choice)** | **80M** | **~78 MB** | same size class as Kokoro-82M |
+
+Kokoro ONNX variants (onnx-community/Kokoro-82M-v1.0-ONNX), budget <300 MB:
+
+| Variant | Size | Status |
+|---|---|---|
+| model_q8f16.onnx (v0.8 shipped) | 86 MB | dynamic-int8, baseline quality |
+| model_uint8f16.onnx | 114 MB | untested |
+| model_fp16.onnx | 163 MB | UNVERIFIED on ORT CPU — spike before shipping |
+| **model_uint8.onnx (v0.9.0 choice)** | **177 MB** | weight-only uint8 + fp32 act — one quality tier up |
+| model.onnx (fp32) | 326 MB | over budget |
+
+**v0.9.0 decisions:** Kitten → mini-0.8 (contract verified identical: same
+onnx_model.py, same inputs/style-256/tokenizer/24 kHz; voices.npz now
+[400, 256] per voice — engine's reference row-selection already handles
+multi-row banks; CI spike extraction updated to row 0). Kokoro → uint8.
+Both sets' validation thresholds reject the old files → clean re-download.
+Resume data now carries a URL sidecar so a stale partial from the OLD model
+can't corrupt the NEW download.
+
+**Next quality rungs if uint8 disappoints:** fp16 spike on the macOS runner
+(RTF + WAV artifact), then fp32 at 326 MB only if the budget grows.
+Kitten quality feedback loop: device logs now print the style-vector head
+(comparable to the CI log line) + exact phonemes per chunk.

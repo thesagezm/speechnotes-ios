@@ -41,5 +41,6 @@ struct LogsView: View {
                 }
             }
         }
+        .miniPlayer()
     }
 }

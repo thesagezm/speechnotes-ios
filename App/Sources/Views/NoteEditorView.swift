@@ -9,6 +9,7 @@ struct NoteEditorView: View {
     @State private var draft: String = ""
     @State private var didLoad = false
     @State private var showingSettings = false
+    @State private var showingVoicePicker = false
     @State private var showingDeleteConfirm = false
 
     private var currentNote: Note? {
@@ -52,6 +53,18 @@ struct NoteEditorView: View {
                 && draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    private var draftWordCount: Int {
+        draft.split(whereSeparator: \.isWhitespace).count
+    }
+
+    /// "412 words · ~3 min listen" — live stats for the keyboard bar.
+    private var draftStats: String {
+        let words = draftWordCount
+        guard words > 0 else { return "0 words" }
+        let minutes = max(1, Int((Double(words) / 145).rounded()))
+        return "\(words) words · ~\(minutes) min listen"
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             if isReadAlongActive {
@@ -61,12 +74,6 @@ struct NoteEditorView: View {
                     .font(.body)
                     .padding(.horizontal, 8)
                     .onChange(of: draft) { _ in saveDraft() }
-            }
-
-            if let progress = player.progress, player.state == .speaking {
-                ProgressView(value: progress)
-                    .padding(.horizontal)
-                    .padding(.top, 4)
             }
 
             controlsBar
@@ -92,6 +99,24 @@ struct NoteEditorView: View {
                     Image(systemName: "speaker.wave.2")
                 }
             }
+            ToolbarItemGroup(placement: .keyboard) {
+                Button {
+                    Haptics.tap()
+                    player.togglePlay(draft, note: currentNote)
+                } label: {
+                    Label(
+                        player.state == .speaking ? "Pause" : "Speak",
+                        systemImage: playIcon
+                    )
+                }
+                .disabled(playButtonDisabled)
+
+                Spacer()
+
+                Text(draftStats)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .confirmationDialog(
             "Delete this note?",
@@ -107,6 +132,10 @@ struct NoteEditorView: View {
         }
         .sheet(isPresented: $showingSettings) {
             SettingsView()
+        }
+        .sheet(isPresented: $showingVoicePicker) {
+            VoicePickerSheet(scope: player.engineKind == .kitten ? .kitten : .kokoro)
+                .environmentObject(player)
         }
         .sheet(isPresented: shareSheetBinding) {
             if let url = player.shareURL {
@@ -126,6 +155,9 @@ struct NoteEditorView: View {
         .onDisappear {
             saveDraft()
         }
+        .onChange(of: player.shareURL) { newValue in
+            if newValue != nil { Haptics.success() }
+        }
     }
 
     // MARK: - Export
@@ -139,6 +171,7 @@ struct NoteEditorView: View {
 
     private var exportButton: some View {
         Button {
+            Haptics.tap()
             player.export(draft)
         } label: {
             Group {
@@ -172,44 +205,108 @@ struct NoteEditorView: View {
         )
     }
 
+    // MARK: - Controls
+
     private var controlsBar: some View {
-        HStack(spacing: 16) {
-            Button {
-                player.togglePlay(draft)
-            } label: {
-                Group {
-                    if player.state == .generating {
-                        ProgressView()
-                    } else {
-                        Image(systemName: playIcon)
+        VStack(spacing: 8) {
+            voiceChip
+
+            if let progress = player.progress, player.state == .speaking {
+                GeometryReader { proxy in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(Color.secondary.opacity(0.25))
+                        Capsule()
+                            .fill(
+                                LinearGradient(
+                                    colors: [.accentColor, .purple],
+                                    startPoint: .leading,
+                                    endPoint: .trailing
+                                )
+                            )
+                            .frame(width: max(4, proxy.size.width * progress))
                     }
                 }
-                .font(.title2)
-                .frame(width: 44, height: 44)
+                .frame(height: 4)
+                .padding(.horizontal)
             }
-            .disabled(playButtonDisabled)
 
-            if player.state == .speaking || player.state == .paused || player.state == .generating {
+            HStack(spacing: 14) {
                 Button {
-                    player.stop()
+                    Haptics.tap()
+                    player.togglePlay(draft, note: currentNote)
                 } label: {
-                    Image(systemName: "stop.fill")
-                        .font(.title2)
-                        .frame(width: 44, height: 44)
+                    ZStack {
+                        Circle()
+                            .fill(
+                                LinearGradient(
+                                    colors: [.accentColor, .purple],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                            .shadow(color: .black.opacity(0.15), radius: 6, y: 3)
+                        if player.state == .generating {
+                            ProgressView()
+                                .tint(.white)
+                        } else {
+                            Image(systemName: playIcon)
+                                .font(.title2.bold())
+                                .foregroundStyle(.white)
+                        }
+                    }
+                    .frame(width: 52, height: 52)
                 }
-                .tint(.red)
+                .disabled(playButtonDisabled)
+
+                if player.state == .speaking || player.state == .paused || player.state == .generating {
+                    Button {
+                        Haptics.press()
+                        player.stop()
+                    } label: {
+                        Image(systemName: "stop.fill")
+                            .font(.body.weight(.bold))
+                            .foregroundStyle(.red)
+                            .frame(width: 36, height: 36)
+                            .background(Circle().fill(Color.red.opacity(0.12)))
+                    }
+                }
+
+                Slider(value: $player.rateMultiplier, in: 0.5...2.0, step: 0.05)
+                    .frame(height: 44)
+
+                Text(String(format: "%.2f×", player.rateMultiplier))
+                    .font(.callout.monospacedDigit())
+                    .frame(width: 52, alignment: .trailing)
             }
-
-            Slider(value: $player.rateMultiplier, in: 0.5...2.0, step: 0.05)
-                .frame(height: 44)
-
-            Text(String(format: "%.2f×", player.rateMultiplier))
-                .font(.callout.monospacedDigit())
-                .frame(width: 52, alignment: .trailing)
+            .padding(.horizontal)
         }
-        .padding(.horizontal)
-        .padding(.vertical, 10)
+        .padding(.top, 8)
+        .padding(.bottom, 10)
         .background(.bar)
+    }
+
+    /// Current engine + voice, one tap from the picker.
+    private var voiceChip: some View {
+        Button {
+            showingVoicePicker = true
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "person.wave.2.fill")
+                    .font(.caption)
+                Text(player.currentVoiceDescription)
+                    .font(.caption.weight(.medium))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(Capsule().fill(Color.secondary.opacity(0.12)))
+            .foregroundStyle(.secondary)
+        }
+        .buttonStyle(.plain)
     }
 
     private func saveDraft() {
@@ -217,15 +314,4 @@ struct NoteEditorView: View {
         note.text = draft
         notes.update(note)
     }
-}
-
-/// UIActivityViewController bridge for sharing exported WAV files.
-private struct ShareSheet: UIViewControllerRepresentable {
-    let items: [Any]
-
-    func makeUIViewController(context: Context) -> UIActivityViewController {
-        UIActivityViewController(activityItems: items, applicationActivities: nil)
-    }
-
-    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }

@@ -1,7 +1,7 @@
 import Foundation
 
 /// Downloads and owns the Kokoro model files (Documents/KokoroOnnx/):
-/// quantized ONNX model (~86 MB) + voice bank (~15 MB) + tokenizer (~4 KB).
+/// uint8 ONNX model (~177 MB) + voice bank (~15 MB) + tokenizer (~4 KB).
 /// One-time download on first launch; everything is offline after that.
 @MainActor
 final class ModelManager: ObservableObject {
@@ -32,17 +32,23 @@ final class ModelManager: ObservableObject {
 
     // MARK: Model set (ONNX engine)
 
-    /// Quantized Kokoro (~86 MB) — the kokoro-onnx/PocketPal default choice.
-    static let onnxModelURL = URL(string: "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/onnx/model_q8f16.onnx")!
+    /// Kokoro uint8 weight-only quant (~177 MB) — fp32 activations, one
+    /// quality tier above dynamic int8/q8f16, comfortably under the 300 MB
+    /// budget. (Next rung would be fp16 ~163 MB, unverified on ORT CPU.)
+    static let onnxModelURL = URL(string: "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/onnx/model_uint8.onnx")!
     static let onnxTokenizerURL = URL(string: "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/tokenizer.json")!
     /// Voice bank: 28 style vectors shared by every Kokoro voice.
     static let voicesURL = URL(string: "https://raw.githubusercontent.com/mlalma/KokoroTestApp/main/Resources/voices.npz")!
 
     // MARK: Kitten model set (second neural engine)
 
-    /// KittenTTS nano 0.1 quantized — 15M params, ~24 MB, CPU-only English.
-    static let kittenModelURL = URL(string: "https://huggingface.co/onnx-community/kitten-tts-nano-0.1-ONNX/resolve/main/onnx/model_quantized.onnx")!
-    static let kittenVoicesURL = URL(string: "https://huggingface.co/KittenML/kitten-tts-nano-0.1/resolve/main/voices.npz")!
+    /// KittenTTS mini 0.8 — 80M params (Kokoro's size class), int8 ONNX
+    /// ~78 MB, CPU-only English. Contract identical to nano 0.1 (same
+    /// inputs, style dim 256, tokenizer, 24 kHz); voices.npz now carries a
+    /// [400, 256] style matrix per voice — the engine's reference
+    /// row-selection already handles multi-row banks.
+    static let kittenModelURL = URL(string: "https://huggingface.co/KittenML/kitten-tts-mini-0.8/resolve/main/kitten_tts_mini_v0_8.onnx")!
+    static let kittenVoicesURL = URL(string: "https://huggingface.co/KittenML/kitten-tts-mini-0.8/resolve/main/voices.npz")!
 
     nonisolated static var kittenDirectory: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -59,10 +65,12 @@ final class ModelManager: ObservableObject {
 
     nonisolated static func kittenFilesAreValid() -> Bool {
         let fm = FileManager.default
+        // Thresholds reject the old nano-0.1 set (~24 MB model, ~10 KB
+        // voices) so the mini-0.8 upgrade re-downloads.
         guard let modelSize = (try? fm.attributesOfItem(atPath: kittenModelFileURL.path))?[.size] as? Int64,
-              modelSize > 15_000_000 else { return false }
+              modelSize > 60_000_000 else { return false }
         guard let voicesSize = (try? fm.attributesOfItem(atPath: kittenVoicesFileURL.path))?[.size] as? Int64,
-              voicesSize > 4_000 else { return false }
+              voicesSize > 1_000_000 else { return false }
         return true
     }
 
@@ -85,8 +93,10 @@ final class ModelManager: ObservableObject {
 
     nonisolated static func onnxFilesAreValid() -> Bool {
         let fm = FileManager.default
+        // Threshold rejects the old q8f16 model (~86 MB) so the uint8
+        // upgrade re-downloads.
         guard let modelSize = (try? fm.attributesOfItem(atPath: onnxModelFileURL.path))?[.size] as? Int64,
-              modelSize > 40_000_000 else { return false }
+              modelSize > 120_000_000 else { return false }
         guard let voicesSize = (try? fm.attributesOfItem(atPath: voicesFileURL.path))?[.size] as? Int64,
               voicesSize > 10_000_000 else { return false }
         // tokenizer.json is tiny (~3.5 KB) — validate by parsing it the same
@@ -99,8 +109,8 @@ final class ModelManager: ObservableObject {
         return true
     }
 
-    /// ~101 MB payload; require headroom of roughly 1.5× (PocketPal lesson).
-    nonisolated static let requiredFreeBytes: Int64 = 150_000_000
+    /// ~192 MB payload; require headroom of roughly 1.5× (PocketPal lesson).
+    nonisolated static let requiredFreeBytes: Int64 = 290_000_000
     /// Generous idle timeout — the GitHub media CDN can stall for minutes.
     nonisolated static let requestTimeout: TimeInterval = 120
     nonisolated static let resourceTimeout: TimeInterval = 7200
@@ -165,36 +175,36 @@ final class ModelManager: ObservableObject {
         return false
     }
 
-    /// Downloads the Kitten set (~24 MB model + 10 KB voices).
+    /// Downloads the Kitten set (~78 MB model + ~3.3 MB voices).
     func startKittenDownload() {
         if case .downloading = kittenState { return }
         guard !kittenIsReady else { return }
 
         if let attrs = try? FileManager.default.attributesOfFileSystem(forPath: NSHomeDirectory()),
            let free = attrs[.systemFreeSize] as? Int64,
-           free < 60_000_000 {
-            let message = "Not enough free space for the Kitten model (need ~60 MB, have \(free / 1_000_000) MB)"
+           free < 130_000_000 {
+            let message = "Not enough free space for the Kitten model (need ~130 MB, have \(free / 1_000_000) MB)"
             kittenState = .failed(message)
             Log.shared.error("ModelManager: \(message)")
             return
         }
 
         kittenState = .downloading(progress: 0)
-        Log.shared.info("ModelManager: starting Kitten model download (~24 MB)")
+        Log.shared.info("ModelManager: starting Kitten model download (~82 MB)")
 
         Task.detached { [weak self] in
             do {
                 try await self?.download(
                     from: Self.kittenModelURL,
                     to: Self.kittenModelFileURL,
-                    expectedBytes: 23_792_492,
+                    expectedBytes: 78_268_016,
                     progressRange: 0.0...0.99,
                     publishingTo: { [weak self] value in self?.reportKittenProgress(value) }
                 )
                 try await self?.download(
                     from: Self.kittenVoicesURL,
                     to: Self.kittenVoicesFileURL,
-                    expectedBytes: 10_294,
+                    expectedBytes: 3_278_902,
                     progressRange: 0.99...1.0,
                     publishingTo: { [weak self] value in self?.reportKittenProgress(value) }
                 )
@@ -235,13 +245,13 @@ final class ModelManager: ObservableObject {
         }
     }
 
-    /// Downloads the model set (~86 MB model + ~15 MB voices + 4 KB tokenizer).
+    /// Downloads the model set (~177 MB model + ~15 MB voices + 4 KB tokenizer).
     func startDownload() {
         if case .downloading = state { return }
         guard !isReady else { return }
 
         // Disk preflight — fail fast with a clear message instead of dying
-        // 80 MB into the download (PocketPal lesson: estimate × ~1.5).
+        // 100 MB into the download (PocketPal lesson: estimate × ~1.5).
         if let attrs = try? FileManager.default.attributesOfFileSystem(forPath: NSHomeDirectory()),
            let free = attrs[.systemFreeSize] as? Int64,
            free < Self.requiredFreeBytes {
@@ -252,14 +262,14 @@ final class ModelManager: ObservableObject {
         }
 
         state = .downloading(progress: 0)
-        Log.shared.info("ModelManager: starting model download (~101 MB)")
+        Log.shared.info("ModelManager: starting model download (~192 MB)")
 
         Task.detached { [weak self] in
             do {
                 try await self?.download(
                     from: Self.onnxModelURL,
                     to: Self.onnxModelFileURL,
-                    expectedBytes: 86_033_585,
+                    expectedBytes: 177_464_632,
                     progressRange: 0.0...0.8,
                     publishingTo: { [weak self] value in self?.reportProgress(value) }
                 )
@@ -338,6 +348,12 @@ final class ModelManager: ObservableObject {
 
         let partURL = destination.appendingPathExtension("part")
         let resumeDataURL = destination.appendingPathExtension("resumeData")
+        // Sidecar recording which remote the resume data belongs to — after
+        // a model-version swap, resuming stale bytes from the OLD url would
+        // corrupt the new download undetectably.
+        let resumeSourceURL = destination.appendingPathExtension("resumeSource")
+        let resumeMatchesSource = (try? String(contentsOf: resumeSourceURL, encoding: .utf8))
+            .map { $0 == source.absoluteString } ?? false
 
         var lastError: Error?
         for attempt in 1...Self.downloadAttempts {
@@ -364,10 +380,16 @@ final class ModelManager: ObservableObject {
 
                 let completedPart = try await withCheckedThrowingContinuation { continuation in
                     delegate.continuation = continuation
-                    if let resumeData = try? Data(contentsOf: resumeDataURL), !resumeData.isEmpty {
+                    if let resumeData = try? Data(contentsOf: resumeDataURL),
+                       !resumeData.isEmpty,
+                       resumeMatchesSource {
                         Log.shared.info("ModelManager: continuing partial download")
                         session.downloadTask(withResumeData: resumeData).resume()
                     } else {
+                        if !resumeMatchesSource {
+                            try? FileManager.default.removeItem(at: resumeDataURL)
+                        }
+                        try? source.absoluteString.write(to: resumeSourceURL, atomically: true, encoding: .utf8)
                         session.downloadTask(with: source).resume()
                     }
                 }

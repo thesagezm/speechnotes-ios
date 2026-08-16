@@ -9,11 +9,7 @@ struct SettingsView: View {
     /// Every installed system voice, fetched once on appear and then reused —
     /// `speechSynthesisVoices()` can return a few hundred entries.
     @State private var systemVoices: [AVSpeechSynthesisVoice] = []
-
-    /// Kokoro voice groups, derived once (voice prefix a* = American,
-    /// b* = British).
-    private static let americanVoices = ModelManager.knownVoices.filter { $0.hasPrefix("a") }
-    private static let britishVoices = ModelManager.knownVoices.filter { $0.hasPrefix("b") }
+    @State private var showingVoicePicker = false
 
     /// Any neural engine is selected AND its model is ready — the system
     /// engine (and so the system voice) is not in the playback path.
@@ -25,7 +21,7 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Speech engine") {
+                Section {
                     Picker("Engine", selection: $player.engineKind) {
                         ForEach(SpeechPlayer.EngineKind.allCases) { kind in
                             Text(kind.label).tag(kind)
@@ -42,47 +38,39 @@ struct SettingsView: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                     }
+                } header: {
+                    Text("Speech engine")
+                } footer: {
+                    Text("Kokoro is the main engine (28 voices). Kitten is a smaller experimental pack (8 voices).")
                 }
 
                 Section {
-                    if player.engineKind == .kitten {
-                        Menu {
-                            Section("Female") {
-                                ForEach(KittenEngine.voiceNames.filter { $0.hasSuffix("-f") }, id: \.self) { voice in
-                                    kittenVoiceRow(voice)
-                                }
-                            }
-                            Section("Male") {
-                                ForEach(KittenEngine.voiceNames.filter { $0.hasSuffix("-m") }, id: \.self) { voice in
-                                    kittenVoiceRow(voice)
-                                }
-                            }
-                        } label: {
-                            dropdownRow(title: "Voice", value: player.kittenVoice)
-                        }
-                    } else {
-                        Menu {
-                            Section("American (a*)") {
-                                ForEach(Self.americanVoices, id: \.self) { voice in
-                                    kokoroVoiceRow(voice)
-                                }
-                            }
-                            Section("British (b*)") {
-                                ForEach(Self.britishVoices, id: \.self) { voice in
-                                    kokoroVoiceRow(voice)
-                                }
-                            }
-                        } label: {
-                            dropdownRow(title: "Voice", value: player.voice)
+                    Button {
+                        showingVoicePicker = true
+                    } label: {
+                        HStack {
+                            Text("Voice")
+                            Spacer()
+                            Text(VoiceCatalog.subtitle(
+                                for: player.engineKind == .kitten ? player.kittenVoice : player.voice,
+                                kind: player.engineKind == .kitten ? .kitten : .kokoro
+                            ))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            Image(systemName: "chevron.up.chevron.down")
+                                .font(.caption2.weight(.medium))
+                                .foregroundStyle(.tertiary)
                         }
                     }
+                    .tint(.primary)
                 } header: {
                     Text(player.engineKind == .kitten ? "Kitten voice" : "Kokoro voice")
                 } footer: {
                     if player.engineKind == .kitten {
-                        Text("Small expressive pack — f = female, m = male.")
+                        Text("Tap a voice in the picker to hear a sample before committing.")
                     } else {
-                        Text("Naming: a = American, b = British · f = female, m = male — e.g. am_eric is American male Eric.")
+                        Text("Friendly names with codenames — e.g. Heart is af_heart, American female. Tap a voice to hear a sample.")
                     }
                 }
 
@@ -92,7 +80,7 @@ struct SettingsView: View {
                         Button {
                             models.startKittenDownload()
                         } label: {
-                            Label("Download Kitten model (~24 MB)", systemImage: "arrow.down.circle")
+                            Label("Download Kitten model (~82 MB)", systemImage: "arrow.down.circle")
                         }
                     case .downloading(let progress):
                         ProgressView(value: progress) {
@@ -106,42 +94,14 @@ struct SettingsView: View {
                         }
                     case .ready:
                         Label("Kitten model ready", systemImage: "checkmark.circle")
-                        Button("Delete Kitten model (frees ~24 MB)", role: .destructive) {
+                        Button("Delete Kitten model (frees ~82 MB)", role: .destructive) {
                             models.deleteKittenModels()
                         }
                     }
                 } header: {
                     Text("Kitten model")
                 } footer: {
-                    Text("A second offline voice pack: 8 expressive voices from a tiny 24 MB model. Optional — Kokoro above is the main engine.")
-                }
-
-                Section {
-                    Menu {
-                        systemVoiceRow(title: "Default (English)", identifier: nil)
-                        ForEach(systemVoices, id: \.identifier) { voice in
-                            systemVoiceRow(
-                                title: systemVoiceTitle(voice),
-                                identifier: voice.identifier
-                            )
-                        }
-                    } label: {
-                        dropdownRow(title: "Voice", value: selectedSystemVoiceTitle)
-                    }
-                    .disabled(neuralEngineIsActive)
-
-                    if neuralEngineIsActive {
-                        Label(
-                            "A Kokoro engine is active — the system voice only applies when Apple (system) is selected, or while a neural model is missing.",
-                            systemImage: "info.circle"
-                        )
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                    }
-                } header: {
-                    Text("System voice")
-                } footer: {
-                    Text("Used by Apple's built-in speech. Enhanced and premium voices sound richer; download them under Settings → Accessibility → Spoken Content → Voices.")
+                    Text("KittenTTS mini 0.8 — 80M parameters, 8 expressive voices. Optional; Kokoro above is the main engine.")
                 }
 
                 Section {
@@ -150,7 +110,7 @@ struct SettingsView: View {
                         Button {
                             models.startDownload()
                         } label: {
-                            Label("Download Kokoro model (~101 MB)", systemImage: "arrow.down.circle")
+                            Label("Download Kokoro model (~192 MB)", systemImage: "arrow.down.circle")
                         }
                     case .downloading(let progress):
                         ProgressView(value: progress) {
@@ -164,14 +124,52 @@ struct SettingsView: View {
                         }
                     case .ready:
                         Label("Model ready — fully offline", systemImage: "checkmark.circle")
-                        Button("Delete model (frees ~101 MB)", role: .destructive) {
+                        Button("Delete model (frees ~192 MB)", role: .destructive) {
                             models.deleteModels()
                         }
                     }
                 } header: {
                     Text("Kokoro model")
                 } footer: {
-                    Text("One-time download, stored inside the app: the quantized model, all 28 voices, and the tokenizer. All speech generation stays on your device.")
+                    Text("One-time download, stored inside the app: the uint8 quality model, all 28 voices, and the tokenizer. All speech generation stays on your device.")
+                }
+
+                Section {
+                    Menu {
+                        systemVoiceRow(title: "Default (English)", identifier: nil)
+                        ForEach(systemVoices, id: \.identifier) { voice in
+                            systemVoiceRow(
+                                title: systemVoiceTitle(voice),
+                                identifier: voice.identifier
+                            )
+                        }
+                    } label: {
+                        HStack {
+                            Text("Voice")
+                            Spacer()
+                            Text(selectedSystemVoiceTitle)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Image(systemName: "chevron.up.chevron.down")
+                                .font(.caption2.weight(.medium))
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                    .disabled(neuralEngineIsActive)
+
+                    if neuralEngineIsActive {
+                        Label(
+                            "A neural engine is active — the system voice only applies when Apple (system) is selected, or while a neural model is missing.",
+                            systemImage: "info.circle"
+                        )
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    }
+                } header: {
+                    Text("System voice")
+                } footer: {
+                    Text("Used by Apple's built-in speech. Enhanced and premium voices sound richer; download them under Settings → Accessibility → Spoken Content → Voices.")
                 }
             }
             .navigationTitle("Speech Settings")
@@ -182,6 +180,10 @@ struct SettingsView: View {
                         dismiss()
                     }
                 }
+            }
+            .sheet(isPresented: $showingVoicePicker) {
+                VoicePickerSheet(scope: player.engineKind == .kitten ? .kitten : .kokoro)
+                    .environmentObject(player)
             }
             .onAppear {
                 guard systemVoices.isEmpty else { return }
@@ -198,33 +200,6 @@ struct SettingsView: View {
 // MARK: - Row builders
 
 private extension SettingsView {
-    @ViewBuilder
-    func kokoroVoiceRow(_ voice: String) -> some View {
-        Button {
-            player.voice = voice
-        } label: {
-            if player.voice == voice {
-                Label(voice, systemImage: "checkmark")
-            } else {
-                Text(voice)
-            }
-        }
-    }
-
-    @ViewBuilder
-    func kittenVoiceRow(_ voice: String) -> some View {
-        let title = KittenEngine.friendlyNames[voice].map { "\($0) (\(voice))" } ?? voice
-        Button {
-            player.kittenVoice = voice
-        } label: {
-            if player.kittenVoice == voice {
-                Label(title, systemImage: "checkmark")
-            } else {
-                Text(title)
-            }
-        }
-    }
-
     @ViewBuilder
     func systemVoiceRow(title: String, identifier: String?) -> some View {
         Button {
@@ -258,19 +233,5 @@ private extension SettingsView {
               let voice = systemVoices.first(where: { $0.identifier == identifier })
         else { return "Default (English)" }
         return "\(voice.name) (\(voice.language))"
-    }
-
-    /// Compact dropdown-style control row: label, current value, chevron.
-    func dropdownRow(title: String, value: String) -> some View {
-        HStack {
-            Text(title)
-            Spacer()
-            Text(value)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-            Image(systemName: "chevron.up.chevron.down")
-                .font(.caption2.weight(.medium))
-                .foregroundStyle(.tertiary)
-        }
     }
 }
