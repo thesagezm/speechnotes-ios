@@ -188,9 +188,10 @@ public enum SentenceChunker {
                 pieces.append((pieceStart, end))
                 break
             }
-            var cut = lastWordBoundary(in: text, from: pieceStart, limit: limit)
-            if let found = cut, found > pieceStart, found < end {
-                cut = found
+            let cut: String.Index
+            if let wordCut = lastWordBoundary(in: text, from: pieceStart, limit: limit),
+               wordCut > pieceStart {
+                cut = wordCut
             } else {
                 cut = limit
             }
