@@ -94,6 +94,28 @@ jobs:
       - name: Generate Xcode project
         run: xcodegen generate
 
+      # KokoroSwift's manifest declares `type: .dynamic`, which produces an
+      # unembedded KokoroSwift.framework that crashes at launch inside
+      # LiveContainer ("Library not loaded: @rpath/KokoroSwift.framework").
+      # LiveContainer needs a fully static binary, so we delete that one line
+      # from the package checkout before building. Pins in Package.resolved
+      # are untouched, so the build still uses KokoroSwift 1.0.11.
+      - name: Patch KokoroSwift to link statically
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project SpeechnotesIOS.xcodeproj \
+            -scheme SpeechnotesIOS \
+            -derivedDataPath build/DerivedData >/dev/null
+          MANIFEST=build/DerivedData/SourcePackages/checkouts/kokoro-ios/Package.swift
+          test -f "$MANIFEST" || { echo "::error::kokoro-ios checkout not found at $MANIFEST"; exit 1; }
+          if grep -q "type: .dynamic" "$MANIFEST"; then
+            sed -i '' "/type: .dynamic,/d" "$MANIFEST"
+            echo "Patched KokoroSwift to a static library:"
+            grep -A3 "\.library(" "$MANIFEST" | head -5
+          else
+            echo "KokoroSwift no longer declares .dynamic — patch not needed (upstream fixed it?)"
+          fi
+
       - name: Archive (unsigned, generic iOS device)
         run: |
           set -o pipefail
@@ -102,10 +124,33 @@ jobs:
             -scheme SpeechnotesIOS \
             -destination 'generic/platform=iOS' \
             -archivePath build/SpeechnotesIOS.xcarchive \
+            -derivedDataPath build/DerivedData \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGN_ENTITLEMENTS="" \
             2>&1 | tee archive.log
+
+      # Belt-and-braces: if anything ever links dynamically again, fail here
+      # with a clear message instead of crashing on the phone at launch.
+      - name: Verify app is fully static (LiveContainer requirement)
+        if: success()
+        run: |
+          APP=$(find build/SpeechnotesIOS.xcarchive/Products/Applications -maxdepth 1 -name '*.app' | head -n 1)
+          echo "--- .app overview ---"
+          du -sh "$APP"
+          ls "$APP"
+          if [ -d "$APP/Frameworks" ]; then
+            echo "--- Frameworks/ contents ---"; ls -la "$APP/Frameworks"
+          fi
+          BIN="$APP/Speechnotes"
+          echo "--- non-system dylib dependencies (must be empty) ---"
+          DEPS=$(otool -L "$BIN" | grep "@rpath/" || true)
+          echo "${DEPS:-<none>}"
+          if [ -n "$DEPS" ] || [ -d "$APP/Frameworks" ]; then
+            echo "::error::App references embedded frameworks — LiveContainer will crash on launch (dyld Library not loaded). All SPM deps must link statically."
+            exit 1
+          fi
+          echo "OK: no @rpath framework dependencies"
 
       - name: Show archive failure summary
         if: failure()
