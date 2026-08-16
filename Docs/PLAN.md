@@ -1,5 +1,24 @@
 # Speechnotes iOS — Master Plan
 
+> **Resuming in a new session?** You're building "Speechnotes iOS" — an offline
+> Speech Note (Linux) clone for iPhone, native Swift/SwiftUI, built from Linux
+> via GitHub Actions (no Mac), sideloaded unsigned via LiveContainer.
+> Repo: `~/.zcode/workspace/default/speechnotes-ios` (GitHub: `thesagezm/speechnotes-ios`, public).
+> **Read this file fully, plus `Docs/SETUP.md`.** Working loop: agent writes
+> code → user pushes → CI builds IPA → user installs via LiveContainer → user
+> reports / agent reads CI results via the unauthenticated GitHub API
+> (runs → jobs → check-run annotations; job logs need the user's login).
+> Toolchain facts: XcodeGen project from `project.yml`; exact package pins
+> (KokoroSwift 1.0.11 / MLX 0.30.2 / MLXUtilsLibrary 0.0.6); Swift 5 language
+> mode; every failure gets diagnosed via the CI "Show failure summary" steps.
+> **Current state (2026-08-16):** Phase 3 (Kokoro on device, v0.3.0) committed;
+> last commit `27384e5` fixed 5 concurrency errors — awaiting push + green CI +
+> on-device acceptance (see checklist item below). Next actions: verify CI, fix
+> any new errors, then guide the user through the Phase 3 test script (download
+> model → am_eric speaks → airplane mode). React Native / ONNX Runtime were
+> discussed and declined: native + MLX stays Plan A, ONNX is Plan B only if MLX
+> fails inside LiveContainer (swap touches one file: `KokoroEngine.swift`).
+
 **Goal:** A fully offline, Speech Note (Linux/Flatpak)-style app for iPhone, built from a Linux PC with no Mac, sideloaded via SideStore + LiveContainer (iloader on the PC). **v1 uses Kokoro for text-to-speech.** STT and translation come later using the same engine-plugin architecture.
 
 ---
