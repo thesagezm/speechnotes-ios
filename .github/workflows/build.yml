@@ -107,12 +107,35 @@ jobs:
             CODE_SIGN_ENTITLEMENTS="" \
             2>&1 | tee archive.log
 
+      - name: Show archive failure summary
+        if: failure()
+        run: |
+          grep -E "error:|fatal error|Assertion|Undefined symbol|Testing failed" archive.log \
+            | grep -vE "warning:" \
+            | tail -n 40 > build-summary.txt || true
+          echo "----- BUILD FAILURE SUMMARY (last 40 matching lines) -----"
+          cat build-summary.txt
+          echo "-----------------------------------------------------------"
+          if [ -s build-summary.txt ]; then
+            python3 -c "import pathlib; t = pathlib.Path('build-summary.txt').read_text()[:5500]; print('::error title=App build failure::' + t.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A'))"
+          fi
+
       - name: Package unsigned IPA
+        if: success()
         run: ./Scripts/package-ipa.sh build/SpeechnotesIOS.xcarchive
 
       - name: Upload IPA artifact
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: SpeechnotesIOS
           path: dist/SpeechnotesIOS.ipa
           if-no-files-found: error
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: archive.log
+          if-no-files-found: warn
