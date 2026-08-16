@@ -10,17 +10,60 @@ struct SettingsView: View {
     /// `speechSynthesisVoices()` can return a few hundred entries.
     @State private var systemVoices: [AVSpeechSynthesisVoice] = []
     @State private var showingVoicePicker = false
+    @AppStorage("renderMarkdown") private var renderMarkdown = false
 
     /// Any neural engine is selected AND its model is ready — the system
     /// engine (and so the system voice) is not in the playback path.
     private var neuralEngineIsActive: Bool {
-        (player.engineKind == .kokoroOnnx || player.engineKind == .kitten)
+        (player.engineKind == .kokoroOnnx || player.engineKind == .kitten || player.engineKind == .supertonic)
             && !player.usingSystemFallback
+    }
+
+    /// The voice preference of whichever engine is selected.
+    private var activeVoiceCodename: String {
+        switch player.engineKind {
+        case .kitten: return player.kittenVoice
+        case .supertonic: return player.supertonicVoice
+        default: return player.voice
+        }
+    }
+
+    private var neuralModelMissing: Bool {
+        switch player.engineKind {
+        case .kokoroOnnx: return !models.isReady
+        case .kitten: return !models.kittenIsReady
+        case .supertonic: return !models.supertonicIsReady
+        default: return false
+        }
+    }
+
+    private var voicePickerScope: VoicePickerSheet.Scope {
+        switch player.engineKind {
+        case .kitten: return .kitten
+        case .supertonic: return .supertonic
+        default: return .kokoro
+        }
+    }
+
+    private var voiceSectionHeader: String {
+        switch player.engineKind {
+        case .kitten: return "Kitten voice"
+        case .supertonic: return "Supertonic voice"
+        default: return "Kokoro voice"
+        }
     }
 
     var body: some View {
         NavigationStack {
             Form {
+                Section {
+                    Toggle("Render Markdown", isOn: $renderMarkdown)
+                } header: {
+                    Text("Notes")
+                } footer: {
+                    Text("When on, the editor gains a preview mode (eye button): headings, emphasis and links are rendered for reading, and speech reads the plain text without markdown symbols. Off keeps everything as raw text.")
+                }
+
                 Section {
                     Picker("Engine", selection: $player.engineKind) {
                         ForEach(SpeechPlayer.EngineKind.allCases) { kind in
@@ -29,8 +72,7 @@ struct SettingsView: View {
                     }
                     .pickerStyle(.inline)
 
-                    if (player.engineKind == .kokoroOnnx && !models.isReady)
-                        || (player.engineKind == .kitten && !models.kittenIsReady) {
+                    if neuralModelMissing {
                         Label(
                             "Neural engine selected, but its model isn't downloaded yet — the system voice is used in the meantime.",
                             systemImage: "info.circle"
@@ -41,7 +83,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Speech engine")
                 } footer: {
-                    Text("Kokoro is the main engine (28 voices). Kitten is a smaller experimental pack (8 voices).")
+                    Text("Kokoro is the main engine (28 voices). Kitten is a smaller experimental pack (8 voices). Supertonic adds 31 languages with 10 voices.")
                 }
 
                 Section {
@@ -52,7 +94,7 @@ struct SettingsView: View {
                             Text("Voice")
                             Spacer()
                             Text(VoiceCatalog.subtitle(
-                                for: player.engineKind == .kitten ? player.kittenVoice : player.voice,
+                                for: activeVoiceCodename,
                                 kind: player.engineKind
                             ))
                             .foregroundStyle(.secondary)
@@ -65,13 +107,46 @@ struct SettingsView: View {
                     }
                     .tint(.primary)
                 } header: {
-                    Text(player.engineKind == .kitten ? "Kitten voice" : "Kokoro voice")
+                    Text(voiceSectionHeader)
                 } footer: {
-                    if player.engineKind == .kitten {
+                    switch player.engineKind {
+                    case .kitten:
                         Text("Tap a voice in the picker to hear a sample before committing.")
-                    } else {
+                    case .supertonic:
+                        Text("10 voice styles, all fluent in 31 languages — pick the language in the voice picker. Tap a voice to hear a sample.")
+                    default:
                         Text("Friendly names with codenames — e.g. Heart is af_heart, American female. Tap a voice to hear a sample.")
                     }
+                }
+
+                Section {
+                    switch models.supertonicState {
+                    case .notDownloaded:
+                        Button {
+                            models.startSupertonicDownload()
+                        } label: {
+                            Label("Download Supertonic model (~399 MB)", systemImage: "arrow.down.circle")
+                        }
+                    case .downloading(let progress):
+                        ProgressView(value: progress) {
+                            Text("Downloading Supertonic… \(Int(progress * 100))%")
+                        }
+                    case .failed(let message):
+                        Label("Supertonic download failed: \(message)", systemImage: "exclamationmark.triangle")
+                            .font(.footnote)
+                        Button("Retry") {
+                            models.startSupertonicDownload()
+                        }
+                    case .ready:
+                        Label("Supertonic model ready", systemImage: "checkmark.circle")
+                        Button("Delete Supertonic model (frees ~399 MB)", role: .destructive) {
+                            models.deleteSupertonicModels()
+                        }
+                    }
+                } header: {
+                    Text("Supertonic model")
+                } footer: {
+                    Text("Supertone supertonic-3 — flow-matching TTS with 31 languages (English, Korean, Japanese, German, French and more) and 10 voice styles. Large (~399 MB) and CPU-based; keep it as the optional multilingual engine alongside Kokoro.")
                 }
 
                 Section {
@@ -182,7 +257,7 @@ struct SettingsView: View {
                 }
             }
             .sheet(isPresented: $showingVoicePicker) {
-                VoicePickerSheet(scope: player.engineKind == .kitten ? .kitten : .kokoro)
+                VoicePickerSheet(scope: voicePickerScope)
                     .environmentObject(player)
             }
             .onAppear {

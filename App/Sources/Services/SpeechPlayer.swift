@@ -9,6 +9,7 @@ final class SpeechPlayer: ObservableObject {
         case system
         case kokoroOnnx
         case kitten
+        case supertonic
 
         var id: String { rawValue }
 
@@ -17,6 +18,7 @@ final class SpeechPlayer: ObservableObject {
             case .system: return "Apple (system)"
             case .kokoroOnnx: return "Kokoro (on-device, offline)"
             case .kitten: return "Kitten (experimental — tiny)"
+            case .supertonic: return "Supertonic (multilingual, experimental)"
             }
         }
     }
@@ -47,6 +49,19 @@ final class SpeechPlayer: ObservableObject {
         didSet {
             UserDefaults.standard.set(kittenVoice, forKey: "kittenVoice")
             kittenEngine?.voice = kittenVoice
+        }
+    }
+    /// Supertonic voice style ("M1"…"F5") and language (ISO code).
+    @Published var supertonicVoice: String {
+        didSet {
+            UserDefaults.standard.set(supertonicVoice, forKey: "supertonicVoice")
+            supertonicEngine?.voice = supertonicVoice
+        }
+    }
+    @Published var supertonicLang: String {
+        didSet {
+            UserDefaults.standard.set(supertonicLang, forKey: "supertonicLang")
+            supertonicEngine?.lang = supertonicLang
         }
     }
     /// Identifier of the `AVSpeechSynthesisVoice` the system engine should
@@ -88,7 +103,7 @@ final class SpeechPlayer: ObservableObject {
     @Published private(set) var auditioningVoice: String?
     /// Engine/voice to restore when the running audition finishes; nil once
     /// the user makes an explicit selection mid-audition.
-    private var preAuditionState: (kind: EngineKind, voice: String, kittenVoice: String)?
+    private var preAuditionState: (kind: EngineKind, voice: String, kittenVoice: String, supertonicVoice: String)?
 
     /// True while an audition sample is sounding.
     var isAuditioning: Bool { auditioningVoice != nil }
@@ -111,12 +126,17 @@ final class SpeechPlayer: ObservableObject {
             return usingSystemFallback
                 ? "Apple voice (model missing)"
                 : VoiceCatalog.subtitle(for: kittenVoice, kind: .kitten)
+        case .supertonic:
+            return usingSystemFallback
+                ? "Apple voice (model missing)"
+                : VoiceCatalog.subtitle(for: supertonicVoice, kind: .supertonic)
         }
     }
 
     private var engine: (any SpeechEngine)?
     private var onnxEngine: OnnxKokoroEngine?
     private var kittenEngine: KittenEngine?
+    private var supertonicEngine: SupertonicEngine?
     private var systemEngine: SystemEngine?
 
     init() {
@@ -133,6 +153,8 @@ final class SpeechPlayer: ObservableObject {
         }
         voice = defaults.string(forKey: "voice") ?? "am_eric"
         kittenVoice = defaults.string(forKey: "kittenVoice") ?? KittenEngine.defaultVoice
+        supertonicVoice = defaults.string(forKey: "supertonicVoice") ?? "M1"
+        supertonicLang = defaults.string(forKey: "supertonicLang") ?? "en"
         systemVoiceIdentifier = defaults.string(forKey: "systemVoiceIdentifier")
 
         rebuildEngine()
@@ -140,7 +162,7 @@ final class SpeechPlayer: ObservableObject {
         ModelManager.shared.onReady = { [weak self] in
             self?.rebuildEngine()
         }
-        Log.shared.info("SpeechPlayer initialised (engine=\(engineKind.rawValue), voice=\(voice), kittenVoice=\(kittenVoice))")
+        Log.shared.info("SpeechPlayer initialised (engine=\(engineKind.rawValue), voice=\(voice), kittenVoice=\(kittenVoice), supertonic=\(supertonicVoice)@\(supertonicLang))")
     }
 
     var activeEngineName: String {
@@ -150,7 +172,25 @@ final class SpeechPlayer: ObservableObject {
     private func rebuildEngine() {
         engine?.stop()
 
-        if engineKind == .kitten, ModelManager.shared.kittenIsReady {
+        // The Supertonic set is ~399 MB of resident sessions — release it as
+        // soon as another engine takes over (single-slot rule, PocketPal
+        // lesson). The other engines' sessions are an order of magnitude
+        // smaller and stay warm for instant switching.
+        if engineKind != .supertonic {
+            supertonicEngine = nil
+        }
+
+        if engineKind == .supertonic, ModelManager.shared.supertonicIsReady {
+            if supertonicEngine == nil {
+                let supertonic = SupertonicEngine()
+                supertonic.voice = supertonicVoice
+                supertonic.lang = supertonicLang
+                supertonicEngine = supertonic
+            }
+            engine = supertonicEngine
+            usingSystemFallback = false
+            Log.shared.info("SpeechPlayer: engine → Supertonic (\(supertonicVoice), \(supertonicLang))")
+        } else if engineKind == .kitten, ModelManager.shared.kittenIsReady {
             if kittenEngine == nil {
                 let kitten = KittenEngine()
                 kitten.voice = kittenVoice
@@ -174,7 +214,7 @@ final class SpeechPlayer: ObservableObject {
             }
             systemEngine?.voiceIdentifier = systemVoiceIdentifier
             engine = systemEngine
-            usingSystemFallback = (engineKind == .kokoroOnnx)
+            usingSystemFallback = (engineKind == .kokoroOnnx || engineKind == .supertonic)
             if usingSystemFallback {
                 Log.shared.info("SpeechPlayer: neural engine selected but model missing — system voice in use")
             }
@@ -242,18 +282,21 @@ final class SpeechPlayer: ObservableObject {
             stop()
             return
         }
-        let modelReady = engineKind == .kitten
-            ? ModelManager.shared.kittenIsReady
-            : ModelManager.shared.isReady
+        let modelReady: Bool
+        switch engineKind {
+        case .kitten: modelReady = ModelManager.shared.kittenIsReady
+        case .supertonic: modelReady = ModelManager.shared.supertonicIsReady
+        default: modelReady = ModelManager.shared.isReady
+        }
         guard modelReady else { return }
 
         if preAuditionState == nil {
-            preAuditionState = (engineKind, voice, kittenVoice)
+            preAuditionState = (engineKind, voice, kittenVoice, supertonicVoice)
         }
-        if engineKind == .kitten {
-            kittenVoice = codename
-        } else {
-            voice = codename
+        switch engineKind {
+        case .kitten: kittenVoice = codename
+        case .supertonic: supertonicVoice = codename
+        default: voice = codename
         }
         auditioningVoice = codename
         let name = VoiceCatalog.shortName(for: codename, kind: engineKind)
@@ -276,6 +319,7 @@ final class SpeechPlayer: ObservableObject {
             auditioningVoice = nil
             voice = saved.voice
             kittenVoice = saved.kittenVoice
+            supertonicVoice = saved.supertonicVoice
             engineKind = saved.kind
         } else {
             auditioningVoice = nil
@@ -320,7 +364,9 @@ final class SpeechPlayer: ObservableObject {
             }
         }
 
-        if engineKind == .kitten, let kittenEngine {
+        if engineKind == .supertonic, let supertonicEngine {
+            supertonicEngine.renderWAV(text: text, onChunkProgress: progress, completion: finish)
+        } else if engineKind == .kitten, let kittenEngine {
             kittenEngine.renderWAV(text: text, onChunkProgress: progress, completion: finish)
         } else if let onnxEngine {
             onnxEngine.renderWAV(text: text, onChunkProgress: progress, completion: finish)

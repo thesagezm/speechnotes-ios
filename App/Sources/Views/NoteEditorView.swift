@@ -1,4 +1,5 @@
 import SwiftUI
+import SpeechLogic
 
 struct NoteEditorView: View {
     let noteId: UUID
@@ -11,6 +12,10 @@ struct NoteEditorView: View {
     @State private var showingSettings = false
     @State private var showingVoicePicker = false
     @State private var showingDeleteConfirm = false
+    /// Markdown reading mode — only meaningful when the Render Markdown
+    /// setting is on; the editor always opens in edit mode.
+    @State private var showPreview = false
+    @AppStorage("renderMarkdown") private var renderMarkdown = false
 
     private var currentNote: Note? {
         notes.notes.first { $0.id == noteId }
@@ -25,14 +30,27 @@ struct NoteEditorView: View {
 
     private static let whitespace = CharacterSet.whitespacesAndNewlines
 
+    /// The text handed to the engine (and read-along view) when markdown
+    /// rendering is on: syntax stripped, content intact — no more hearing
+    /// "hashtag hashtag heading". With rendering off it's the raw draft.
+    private var speechText: String {
+        renderMarkdown ? MarkdownText.plainText(draft) : draft
+    }
+
+    /// What the read-along view shows — always the same variant the engine
+    /// was given, so spoken ranges line up with displayed characters.
+    private var displayText: String {
+        isReadAlongActive ? speechText : draft
+    }
+
     /// Shifts `player.spokenRange` — UTF-16 offsets into the *trimmed* text
-    /// the engine was given — into draft coordinates: re-add the length of
-    /// the draft's leading whitespace (every whitespace scalar is one UTF-16
-    /// unit), then clamp to the draft's UTF-16 length.
+    /// the engine was given — into display coordinates: re-add the length of
+    /// the displayed text's leading whitespace (every whitespace scalar is
+    /// one UTF-16 unit), then clamp to its UTF-16 length.
     private var draftSpokenRange: Range<Int>? {
         guard let spoken = player.spokenRange else { return nil }
-        let leading = draft.unicodeScalars.prefix { Self.whitespace.contains($0) }.count
-        let length = draft.utf16.count
+        let leading = displayText.unicodeScalars.prefix { Self.whitespace.contains($0) }.count
+        let length = displayText.utf16.count
         let lower = min(max(spoken.lowerBound + leading, 0), length)
         let upper = min(max(spoken.upperBound + leading, lower), length)
         guard upper > lower else { return nil }
@@ -53,6 +71,14 @@ struct NoteEditorView: View {
                 && draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    private var voicePickerScope: VoicePickerSheet.Scope {
+        switch player.engineKind {
+        case .kitten: return .kitten
+        case .supertonic: return .supertonic
+        default: return .kokoro
+        }
+    }
+
     private var draftWordCount: Int {
         draft.split(whereSeparator: \.isWhitespace).count
     }
@@ -68,7 +94,9 @@ struct NoteEditorView: View {
     var body: some View {
         VStack(spacing: 0) {
             if isReadAlongActive {
-                ReadAlongTextView(text: draft, spokenRange: draftSpokenRange)
+                ReadAlongTextView(text: displayText, spokenRange: draftSpokenRange)
+            } else if renderMarkdown && showPreview {
+                markdownPreview
             } else {
                 TextEditor(text: $draft)
                     .font(.body)
@@ -90,6 +118,18 @@ struct NoteEditorView: View {
                 .tint(.red)
             }
             ToolbarItem(placement: .navigationBarTrailing) {
+                if renderMarkdown {
+                    Button {
+                        Haptics.tap()
+                        showPreview.toggle()
+                        if !showPreview { saveDraft() }
+                    } label: {
+                        Image(systemName: showPreview ? "pencil.circle" : "eye.circle")
+                    }
+                    .accessibilityLabel(showPreview ? "Edit note" : "Preview markdown")
+                }
+            }
+            ToolbarItem(placement: .navigationBarTrailing) {
                 exportButton
             }
             ToolbarItem(placement: .navigationBarTrailing) {
@@ -102,7 +142,7 @@ struct NoteEditorView: View {
             ToolbarItemGroup(placement: .keyboard) {
                 Button {
                     Haptics.tap()
-                    player.togglePlay(draft, note: currentNote)
+                    player.togglePlay(speechText, note: currentNote)
                 } label: {
                     Label(
                         player.state == .speaking ? "Pause" : "Speak",
@@ -134,7 +174,7 @@ struct NoteEditorView: View {
             SettingsView()
         }
         .sheet(isPresented: $showingVoicePicker) {
-            VoicePickerSheet(scope: player.engineKind == .kitten ? .kitten : .kokoro)
+            VoicePickerSheet(scope: voicePickerScope)
                 .environmentObject(player)
         }
         .sheet(isPresented: shareSheetBinding) {
@@ -175,7 +215,7 @@ struct NoteEditorView: View {
     private var exportButton: some View {
         Button {
             Haptics.tap()
-            player.export(draft)
+            player.export(speechText)
         } label: {
             Group {
                 if case .running(let progress) = player.exportState {
@@ -208,6 +248,34 @@ struct NoteEditorView: View {
         )
     }
 
+    // MARK: - Markdown preview
+
+    /// Reading mode for markdown notes: headings, emphasis, lists and links
+    /// rendered; malformed syntax falls back to the verbatim text.
+    private var markdownPreview: some View {
+        ScrollView {
+            Text(markdownAttributed)
+                .font(.body)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+        }
+        .onTapGesture {
+            // Tap to edit — readers expect the whole surface to be a toggle.
+            Haptics.tap()
+            showPreview = false
+        }
+    }
+
+    private var markdownAttributed: AttributedString {
+        // Full parse: headings, lists, emphasis, links. Soft line breaks
+        // collapse within paragraphs — proper markdown semantics.
+        if let parsed = try? AttributedString(markdown: draft) {
+            return parsed
+        }
+        return AttributedString(verbatim: draft)
+    }
+
     // MARK: - Controls
 
     private var controlsBar: some View {
@@ -236,7 +304,7 @@ struct NoteEditorView: View {
             HStack(spacing: 14) {
                 Button {
                     Haptics.tap()
-                    player.togglePlay(draft, note: currentNote)
+                    player.togglePlay(speechText, note: currentNote)
                 } label: {
                     ZStack {
                         Circle()

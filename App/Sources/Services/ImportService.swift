@@ -20,11 +20,12 @@ final class ImportService {
     private init() {}
 
     /// File types we accept, for the Files picker and Open-In registration.
+    /// Built on the broad `.text` base instead of dynamic `UTType(filenameExtension:)`
+    /// lookups — dynamic types for md/markdown proved unreliable in the
+    /// fileImporter on device (files greyed out or silently unselectable),
+    /// while `.text` covers txt/md/markdown and friends.
     static var acceptedContentTypes: [UTType] {
-        var types: [UTType] = [.pdf, .plainText, .utf8PlainText]
-        if let markdown = UTType(filenameExtension: "md") { types.append(markdown) }
-        if let markdownAlt = UTType(filenameExtension: "markdown") { types.append(markdownAlt) }
-        return types
+        [.pdf, .text]
     }
 
     static func canImport(_ url: URL) -> Bool {
@@ -32,8 +33,10 @@ final class ImportService {
         let pathExtension = url.pathExtension.lowercased()
         if ["txt", "text", "md", "markdown", "pdf"].contains(pathExtension) { return true }
         guard let type = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType else {
-            // No extension and no type metadata — let the reader decide.
-            return pathExtension.isEmpty
+            // No extension and no type metadata (common before security scope
+            // is granted) — let the reader decide; it fails with a log if the
+            // file turns out to be unusable.
+            return true
         }
         return acceptedContentTypes.contains { type.conforms(to: $0) }
     }
@@ -140,7 +143,11 @@ final class ImportService {
     // MARK: - PDF
 
     private static func pdfText(from url: URL) -> String? {
-        guard let document = PDFDocument(url: url), document.pageCount > 0 else { return nil }
+        // Route PDFs through the same coordinated read as plain text so
+        // iCloud placeholder PDFs materialize first; PDFDocument(url:)
+        // alone fails on placeholders.
+        guard let data = coordinatedData(from: url), !data.isEmpty else { return nil }
+        guard let document = PDFDocument(data: data), document.pageCount > 0 else { return nil }
         return document.string
     }
 

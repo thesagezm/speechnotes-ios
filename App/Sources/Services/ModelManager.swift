@@ -16,6 +16,7 @@ final class ModelManager: ObservableObject {
 
     @Published private(set) var state: State
     @Published private(set) var kittenState: State
+    @Published private(set) var supertonicState: State
 
     /// Called on the main actor when any model becomes ready.
     var onReady: (() -> Void)?
@@ -71,6 +72,63 @@ final class ModelManager: ObservableObject {
               modelSize > 60_000_000 else { return false }
         guard let voicesSize = (try? fm.attributesOfItem(atPath: kittenVoicesFileURL.path))?[.size] as? Int64,
               voicesSize > 1_000_000 else { return false }
+        return true
+    }
+
+    // MARK: Supertonic model set (third neural engine)
+
+    /// Supertone supertonic-3 — flow-matching TTS, 31 languages, 10 voice
+    /// styles (M1–M5 male, F1–F5 female). ~399 MB total across 4 ONNX
+    /// sessions + config + unicode indexer + style JSONs. CPU-only via the
+    /// vendored Helper (App/Sources/Engine/Supertonic/Helper.swift, MIT).
+    static let supertonicBaseURL = URL(string: "https://huggingface.co/Supertone/supertonic-3/resolve/main")!
+
+    static let supertonicVoices: [String] = ["M1", "M2", "M3", "M4", "M5", "F1", "F2", "F3", "F4", "F5"]
+
+    /// (file name, size in bytes from HF, lower progress bound) — downloaded
+    /// in this order into Documents/Supertonic/onnx.
+    nonisolated static let supertonicOnnxFiles: [(name: String, bytes: Int64, from: Double)] = [
+        ("duration_predictor.onnx", 3_700_147, 0.00),
+        ("text_encoder.onnx", 36_416_150, 0.01),
+        ("vector_estimator.onnx", 256_534_781, 0.10),
+        ("vocoder.onnx", 101_424_195, 0.75),
+        ("tts.json", 8_253, 0.99),
+        ("unicode_indexer.json", 277_676, 0.993),
+    ]
+
+    nonisolated static var supertonicDirectory: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Supertonic")
+    }
+
+    nonisolated static var supertonicOnnxDirectory: URL {
+        supertonicDirectory.appendingPathComponent("onnx")
+    }
+
+    nonisolated static var supertonicStylesDirectory: URL {
+        supertonicDirectory.appendingPathComponent("voice_styles")
+    }
+
+    nonisolated static func supertonicStyleFileURL(voice: String) -> URL {
+        supertonicStylesDirectory.appendingPathComponent("\(voice).json")
+    }
+
+    nonisolated static func supertonicFilesAreValid() -> Bool {
+        let fm = FileManager.default
+        func size(_ url: URL) -> Int64? {
+            (try? fm.attributesOfItem(atPath: url.path))?[.size] as? Int64
+        }
+        // The heavy session is the memory gate — require near-complete files.
+        guard size(supertonicOnnxDirectory.appendingPathComponent("vector_estimator.onnx")) ?? 0 > 200_000_000,
+              size(supertonicOnnxDirectory.appendingPathComponent("vocoder.onnx")) ?? 0 > 90_000_000,
+              size(supertonicOnnxDirectory.appendingPathComponent("text_encoder.onnx")) ?? 0 > 30_000_000,
+              size(supertonicOnnxDirectory.appendingPathComponent("duration_predictor.onnx")) ?? 0 > 3_000_000,
+              size(supertonicOnnxDirectory.appendingPathComponent("tts.json")) ?? 0 > 1_000,
+              size(supertonicOnnxDirectory.appendingPathComponent("unicode_indexer.json")) ?? 0 > 100_000
+        else { return false }
+        for voice in supertonicVoices {
+            guard size(supertonicStyleFileURL(voice: voice)) ?? 0 > 100_000 else { return false }
+        }
         return true
     }
 
@@ -130,6 +188,12 @@ final class ModelManager: ObservableObject {
         } else {
             kittenState = .notDownloaded
         }
+        if Self.supertonicFilesAreValid() {
+            supertonicState = .ready
+            Log.shared.info("ModelManager: Supertonic model already present")
+        } else {
+            supertonicState = .notDownloaded
+        }
     }
 
     // MARK: Legacy layout migration
@@ -173,6 +237,99 @@ final class ModelManager: ObservableObject {
     var kittenIsReady: Bool {
         if case .ready = kittenState { return true }
         return false
+    }
+
+    var supertonicIsReady: Bool {
+        if case .ready = supertonicState { return true }
+        return false
+    }
+
+    /// Downloads the Supertonic set (~399 MB total, 16 files).
+    func startSupertonicDownload() {
+        if case .downloading = supertonicState { return }
+        guard !supertonicIsReady else { return }
+
+        // PocketPal lesson: estimate × ~1.5 headroom.
+        if let attrs = try? FileManager.default.attributesOfFileSystem(forPath: NSHomeDirectory()),
+           let free = attrs[.systemFreeSize] as? Int64,
+           free < 600_000_000 {
+            let message = "Not enough free space for Supertonic (need ~600 MB, have \(free / 1_000_000) MB)"
+            supertonicState = .failed(message)
+            Log.shared.error("ModelManager: \(message)")
+            return
+        }
+
+        supertonicState = .downloading(progress: 0)
+        Log.shared.info("ModelManager: starting Supertonic download (~399 MB)")
+
+        Task.detached { [weak self] in
+            do {
+                // ONNX files + configs, each mapped to its progress slice.
+                for index in 0..<Self.supertonicOnnxFiles.count {
+                    let file = Self.supertonicOnnxFiles[index]
+                    let upper = index + 1 < Self.supertonicOnnxFiles.count
+                        ? Self.supertonicOnnxFiles[index + 1].from
+                        : 0.994
+                    try await self?.download(
+                        from: Self.supertonicBaseURL.appendingPathComponent("onnx/\(file.name)"),
+                        to: Self.supertonicOnnxDirectory.appendingPathComponent(file.name),
+                        expectedBytes: file.bytes,
+                        progressRange: file.from...upper,
+                        publishingTo: { [weak self] value in self?.reportSupertonicProgress(value) }
+                    )
+                }
+                // All 10 voice styles (~0.29 MB each) share the final slice.
+                for (index, voice) in Self.supertonicVoices.enumerated() {
+                    let lower = 0.994 + 0.006 * Double(index) / Double(Self.supertonicVoices.count)
+                    let upper = 0.994 + 0.006 * Double(index + 1) / Double(Self.supertonicVoices.count)
+                    try await self?.download(
+                        from: Self.supertonicBaseURL.appendingPathComponent("voice_styles/\(voice).json"),
+                        to: Self.supertonicStyleFileURL(voice: voice),
+                        expectedBytes: 292_000,
+                        progressRange: lower...upper,
+                        publishingTo: { [weak self] value in self?.reportSupertonicProgress(value) }
+                    )
+                }
+                await MainActor.run {
+                    guard let self else { return }
+                    if Self.supertonicFilesAreValid() {
+                        self.supertonicState = .ready
+                        Log.shared.info("ModelManager: Supertonic download complete")
+                        self.onReady?()
+                    } else {
+                        self.supertonicState = .failed("Downloaded Supertonic files failed validation")
+                        Log.shared.error("ModelManager: Supertonic files failed validation after download")
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    guard let self else { return }
+                    self.supertonicState = .failed(error.localizedDescription)
+                    Log.shared.error("ModelManager: Supertonic download failed: \(error)")
+                }
+            }
+        }
+    }
+
+    func deleteSupertonicModels() {
+        try? FileManager.default.removeItem(at: Self.supertonicDirectory)
+        var cleanup: [URL] = Self.supertonicOnnxFiles.map {
+            Self.supertonicOnnxDirectory.appendingPathComponent($0.name)
+        }
+        cleanup += Self.supertonicVoices.map { Self.supertonicStyleFileURL(voice: $0) }
+        for base in cleanup {
+            try? FileManager.default.removeItem(at: base.appendingPathExtension("part"))
+            try? FileManager.default.removeItem(at: base.appendingPathExtension("resumeData"))
+            try? FileManager.default.removeItem(at: base.appendingPathExtension("resumeSource"))
+        }
+        supertonicState = .notDownloaded
+        Log.shared.info("ModelManager: Supertonic models deleted")
+    }
+
+    private func reportSupertonicProgress(_ value: Double) {
+        if case .downloading = supertonicState {
+            supertonicState = .downloading(progress: value)
+        }
     }
 
     /// Downloads the Kitten set (~78 MB model + ~3.3 MB voices).

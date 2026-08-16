@@ -8,6 +8,8 @@ struct NotesListView: View {
     @State private var importErrorMessage: String?
     @State private var searchText = ""
     @State private var sort: SortOrder = SortOrder.stored
+    /// Note whose text the share sheet is presenting (leading swipe → Share).
+    @State private var sharingNote: Note?
 
     enum SortOrder: String, CaseIterable, Identifiable {
         case edited, created, title
@@ -105,11 +107,15 @@ struct NotesListView: View {
                 allowedContentTypes: ImportService.acceptedContentTypes,
                 allowsMultipleSelection: false
             ) { result in
-                switch result {
-                case .success(let urls):
-                    if let url = urls.first { importFile(at: url) }
-                case .failure(let error):
-                    importErrorMessage = error.localizedDescription
+                // The completion is not guaranteed to arrive on the main
+                // actor — every @State mutation below needs to.
+                Task { @MainActor in
+                    switch result {
+                    case .success(let urls):
+                        if let url = urls.first { importFile(at: url) }
+                    case .failure(let error):
+                        importErrorMessage = error.localizedDescription
+                    }
                 }
             }
             // Open-In files and speechnotes:// links (LiveContainer forwards
@@ -133,6 +139,9 @@ struct NotesListView: View {
                 if let url = player.shareURL {
                     ShareSheet(items: [url])
                 }
+            }
+            .sheet(item: $sharingNote) { note in
+                ShareSheet(items: [note.text])
             }
             .alert(
                 "Import failed",
@@ -167,6 +176,12 @@ struct NotesListView: View {
                             }
                         }
                         .swipeActions(edge: .leading, allowsFullSwipe: false) {
+                            Button {
+                                sharingNote = note
+                            } label: {
+                                Label("Share", systemImage: "doc.on.doc")
+                            }
+                            .tint(.indigo)
                             Button {
                                 exportNote(note)
                             } label: {

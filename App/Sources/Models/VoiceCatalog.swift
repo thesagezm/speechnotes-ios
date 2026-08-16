@@ -56,8 +56,36 @@ enum VoiceCatalog {
         )
     }
 
+    /// The Supertonic pack — 10 voice styles (M1–M5 male, F1–F5 female),
+    /// every one of them speaks all 31 languages.
+    static let supertonic: [VoiceDescriptor] = ModelManager.supertonicVoices.map { id in
+        VoiceDescriptor(
+            id: id,
+            displayName: id,
+            accent: nil,
+            gender: id.hasPrefix("M") ? "Male" : "Female"
+        )
+    }
+
+    /// Display names for Supertonic's language codes (AVAILABLE_LANGS in
+    /// Helper.swift). "na" has no official expansion — labelled Neutral.
+    static let supertonicLanguages: [String: String] = [
+        "en": "English", "ko": "Korean", "ja": "Japanese", "ar": "Arabic",
+        "bg": "Bulgarian", "cs": "Czech", "da": "Danish", "de": "German",
+        "el": "Greek", "es": "Spanish", "et": "Estonian", "fi": "Finnish",
+        "fr": "French", "hi": "Hindi", "hr": "Croatian", "hu": "Hungarian",
+        "id": "Indonesian", "it": "Italian", "lt": "Lithuanian", "lv": "Latvian",
+        "nl": "Dutch", "pl": "Polish", "pt": "Portuguese", "ro": "Romanian",
+        "ru": "Russian", "sk": "Slovak", "sl": "Slovenian", "sv": "Swedish",
+        "tr": "Turkish", "uk": "Ukrainian", "vi": "Vietnamese", "na": "Neutral",
+    ]
+
     static func descriptors(for kind: SpeechPlayer.EngineKind) -> [VoiceDescriptor] {
-        kind == .kitten ? kitten : kokoro
+        switch kind {
+        case .kitten: return kitten
+        case .supertonic: return supertonic
+        default: return kokoro
+        }
     }
 
     /// Friendly subtitle for a codename, whichever engine it belongs to.
