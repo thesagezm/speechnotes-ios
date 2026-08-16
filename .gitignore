@@ -1,0 +1,21 @@
+# Xcode project is generated on CI by XcodeGen — never commit it
+*.xcodeproj
+App/Resources/Info.plist
+
+# Build output
+build/
+dist/
+DerivedData/
+
+# Xcode user state
+xcuserdata/
+*.xcuserstate
+*.xcdebugger
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.pyc

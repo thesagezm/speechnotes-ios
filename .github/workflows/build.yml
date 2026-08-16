@@ -1,0 +1,47 @@
+name: Build IPA
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Archive (unsigned, generic iOS device)
+        run: |
+          set -o pipefail
+          xcodebuild archive \
+            -project SpeechnotesIOS.xcodeproj \
+            -scheme SpeechnotesIOS \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/SpeechnotesIOS.xcarchive \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" \
+            2>&1 | tee archive.log
+
+      - name: Package unsigned IPA
+        run: ./Scripts/package-ipa.sh build/SpeechnotesIOS.xcarchive
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SpeechnotesIOS
+          path: dist/SpeechnotesIOS.ipa
+          if-no-files-found: error

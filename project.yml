@@ -1,0 +1,42 @@
+name: SpeechnotesIOS
+options:
+  bundleIdPrefix: com.speechnotes
+  deploymentTarget:
+    iOS: "18.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+targets:
+  SpeechnotesIOS:
+    type: application
+    platform: iOS
+    sources:
+      - App/Sources
+      - App/Resources
+    info:
+      path: App/Resources/Info.plist
+      properties:
+        CFBundleDisplayName: Speechnotes
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        ITSAppUsesNonExemptEncryption: false
+    settings:
+      base:
+        PRODUCT_NAME: Speechnotes
+        PRODUCT_BUNDLE_IDENTIFIER: com.speechnotes.ios
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+schemes:
+  SpeechnotesIOS:
+    build:
+      targets:
+        SpeechnotesIOS: all
+    run:
+      config: Debug
+    archive:
+      config: Release
