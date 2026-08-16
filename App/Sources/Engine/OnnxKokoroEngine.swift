@@ -9,13 +9,13 @@ import SpeechLogic
 /// approach. Model (`model_q8f16.onnx`, ~82 MB) + tokenizer.json live in
 /// Documents/KokoroOnnx; voice style vectors are reused from the existing
 /// MLX voices.npz. Inference spec verified against PocketPal's
-/// react-native-speech KokoroEngine: inputs `input_ids` int64 [1, N],
+/// react-native-speech engine: inputs `input_ids` int64 [1, N],
 /// `style` float32 [1, 256] (flat voice array sliced at
 /// clamp(N-2, 0, 509) * 256), `speed` float32 [1]; output `waveform`
 /// float32 @ 24 kHz. The model takes speed natively, so playback is a plain
 /// player node — no time-pitch gymnastics.
 ///
-/// Streaming architecture mirrors KokoroEngine (sentence chunks via
+/// Streaming architecture (sentence chunks via
 /// SpeechLogic, generation capped a few chunks ahead, played buffers
 /// released, read-along ranges, interruption handling). MLX/Metal is never
 /// touched for inference — this is the escape hatch when Metal memory
@@ -189,7 +189,7 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
     }
 
     /// engineQueue only — phonemes → token IDs (per-character vocab lookup,
-    /// matching KokoroSwift's tokenizer for the same model).
+    /// matching the reference tokenizer for this model).
     private func tokenize(_ phonemes: String) -> [Int] {
         phonemes.map { vocab[String($0)] }.compactMap { $0 }
     }
@@ -359,7 +359,7 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
         state = .idle
     }
 
-    // MARK: - Streaming playback (main thread) — same contract as KokoroEngine
+    // MARK: - Streaming playback (main thread)
 
     private func scheduleReadyChunks(generation: Int) {
         guard playbackGeneration == generation else { return }

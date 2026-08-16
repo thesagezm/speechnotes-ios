@@ -7,7 +7,6 @@ import Foundation
 final class SpeechPlayer: ObservableObject {
     enum EngineKind: String, CaseIterable, Identifiable {
         case system
-        case kokoro
         case kokoroOnnx
 
         var id: String { rawValue }
@@ -15,8 +14,7 @@ final class SpeechPlayer: ObservableObject {
         var label: String {
             switch self {
             case .system: return "Apple (system)"
-            case .kokoro: return "Kokoro (on-device, Metal)"
-            case .kokoroOnnx: return "Kokoro ONNX (on-device, CPU)"
+            case .kokoroOnnx: return "Kokoro (on-device, offline)"
             }
         }
     }
@@ -39,7 +37,6 @@ final class SpeechPlayer: ObservableObject {
     @Published var voice: String {
         didSet {
             UserDefaults.standard.set(voice, forKey: "voice")
-            kokoroEngine?.voice = voice
             onnxEngine?.voice = voice
         }
     }
@@ -74,14 +71,21 @@ final class SpeechPlayer: ObservableObject {
     @Published var shareURL: URL?
 
     private var engine: (any SpeechEngine)?
-    private var kokoroEngine: KokoroEngine?
     private var onnxEngine: OnnxKokoroEngine?
     private var systemEngine: SystemEngine?
 
     init() {
         let defaults = UserDefaults.standard
         rateMultiplier = defaults.object(forKey: "rateMultiplier") as? Double ?? 1.0
-        engineKind = EngineKind(rawValue: defaults.string(forKey: "engineKind") ?? "") ?? .system
+        // v0.6 and earlier also shipped a Metal Kokoro engine ("kokoro");
+        // it was removed in v0.7 — carry that preference over to the ONNX engine.
+        let storedEngine = defaults.string(forKey: "engineKind")
+        if storedEngine == "kokoro" {
+            defaults.set(EngineKind.kokoroOnnx.rawValue, forKey: "engineKind")
+            engineKind = .kokoroOnnx
+        } else {
+            engineKind = EngineKind(rawValue: storedEngine ?? "") ?? .system
+        }
         voice = defaults.string(forKey: "voice") ?? "am_eric"
         systemVoiceIdentifier = defaults.string(forKey: "systemVoiceIdentifier")
 
@@ -100,7 +104,7 @@ final class SpeechPlayer: ObservableObject {
     private func rebuildEngine() {
         engine?.stop()
 
-        if engineKind == .kokoroOnnx, ModelManager.shared.onnxIsReady {
+        if engineKind == .kokoroOnnx, ModelManager.shared.isReady {
             if onnxEngine == nil {
                 let onnx = OnnxKokoroEngine()
                 onnx.voice = voice
@@ -109,22 +113,13 @@ final class SpeechPlayer: ObservableObject {
             engine = onnxEngine
             usingSystemFallback = false
             Log.shared.info("SpeechPlayer: engine → Kokoro ONNX (\(voice))")
-        } else if engineKind == .kokoro, ModelManager.shared.isReady {
-            if kokoroEngine == nil {
-                let kokoro = KokoroEngine()
-                kokoro.voice = voice
-                kokoroEngine = kokoro
-            }
-            engine = kokoroEngine
-            usingSystemFallback = false
-            Log.shared.info("SpeechPlayer: engine → Kokoro (\(voice))")
         } else {
             if systemEngine == nil {
                 systemEngine = SystemEngine()
             }
             systemEngine?.voiceIdentifier = systemVoiceIdentifier
             engine = systemEngine
-            usingSystemFallback = (engineKind == .kokoro || engineKind == .kokoroOnnx)
+            usingSystemFallback = (engineKind == .kokoroOnnx)
             if usingSystemFallback {
                 Log.shared.info("SpeechPlayer: neural engine selected but model missing — system voice in use")
             }
@@ -206,10 +201,8 @@ final class SpeechPlayer: ObservableObject {
             }
         }
 
-        if engineKind == .kokoroOnnx, let onnxEngine {
+        if let onnxEngine {
             onnxEngine.renderWAV(text: text, onChunkProgress: progress, completion: finish)
-        } else if let kokoroEngine {
-            kokoroEngine.renderWAV(text: text, onChunkProgress: progress, completion: finish)
         } else {
             exportState = .failed("No neural engine available — download a model in Settings first.")
         }

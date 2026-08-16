@@ -127,8 +127,8 @@ jobs:
       - name: Generate Xcode project
         run: xcodegen generate
 
-      # Some of our SPM dependencies declare `type: .dynamic` in their
-      # manifests (KokoroSwift 1.0.11 and its dep MisakiSwift 1.0.6 both do).
+      # One of our SPM dependencies declares `type: .dynamic` in its
+      # manifest (MisakiSwift 1.0.6, our G2P).
       # Dynamic SPM products become unembedded *.framework refs that crash at
       # launch inside LiveContainer ("Library not loaded: @rpath/…"), so we
       # strip that declaration from EVERY package checkout before building.

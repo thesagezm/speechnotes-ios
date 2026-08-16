@@ -8,7 +8,7 @@ enum SpeechState: Equatable {
 }
 
 /// Anything that can turn text into spoken audio.
-/// Implementations: SystemEngine (Apple TTS, Phase 1) → KokoroEngine (Phase 2+).
+/// Implementations: SystemEngine (Apple TTS) and OnnxKokoroEngine (Kokoro on CPU).
 protocol SpeechEngine: AnyObject {
     var name: String { get }
     var onStateChanged: ((SpeechState) -> Void)? { get set }

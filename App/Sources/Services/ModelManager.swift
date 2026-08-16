@@ -1,7 +1,8 @@
 import Foundation
 
-/// Downloads and owns the Kokoro model files (Documents/Kokoro/).
-/// ~342 MB one-time download on first launch; everything is offline after that.
+/// Downloads and owns the Kokoro model files (Documents/KokoroOnnx/):
+/// quantized ONNX model (~86 MB) + voice bank (~15 MB) + tokenizer (~4 KB).
+/// One-time download on first launch; everything is offline after that.
 @MainActor
 final class ModelManager: ObservableObject {
     static let shared = ModelManager()
@@ -14,29 +15,27 @@ final class ModelManager: ObservableObject {
     }
 
     @Published private(set) var state: State
-    @Published private(set) var onnxState: State
 
-    /// Called on the main actor when a model becomes ready.
+    /// Called on the main actor when the model becomes ready.
     var onReady: (() -> Void)?
 
     /// The 28 voices shipped in the official voice bank (verified on CI).
     static let knownVoices: [String] = [
         "af_alloy", "af_aoede", "af_bella", "af_heart", "af_jessica",
         "af_kore", "af_nicole", "af_nova", "af_river", "af_sarah", "af_sky",
-        "am_adam", "am_echo", "am_eric", "am_fenrir", "am_liam",
+        "am_adam", "am_echo", "am_eric", "am_fenfir", "am_liam",
         "am_michael", "am_onyx", "am_puck", "am_santa",
         "bf_alice", "bf_emma", "bf_isabella", "bf_lily",
         "bm_daniel", "bm_fable", "bm_george", "bm_lewis",
     ]
 
-    static let modelURL = URL(string: "https://media.githubusercontent.com/media/mlalma/KokoroTestApp/main/Resources/kokoro-v1_0.safetensors")!
-    static let voicesURL = URL(string: "https://raw.githubusercontent.com/mlalma/KokoroTestApp/main/Resources/voices.npz")!
+    // MARK: Model set (ONNX engine)
 
-    // MARK: ONNX model set (Plan B engine)
-
-    /// Quantized Kokoro (~82 MB) — the kokoro-onnx/PocketPal default choice.
+    /// Quantized Kokoro (~86 MB) — the kokoro-onnx/PocketPal default choice.
     static let onnxModelURL = URL(string: "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/onnx/model_q8f16.onnx")!
     static let onnxTokenizerURL = URL(string: "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/tokenizer.json")!
+    /// Voice bank: 28 style vectors shared by every Kokoro voice.
+    static let voicesURL = URL(string: "https://raw.githubusercontent.com/mlalma/KokoroTestApp/main/Resources/voices.npz")!
 
     nonisolated static var onnxDirectory: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -51,13 +50,19 @@ final class ModelManager: ObservableObject {
         onnxDirectory.appendingPathComponent("tokenizer.json")
     }
 
+    nonisolated static var voicesFileURL: URL {
+        onnxDirectory.appendingPathComponent("voices.npz")
+    }
+
     nonisolated static func onnxFilesAreValid() -> Bool {
         let fm = FileManager.default
         guard let modelSize = (try? fm.attributesOfItem(atPath: onnxModelFileURL.path))?[.size] as? Int64,
               modelSize > 40_000_000 else { return false }
+        guard let voicesSize = (try? fm.attributesOfItem(atPath: voicesFileURL.path))?[.size] as? Int64,
+              voicesSize > 10_000_000 else { return false }
         // tokenizer.json is tiny (~3.5 KB) — validate by parsing it the same
-        // way the engine does, not by size. (A >10 KB size check rejected
-        // every successful download.)
+        // way the engine does, not by size. (A >10 KB size check once
+        // rejected every successful download.)
         guard let data = try? Data(contentsOf: onnxTokenizerFileURL),
               let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               let vocab = (json["model"] as? [String: Any])?["vocab"] as? [String: Int],
@@ -65,70 +70,68 @@ final class ModelManager: ObservableObject {
         return true
     }
 
-    /// ~342 MB payload; require headroom of roughly 1.3× (PocketPal lesson).
-    nonisolated static let requiredFreeBytes: Int64 = 450_000_000
-    /// Generous idle timeout — GitHub's media CDN can stall for minutes.
+    /// ~101 MB payload; require headroom of roughly 1.5× (PocketPal lesson).
+    nonisolated static let requiredFreeBytes: Int64 = 150_000_000
+    /// Generous idle timeout — the GitHub media CDN can stall for minutes.
     nonisolated static let requestTimeout: TimeInterval = 120
     nonisolated static let resourceTimeout: TimeInterval = 7200
     nonisolated static let downloadAttempts = 3
 
     init() {
-        if Self.filesAreValid() {
+        Self.migrateLegacyMetalFiles()
+        if Self.onnxFilesAreValid() {
             state = .ready
             Log.shared.info("ModelManager: model already present")
         } else {
             state = .notDownloaded
         }
-        if Self.onnxFilesAreValid() {
-            onnxState = .ready
-            Log.shared.info("ModelManager: ONNX model already present")
-        } else {
-            onnxState = .notDownloaded
+    }
+
+    // MARK: Legacy layout migration
+
+    /// v0.6 and earlier kept the voice bank in Documents/Kokoro/ next to a
+    /// 327 MB Metal safetensors that no engine uses any more. Move the voice
+    /// bank into the ONNX directory (no re-download) and delete the rest.
+    nonisolated private static func migrateLegacyMetalFiles() {
+        let fm = FileManager.default
+        let legacyDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Kokoro")
+        let legacyVoices = legacyDir.appendingPathComponent("voices.npz")
+        let legacyModel = legacyDir.appendingPathComponent("kokoro-v1_0.safetensors")
+
+        if fm.fileExists(atPath: legacyVoices.path),
+           !fm.fileExists(atPath: voicesFileURL.path) {
+            try? fm.createDirectory(at: onnxDirectory, withIntermediateDirectories: true)
+            do {
+                try fm.moveItem(at: legacyVoices, to: voicesFileURL)
+                Log.shared.info("ModelManager: migrated voice bank from the retired Metal-engine layout")
+            } catch {
+                Log.shared.error("ModelManager: voice bank migration failed (\(error.localizedDescription)) — it will re-download")
+            }
+        }
+        if fm.fileExists(atPath: legacyModel.path) {
+            try? fm.removeItem(at: legacyModel)
+            Log.shared.info("ModelManager: removed the retired Metal model (freed ~327 MB)")
+        }
+        // Remove the old directory if nothing is left in it.
+        if fm.fileExists(atPath: legacyDir.path),
+           (try? fm.contentsOfDirectory(atPath: legacyDir.path))?.isEmpty == true {
+            try? fm.removeItem(at: legacyDir)
         }
     }
-
-    // Paths and file checks are pure FileManager math — usable from any thread.
-    nonisolated static var kokoroDirectory: URL {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Kokoro")
-    }
-
-    nonisolated static var modelFileURL: URL {
-        kokoroDirectory.appendingPathComponent("kokoro-v1_0.safetensors")
-    }
-
-    nonisolated static var voicesFileURL: URL {
-        kokoroDirectory.appendingPathComponent("voices.npz")
-    }
-
-    nonisolated static func filesAreValid() -> Bool {
-        let fm = FileManager.default
-        guard let modelSize = (try? fm.attributesOfItem(atPath: modelFileURL.path))?[.size] as? Int64,
-              modelSize > 300_000_000 else { return false }
-        guard let voicesSize = (try? fm.attributesOfItem(atPath: voicesFileURL.path))?[.size] as? Int64,
-              voicesSize > 10_000_000 else { return false }
-        return true
-    }
-
-    var modelPath: URL { Self.modelFileURL }
-    var voicesPath: URL { Self.voicesFileURL }
 
     var isReady: Bool {
         if case .ready = state { return true }
         return false
     }
 
-    var onnxIsReady: Bool {
-        if case .ready = onnxState { return true }
-        return false
-    }
-
+    /// Downloads the model set (~86 MB model + ~15 MB voices + 4 KB tokenizer).
     func startDownload() {
         if case .downloading = state { return }
         guard !isReady else { return }
 
         // Disk preflight — fail fast with a clear message instead of dying
-        // 300 MB into the download (PocketPal lesson: estimate × ~1.3).
+        // 80 MB into the download (PocketPal lesson: estimate × ~1.5).
         if let attrs = try? FileManager.default.attributesOfFileSystem(forPath: NSHomeDirectory()),
            let free = attrs[.systemFreeSize] as? Int64,
            free < Self.requiredFreeBytes {
@@ -139,27 +142,34 @@ final class ModelManager: ObservableObject {
         }
 
         state = .downloading(progress: 0)
-        Log.shared.info("ModelManager: starting model download (~342 MB)")
+        Log.shared.info("ModelManager: starting model download (~101 MB)")
 
         Task.detached { [weak self] in
             do {
                 try await self?.download(
-                    from: Self.modelURL,
-                    to: Self.modelFileURL,
-                    expectedBytes: 327_115_152,
-                    progressRange: 0.0...0.95,
+                    from: Self.onnxModelURL,
+                    to: Self.onnxModelFileURL,
+                    expectedBytes: 86_033_585,
+                    progressRange: 0.0...0.8,
                     publishingTo: { [weak self] value in self?.reportProgress(value) }
                 )
                 try await self?.download(
                     from: Self.voicesURL,
                     to: Self.voicesFileURL,
                     expectedBytes: 14_629_684,
-                    progressRange: 0.95...1.0,
+                    progressRange: 0.8...0.97,
+                    publishingTo: { [weak self] value in self?.reportProgress(value) }
+                )
+                try await self?.download(
+                    from: Self.onnxTokenizerURL,
+                    to: Self.onnxTokenizerFileURL,
+                    expectedBytes: 3_497,
+                    progressRange: 0.97...1.0,
                     publishingTo: { [weak self] value in self?.reportProgress(value) }
                 )
                 await MainActor.run {
                     guard let self else { return }
-                    if Self.filesAreValid() {
+                    if Self.onnxFilesAreValid() {
                         self.state = .ready
                         Log.shared.info("ModelManager: download complete")
                         self.onReady?()
@@ -178,77 +188,9 @@ final class ModelManager: ObservableObject {
         }
     }
 
-    /// Downloads the ONNX engine's model set (~82 MB quantized + tokenizer).
-    func startOnnxDownload() {
-        if case .downloading = onnxState { return }
-        guard !onnxIsReady else { return }
-
-        if let attrs = try? FileManager.default.attributesOfFileSystem(forPath: NSHomeDirectory()),
-           let free = attrs[.systemFreeSize] as? Int64,
-           free < 150_000_000 {
-            let message = "Not enough free space for the ONNX model (need ~150 MB, have \(free / 1_000_000) MB)"
-            onnxState = .failed(message)
-            Log.shared.error("ModelManager: \(message)")
-            return
-        }
-
-        onnxState = .downloading(progress: 0)
-        Log.shared.info("ModelManager: starting ONNX model download (~82 MB)")
-
-        Task.detached { [weak self] in
-            do {
-                try await self?.download(
-                    from: Self.onnxModelURL,
-                    to: Self.onnxModelFileURL,
-                    expectedBytes: 86_033_585,
-                    progressRange: 0.0...0.95,
-                    publishingTo: { [weak self] value in self?.reportOnnxProgress(value) }
-                )
-                try await self?.download(
-                    from: Self.onnxTokenizerURL,
-                    to: Self.onnxTokenizerFileURL,
-                    expectedBytes: 3_497,
-                    progressRange: 0.95...1.0,
-                    publishingTo: { [weak self] value in self?.reportOnnxProgress(value) }
-                )
-                await MainActor.run {
-                    guard let self else { return }
-                    if Self.onnxFilesAreValid() {
-                        self.onnxState = .ready
-                        Log.shared.info("ModelManager: ONNX download complete")
-                        self.onReady?()
-                    } else {
-                        self.onnxState = .failed("Downloaded ONNX files failed validation")
-                        Log.shared.error("ModelManager: ONNX files failed validation after download")
-                    }
-                }
-            } catch {
-                await MainActor.run {
-                    guard let self else { return }
-                    self.onnxState = .failed(error.localizedDescription)
-                    Log.shared.error("ModelManager: ONNX download failed: \(error)")
-                }
-            }
-        }
-    }
-
-    func deleteOnnxModels() {
-        try? FileManager.default.removeItem(at: Self.onnxDirectory)
-        for base in [Self.onnxModelFileURL, Self.onnxTokenizerFileURL] {
-            try? FileManager.default.removeItem(at: base.appendingPathExtension("part"))
-            try? FileManager.default.removeItem(at: base.appendingPathExtension("resumeData"))
-        }
-        onnxState = .notDownloaded
-        Log.shared.info("ModelManager: ONNX models deleted")
-    }
-
     func deleteModels() {
-        if onnxIsReady {
-            Log.shared.error("ModelManager: deleting the voice bank — the ONNX engine needs it too and will stop working until re-downloaded")
-        }
-        try? FileManager.default.removeItem(at: modelPath)
-        try? FileManager.default.removeItem(at: voicesPath)
-        for base in [Self.modelFileURL, Self.voicesFileURL] {
+        try? FileManager.default.removeItem(at: Self.onnxDirectory)
+        for base in [Self.onnxModelFileURL, Self.voicesFileURL, Self.onnxTokenizerFileURL] {
             try? FileManager.default.removeItem(at: base.appendingPathExtension("part"))
             try? FileManager.default.removeItem(at: base.appendingPathExtension("resumeData"))
         }
@@ -259,12 +201,6 @@ final class ModelManager: ObservableObject {
     private func reportProgress(_ value: Double) {
         if case .downloading = state {
             state = .downloading(progress: value)
-        }
-    }
-
-    private func reportOnnxProgress(_ value: Double) {
-        if case .downloading = onnxState {
-            onnxState = .downloading(progress: value)
         }
     }
 
@@ -348,7 +284,7 @@ final class ModelManager: ObservableObject {
         throw lastError ?? URLError(.badURL)
     }
 
-    /// PocketPal lesson: 342 MB of model files should not ride iCloud backups.
+    /// PocketPal lesson: 100+ MB of model files should not ride iCloud backups.
     nonisolated private static func excludeFromBackup(_ directory: URL) {
         var url = directory
         var values = URLResourceValues()

@@ -18,8 +18,7 @@ struct SettingsView: View {
     /// Any neural engine is selected AND its model is ready — the system
     /// engine (and so the system voice) is not in the playback path.
     private var neuralEngineIsActive: Bool {
-        (player.engineKind == .kokoro || player.engineKind == .kokoroOnnx)
-            && !player.usingSystemFallback
+        player.engineKind == .kokoroOnnx && !player.usingSystemFallback
     }
 
     var body: some View {
@@ -33,8 +32,7 @@ struct SettingsView: View {
                     }
                     .pickerStyle(.inline)
 
-                    if (player.engineKind == .kokoro && !models.isReady)
-                        || (player.engineKind == .kokoroOnnx && !models.onnxIsReady) {
+                    if player.engineKind == .kokoroOnnx && !models.isReady {
                         Label(
                             "Neural engine selected, but its model isn't downloaded yet — the system voice is used in the meantime.",
                             systemImage: "info.circle"
@@ -99,7 +97,7 @@ struct SettingsView: View {
                         Button {
                             models.startDownload()
                         } label: {
-                            Label("Download Kokoro model (~342 MB)", systemImage: "arrow.down.circle")
+                            Label("Download Kokoro model (~101 MB)", systemImage: "arrow.down.circle")
                         }
                     case .downloading(let progress):
                         ProgressView(value: progress) {
@@ -113,53 +111,14 @@ struct SettingsView: View {
                         }
                     case .ready:
                         Label("Model ready — fully offline", systemImage: "checkmark.circle")
-                        Button("Delete model (frees ~342 MB)", role: .destructive) {
+                        Button("Delete model (frees ~101 MB)", role: .destructive) {
                             models.deleteModels()
                         }
                     }
                 } header: {
-                    Text("Kokoro model (Metal engine)")
+                    Text("Kokoro model")
                 } footer: {
-                    Text("One-time download, stored inside the app. All speech generation stays on your device. The voice bank here is shared with the ONNX engine below.")
-                }
-
-                Section {
-                    switch models.onnxState {
-                    case .notDownloaded:
-                        Button {
-                            models.startOnnxDownload()
-                        } label: {
-                            Label("Download ONNX model (~82 MB)", systemImage: "arrow.down.circle")
-                        }
-                        .disabled(!models.isReady)
-                        if !models.isReady {
-                            Label(
-                                "Needs the voice bank from the Kokoro model above.",
-                                systemImage: "info.circle"
-                            )
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                        }
-                    case .downloading(let progress):
-                        ProgressView(value: progress) {
-                            Text("Downloading… \(Int(progress * 100))%")
-                        }
-                    case .failed(let message):
-                        Label("Download failed: \(message)", systemImage: "exclamationmark.triangle")
-                            .font(.footnote)
-                        Button("Retry") {
-                            models.startOnnxDownload()
-                        }
-                    case .ready:
-                        Label("ONNX model ready — runs on the CPU", systemImage: "checkmark.circle")
-                        Button("Delete ONNX model (frees ~82 MB)", role: .destructive) {
-                            models.deleteOnnxModels()
-                        }
-                    }
-                } header: {
-                    Text("Kokoro ONNX model (CPU engine)")
-                } footer: {
-                    Text("The same Kokoro voices running on the CPU — a smaller download that avoids the GPU memory issues seen with long notes on the Metal engine.")
+                    Text("One-time download, stored inside the app: the quantized model, all 28 voices, and the tokenizer. All speech generation stays on your device.")
                 }
             }
             .navigationTitle("Speech Settings")
