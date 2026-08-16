@@ -22,8 +22,9 @@ struct NoteEditorView: View {
     }
 
     private var playButtonDisabled: Bool {
-        player.state == .idle
-            && draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        player.isExporting
+            || player.state == .idle
+                && draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     var body: some View {
@@ -33,11 +34,20 @@ struct NoteEditorView: View {
                 .padding(.horizontal, 8)
                 .onChange(of: draft) { _ in saveDraft() }
 
+            if let progress = player.progress, player.state == .speaking {
+                ProgressView(value: progress)
+                    .padding(.horizontal)
+                    .padding(.top, 4)
+            }
+
             controlsBar
         }
         .navigationTitle(currentNote?.title ?? "Note")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                exportButton
+            }
             ToolbarItem(placement: .navigationBarTrailing) {
                 Button {
                     showingSettings = true
@@ -49,6 +59,16 @@ struct NoteEditorView: View {
         .sheet(isPresented: $showingSettings) {
             SettingsView()
         }
+        .sheet(isPresented: shareSheetBinding) {
+            if let url = player.shareURL {
+                ShareSheet(items: [url])
+            }
+        }
+        .alert("Export failed", isPresented: exportErrorBinding) {
+            Button("OK") { player.dismissExportError() }
+        } message: {
+            Text(exportErrorMessage ?? "")
+        }
         .onAppear {
             guard !didLoad else { return }
             draft = currentNote?.text ?? ""
@@ -57,6 +77,50 @@ struct NoteEditorView: View {
         .onDisappear {
             saveDraft()
         }
+    }
+
+    // MARK: - Export
+
+    private var canExport: Bool {
+        !player.usingSystemFallback
+            && player.engineKind == .kokoro
+            && !player.isExporting
+            && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var exportButton: some View {
+        Button {
+            player.export(draft)
+        } label: {
+            Group {
+                if case .running(let progress) = player.exportState {
+                    ProgressView(value: progress)
+                        .frame(width: 28)
+                } else {
+                    Image(systemName: "square.and.arrow.up")
+                }
+            }
+        }
+        .disabled(!canExport)
+    }
+
+    private var exportErrorMessage: String? {
+        if case .failed(let message) = player.exportState { return message }
+        return nil
+    }
+
+    private var exportErrorBinding: Binding<Bool> {
+        Binding(
+            get: { exportErrorMessage != nil },
+            set: { if !$0 { player.dismissExportError() } }
+        )
+    }
+
+    private var shareSheetBinding: Binding<Bool> {
+        Binding(
+            get: { player.shareURL != nil },
+            set: { if !$0 { player.shareURL = nil } }
+        )
     }
 
     private var controlsBar: some View {
@@ -103,4 +167,15 @@ struct NoteEditorView: View {
         note.text = draft
         notes.update(note)
     }
+}
+
+/// UIActivityViewController bridge for sharing exported WAV files.
+private struct ShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }

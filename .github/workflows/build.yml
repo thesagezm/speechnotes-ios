@@ -6,6 +6,33 @@ on:
   workflow_dispatch:
 
 jobs:
+  logic-tests:
+    name: Logic tests (chunker + WAV writer)
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run SpeechLogic package tests
+        run: |
+          set -o pipefail
+          cd Packages/SpeechLogic
+          swift test 2>&1 | tee ../../logic-tests.log
+
+      - name: Show failure summary
+        if: failure()
+        run: |
+          grep -E "error:|failed|XCTAssert" logic-tests.log | tail -n 30 || true
+
+      - name: Upload logic test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logic-tests-log
+          path: logic-tests.log
+          if-no-files-found: warn
+
   kokoro-spike:
     name: Kokoro spike (experimental — non-blocking)
     runs-on: macos-latest

@@ -20,6 +20,8 @@ final class SpeechPlayer: ObservableObject {
     }
 
     @Published private(set) var state: SpeechState = .idle
+    /// Speech progress 0…1 (chunk-granular) while speaking; nil otherwise.
+    @Published private(set) var progress: Double?
     @Published var rateMultiplier: Double {
         didSet { UserDefaults.standard.set(rateMultiplier, forKey: "rateMultiplier") }
     }
@@ -39,6 +41,17 @@ final class SpeechPlayer: ObservableObject {
     /// True when Kokoro is selected but its model isn't downloaded yet —
     /// the system engine is used in the meantime.
     private(set) var usingSystemFallback = false
+
+    enum ExportState: Equatable {
+        case idle
+        case running(Double)
+        case failed(String)
+    }
+
+    @Published private(set) var exportState: ExportState = .idle
+    /// Set when a WAV export succeeds — the editor presents the share sheet
+    /// and clears this when it dismisses.
+    @Published var shareURL: URL?
 
     private var engine: (any SpeechEngine)?
     private var kokoroEngine: KokoroEngine?
@@ -90,6 +103,11 @@ final class SpeechPlayer: ObservableObject {
                 self?.state = newState
             }
         }
+        engine?.onProgress = { [weak self] value in
+            Task { @MainActor in
+                self?.progress = value > 0 ? value : nil
+            }
+        }
     }
 
     func togglePlay(_ text: String) {
@@ -108,5 +126,51 @@ final class SpeechPlayer: ObservableObject {
 
     func stop() {
         engine?.stop()
+    }
+
+    // MARK: - WAV export
+
+    var isExporting: Bool {
+        if case .running = exportState { return true }
+        return false
+    }
+
+    func export(_ text: String) {
+        guard case .idle = exportState else { return }
+        guard let kokoroEngine else {
+            exportState = .failed("Export needs the Kokoro engine — download the model in Settings first.")
+            return
+        }
+
+        stop()
+        shareURL = nil
+        exportState = .running(0)
+        Log.shared.info("SpeechPlayer: exporting note to WAV")
+
+        kokoroEngine.renderWAV(
+            text: text,
+            onChunkProgress: { [weak self] value in
+                Task { @MainActor in
+                    guard let self, self.isExporting else { return }
+                    self.exportState = .running(value)
+                }
+            },
+            completion: { [weak self] result in
+                Task { @MainActor in
+                    guard let self else { return }
+                    switch result {
+                    case .success(let url):
+                        self.shareURL = url
+                        self.exportState = .idle
+                    case .failure(let error):
+                        self.exportState = .failed(error.localizedDescription)
+                    }
+                }
+            }
+        )
+    }
+
+    func dismissExportError() {
+        if case .failed = exportState { exportState = .idle }
     }
 }

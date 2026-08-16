@@ -8,6 +8,8 @@ settings:
   base:
     SWIFT_VERSION: "5.0"
 packages:
+  SpeechLogic:
+    path: Packages/SpeechLogic
   KokoroSwift:
     url: https://github.com/mlalma/kokoro-ios
     exactVersion: "1.0.11"
@@ -25,6 +27,7 @@ targets:
       - App/Sources
       - App/Resources
     dependencies:
+      - package: SpeechLogic
       - package: KokoroSwift
       - package: MLX
       - package: MLXUtilsLibrary
@@ -40,8 +43,8 @@ targets:
       base:
         PRODUCT_NAME: Speechnotes
         PRODUCT_BUNDLE_IDENTIFIER: com.speechnotes.ios
-        MARKETING_VERSION: "0.3.2"
-        CURRENT_PROJECT_VERSION: "2"
+        MARKETING_VERSION: "0.4.0"
+        CURRENT_PROJECT_VERSION: "3"
         TARGETED_DEVICE_FAMILY: "1"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor

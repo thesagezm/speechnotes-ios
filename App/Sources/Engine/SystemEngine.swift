@@ -6,6 +6,7 @@ final class SystemEngine: NSObject, SpeechEngine {
     let name = "Apple (system)"
 
     var onStateChanged: ((SpeechState) -> Void)?
+    var onProgress: ((Double) -> Void)?
 
     private let synthesizer = AVSpeechSynthesizer()
     private var state: SpeechState = .idle {
