@@ -172,8 +172,10 @@ You can contribute small tweaks immediately (labels, colors, layout) — low-ris
 - [x] Questions answered (2026-08-16, see above)
 - [x] Phase 0 scaffolded, pushed, built on Actions, **installed via LiveContainer and confirmed working on the phone** (2026-08-16 — "said hello to the cloud")
 - [x] Phase 1 built & committed (v0.2.0): notes list + editor with autosave (JSON persistence in Documents), `SpeechEngine` protocol + `SystemEngine` (AVSpeechSynthesizer with pause/resume/stop + speed slider), SpeechPlayer wrapper (engine-swappable — Kokoro drops in here), on-device Logs tab with share
-- [ ] Phase 1 on-device acceptance: create note → system voice reads it aloud (play/pause/stop/speed) → note survives app restart
-- [ ] Phase 2 begins (Kokoro engine integration + CI test that generates sample.wav)
+- [x] Phase 1 **accepted on device** (2026-08-16: note typed, read aloud, logs normal)
+- [x] Phase 2 built & committed: `kokoro-spike` CI job runs KokoroSwift on the macOS runner (MLX does **not** work on iOS simulators — verified from KokoroTestApp docs), downloads model (kokoro-v1_0.safetensors, 327 MB, cached between runs) + voices.npz from the KokoroTestApp repo, generates speech, writes `sample.wav` artifact with a real-time-factor measurement
+- [ ] Phase 2 acceptance: `kokoro-sample` artifact contains audible Kokoro speech; check RTF and the voice list in `kokoro-spike-log`
+- [ ] Phase 3 begins (bundle model + voices into the IPA, KokoroEngine in the app, voice picker; am_eric preferred)
 
 ---
 
