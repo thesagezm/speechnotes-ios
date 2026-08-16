@@ -1,4 +1,4 @@
-// swift-tools-version: 5.9
+// swift-tools-version: 6.0
 import PackageDescription
 
 // Standalone spike package: runs the Kokoro pipeline with `swift test` on CI.
@@ -9,6 +9,7 @@ let package = Package(
     platforms: [
         .macOS(.v15)
     ],
+    swiftLanguageModes: [.v5],
     dependencies: [
         .package(url: "https://github.com/mlalma/kokoro-ios", exact: "1.0.11"),
         .package(url: "https://github.com/ml-explore/mlx-swift", exact: "0.30.2"),
