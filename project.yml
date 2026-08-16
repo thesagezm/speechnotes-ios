@@ -32,6 +32,7 @@ targets:
     dependencies:
       - package: SpeechLogic
       - package: OnnxRuntime
+        product: onnxruntime
       - package: KokoroSwift
       - package: MLX
       - package: MLXUtilsLibrary
