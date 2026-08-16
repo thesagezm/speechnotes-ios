@@ -109,6 +109,75 @@ jobs:
             spike-tail.txt
           if-no-files-found: warn
 
+  kitten-spike:
+    name: Kitten spike (validates ONNX contract)
+    runs-on: macos-latest
+    timeout-minutes: 15
+    # Informative and non-blocking by design (the phone is the real bench)
+    # — but read this job's results via the API before trusting the engine.
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Kitten model + extract voice vector
+        run: |
+          mkdir -p ~/kitten-spike
+          curl -L --retry 3 --progress-bar \
+            -o ~/kitten-spike/model.onnx \
+            "https://huggingface.co/onnx-community/kitten-tts-nano-0.1-ONNX/resolve/main/onnx/model_quantized.onnx"
+          curl -L --retry 3 --progress-bar \
+            -o /tmp/kitten-voices.npz \
+            "https://huggingface.co/KittenML/kitten-tts-nano-0.1/resolve/main/voices.npz"
+          # Extract expr-voice-5-m ("Leo") as one raw float32 row — keeps the
+          # spike test free of npz/MLX dependencies.
+          python3 -c "
+          import zipfile
+          z = zipfile.ZipFile('/tmp/kitten-voices.npz')
+          data = z.read('expr-voice-5-m.npy')
+          hlen = int.from_bytes(data[8:10], 'little')
+          body = data[10 + hlen:]
+          assert len(body) == 256 * 4, len(body)
+          import os
+          open(os.path.expanduser('~/kitten-spike/voice.f32'), 'wb').write(body)
+          "
+          ls -lh ~/kitten-spike
+
+      - name: Run Kitten spike test
+        run: |
+          set -o pipefail
+          cd Tests/KittenSpike
+          swift test 2>&1 | tee ../../kitten-spike.log
+
+      - name: Show failure summary
+        if: always()
+        run: |
+          grep -E "KITTEN-SPIKE|error:|failed|Fatal|Crash|unexpected exit|Executed" kitten-spike.log \
+            | grep -vE "warning:" \
+            | tail -n 40 > kitten-summary.txt || true
+          echo "----- KITTEN SPIKE SUMMARY -----"
+          cat kitten-summary.txt
+          echo "--------------------------------"
+          if [ -s kitten-summary.txt ]; then
+            python3 -c "import pathlib; t = pathlib.Path('kitten-summary.txt').read_text()[:5500]; print('::error title=Kitten spike failure::' + t.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A'))"
+          fi
+
+      - name: Upload sample audio
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kitten-sample
+          path: ~/kitten-spike/sample.wav
+          if-no-files-found: error
+
+      - name: Upload spike log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kitten-spike-log
+          path: kitten-spike.log
+          if-no-files-found: warn
+
   build-ipa:
     name: Build unsigned IPA
     runs-on: macos-latest

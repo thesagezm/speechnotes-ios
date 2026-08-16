@@ -15,6 +15,19 @@
 | Logs | Persistent log viewer + share | Fine for now |
 | Read-along | NSTextStorage highlight + autoscroll | Works; styles are plain |
 
+## Known issues (registered 2026-08-16, user-reported)
+
+1. **Read-along highlight "misses words"** — highlighting is chunk-granular
+   (jumps sentence-to-sentence as chunks are scheduled), so words inside a
+   sentence never light up individually. Fix in UI-1/UI-3: interpolate the
+   highlight within the current chunk using its known audio duration and
+   char offsets (a DisplayLink-timed sweep), instead of one range per chunk.
+2. **Voices "not extremely smooth"** — two contributors: q8 quantization
+   (CPU model) and hard chunk-boundary joins. Candidate fixes, cheapest
+   first: (a) 10–20 ms crossfade at chunk boundaries in the engines'
+   buffer scheduling; (b) offer the fp32 ONNX model (~177 MB) as a quality
+   option in Settings; (c) Supertonic engine (known for smooth output).
+
 ## Principles
 
 1. **Voice-forward** — this app exists to make the phone talk nicely; voice

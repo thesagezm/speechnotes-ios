@@ -18,7 +18,8 @@ struct SettingsView: View {
     /// Any neural engine is selected AND its model is ready — the system
     /// engine (and so the system voice) is not in the playback path.
     private var neuralEngineIsActive: Bool {
-        player.engineKind == .kokoroOnnx && !player.usingSystemFallback
+        (player.engineKind == .kokoroOnnx || player.engineKind == .kitten)
+            && !player.usingSystemFallback
     }
 
     var body: some View {
@@ -32,7 +33,8 @@ struct SettingsView: View {
                     }
                     .pickerStyle(.inline)
 
-                    if player.engineKind == .kokoroOnnx && !models.isReady {
+                    if (player.engineKind == .kokoroOnnx && !models.isReady)
+                        || (player.engineKind == .kitten && !models.kittenIsReady) {
                         Label(
                             "Neural engine selected, but its model isn't downloaded yet — the system voice is used in the meantime.",
                             systemImage: "info.circle"
@@ -43,24 +45,75 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    Menu {
-                        Section("American (a*)") {
-                            ForEach(Self.americanVoices, id: \.self) { voice in
-                                kokoroVoiceRow(voice)
+                    if player.engineKind == .kitten {
+                        Menu {
+                            Section("Female") {
+                                ForEach(KittenEngine.voiceNames.filter { $0.hasSuffix("-f") }, id: \.self) { voice in
+                                    kittenVoiceRow(voice)
+                                }
                             }
-                        }
-                        Section("British (b*)") {
-                            ForEach(Self.britishVoices, id: \.self) { voice in
-                                kokoroVoiceRow(voice)
+                            Section("Male") {
+                                ForEach(KittenEngine.voiceNames.filter { $0.hasSuffix("-m") }, id: \.self) { voice in
+                                    kittenVoiceRow(voice)
+                                }
                             }
+                        } label: {
+                            dropdownRow(title: "Voice", value: player.kittenVoice)
                         }
-                    } label: {
-                        dropdownRow(title: "Voice", value: player.voice)
+                    } else {
+                        Menu {
+                            Section("American (a*)") {
+                                ForEach(Self.americanVoices, id: \.self) { voice in
+                                    kokoroVoiceRow(voice)
+                                }
+                            }
+                            Section("British (b*)") {
+                                ForEach(Self.britishVoices, id: \.self) { voice in
+                                    kokoroVoiceRow(voice)
+                                }
+                            }
+                        } label: {
+                            dropdownRow(title: "Voice", value: player.voice)
+                        }
                     }
                 } header: {
-                    Text("Kokoro voice")
+                    Text(player.engineKind == .kitten ? "Kitten voice" : "Kokoro voice")
                 } footer: {
-                    Text("Naming: a = American, b = British · f = female, m = male — e.g. am_eric is American male Eric.")
+                    if player.engineKind == .kitten {
+                        Text("Small expressive pack — f = female, m = male.")
+                    } else {
+                        Text("Naming: a = American, b = British · f = female, m = male — e.g. am_eric is American male Eric.")
+                    }
+                }
+
+                Section {
+                    switch models.kittenState {
+                    case .notDownloaded:
+                        Button {
+                            models.startKittenDownload()
+                        } label: {
+                            Label("Download Kitten model (~24 MB)", systemImage: "arrow.down.circle")
+                        }
+                    case .downloading(let progress):
+                        ProgressView(value: progress) {
+                            Text("Downloading Kitten… \(Int(progress * 100))%")
+                        }
+                    case .failed(let message):
+                        Label("Kitten download failed: \(message)", systemImage: "exclamationmark.triangle")
+                            .font(.footnote)
+                        Button("Retry") {
+                            models.startKittenDownload()
+                        }
+                    case .ready:
+                        Label("Kitten model ready", systemImage: "checkmark.circle")
+                        Button("Delete Kitten model (frees ~24 MB)", role: .destructive) {
+                            models.deleteKittenModels()
+                        }
+                    }
+                } header: {
+                    Text("Kitten model")
+                } footer: {
+                    Text("A second offline voice pack: 8 expressive voices from a tiny 24 MB model. Optional — Kokoro above is the main engine.")
                 }
 
                 Section {
@@ -154,6 +207,20 @@ private extension SettingsView {
                 Label(voice, systemImage: "checkmark")
             } else {
                 Text(voice)
+            }
+        }
+    }
+
+    @ViewBuilder
+    func kittenVoiceRow(_ voice: String) -> some View {
+        let title = KittenEngine.friendlyNames[voice].map { "\($0) (\(voice))" } ?? voice
+        Button {
+            player.kittenVoice = voice
+        } label: {
+            if player.kittenVoice == voice {
+                Label(title, systemImage: "checkmark")
+            } else {
+                Text(title)
             }
         }
     }

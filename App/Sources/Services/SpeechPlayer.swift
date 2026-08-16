@@ -8,6 +8,7 @@ final class SpeechPlayer: ObservableObject {
     enum EngineKind: String, CaseIterable, Identifiable {
         case system
         case kokoroOnnx
+        case kitten
 
         var id: String { rawValue }
 
@@ -15,6 +16,7 @@ final class SpeechPlayer: ObservableObject {
             switch self {
             case .system: return "Apple (system)"
             case .kokoroOnnx: return "Kokoro (on-device, offline)"
+            case .kitten: return "Kitten (on-device, tiny)"
             }
         }
     }
@@ -38,6 +40,13 @@ final class SpeechPlayer: ObservableObject {
         didSet {
             UserDefaults.standard.set(voice, forKey: "voice")
             onnxEngine?.voice = voice
+        }
+    }
+    /// Kitten voices live in a separate namespace from Kokoro voices.
+    @Published var kittenVoice: String {
+        didSet {
+            UserDefaults.standard.set(kittenVoice, forKey: "kittenVoice")
+            kittenEngine?.voice = kittenVoice
         }
     }
     /// Identifier of the `AVSpeechSynthesisVoice` the system engine should
@@ -72,6 +81,7 @@ final class SpeechPlayer: ObservableObject {
 
     private var engine: (any SpeechEngine)?
     private var onnxEngine: OnnxKokoroEngine?
+    private var kittenEngine: KittenEngine?
     private var systemEngine: SystemEngine?
 
     init() {
@@ -104,7 +114,16 @@ final class SpeechPlayer: ObservableObject {
     private func rebuildEngine() {
         engine?.stop()
 
-        if engineKind == .kokoroOnnx, ModelManager.shared.isReady {
+        if engineKind == .kitten, ModelManager.shared.kittenIsReady {
+            if kittenEngine == nil {
+                let kitten = KittenEngine()
+                kitten.voice = kittenVoice
+                kittenEngine = kitten
+            }
+            engine = kittenEngine
+            usingSystemFallback = false
+            Log.shared.info("SpeechPlayer: engine → Kitten (\(kittenVoice))")
+        } else if engineKind == .kokoroOnnx, ModelManager.shared.isReady {
             if onnxEngine == nil {
                 let onnx = OnnxKokoroEngine()
                 onnx.voice = voice
@@ -201,7 +220,9 @@ final class SpeechPlayer: ObservableObject {
             }
         }
 
-        if let onnxEngine {
+        if engineKind == .kitten, let kittenEngine {
+            kittenEngine.renderWAV(text: text, onChunkProgress: progress, completion: finish)
+        } else if let onnxEngine {
             onnxEngine.renderWAV(text: text, onChunkProgress: progress, completion: finish)
         } else {
             exportState = .failed("No neural engine available — download a model in Settings first.")

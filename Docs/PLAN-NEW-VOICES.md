@@ -5,15 +5,44 @@
 > Hugging Face on 2026-08-16 (sizes from the HF API). Companion doc:
 > `Docs/PLAN-UI.md`.
 
+## Status 2026-08-16 (late)
+
+- **Kitten: IMPLEMENTED in v0.8.0** (unpushed at time of writing). Full
+  contract extracted from the reference implementation
+  (KittenML/KittenTTS `onnx_model.py`): inputs `input_ids` (BOS 0 + 175-entry
+  symbol-table ids + EOS [10, 0]), `style` float32 [1,256] — each voice is a
+  SINGLE row (bank = 8×1×256, 10,294 bytes), `speed` [1]; waveform @ 24 kHz
+  with last 5,000 samples trimmed per chunk. `KittenTokenizer` in SpeechLogic
+  is GENERATED from the Python source (byte-exact) + unit tests.
+  `KittenEngine` mirrors OnnxKokoroEngine streaming. Model: 23,792,492 B
+  quantized from onnx-community; voices.npz from KittenML. CI `kitten-spike`
+  job validates the ONNX contract (hardcoded espeak-dialect phonemes, no
+  MLX on the runner; voice row pre-extracted via python zipfile).
+  **Remaining risk:** MisakiSwift phonemes vs espeak dialect differences
+  (both IPA-with-stress; a few combining-mark edge cases may tokenize
+  differently) — listen to the device output.
+- **Supertonic: researched, ready to port.** Official iOS example exists at
+  `supertone-inc/supertonic` `ios/ExampleiOSApp` — XcodeGen + the SAME
+  `onnxruntime-swift-package-manager` dependency we already ship. The whole
+  pipeline is ONE vendored file, `swift/Sources/Helper.swift` (835 lines):
+  `loadTextToSpeech(dir, useGpu, env)`, `TextToSpeech.call(text, lang,
+  style, nfe, speed:, silenceDuration:) → (wav, duration)`,
+  `loadVoiceStyle(paths)`. Assets: `onnx/{tts.json,duration_predictor,
+  text_encoder,vector_estimator,vocoder}.onnx` + `voice_styles/*.json`
+  (M1–M5, F1–F5). **Supertonic 3** (2026-04-29) added the 31-language
+  support with v2-compatible assets (Supertone/supertonic-3). License:
+  **openrail** (personal sideload fine; verify the GitHub code-repo license
+  before vendoring Helper.swift).
+
 ## Why these two
 
 | | Kokoro (have) | **KittenTTS nano 0.1** | **Supertonic (Supertone)** |
 |---|---|---|---|
-| Params | 82 M | ~6 M (nano) | ~2.4 M |
+| Params | 82 M | ~6 M (nano) | 66 M |
 | Download | 86 MB q8 + 15 MB voices | **23.8 MB total** | ~262 MB (v1: 4 models) or int8 build |
 | Voices | 28 | 8 expressive (4 m + 4 f) | 8–9 (F1–F5, M1–M4) |
 | Languages | English | English | **31 languages** |
-| License | Apache-2.0 | MIT | Apache-2.0 (Supertone) |
+| License | Apache-2.0 | MIT | openrail (Supertone) |
 | Texture | Warm, narrative | Bright, expressive | Fast, clean, multilingual |
 
 Kitten is the cheap win (24 MB); Supertonic is the strategic win (any
@@ -49,37 +78,27 @@ non-English, see risks).
 - Shared ORT session/env per engine; `MLX.GPU.clearCache()` calls in
   MisakiSwift G2P stay (Kokoro only — see risks).
 
-## Phase V-1 — KittenTTS nano (start here)
+## Phase V-1 — KittenTTS nano — ✅ implemented v0.8.0 (see status above)
 
-1. **CI spike** (like the old kokoro spike): logic-test that loads the
-   quantized model + tokenizer, synthesizes "hello", asserts non-silent
-   audio, measures RTF on the macOS runner; artifact `kitten-sample.wav`.
-2. **Input-signature research** (the one unknown): confirm tensor names /
-   shapes (ids, style/voice vector, speed?) from the onnx-community README +
-   KittenML reference code; Kitten phonemization — check whether it reuses
-   IPA-style ids like Kokoro (then MisakiSwift may serve) or ships its own
-   text normalizer in `tokenizer.json` (then feed text directly).
-3. **`KittenEngine`** (~250 lines, clone OnnxKokoroEngine's streaming
-   skeleton: chunk → phonemize → tokens → session.run → 24 kHz buffer;
-   chunk size ~120 chars given the smaller context).
-4. Settings: engine card "Kitten (24 MB) — 8 expressive voices" with
-   download progress; voice sheet gains engine sections.
-
-**Acceptance**: airplane-mode note spoken by `expr-voice-2-m`; RTF ≤ 1.0 on
+Acceptance still open: airplane-mode note spoken by a Kitten voice; RTF on
 A14; switching Kokoro↔Kitten mid-session never crashes (serialized swap).
 
-## Phase V-2 — Supertonic
+## Phase V-2 — Supertonic (port path now concrete)
 
-1. Pick artifact: start with v1 4-model pipeline (sherpa-onnx-proven,
-   documented JSON config `tts.yml`), compare int8 build size before
-   shipping the download.
-2. **Byte-level tokenizer = no G2P** for non-English text — this is the
-   feature: type/paste Spanish/French/etc. and it speaks. Editor language
-   is just text; no code changes needed outside the engine.
-3. `SupertonicEngine`: 4 chained sessions (text→duration→estimator→vocoder)
-   per chunk; voices are small JSON style files — bundle all 8 in the
-   engine download (~no size impact).
-4. Voice sheet shows language coverage note ("31 languages").
+1. Vendor `swift/Sources/Helper.swift` from supertone-inc/supertonic into
+   `App/Sources/Engine/Supertonic/` (verify repo license first — HF model
+   is openrail; personal sideload OK).
+2. `SupertonicEngine: SpeechEngine` adapter: per-sentence-chunk
+   `textToSpeech.call(chunk, "na", style, nfe)` — language "na" = auto.
+   Style from one `voice_styles/*.json`. nfe default ~32 (example's slider);
+   speed/silence built into the call.
+3. Model set download: 5 files from `Supertone/supertonic` (v1 assets,
+   OnnxSlim variants exist) or `supertonic-3` — compare sizes first;
+   version-sentinel the directory (v1 vs v3 assets differ).
+4. Voice sheet: M1–M5 / F1–F5 with language note ("31 languages, auto-detected
+   — non-English notes just work").
+5. Start as a third engine alongside Kokoro/Kitten; single-slot memory rule
+   applies (PocketPal lesson).
 
 **Acceptance**: a Spanish note speaks intelligibly offline; a long English
 note plays through (streaming parity); download ≤ ~270 MB with progress.
