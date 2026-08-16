@@ -5,9 +5,11 @@ struct NoteEditorView: View {
 
     @EnvironmentObject private var notes: NotesStore
     @EnvironmentObject private var player: SpeechPlayer
+    @Environment(\.dismiss) private var dismiss
     @State private var draft: String = ""
     @State private var didLoad = false
     @State private var showingSettings = false
+    @State private var showingDeleteConfirm = false
 
     private var currentNote: Note? {
         notes.notes.first { $0.id == noteId }
@@ -72,6 +74,14 @@ struct NoteEditorView: View {
         .navigationTitle(currentNote?.title ?? "Note")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            ToolbarItem(placement: .navigationBarLeading) {
+                Button(role: .destructive) {
+                    showingDeleteConfirm = true
+                } label: {
+                    Image(systemName: "trash")
+                }
+                .tint(.red)
+            }
             ToolbarItem(placement: .navigationBarTrailing) {
                 exportButton
             }
@@ -82,6 +92,18 @@ struct NoteEditorView: View {
                     Image(systemName: "speaker.wave.2")
                 }
             }
+        }
+        .confirmationDialog(
+            "Delete this note?",
+            isPresented: $showingDeleteConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Delete note", role: .destructive) {
+                player.stop()
+                notes.delete(noteId: noteId)
+                dismiss()
+            }
+            Button("Cancel", role: .cancel) {}
         }
         .sheet(isPresented: $showingSettings) {
             SettingsView()

@@ -36,6 +36,13 @@ final class NotesStore: ObservableObject {
         save()
     }
 
+    /// Deletes by identity — used by the editor's delete button, where we
+    /// don't have list offsets.
+    func delete(noteId: UUID) {
+        notes.removeAll { $0.id == noteId }
+        save()
+    }
+
     private func save() {
         do {
             let data = try JSONEncoder().encode(notes)
