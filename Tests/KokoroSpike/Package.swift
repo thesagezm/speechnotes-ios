@@ -9,7 +9,6 @@ let package = Package(
     platforms: [
         .macOS(.v15)
     ],
-    swiftLanguageModes: [.v5],
     dependencies: [
         .package(url: "https://github.com/mlalma/kokoro-ios", exact: "1.0.11"),
         .package(url: "https://github.com/ml-explore/mlx-swift", exact: "0.30.2"),
@@ -25,5 +24,6 @@ let package = Package(
             ],
             path: "Tests/KokoroSpikeTests"
         )
-    ]
+    ],
+    swiftLanguageModes: [.v5]
 )
