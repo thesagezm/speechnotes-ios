@@ -31,6 +31,13 @@ final class ModelManager: ObservableObject {
     static let modelURL = URL(string: "https://media.githubusercontent.com/media/mlalma/KokoroTestApp/main/Resources/kokoro-v1_0.safetensors")!
     static let voicesURL = URL(string: "https://raw.githubusercontent.com/mlalma/KokoroTestApp/main/Resources/voices.npz")!
 
+    /// ~342 MB payload; require headroom of roughly 1.3× (PocketPal lesson).
+    nonisolated static let requiredFreeBytes: Int64 = 450_000_000
+    /// Generous idle timeout — GitHub's media CDN can stall for minutes.
+    nonisolated static let requestTimeout: TimeInterval = 120
+    nonisolated static let resourceTimeout: TimeInterval = 7200
+    nonisolated static let downloadAttempts = 3
+
     init() {
         if Self.filesAreValid() {
             state = .ready
@@ -75,6 +82,17 @@ final class ModelManager: ObservableObject {
         if case .downloading = state { return }
         guard !isReady else { return }
 
+        // Disk preflight — fail fast with a clear message instead of dying
+        // 300 MB into the download (PocketPal lesson: estimate × ~1.3).
+        if let attrs = try? FileManager.default.attributesOfFileSystem(forPath: NSHomeDirectory()),
+           let free = attrs[.systemFreeSize] as? Int64,
+           free < Self.requiredFreeBytes {
+            let message = "Not enough free space: need ~\(Self.requiredFreeBytes / 1_000_000) MB, have \(free / 1_000_000) MB"
+            state = .failed(message)
+            Log.shared.error("ModelManager: \(message)")
+            return
+        }
+
         state = .downloading(progress: 0)
         Log.shared.info("ModelManager: starting model download (~342 MB)")
 
@@ -114,6 +132,10 @@ final class ModelManager: ObservableObject {
     func deleteModels() {
         try? FileManager.default.removeItem(at: modelPath)
         try? FileManager.default.removeItem(at: voicesPath)
+        for base in [Self.modelFileURL, Self.voicesFileURL] {
+            try? FileManager.default.removeItem(at: base.appendingPathExtension("part"))
+            try? FileManager.default.removeItem(at: base.appendingPathExtension("resumeData"))
+        }
         state = .notDownloaded
         Log.shared.info("ModelManager: models deleted")
     }
@@ -124,44 +146,101 @@ final class ModelManager: ObservableObject {
         }
     }
 
-    /// Downloads one file with progress, writing to a .part file and renaming
-    /// into place only on success.
-    private func download(from source: URL, to destination: URL, progressRange: ClosedRange<Double>) async throws {
-        let delegate = ProgressDelegate()
-        let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
-        defer { session.finishTasksAndInvalidate() }
+    /// Downloads one file with progress, retry, and resume support.
+    ///
+    /// The completed temp file MUST be moved inside the delegate's
+    /// `didFinishDownloadingTo` callback — URLSession deletes it the moment
+    /// that method returns, which is exactly the race that produced
+    /// "CFNetworkDownload_*.tmp couldn't be moved" on device when the move
+    /// ran after an async hop back into the task.
+    nonisolated private func download(
+        from source: URL,
+        to destination: URL,
+        progressRange: ClosedRange<Double>
+    ) async throws {
+        let directory = destination.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        Self.excludeFromBackup(directory)
 
-        delegate.onProgress = { [weak self] written, total in
-            guard total > 0 else { return }
-            let fraction = min(1.0, Double(written) / Double(total))
-            let value = progressRange.lowerBound
-                + (progressRange.upperBound - progressRange.lowerBound) * fraction
-            Task { @MainActor [weak self] in
-                self?.reportProgress(value)
+        let partURL = destination.appendingPathExtension("part")
+        let resumeDataURL = destination.appendingPathExtension("resumeData")
+
+        var lastError: Error?
+        for attempt in 1...Self.downloadAttempts {
+            do {
+                let delegate = ProgressDelegate(partURL: partURL)
+                let config = URLSessionConfiguration.ephemeral
+                config.timeoutIntervalForRequest = Self.requestTimeout
+                config.timeoutIntervalForResource = Self.resourceTimeout
+                let session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
+                defer { session.finishTasksAndInvalidate() }
+
+                delegate.onProgress = { [weak self] written, total in
+                    guard total > 0 else { return }
+                    let fraction = min(1.0, Double(written) / Double(total))
+                    let value = progressRange.lowerBound
+                        + (progressRange.upperBound - progressRange.lowerBound) * fraction
+                    Task { @MainActor [weak self] in
+                        self?.reportProgress(value)
+                    }
+                }
+
+                if attempt > 1 {
+                    Log.shared.info("ModelManager: retry \(attempt) of \(Self.downloadAttempts)")
+                }
+
+                let completedPart = try await withCheckedThrowingContinuation { continuation in
+                    delegate.continuation = continuation
+                    if let resumeData = try? Data(contentsOf: resumeDataURL), !resumeData.isEmpty {
+                        Log.shared.info("ModelManager: continuing partial download")
+                        session.downloadTask(withResumeData: resumeData).resume()
+                    } else {
+                        session.downloadTask(with: source).resume()
+                    }
+                }
+
+                try? FileManager.default.removeItem(at: destination)
+                try FileManager.default.moveItem(at: completedPart, to: destination)
+                try? FileManager.default.removeItem(at: resumeDataURL)
+                return
+            } catch {
+                lastError = error
+                // Persist resume data when iOS offers it, so the next attempt
+                // (or the next app launch) continues instead of restarting.
+                if let data = (error as NSError).userInfo[NSURLSessionDownloadTaskResumeData] as? Data,
+                   !data.isEmpty {
+                    try? data.write(to: resumeDataURL, options: .atomic)
+                } else {
+                    // A failed resume attempt yields no fresh resume data —
+                    // clear the stale blob so the next attempt starts clean.
+                    try? FileManager.default.removeItem(at: resumeDataURL)
+                }
+                Log.shared.error("ModelManager: attempt \(attempt) failed: \(error.localizedDescription)")
             }
         }
+        throw lastError ?? URLError(.badURL)
+    }
 
-        let tempLocation = try await withCheckedThrowingContinuation { continuation in
-            delegate.continuation = continuation
-            session.downloadTask(with: source).resume()
-        }
-
-        try FileManager.default.createDirectory(
-            at: destination.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        let partURL = destination.appendingPathExtension("part")
-        try? FileManager.default.removeItem(at: partURL)
-        try FileManager.default.moveItem(at: tempLocation, to: partURL)
-        try? FileManager.default.removeItem(at: destination)
-        try FileManager.default.moveItem(at: partURL, to: destination)
+    /// PocketPal lesson: 342 MB of model files should not ride iCloud backups.
+    nonisolated private static func excludeFromBackup(_ directory: URL) {
+        var url = directory
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try? url.setResourceValues(values)
     }
 }
 
 /// URLSession download delegate bridging to async/await.
+/// Moves the completed file synchronously in `didFinishDownloadingTo` — the
+/// system temp location is only valid until that method returns.
 private final class ProgressDelegate: NSObject, URLSessionDownloadDelegate {
+    let partURL: URL
     var continuation: CheckedContinuation<URL, Error>?
     var onProgress: ((Int64, Int64) -> Void)?
+
+    init(partURL: URL) {
+        self.partURL = partURL
+    }
 
     func urlSession(
         _ session: URLSession,
@@ -178,7 +257,13 @@ private final class ProgressDelegate: NSObject, URLSessionDownloadDelegate {
         downloadTask: URLSessionDownloadTask,
         didFinishDownloadingTo location: URL
     ) {
-        continuation?.resume(returning: location)
+        do {
+            try? FileManager.default.removeItem(at: partURL)
+            try FileManager.default.moveItem(at: location, to: partURL)
+            continuation?.resume(returning: partURL)
+        } catch {
+            continuation?.resume(throwing: error)
+        }
         continuation = nil
     }
 
