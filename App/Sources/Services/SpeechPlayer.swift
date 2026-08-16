@@ -8,13 +8,15 @@ final class SpeechPlayer: ObservableObject {
     enum EngineKind: String, CaseIterable, Identifiable {
         case system
         case kokoro
+        case kokoroOnnx
 
         var id: String { rawValue }
 
         var label: String {
             switch self {
             case .system: return "Apple (system)"
-            case .kokoro: return "Kokoro (on-device)"
+            case .kokoro: return "Kokoro (on-device, Metal)"
+            case .kokoroOnnx: return "Kokoro ONNX (on-device, CPU)"
             }
         }
     }
@@ -38,6 +40,7 @@ final class SpeechPlayer: ObservableObject {
         didSet {
             UserDefaults.standard.set(voice, forKey: "voice")
             kokoroEngine?.voice = voice
+            onnxEngine?.voice = voice
         }
     }
     /// Identifier of the `AVSpeechSynthesisVoice` the system engine should
@@ -72,6 +75,7 @@ final class SpeechPlayer: ObservableObject {
 
     private var engine: (any SpeechEngine)?
     private var kokoroEngine: KokoroEngine?
+    private var onnxEngine: OnnxKokoroEngine?
     private var systemEngine: SystemEngine?
 
     init() {
@@ -96,7 +100,16 @@ final class SpeechPlayer: ObservableObject {
     private func rebuildEngine() {
         engine?.stop()
 
-        if engineKind == .kokoro, ModelManager.shared.isReady {
+        if engineKind == .kokoroOnnx, ModelManager.shared.onnxIsReady {
+            if onnxEngine == nil {
+                let onnx = OnnxKokoroEngine()
+                onnx.voice = voice
+                onnxEngine = onnx
+            }
+            engine = onnxEngine
+            usingSystemFallback = false
+            Log.shared.info("SpeechPlayer: engine → Kokoro ONNX (\(voice))")
+        } else if engineKind == .kokoro, ModelManager.shared.isReady {
             if kokoroEngine == nil {
                 let kokoro = KokoroEngine()
                 kokoro.voice = voice
@@ -111,9 +124,9 @@ final class SpeechPlayer: ObservableObject {
             }
             systemEngine?.voiceIdentifier = systemVoiceIdentifier
             engine = systemEngine
-            usingSystemFallback = (engineKind == .kokoro)
+            usingSystemFallback = (engineKind == .kokoro || engineKind == .kokoroOnnx)
             if usingSystemFallback {
-                Log.shared.info("SpeechPlayer: Kokoro selected but model missing — system voice in use")
+                Log.shared.info("SpeechPlayer: neural engine selected but model missing — system voice in use")
             }
         }
 
@@ -164,8 +177,8 @@ final class SpeechPlayer: ObservableObject {
 
     func export(_ text: String) {
         guard case .idle = exportState else { return }
-        guard let kokoroEngine else {
-            exportState = .failed("Export needs the Kokoro engine — download the model in Settings first.")
+        guard usingSystemFallback == false, engineKind != .system else {
+            exportState = .failed("Export needs a neural engine — download a Kokoro model in Settings first.")
             return
         }
 
@@ -174,27 +187,32 @@ final class SpeechPlayer: ObservableObject {
         exportState = .running(0)
         Log.shared.info("SpeechPlayer: exporting note to WAV")
 
-        kokoroEngine.renderWAV(
-            text: text,
-            onChunkProgress: { [weak self] value in
-                Task { @MainActor in
-                    guard let self, self.isExporting else { return }
-                    self.exportState = .running(value)
-                }
-            },
-            completion: { [weak self] result in
-                Task { @MainActor in
-                    guard let self else { return }
-                    switch result {
-                    case .success(let url):
-                        self.shareURL = url
-                        self.exportState = .idle
-                    case .failure(let error):
-                        self.exportState = .failed(error.localizedDescription)
-                    }
+        let progress: (Double) -> Void = { [weak self] value in
+            Task { @MainActor in
+                guard let self, self.isExporting else { return }
+                self.exportState = .running(value)
+            }
+        }
+        let finish: (Result<URL, Error>) -> Void = { [weak self] result in
+            Task { @MainActor in
+                guard let self else { return }
+                switch result {
+                case .success(let url):
+                    self.shareURL = url
+                    self.exportState = .idle
+                case .failure(let error):
+                    self.exportState = .failed(error.localizedDescription)
                 }
             }
-        )
+        }
+
+        if engineKind == .kokoroOnnx, let onnxEngine {
+            onnxEngine.renderWAV(text: text, onChunkProgress: progress, completion: finish)
+        } else if let kokoroEngine {
+            kokoroEngine.renderWAV(text: text, onChunkProgress: progress, completion: finish)
+        } else {
+            exportState = .failed("No neural engine available — download a model in Settings first.")
+        }
     }
 
     func dismissExportError() {

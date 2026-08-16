@@ -132,7 +132,7 @@ struct NoteEditorView: View {
 
     private var canExport: Bool {
         !player.usingSystemFallback
-            && player.engineKind == .kokoro
+            && player.engineKind != .system
             && !player.isExporting
             && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }

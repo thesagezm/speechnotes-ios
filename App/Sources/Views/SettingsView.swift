@@ -32,9 +32,10 @@ struct SettingsView: View {
                     }
                     .pickerStyle(.inline)
 
-                    if player.engineKind == .kokoro && !models.isReady {
+                    if (player.engineKind == .kokoro && !models.isReady)
+                        || (player.engineKind == .kokoroOnnx && !models.onnxIsReady) {
                         Label(
-                            "Kokoro selected, but its model isn't downloaded yet — the system voice is used in the meantime.",
+                            "Neural engine selected, but its model isn't downloaded yet — the system voice is used in the meantime.",
                             systemImage: "info.circle"
                         )
                         .font(.footnote)
@@ -89,6 +90,45 @@ struct SettingsView: View {
                     Text("System voice")
                 } footer: {
                     Text("Used by Apple's built-in speech. Enhanced and premium voices sound richer; download them under Settings → Accessibility → Spoken Content → Voices.")
+                }
+
+                Section {
+                    switch models.onnxState {
+                    case .notDownloaded:
+                        Button {
+                            models.startOnnxDownload()
+                        } label: {
+                            Label("Download ONNX model (~82 MB)", systemImage: "arrow.down.circle")
+                        }
+                        .disabled(!models.isReady)
+                        if !models.isReady {
+                            Label(
+                                "Needs the voice bank from the Kokoro model above.",
+                                systemImage: "info.circle"
+                            )
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                        }
+                    case .downloading(let progress):
+                        ProgressView(value: progress) {
+                            Text("Downloading… \(Int(progress * 100))%")
+                        }
+                    case .failed(let message):
+                        Label("Download failed: \(message)", systemImage: "exclamationmark.triangle")
+                            .font(.footnote)
+                        Button("Retry") {
+                            models.startOnnxDownload()
+                        }
+                    case .ready:
+                        Label("ONNX model ready — CPU inference, no Metal", systemImage: "checkmark.circle")
+                        Button("Delete ONNX model (frees ~82 MB)", role: .destructive) {
+                            models.deleteOnnxModels()
+                        }
+                    }
+                } header: {
+                    Text("Kokoro ONNX model (Plan B engine)")
+                } footer: {
+                    Text("The same Kokoro voice running on the CPU via ONNX Runtime — smaller download, no GPU memory pressure. Reuses the voice bank from the model above.")
                 }
 
                 Section {
