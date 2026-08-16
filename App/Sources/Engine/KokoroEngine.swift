@@ -55,15 +55,16 @@ final class KokoroEngine: NSObject, SpeechEngine {
     // MARK: - Model loading
 
     private var isModelPresent: Bool {
-        ModelManager.shared.isReady
+        FileManager.default.fileExists(atPath: ModelManager.modelFileURL.path)
+            && FileManager.default.fileExists(atPath: ModelManager.voicesFileURL.path)
     }
 
     private func loadModelIfNeeded() {
         guard !modelLoadAttempted else { return }
         modelLoadAttempted = true
 
-        let modelPath = ModelManager.shared.modelPath
-        let voicesPath = ModelManager.shared.voicesPath
+        let modelPath = ModelManager.modelFileURL
+        let voicesPath = ModelManager.voicesFileURL
         guard FileManager.default.fileExists(atPath: modelPath.path),
               FileManager.default.fileExists(atPath: voicesPath.path) else {
             Log.shared.error("KokoroEngine: model files missing at \(modelPath.deletingLastPathComponent().path)")

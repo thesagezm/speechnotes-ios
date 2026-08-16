@@ -32,7 +32,7 @@ final class ModelManager: ObservableObject {
     static let voicesURL = URL(string: "https://raw.githubusercontent.com/mlalma/KokoroTestApp/main/Resources/voices.npz")!
 
     init() {
-        if Self.filesLookValid() {
+        if Self.filesAreValid() {
             state = .ready
             Log.shared.info("ModelManager: model already present")
         } else {
@@ -40,13 +40,31 @@ final class ModelManager: ObservableObject {
         }
     }
 
-    var directory: URL {
+    // Paths and file checks are pure FileManager math — usable from any thread.
+    nonisolated static var kokoroDirectory: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Kokoro")
     }
 
-    var modelPath: URL { directory.appendingPathComponent("kokoro-v1_0.safetensors") }
-    var voicesPath: URL { directory.appendingPathComponent("voices.npz") }
+    nonisolated static var modelFileURL: URL {
+        kokoroDirectory.appendingPathComponent("kokoro-v1_0.safetensors")
+    }
+
+    nonisolated static var voicesFileURL: URL {
+        kokoroDirectory.appendingPathComponent("voices.npz")
+    }
+
+    nonisolated static func filesAreValid() -> Bool {
+        let fm = FileManager.default
+        guard let modelSize = (try? fm.attributesOfItem(atPath: modelFileURL.path))?[.size] as? Int64,
+              modelSize > 300_000_000 else { return false }
+        guard let voicesSize = (try? fm.attributesOfItem(atPath: voicesFileURL.path))?[.size] as? Int64,
+              voicesSize > 10_000_000 else { return false }
+        return true
+    }
+
+    var modelPath: URL { Self.modelFileURL }
+    var voicesPath: URL { Self.voicesFileURL }
 
     var isReady: Bool {
         if case .ready = state { return true }
@@ -64,17 +82,17 @@ final class ModelManager: ObservableObject {
             do {
                 try await self?.download(
                     from: Self.modelURL,
-                    to: Self.modelURLName,
+                    to: Self.modelFileURL,
                     progressRange: 0.0...0.95
                 )
                 try await self?.download(
                     from: Self.voicesURL,
-                    to: Self.voicesURLName,
+                    to: Self.voicesFileURL,
                     progressRange: 0.95...1.0
                 )
                 await MainActor.run {
                     guard let self else { return }
-                    if Self.filesLookValid() {
+                    if Self.filesAreValid() {
                         self.state = .ready
                         Log.shared.info("ModelManager: download complete")
                         self.onReady?()
@@ -98,19 +116,6 @@ final class ModelManager: ObservableObject {
         try? FileManager.default.removeItem(at: voicesPath)
         state = .notDownloaded
         Log.shared.info("ModelManager: models deleted")
-    }
-
-    // Convenience nonisolated accessors for the detached task above.
-    private nonisolated static var modelURLName: URL { shared.modelPath }
-    private nonisolated static var voicesURLName: URL { shared.voicesPath }
-
-    private static func filesLookValid() -> Bool {
-        let fm = FileManager.default
-        guard let modelSize = (try? fm.attributesOfItem(atPath: shared.modelPath.path))?[.size] as? Int64,
-              modelSize > 300_000_000 else { return false }
-        guard let voicesSize = (try? fm.attributesOfItem(atPath: shared.voicesPath.path))?[.size] as? Int64,
-              voicesSize > 10_000_000 else { return false }
-        return true
     }
 
     private func reportProgress(_ value: Double) {
