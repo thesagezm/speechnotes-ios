@@ -15,7 +15,8 @@ final class KittenTokenizerTests: XCTestCase {
         XCTAssertEqual(KittenTokenizer.vocabulary["a"], 43)
         // Reference builds its dict last-wins: duplicates keep their final id.
         XCTAssertEqual(KittenTokenizer.vocabulary["\""], 15)        // '"' also occupies 11 and 14
-        XCTAssertEqual(KittenTokenizer.vocabulary["'"], 176)        // "'" also occupies 174
+        XCTAssertEqual(KittenTokenizer.vocabulary["'"], 176)       // "'" also occupies 174
+        XCTAssertEqual(KittenTokenizer.vocabulary["\u{329}"], 175) // combining mark is its own entry
         // IPA stress marks are word-ish letters late in the table.
         XCTAssertNotNil(KittenTokenizer.vocabulary["ˈ"])
         XCTAssertNotNil(KittenTokenizer.vocabulary["ː"])
@@ -48,5 +49,13 @@ final class KittenTokenizerTests: XCTestCase {
 
     func testEmptyPhonemesStillProduceWrappers() {
         XCTAssertEqual(KittenTokenizer.tokenize(""), [0, 10, 0])
+    }
+
+    func testCombiningMarksKeepBaseScalar() {
+        // The reference iterates codepoints, so a base+mark cluster ("d" +
+        // U+032A dental) keeps the base's id and drops the unknown mark.
+        // A Character-keyed table would lose BOTH — the bug this locks out.
+        // ('d' = 46; U+032A has no table entry.)
+        XCTAssertEqual(KittenTokenizer.ids(for: "d̪").first, 46)
     }
 }

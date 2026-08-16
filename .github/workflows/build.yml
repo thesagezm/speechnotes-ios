@@ -39,94 +39,13 @@ jobs:
           path: logic-tests.log
           if-no-files-found: warn
 
-  kokoro-spike:
-    name: Kokoro spike (experimental — non-blocking)
-    runs-on: macos-latest
-    timeout-minutes: 30
-    # Experimental side-quest: proves Kokoro generation in CI. Failures here
-    # must never block or worry us — the app is tested on the real device.
-    continue-on-error: true
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Cache Kokoro model + voices
-        uses: actions/cache@v4
-        with:
-          path: ~/kokoro-spike
-          key: kokoro-models-v1-327115152
-
-      - name: Download model + voices (if not cached)
-        run: |
-          mkdir -p ~/kokoro-spike
-          if [ ! -f ~/kokoro-spike/kokoro-v1_0.safetensors ]; then
-            curl -L --retry 3 --progress-bar \
-              -o ~/kokoro-spike/kokoro-v1_0.safetensors \
-              https://media.githubusercontent.com/media/mlalma/KokoroTestApp/main/Resources/kokoro-v1_0.safetensors
-          fi
-          if [ ! -f ~/kokoro-spike/voices.npz ]; then
-            curl -L --retry 3 --progress-bar \
-              -o ~/kokoro-spike/voices.npz \
-              https://raw.githubusercontent.com/mlalma/KokoroTestApp/main/Resources/voices.npz
-          fi
-          ls -lh ~/kokoro-spike
-
-      - name: Run Kokoro spike test
-        run: |
-          set -o pipefail
-          cd Tests/KokoroSpike
-          swift build --build-tests
-          # Under `swift test` the xctest bundle is the main bundle, and mlx's
-          # metallib loader checks mainBundle first, then the mlx-swift_Cmlx
-          # bundle — SPM copies neither into the xctest. Copy both in, then
-          # run without rebuilding (a rebuild would regenerate the xctest).
-          XCTEST=".build/debug/KokoroSpikePackageTests.xctest"
-          mkdir -p "$XCTEST/Contents/Resources"
-          METALLIB="$(find .build -name 'default.metallib' -path '*debug*' | head -1)"
-          if [ -n "$METALLIB" ]; then
-            cp "$METALLIB" "$XCTEST/Contents/Resources/"
-          else
-            echo "warning: default.metallib not found in .build — spike will likely fail"
-          fi
-          CMLX_BUNDLE="$(find .build -name 'mlx-swift_Cmlx.bundle' -path '*debug*' -type d | head -1)"
-          if [ -n "$CMLX_BUNDLE" ]; then
-            cp -R "$CMLX_BUNDLE" "$XCTEST/Contents/Resources/"
-          else
-            echo "warning: mlx-swift_Cmlx.bundle not found in .build"
-          fi
-          swift test --skip-build 2>&1 | tee ../../spike.log
-
-      - name: Show failure summary
-        if: always()
-        run: |
-          tail -n 400 spike.log > spike-tail.txt
-          grep -E "KOKORO-SPIKE|Test Suite|Test Case|Test session|error:|failed|Fatal|Crash|unexpected exit|Assertion|Metal|Executed" spike-tail.txt \
-            | grep -vE "WriteAuxiliaryFile|builtin-|warning:" \
-            | tail -n 40 > summary.txt || true
-          echo "----- FAILURE SUMMARY (last 40 matching lines) -----"
-          cat summary.txt
-          echo "----------------------------------------------------"
-          if [ -s summary.txt ]; then
-            python3 -c "import pathlib; t = pathlib.Path('summary.txt').read_text()[:5500]; print('::error title=Kokoro spike test failure::' + t.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A'))"
-          fi
-
-      - name: Upload sample audio
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: kokoro-sample
-          path: ~/kokoro-spike/sample.wav
-          if-no-files-found: error
-
-      - name: Upload spike log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: kokoro-spike-log
-          path: |
-            spike.log
-            spike-tail.txt
-          if-no-files-found: warn
+  # Retired 2026-08-16 (v0.8.2): the kokoro-spike job (MLX Metal generation
+  # under `swift test`) never got past mlx's metallib loading on the runner —
+  # the xctest runner doesn't expose the bundle where mlx looks for it, and
+  # copying default.metallib + mlx-swift_Cmlx.bundle into the xctest Resources
+  # didn't help either. It tested the Metal path v0.7.0 removed from the app;
+  # kitten-spike (ONNX) is the live contract test. Package archived in git
+  # history (Tests/KokoroSpike, removed in the same commit).
 
   kitten-spike:
     name: Kitten spike (validates ONNX contract)
