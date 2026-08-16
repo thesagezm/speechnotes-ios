@@ -114,10 +114,11 @@ public enum SentenceChunker {
     /// - Parameters:
     ///   - text: The full text to be spoken.
     ///   - firstMaxChars: Maximum UTF-16 length of the fast-start first chunk.
-    ///   - batchMaxChars: Maximum total UTF-16 length of every later chunk;
-    ///     consecutive whole sentences are packed greedily up to this limit.
-    ///     A single sentence longer than the limit becomes an oversized chunk
-    ///     of its own rather than being split mid-sentence.
+    ///   - batchMaxChars: Maximum total UTF-16 length of every later chunk.
+    ///     Consecutive whole sentences are packed greedily up to this limit,
+    ///     and a single sentence longer than the limit is split at word
+    ///     boundaries into pieces that each fit — downstream TTS engines
+    ///     enforce per-call token limits, so no chunk may be oversized.
     /// - Returns: All chunks in order. The first element is `firstChunk(in:)`;
     ///   substrings taken at each chunk's offset/length reproduce `text`
     ///   exactly. Empty for empty or whitespace-only input.
@@ -129,36 +130,74 @@ public enum SentenceChunker {
         let utf16 = text.utf16
 
         var cursor = utf16.index(utf16.startIndex, offsetBy: first.length, limitedBy: utf16.endIndex) ?? utf16.endIndex
-        var batchStart = cursor
-        var batchEnd = cursor
-        var batchLength = 0
 
+        // Pass 1 — scan sentence ranges; pass 2 — split any oversized
+        // sentence at word boundaries so every piece fits the batch limit.
+        var pieces: [(start: String.Index, end: String.Index)] = []
         while cursor < text.endIndex {
-            // With no boundary left, the trailing text is the final chunk.
             let end = sentenceEnd(in: text, from: cursor, limit: text.endIndex) ?? text.endIndex
-            let sentenceLength = text[cursor..<end].utf16.count
-
-            if batchLength == 0 {
-                batchStart = cursor
-                batchEnd = end
-                batchLength = sentenceLength
-            } else if batchLength + sentenceLength <= maxBatchLength {
-                batchEnd = end
-                batchLength += sentenceLength
-            } else {
-                result.append(chunk(in: text, from: batchStart, to: batchEnd))
-                batchStart = cursor
-                batchEnd = end
-                batchLength = sentenceLength
-            }
-
+            pieces.append(contentsOf: splitOversized(text, start: cursor, end: end, maxUtf16: maxBatchLength))
             cursor = end
         }
 
+        // Pass 3 — pack pieces greedily into batches up to the limit.
+        var batchStart: String.Index?
+        var batchEnd: String.Index?
+        var batchLength = 0
+        for piece in pieces {
+            let pieceLength = text[piece.start..<piece.end].utf16.count
+            if batchLength == 0 {
+                batchStart = piece.start
+                batchEnd = piece.end
+                batchLength = pieceLength
+            } else if batchLength + pieceLength <= maxBatchLength {
+                batchEnd = piece.end
+                batchLength += pieceLength
+            } else {
+                result.append(chunk(in: text, from: batchStart!, to: batchEnd!))
+                batchStart = piece.start
+                batchEnd = piece.end
+                batchLength = pieceLength
+            }
+        }
         if batchLength > 0 {
-            result.append(chunk(in: text, from: batchStart, to: batchEnd))
+            result.append(chunk(in: text, from: batchStart!, to: batchEnd!))
         }
         return result
+    }
+
+    /// Splits the sentence span `start..<end` into pieces whose UTF-16 length
+    /// never exceeds `maxUtf16`. Cuts land on word boundaries (after the
+    /// whitespace run) whenever one exists in the window; text with no
+    /// whitespace at all is hard-cut at the cap. Pieces partition the span
+    /// exactly — contiguity with the surrounding chunks is preserved.
+    private static func splitOversized(
+        _ text: String,
+        start: String.Index,
+        end: String.Index,
+        maxUtf16: Int
+    ) -> [(start: String.Index, end: String.Index)] {
+        guard text[start..<end].utf16.count > maxUtf16 else {
+            return [(start, end)]
+        }
+        var pieces: [(start: String.Index, end: String.Index)] = []
+        var pieceStart = start
+        while pieceStart < end {
+            let limit = utf16CappedIndex(text, from: pieceStart, maxUtf16Length: maxUtf16)
+            if limit >= end {
+                pieces.append((pieceStart, end))
+                break
+            }
+            var cut = lastWordBoundary(in: text, from: pieceStart, limit: limit)
+            if let found = cut, found > pieceStart, found < end {
+                cut = found
+            } else {
+                cut = limit
+            }
+            pieces.append((pieceStart, cut))
+            pieceStart = cut
+        }
+        return pieces
     }
 
     // MARK: - Sentence scanning

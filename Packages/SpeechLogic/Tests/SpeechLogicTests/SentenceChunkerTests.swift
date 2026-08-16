@@ -169,6 +169,32 @@ final class SentenceChunkerTests: XCTestCase {
         assertReconstructs(gnarly)
     }
 
+    // MARK: - Oversized sentences (TTS per-call token limits)
+
+    func testOversizedSentenceIsSplitAtWordBoundaries() {
+        // One 122-char run-on sentence with no terminator, batch cap 20:
+        // every chunk must fit the cap and reconstruction must hold.
+        let words = (1...20).map { "word\($0)" }
+        let runOn = words.joined(separator: " ")
+        let all = SentenceChunker.chunks(for: runOn, firstMaxChars: 20, batchMaxChars: 20)
+        XCTAssertGreaterThan(all.count, 1)
+        XCTAssertTrue(all.allSatisfy { $0.length <= 20 }, "no chunk may exceed batchMaxChars")
+        XCTAssertTrue(all.allSatisfy { !$0.text.hasPrefix(" ") })
+        assertReconstructs(runOn, firstMax: 20, batchMax: 20)
+
+        // A giant unbroken token hard-cuts rather than exceeding the cap.
+        let unbroken = String(repeating: "x", count: 50)
+        let hard = SentenceChunker.chunks(for: unbroken, firstMaxChars: 20, batchMaxChars: 20)
+        XCTAssertTrue(hard.allSatisfy { $0.length <= 20 })
+        assertReconstructs(unbroken, firstMax: 20, batchMax: 20)
+
+        // Mixed: normal sentences around one oversized sentence.
+        let mixed = "Short one. " + runOn + " And a short tail."
+        let mixedChunks = SentenceChunker.chunks(for: mixed, firstMaxChars: 20, batchMaxChars: 20)
+        XCTAssertTrue(mixedChunks.allSatisfy { $0.length <= 20 })
+        assertReconstructs(mixed, firstMax: 20, batchMax: 20)
+    }
+
     // MARK: - UTF-16 correctness
 
     func testUTF16OffsetsWithEmoji() {

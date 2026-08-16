@@ -53,6 +53,11 @@ final class KokoroEngine: NSObject, SpeechEngine {
     /// gapless while bounding audio-buffer + MLX-cache memory.
     private static let generationAheadLimit = 3
 
+    /// Maximum characters (~30 words) per synthesis call. KokoroSwift enforces
+    /// a per-call token limit — larger chunks throw "too many tokens" and kill
+    /// the rest of the note. Applies to the first chunk and every batch.
+    private static let chunkMaxChars = 160
+
     // Streaming pipeline state — main thread only.
     private var chunks: [Chunk] = []
     private var generatedBuffers: [Int: AVAudioPCMBuffer] = [:]
@@ -173,7 +178,11 @@ final class KokoroEngine: NSObject, SpeechEngine {
             return
         }
 
-        let allChunks = SentenceChunker.chunks(for: clean)
+        let allChunks = SentenceChunker.chunks(
+            for: clean,
+            firstMaxChars: Self.chunkMaxChars,
+            batchMaxChars: Self.chunkMaxChars
+        )
         guard !allChunks.isEmpty else { return }
 
         DispatchQueue.main.async { self.state = .generating }
@@ -385,7 +394,11 @@ final class KokoroEngine: NSObject, SpeechEngine {
         playbackGeneration += 1
         DispatchQueue.main.async { self.state = .idle }
 
-        let renderChunks = SentenceChunker.chunks(for: clean)
+        let renderChunks = SentenceChunker.chunks(
+            for: clean,
+            firstMaxChars: Self.chunkMaxChars,
+            batchMaxChars: Self.chunkMaxChars
+        )
         let total = max(1, clean.utf16.count)
 
         ttsQueue.async { [weak self] in
