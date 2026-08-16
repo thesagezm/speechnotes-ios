@@ -53,7 +53,7 @@ struct SettingsView: View {
                             Spacer()
                             Text(VoiceCatalog.subtitle(
                                 for: player.engineKind == .kitten ? player.kittenVoice : player.voice,
-                                kind: player.engineKind == .kitten ? .kitten : .kokoro
+                                kind: player.engineKind
                             ))
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
