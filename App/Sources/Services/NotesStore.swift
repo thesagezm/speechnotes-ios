@@ -28,7 +28,7 @@ final class NotesStore: ObservableObject {
         var updated = note
         updated.updatedAt = Date()
         notes[index] = updated
-        save()
+        scheduleSave()
     }
 
     func delete(at offsets: IndexSet) {
@@ -40,6 +40,31 @@ final class NotesStore: ObservableObject {
     /// don't have list offsets.
     func delete(noteId: UUID) {
         notes.removeAll { $0.id == noteId }
+        save()
+    }
+
+    // MARK: - Persistence
+
+    /// Typing fires update() on every keystroke; encoding the whole store to
+    /// JSON synchronously each keypress made the editor laggy on device.
+    /// Disk writes are coalesced: one save, a second after the last change.
+    private var saveTask: Task<Void, Never>?
+
+    private func scheduleSave() {
+        saveTask?.cancel()
+        saveTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            guard !Task.isCancelled else { return }
+            self?.save()
+        }
+    }
+
+    /// Persists immediately, cancelling any pending coalesced save. Call when
+    /// leaving the editor or entering the background — anything that could
+    /// kill the process within the debounce window.
+    func flushNow() {
+        saveTask?.cancel()
+        saveTask = nil
         save()
     }
 

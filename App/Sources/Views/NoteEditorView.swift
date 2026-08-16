@@ -73,7 +73,7 @@ struct NoteEditorView: View {
                 TextEditor(text: $draft)
                     .font(.body)
                     .padding(.horizontal, 8)
-                    .onChange(of: draft) { _ in saveDraft() }
+                    .onChange(of: draft) { _ in scheduleDraftSync() }
             }
 
             controlsBar
@@ -153,7 +153,10 @@ struct NoteEditorView: View {
             didLoad = true
         }
         .onDisappear {
+            draftSyncTask?.cancel()
+            draftSyncTask = nil
             saveDraft()
+            notes.flushNow()
         }
         .onChange(of: player.shareURL) { newValue in
             if newValue != nil { Haptics.success() }
@@ -313,5 +316,20 @@ struct NoteEditorView: View {
         guard var note = currentNote, note.text != draft else { return }
         note.text = draft
         notes.update(note)
+    }
+
+    /// Pushing the draft into the store re-sorts and re-renders the whole
+    /// notes list; doing that per keystroke was a big part of the editor lag.
+    /// The sync (and the debounced disk write behind it) lands shortly after
+    /// typing pauses, and immediately when the editor goes away.
+    @State private var draftSyncTask: Task<Void, Never>?
+
+    private func scheduleDraftSync() {
+        draftSyncTask?.cancel()
+        draftSyncTask = Task {
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            guard !Task.isCancelled else { return }
+            saveDraft()
+        }
     }
 }

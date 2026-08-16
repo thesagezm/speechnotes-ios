@@ -82,6 +82,9 @@ struct NotesListView: View {
                 }
             }
             .navigationTitle("Speechnotes")
+            .navigationDestination(for: UUID.self) { id in
+                NoteEditorView(noteId: id)
+            }
             .searchable(text: $searchText, prompt: "Search notes")
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
@@ -189,11 +192,14 @@ struct NotesListView: View {
     }
 
     private func noteRow(_ note: Note) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+        // Computed once — preview() walks the whole body, twice per row per
+        // render was measurable on device.
+        let previewText = preview(of: note)
+        return VStack(alignment: .leading, spacing: 4) {
             Text(note.title)
                 .font(.headline)
-            if !preview(of: note).isEmpty {
-                Text(preview(of: note))
+            if !previewText.isEmpty {
+                Text(previewText)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
@@ -272,7 +278,10 @@ struct NotesListView: View {
             } label: {
                 Label("Import from Files…", systemImage: "folder")
             }
-            if ImportService.clipboardText() != nil {
+            // hasStrings is a cheap content-free check — reading .string here
+            // would hit the (possibly remote) pasteboard on every render and
+            // can trigger iOS paste prompts. Content is read on tap instead.
+            if UIPasteboard.general.hasStrings {
                 Button {
                     importFromClipboard()
                 } label: {
