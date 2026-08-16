@@ -6,6 +6,7 @@ App/Resources/Info.plist
 build/
 dist/
 DerivedData/
+.build/
 
 # Xcode user state
 xcuserdata/

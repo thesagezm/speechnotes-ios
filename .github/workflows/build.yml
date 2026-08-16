@@ -35,21 +35,11 @@ jobs:
           fi
           ls -lh ~/kokoro-spike
 
-      - name: Install XcodeGen
-        run: brew install xcodegen
-
-      - name: Generate Xcode project
-        run: xcodegen generate
-
       - name: Run Kokoro spike test
         run: |
           set -o pipefail
-          xcodebuild test \
-            -project SpeechnotesIOS.xcodeproj \
-            -scheme KokoroSpike \
-            -destination 'platform=OS X,arch=arm64' \
-            -skipPackagePluginValidation \
-            2>&1 | tee spike.log
+          cd Tests/KokoroSpike
+          swift test 2>&1 | tee ../../spike.log
 
       - name: Show failure summary
         if: always()
