@@ -375,7 +375,7 @@ final class SupertonicEngine: NSObject, SpeechEngine {
                 for (index, chunk) in renderChunks.enumerated() {
                     // Chunk gap mirrors playback pacing (call's silenceDuration).
                     if index > 0 {
-                        samples.append(contentsOf: [Float](repeating: 0, count: Int(0.05 * tts.sampleRate)))
+                        samples.append(contentsOf: [Float](repeating: 0, count: Int(0.05 * Double(tts.sampleRate))))
                     }
                     samples.append(contentsOf: try self.generateChunk(chunk.text))
                     let charsDone = renderChunks.prefix(index + 1).reduce(0) { $0 + $1.length }
@@ -409,7 +409,8 @@ final class SupertonicEngine: NSObject, SpeechEngine {
 
         let destination = buffer.floatChannelData![0]
         samples.withUnsafeBufferPointer { source in
-            memcpy(destination, source.baseAddress!, samples.count * MemoryLayout<Float>.size)
+            guard let base = source.baseAddress else { return }
+            memcpy(destination, base, samples.count * MemoryLayout<Float>.size)
         }
         return buffer
     }

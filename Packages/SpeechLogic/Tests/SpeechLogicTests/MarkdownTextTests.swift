@@ -10,7 +10,7 @@ final class MarkdownTextTests: XCTestCase {
         ### Section
         """
         let output = MarkdownText.plainText(input)
-        XCTAssertEqual(output, "Title\n\nSome bold and italic and code text.\n\nSection")
+        XCTAssertEqual(output, "Title\nSome bold and italic and code text.\n\nSection")
     }
 
     func testLinksAndImages() {

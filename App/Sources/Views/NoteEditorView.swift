@@ -273,7 +273,7 @@ struct NoteEditorView: View {
         if let parsed = try? AttributedString(markdown: draft) {
             return parsed
         }
-        return AttributedString(verbatim: draft)
+        return AttributedString(draft)
     }
 
     // MARK: - Controls
