@@ -248,10 +248,10 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
             outputNames: [outputName],
             runOptions: nil
         )
-        guard let waveform = outputs[outputName],
-              let raw = try waveform.tensorData() else {
+        guard let waveform = outputs[outputName] else {
             throw OnnxEngineError.noOutput
         }
+        let raw = try waveform.tensorData()
         let data = raw as Data
         return data.withUnsafeBytes { rawBytes in
             Array(rawBytes.bindMemory(to: Float.self))
