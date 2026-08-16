@@ -15,10 +15,11 @@ struct SettingsView: View {
     private static let americanVoices = ModelManager.knownVoices.filter { $0.hasPrefix("a") }
     private static let britishVoices = ModelManager.knownVoices.filter { $0.hasPrefix("b") }
 
-    /// Kokoro is selected AND its model is ready — the system engine (and so
-    /// the system voice) is not in the playback path.
-    private var kokoroIsActive: Bool {
-        player.engineKind == .kokoro && !player.usingSystemFallback
+    /// Any neural engine is selected AND its model is ready — the system
+    /// engine (and so the system voice) is not in the playback path.
+    private var neuralEngineIsActive: Bool {
+        (player.engineKind == .kokoro || player.engineKind == .kokoroOnnx)
+            && !player.usingSystemFallback
     }
 
     var body: some View {
@@ -76,11 +77,11 @@ struct SettingsView: View {
                     } label: {
                         dropdownRow(title: "Voice", value: selectedSystemVoiceTitle)
                     }
-                    .disabled(kokoroIsActive)
+                    .disabled(neuralEngineIsActive)
 
-                    if kokoroIsActive {
+                    if neuralEngineIsActive {
                         Label(
-                            "Kokoro is the active engine — the system voice only applies when Apple (system) is selected, or while the Kokoro model is missing.",
+                            "A Kokoro engine is active — the system voice only applies when Apple (system) is selected, or while a neural model is missing.",
                             systemImage: "info.circle"
                         )
                         .font(.footnote)
@@ -90,6 +91,36 @@ struct SettingsView: View {
                     Text("System voice")
                 } footer: {
                     Text("Used by Apple's built-in speech. Enhanced and premium voices sound richer; download them under Settings → Accessibility → Spoken Content → Voices.")
+                }
+
+                Section {
+                    switch models.state {
+                    case .notDownloaded:
+                        Button {
+                            models.startDownload()
+                        } label: {
+                            Label("Download Kokoro model (~342 MB)", systemImage: "arrow.down.circle")
+                        }
+                    case .downloading(let progress):
+                        ProgressView(value: progress) {
+                            Text("Downloading… \(Int(progress * 100))%")
+                        }
+                    case .failed(let message):
+                        Label("Download failed: \(message)", systemImage: "exclamationmark.triangle")
+                            .font(.footnote)
+                        Button("Retry") {
+                            models.startDownload()
+                        }
+                    case .ready:
+                        Label("Model ready — fully offline", systemImage: "checkmark.circle")
+                        Button("Delete model (frees ~342 MB)", role: .destructive) {
+                            models.deleteModels()
+                        }
+                    }
+                } header: {
+                    Text("Kokoro model (Metal engine)")
+                } footer: {
+                    Text("One-time download, stored inside the app. All speech generation stays on your device. The voice bank here is shared with the ONNX engine below.")
                 }
 
                 Section {
@@ -120,45 +151,15 @@ struct SettingsView: View {
                             models.startOnnxDownload()
                         }
                     case .ready:
-                        Label("ONNX model ready — CPU inference, no Metal", systemImage: "checkmark.circle")
+                        Label("ONNX model ready — runs on the CPU", systemImage: "checkmark.circle")
                         Button("Delete ONNX model (frees ~82 MB)", role: .destructive) {
                             models.deleteOnnxModels()
                         }
                     }
                 } header: {
-                    Text("Kokoro ONNX model (Plan B engine)")
+                    Text("Kokoro ONNX model (CPU engine)")
                 } footer: {
-                    Text("The same Kokoro voice running on the CPU via ONNX Runtime — smaller download, no GPU memory pressure. Reuses the voice bank from the model above.")
-                }
-
-                Section {
-                    switch models.state {
-                    case .notDownloaded:
-                        Button {
-                            models.startDownload()
-                        } label: {
-                            Label("Download Kokoro model (~342 MB)", systemImage: "arrow.down.circle")
-                        }
-                    case .downloading(let progress):
-                        ProgressView(value: progress) {
-                            Text("Downloading… \(Int(progress * 100))%")
-                        }
-                    case .failed(let message):
-                        Label("Download failed: \(message)", systemImage: "exclamationmark.triangle")
-                            .font(.footnote)
-                        Button("Retry") {
-                            models.startDownload()
-                        }
-                    case .ready:
-                        Label("Model ready — fully offline", systemImage: "checkmark.circle")
-                        Button("Delete model (frees ~342 MB)", role: .destructive) {
-                            models.deleteModels()
-                        }
-                    }
-                } header: {
-                    Text("Kokoro model")
-                } footer: {
-                    Text("One-time download, stored inside the app. All speech generation stays on your device.")
+                    Text("The same Kokoro voices running on the CPU — a smaller download that avoids the GPU memory issues seen with long notes on the Metal engine.")
                 }
             }
             .navigationTitle("Speech Settings")

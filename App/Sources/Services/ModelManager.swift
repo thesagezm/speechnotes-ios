@@ -230,6 +230,9 @@ final class ModelManager: ObservableObject {
     }
 
     func deleteModels() {
+        if onnxIsReady {
+            Log.shared.error("ModelManager: deleting the voice bank — the ONNX engine needs it too and will stop working until re-downloaded")
+        }
         try? FileManager.default.removeItem(at: modelPath)
         try? FileManager.default.removeItem(at: voicesPath)
         for base in [Self.modelFileURL, Self.voicesFileURL] {

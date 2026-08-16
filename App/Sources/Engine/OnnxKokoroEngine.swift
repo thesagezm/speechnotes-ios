@@ -45,6 +45,9 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
     // Model state — engineQueue only.
     private var ortEnv: ORTEnv?
     private var ortSession: ORTSession?
+    /// Model output tensor name — "waveform" on most exports, but some name
+    /// it "audio"; resolved from the session at load (PocketPal accepts both).
+    private var outputName: String = "waveform"
     private var vocab: [String: Int] = [:]
     private var voicesFlat: [String: [Float]] = [:]
     private var g2pAmerican: EnglishG2P?
@@ -141,7 +144,11 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
             let session = try ORTSession(env: env, modelPath: modelPath.path, sessionOptions: options)
             ortEnv = env
             ortSession = session
-            Log.shared.info("OnnxKokoroEngine: session loaded in \(Date().timeIntervalSince(started))s")
+            let outputNames = (try? session.outputNames()) ?? []
+            if let first = outputNames.first {
+                outputName = outputNames.contains("waveform") ? "waveform" : first
+            }
+            Log.shared.info("OnnxKokoroEngine: session loaded in \(Date().timeIntervalSince(started))s (output: \(outputName))")
 
             let tokenizerData = try Data(contentsOf: tokenizerPath)
             let tokenizerJSON = try JSONSerialization.jsonObject(with: tokenizerData) as? [String: Any]
@@ -238,10 +245,10 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
                 "style": styleTensor,
                 "speed": speedTensor,
             ],
-            outputNames: ["waveform"],
+            outputNames: [outputName],
             runOptions: nil
         )
-        guard let waveform = outputs["waveform"],
+        guard let waveform = outputs[outputName],
               let raw = try waveform.tensorData() else {
             throw OnnxEngineError.noOutput
         }
