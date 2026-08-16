@@ -167,27 +167,53 @@ jobs:
             CODE_SIGN_ENTITLEMENTS="" \
             2>&1 | tee archive.log
 
-      # Belt-and-braces: if anything ever links dynamically again, fail here
-      # with a clear message instead of crashing on the phone at launch.
-      - name: Verify app is fully static (LiveContainer requirement)
+      # Belt-and-braces: the real LiveContainer killer is a dyld load command
+      # pointing at an @rpath framework. Static archives linked into the binary
+      # are harmless — but Xcode copies SPM binaryTarget frameworks into
+      # Frameworks/ even when they're static (ONNX Runtime's pod archive is a
+      # static ar-archive .framework). Strip those (dead ~40 MB weight, and
+      # LiveContainer's re-signer shouldn't trip over them); hard-fail on any
+      # framework that is NOT a static archive.
+      - name: Verify app is fully static + strip static frameworks (LiveContainer requirement)
         if: success()
         run: |
           APP=$(find build/SpeechnotesIOS.xcarchive/Products/Applications -maxdepth 1 -name '*.app' | head -n 1)
           echo "--- .app overview ---"
           du -sh "$APP"
           ls "$APP"
-          if [ -d "$APP/Frameworks" ]; then
-            echo "--- Frameworks/ contents ---"; ls -la "$APP/Frameworks"
-          fi
           BIN="$APP/Speechnotes"
           echo "--- non-system dylib dependencies (must be empty) ---"
           DEPS=$(otool -L "$BIN" | grep "@rpath/" || true)
           echo "${DEPS:-<none>}"
-          if [ -n "$DEPS" ] || [ -d "$APP/Frameworks" ]; then
-            echo "::error::App references embedded frameworks — LiveContainer will crash on launch (dyld Library not loaded). All SPM deps must link statically."
+          if [ -n "$DEPS" ]; then
+            echo "::error::App has @rpath dylib dependencies — LiveContainer will crash on launch (dyld Library not loaded). All SPM deps must link statically."
             exit 1
           fi
-          echo "OK: no @rpath framework dependencies"
+          if [ -d "$APP/Frameworks" ]; then
+            echo "--- Frameworks/ contents ---"; ls -la "$APP/Frameworks"
+            shopt -s nullglob
+            for FW in "$APP/Frameworks"/*; do
+              NAME=$(basename "$FW")
+              if [ -d "$FW" ] && [[ "$NAME" == *.framework ]]; then
+                MACHO="$FW/${NAME%.framework}"
+              else
+                MACHO="$FW"
+              fi
+              if { [ -d "$FW" ] && [[ "$NAME" != *.framework ]]; } || [ ! -f "$MACHO" ]; then
+                echo "::error::$NAME in Frameworks/ is unexpected (not a framework binary) — inspect manually."
+                exit 1
+              fi
+              if file "$MACHO" | grep -q "ar archive"; then
+                echo "Stripping static framework (already linked into the binary): $NAME"
+                rm -rf "$FW"
+              else
+                echo "::error::$NAME in Frameworks/ is dynamic — LiveContainer will crash on launch (dyld Library not loaded)."
+                exit 1
+              fi
+            done
+            rmdir "$APP/Frameworks" 2>/dev/null || true
+          fi
+          echo "OK: no @rpath framework dependencies, no embedded frameworks"
 
       - name: Show archive failure summary
         if: failure()
