@@ -140,9 +140,6 @@ struct NotesListView: View {
                     ShareSheet(items: [url])
                 }
             }
-            .sheet(item: $sharingNote) { note in
-                ShareSheet(items: [note.text])
-            }
             .alert(
                 "Import failed",
                 isPresented: Binding(
@@ -154,6 +151,11 @@ struct NotesListView: View {
             } message: {
                 Text(importErrorMessage ?? "")
             }
+        }
+        // Attached OUTSIDE the NavigationStack: two .sheet modifiers on the
+        // same view node is the classic SwiftUI trap where one is ignored.
+        .sheet(item: $sharingNote) { note in
+            ShareSheet(items: [note.text])
         }
         .miniPlayer(visible: path.isEmpty, onTap: jumpToPlayingNote)
     }
