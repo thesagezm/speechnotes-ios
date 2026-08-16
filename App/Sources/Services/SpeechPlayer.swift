@@ -22,6 +22,9 @@ final class SpeechPlayer: ObservableObject {
     @Published private(set) var state: SpeechState = .idle
     /// Speech progress 0…1 (chunk-granular) while speaking; nil otherwise.
     @Published private(set) var progress: Double?
+    /// UTF-16 range of the source text currently being spoken (read-along
+    /// highlighting); nil when idle.
+    @Published private(set) var spokenRange: Range<Int>?
     @Published var rateMultiplier: Double {
         didSet { UserDefaults.standard.set(rateMultiplier, forKey: "rateMultiplier") }
     }
@@ -35,6 +38,20 @@ final class SpeechPlayer: ObservableObject {
         didSet {
             UserDefaults.standard.set(voice, forKey: "voice")
             kokoroEngine?.voice = voice
+        }
+    }
+    /// Identifier of the `AVSpeechSynthesisVoice` the system engine should
+    /// use (Settings → System voice); nil = Apple's default en-US voice.
+    /// Persisted, and forwarded to the engine so a change applies to the
+    /// next utterance.
+    @Published var systemVoiceIdentifier: String? {
+        didSet {
+            if let identifier = systemVoiceIdentifier {
+                UserDefaults.standard.set(identifier, forKey: "systemVoiceIdentifier")
+            } else {
+                UserDefaults.standard.removeObject(forKey: "systemVoiceIdentifier")
+            }
+            systemEngine?.voiceIdentifier = systemVoiceIdentifier
         }
     }
 
@@ -62,6 +79,7 @@ final class SpeechPlayer: ObservableObject {
         rateMultiplier = defaults.object(forKey: "rateMultiplier") as? Double ?? 1.0
         engineKind = EngineKind(rawValue: defaults.string(forKey: "engineKind") ?? "") ?? .system
         voice = defaults.string(forKey: "voice") ?? "am_eric"
+        systemVoiceIdentifier = defaults.string(forKey: "systemVoiceIdentifier")
 
         rebuildEngine()
 
@@ -91,6 +109,7 @@ final class SpeechPlayer: ObservableObject {
             if systemEngine == nil {
                 systemEngine = SystemEngine()
             }
+            systemEngine?.voiceIdentifier = systemVoiceIdentifier
             engine = systemEngine
             usingSystemFallback = (engineKind == .kokoro)
             if usingSystemFallback {
@@ -101,11 +120,19 @@ final class SpeechPlayer: ObservableObject {
         engine?.onStateChanged = { [weak self] newState in
             Task { @MainActor in
                 self?.state = newState
+                if newState == .idle {
+                    self?.spokenRange = nil
+                }
             }
         }
         engine?.onProgress = { [weak self] value in
             Task { @MainActor in
                 self?.progress = value > 0 ? value : nil
+            }
+        }
+        engine?.onSpokenRange = { [weak self] offset, length in
+            Task { @MainActor in
+                self?.spokenRange = offset >= 0 && length > 0 ? offset..<(offset + length) : nil
             }
         }
     }

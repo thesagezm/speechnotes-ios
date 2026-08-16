@@ -13,6 +13,29 @@ struct NoteEditorView: View {
         notes.notes.first { $0.id == noteId }
     }
 
+    /// True while a note is being spoken — the editable TextEditor is swapped
+    /// for the read-along view so the draft can't change under the highlighter.
+    /// Stop (or finishing) returns to the normal editor with the same draft.
+    private var isReadAlongActive: Bool {
+        player.state == .speaking || player.state == .paused
+    }
+
+    private static let whitespace = CharacterSet.whitespacesAndNewlines
+
+    /// Shifts `player.spokenRange` — UTF-16 offsets into the *trimmed* text
+    /// the engine was given — into draft coordinates: re-add the length of
+    /// the draft's leading whitespace (every whitespace scalar is one UTF-16
+    /// unit), then clamp to the draft's UTF-16 length.
+    private var draftSpokenRange: Range<Int>? {
+        guard let spoken = player.spokenRange else { return nil }
+        let leading = draft.unicodeScalars.prefix { Self.whitespace.contains($0) }.count
+        let length = draft.utf16.count
+        let lower = min(max(spoken.lowerBound + leading, 0), length)
+        let upper = min(max(spoken.upperBound + leading, lower), length)
+        guard upper > lower else { return nil }
+        return lower..<upper
+    }
+
     private var playIcon: String {
         switch player.state {
         case .generating: return "hourglass"
@@ -29,10 +52,14 @@ struct NoteEditorView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            TextEditor(text: $draft)
-                .font(.body)
-                .padding(.horizontal, 8)
-                .onChange(of: draft) { _ in saveDraft() }
+            if isReadAlongActive {
+                ReadAlongTextView(text: draft, spokenRange: draftSpokenRange)
+            } else {
+                TextEditor(text: $draft)
+                    .font(.body)
+                    .padding(.horizontal, 8)
+                    .onChange(of: draft) { _ in saveDraft() }
+            }
 
             if let progress = player.progress, player.state == .speaking {
                 ProgressView(value: progress)
@@ -152,6 +179,7 @@ struct NoteEditorView: View {
             }
 
             Slider(value: $player.rateMultiplier, in: 0.5...2.0, step: 0.05)
+                .frame(height: 44)
 
             Text(String(format: "%.2f×", player.rateMultiplier))
                 .font(.callout.monospacedDigit())

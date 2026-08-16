@@ -23,6 +23,7 @@ final class KokoroEngine: NSObject, SpeechEngine {
 
     var onStateChanged: ((SpeechState) -> Void)?
     var onProgress: ((Double) -> Void)?
+    var onSpokenRange: ((Int, Int) -> Void)?
 
     /// Called once after the model has been loaded for the first time
     /// (loading takes a few seconds; the UI can show "preparing…").
@@ -257,6 +258,12 @@ final class KokoroEngine: NSObject, SpeechEngine {
 
         let charsDone = chunks.prefix(scheduledUpTo + 1).reduce(0) { $0 + $1.length }
         onProgress?(min(1.0, Double(charsDone) / Double(totalChars)))
+
+        // Read-along highlighting: announced at schedule time, so with
+        // generation outrunning playback (RTF < 1) the highlight can lead
+        // the audio by whatever is queued ahead — chunk-granular by design.
+        let spoken = chunks[scheduledUpTo]
+        onSpokenRange?(spoken.offset, spoken.length)
 
         // No .interrupts flag: consecutive chunks must queue gaplessly.
         playerNode.scheduleBuffer(buffer, at: nil, options: []) { [weak self] in

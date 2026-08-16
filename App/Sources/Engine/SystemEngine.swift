@@ -7,8 +7,15 @@ final class SystemEngine: NSObject, SpeechEngine {
 
     var onStateChanged: ((SpeechState) -> Void)?
     var onProgress: ((Double) -> Void)?
+    var onSpokenRange: ((Int, Int) -> Void)?
 
     private let synthesizer = AVSpeechSynthesizer()
+
+    /// Identifier of the `AVSpeechSynthesisVoice` to use (Settings → System
+    /// voice). Falls back to the default en-US voice when nil, or when the
+    /// identifier no longer resolves (voice deleted from the device).
+    var voiceIdentifier: String?
+
     private var state: SpeechState = .idle {
         didSet {
             if state != oldValue {
@@ -41,7 +48,12 @@ final class SystemEngine: NSObject, SpeechEngine {
         let utterance = AVSpeechUtterance(string: clean)
         // AVSpeechUtterance.rate: 0.0...1.0, default 0.5 — map our multiplier onto it.
         utterance.rate = Float(min(1.0, max(0.1, 0.5 * rateMultiplier)))
-        utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
+        if let identifier = voiceIdentifier,
+           let voice = AVSpeechSynthesisVoice(identifier: identifier) {
+            utterance.voice = voice
+        } else {
+            utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
+        }
         synthesizer.speak(utterance)
         // State flips to .speaking via the didStart delegate callback.
     }
@@ -67,6 +79,18 @@ final class SystemEngine: NSObject, SpeechEngine {
 extension SystemEngine: AVSpeechSynthesizerDelegate {
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didStart utterance: AVSpeechUtterance) {
         DispatchQueue.main.async { self.state = .speaking }
+    }
+
+    /// NSRange is UTF-16, matching our chunk-offset convention exactly.
+    func speechSynthesizer(
+        _ synthesizer: AVSpeechSynthesizer,
+        willSpeakRangeOfSpeechString characterRange: NSRange,
+        utterance: AVSpeechUtterance
+    ) {
+        let range = onSpokenRange
+        DispatchQueue.main.async {
+            range?(characterRange.location, characterRange.length)
+        }
     }
 
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
