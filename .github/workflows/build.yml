@@ -51,6 +51,20 @@ jobs:
             -skipPackagePluginValidation \
             2>&1 | tee spike.log
 
+      - name: Show failure summary
+        if: always()
+        run: |
+          tail -n 400 spike.log > spike-tail.txt
+          grep -E "KOKORO-SPIKE|Test Suite|Test Case|Test session|error:|failed|Fatal|Crash|unexpected exit|Assertion|Metal|Executed" spike-tail.txt \
+            | grep -vE "WriteAuxiliaryFile|builtin-|warning:" \
+            | tail -n 40 > summary.txt || true
+          echo "----- FAILURE SUMMARY (last 40 matching lines) -----"
+          cat summary.txt
+          echo "----------------------------------------------------"
+          if [ -s summary.txt ]; then
+            python3 -c "import pathlib; t = pathlib.Path('summary.txt').read_text()[:5500]; print('::error title=Kokoro spike test failure::' + t.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A'))"
+          fi
+
       - name: Upload sample audio
         if: success()
         uses: actions/upload-artifact@v4
@@ -64,7 +78,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: kokoro-spike-log
-          path: spike.log
+          path: |
+            spike.log
+            spike-tail.txt
           if-no-files-found: warn
 
   build-ipa:
