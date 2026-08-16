@@ -230,12 +230,12 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
         )
         let styleTensor = try ORTValue(
             tensorData: NSMutableData(bytes: style, length: style.count * MemoryLayout<Float>.size),
-            elementType: .float32,
+            elementType: .float,
             shape: [1, NSNumber(value: Self.styleDim)]
         )
         let speedTensor = try ORTValue(
             tensorData: speedData,
-            elementType: .float32,
+            elementType: .float,
             shape: [1]
         )
 
