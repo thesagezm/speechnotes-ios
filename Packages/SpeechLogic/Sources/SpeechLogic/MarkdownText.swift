@@ -88,6 +88,138 @@ public enum MarkdownText {
         return paragraphs.joined(separator: "\n\n")
     }
 
+    // MARK: - Block structure (reading view)
+
+    /// One block of a markdown document, for reading-view layout.
+    public enum MarkdownBlock: Equatable {
+        case heading(level: Int, text: String)
+        /// May contain "\n" — single line breaks are CONTENT here.
+        case paragraph(String)
+        case bulletList(items: [String])
+        case orderedList(items: [String])
+        case quote(String)
+        case code(String)
+        case divider
+    }
+
+    /// Block structure for the reading view. Same scanning rules as
+    /// `plainText` (fences, headings, thematic breaks, > quotes, -/*/+/ and
+    /// "1." list markers) but inline syntax is left intact for the display
+    /// layer to style. Consecutive non-blank lines form ONE paragraph joined
+    /// by "\n" — line breaks stay visible.
+    public static func blocks(_ markdown: String) -> [MarkdownBlock] {
+        var result: [MarkdownBlock] = []
+        var paragraph: [String] = []
+        var quote: [String] = []
+        var bullets: [String] = []
+        var ordered: [String] = []
+        var codeLines: [String] = []
+        var inFence = false
+
+        func flushParagraph() {
+            if !paragraph.isEmpty { result.append(.paragraph(paragraph.joined(separator: "\n"))) }
+            paragraph = []
+        }
+        func flushQuote() {
+            if !quote.isEmpty { result.append(.quote(quote.joined(separator: "\n"))) }
+            quote = []
+        }
+        func flushLists() {
+            if !bullets.isEmpty { result.append(.bulletList(items: bullets)) }
+            bullets = []
+            if !ordered.isEmpty { result.append(.orderedList(items: ordered)) }
+            ordered = []
+        }
+        func flushAll() { flushParagraph(); flushQuote(); flushLists() }
+
+        for rawLine in markdown.components(separatedBy: "\n") {
+            let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
+
+            if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
+                if !inFence {
+                    flushAll()
+                    inFence = true
+                } else {
+                    inFence = false
+                    result.append(.code(codeLines.joined(separator: "\n")))
+                    codeLines = []
+                }
+                continue
+            }
+            if inFence {
+                codeLines.append(rawLine)
+                continue
+            }
+
+            if trimmed.isEmpty {
+                flushAll()
+                continue
+            }
+            if isThematicBreak(trimmed) {
+                flushAll()
+                result.append(.divider)
+                continue
+            }
+            if let heading = stripHeading(trimmed), let level = headingLevel(trimmed) {
+                flushAll()
+                result.append(.heading(level: level, text: heading))
+                continue
+            }
+            if trimmed.hasPrefix(">") {
+                flushParagraph(); flushLists()
+                var line = trimmed
+                while line.hasPrefix(">") {
+                    line = String(line.dropFirst()).trimmingCharacters(in: .whitespaces)
+                }
+                quote.append(line)
+                continue
+            }
+            if let item = bulletItem(trimmed) {
+                flushParagraph(); flushQuote()
+                if !ordered.isEmpty { flushLists() }
+                bullets.append(item)
+                continue
+            }
+            if let item = orderedItem(trimmed) {
+                flushParagraph(); flushQuote()
+                if !bullets.isEmpty { flushLists() }
+                ordered.append(item)
+                continue
+            }
+            flushQuote(); flushLists()
+            paragraph.append(trimmed)
+        }
+        if inFence { result.append(.code(codeLines.joined(separator: "\n"))) }
+        flushAll()
+        return result
+    }
+
+    /// Heading level (count of leading #'s), 1–6, else nil.
+    private static func headingLevel(_ line: String) -> Int? {
+        guard line.hasPrefix("#") else { return nil }
+        var count = 0
+        for character in line {
+            guard character == "#" else { break }
+            count += 1
+        }
+        return (1...6).contains(count) ? count : nil
+    }
+
+    /// "- text" / "* text" / "+ text" → "text"; nil when not a bullet item.
+    private static func bulletItem(_ line: String) -> String? {
+        guard let first = line.first, first == "-" || first == "*" || first == "+",
+              line.dropFirst().first == " " else { return nil }
+        return String(line.dropFirst()).trimmingCharacters(in: .whitespaces)
+    }
+
+    /// "3. text" / "3) text" → "text"; nil when not an ordered item.
+    private static func orderedItem(_ line: String) -> String? {
+        guard let match = line.range(of: #"^\d{1,9}[.)]\s+"#, options: .regularExpression) else {
+            return nil
+        }
+        return String(line[match.upperBound...])
+    }
+
     // MARK: - Block-level helpers
 
     private static func isThematicBreak(_ line: String) -> Bool {

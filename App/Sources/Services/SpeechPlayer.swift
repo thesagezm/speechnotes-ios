@@ -6,19 +6,20 @@ import Foundation
 @MainActor
 final class SpeechPlayer: ObservableObject {
     enum EngineKind: String, CaseIterable, Identifiable {
+        // Declaration order = picker order, worst quality first (user-set).
+        case kitten
         case system
         case kokoroOnnx
-        case kitten
         case supertonic
 
         var id: String { rawValue }
 
         var label: String {
             switch self {
-            case .system: return "Apple (system)"
-            case .kokoroOnnx: return "Kokoro (on-device, offline)"
-            case .kitten: return "Kitten (experimental — tiny)"
-            case .supertonic: return "Supertonic (multilingual, experimental)"
+            case .kitten: return "Kitten — tiny, lowest quality"
+            case .system: return "Apple system voice"
+            case .kokoroOnnx: return "Kokoro — on-device neural, 28 voices"
+            case .supertonic: return "Supertonic — best quality, multilingual"
             }
         }
     }
@@ -26,9 +27,6 @@ final class SpeechPlayer: ObservableObject {
     @Published private(set) var state: SpeechState = .idle
     /// Speech progress 0…1 (chunk-granular) while speaking; nil otherwise.
     @Published private(set) var progress: Double?
-    /// UTF-16 range of the source text currently being spoken (read-along
-    /// highlighting); nil when idle.
-    @Published private(set) var spokenRange: Range<Int>?
     @Published var rateMultiplier: Double {
         didSet { UserDefaults.standard.set(rateMultiplier, forKey: "rateMultiplier") }
     }
@@ -224,7 +222,6 @@ final class SpeechPlayer: ObservableObject {
             Task { @MainActor in
                 self?.state = newState
                 if newState == .idle {
-                    self?.spokenRange = nil
                     self?.nowPlayingTitle = nil
                     self?.nowPlayingNoteId = nil
                     self?.finishAuditionIfActive()
@@ -234,11 +231,6 @@ final class SpeechPlayer: ObservableObject {
         engine?.onProgress = { [weak self] value in
             Task { @MainActor in
                 self?.progress = value > 0 ? value : nil
-            }
-        }
-        engine?.onSpokenRange = { [weak self] offset, length in
-            Task { @MainActor in
-                self?.spokenRange = offset >= 0 && length > 0 ? offset..<(offset + length) : nil
             }
         }
     }

@@ -83,7 +83,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Speech engine")
                 } footer: {
-                    Text("Kokoro is the main engine (28 voices). Kitten is a smaller experimental pack (8 voices). Supertonic adds 31 languages with 10 voices.")
+                    Text("Listed worst to best. Supertonic sounds the best (10 voice styles, 31 languages). Kokoro is the solid default (28 voices). Apple's system voice beats Kitten, which is tiny and rough.")
                 }
 
                 Section {
@@ -150,36 +150,6 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    switch models.kittenState {
-                    case .notDownloaded:
-                        Button {
-                            models.startKittenDownload()
-                        } label: {
-                            Label("Download Kitten model (~82 MB)", systemImage: "arrow.down.circle")
-                        }
-                    case .downloading(let progress):
-                        ProgressView(value: progress) {
-                            Text("Downloading Kitten… \(Int(progress * 100))%")
-                        }
-                    case .failed(let message):
-                        Label("Kitten download failed: \(message)", systemImage: "exclamationmark.triangle")
-                            .font(.footnote)
-                        Button("Retry") {
-                            models.startKittenDownload()
-                        }
-                    case .ready:
-                        Label("Kitten model ready", systemImage: "checkmark.circle")
-                        Button("Delete Kitten model (frees ~82 MB)", role: .destructive) {
-                            models.deleteKittenModels()
-                        }
-                    }
-                } header: {
-                    Text("Kitten model")
-                } footer: {
-                    Text("KittenTTS mini 0.8 — 80M parameters, 8 expressive voices. Optional; Kokoro above is the main engine.")
-                }
-
-                Section {
                     switch models.state {
                     case .notDownloaded:
                         Button {
@@ -207,6 +177,36 @@ struct SettingsView: View {
                     Text("Kokoro model")
                 } footer: {
                     Text("One-time download, stored inside the app: the uint8 quality model, all 28 voices, and the tokenizer. All speech generation stays on your device.")
+                }
+
+                Section {
+                    switch models.kittenState {
+                    case .notDownloaded:
+                        Button {
+                            models.startKittenDownload()
+                        } label: {
+                            Label("Download Kitten model (~82 MB)", systemImage: "arrow.down.circle")
+                        }
+                    case .downloading(let progress):
+                        ProgressView(value: progress) {
+                            Text("Downloading Kitten… \(Int(progress * 100))%")
+                        }
+                    case .failed(let message):
+                        Label("Kitten download failed: \(message)", systemImage: "exclamationmark.triangle")
+                            .font(.footnote)
+                        Button("Retry") {
+                            models.startKittenDownload()
+                        }
+                    case .ready:
+                        Label("Kitten model ready", systemImage: "checkmark.circle")
+                        Button("Delete Kitten model (frees ~82 MB)", role: .destructive) {
+                            models.deleteKittenModels()
+                        }
+                    }
+                } header: {
+                    Text("Kitten model")
+                } footer: {
+                    Text("KittenTTS mini 0.8 — 80M parameters, 8 expressive voices. Optional; Kokoro above is the main engine.")
                 }
 
                 Section {

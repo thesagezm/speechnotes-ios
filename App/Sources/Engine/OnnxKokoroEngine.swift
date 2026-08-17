@@ -25,7 +25,6 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
 
     var onStateChanged: ((SpeechState) -> Void)?
     var onProgress: ((Double) -> Void)?
-    var onSpokenRange: ((Int, Int) -> Void)?
 
     var voice = "am_eric"
 
@@ -376,9 +375,6 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
 
         let charsDone = chunks.prefix(scheduledUpTo + 1).reduce(0) { $0 + $1.length }
         onProgress?(min(1.0, Double(charsDone) / Double(totalChars)))
-
-        let spoken = chunks[scheduledUpTo]
-        onSpokenRange?(spoken.offset, spoken.length)
 
         playerNode.scheduleBuffer(buffer, at: nil, options: []) { [weak self] in
             DispatchQueue.main.async {

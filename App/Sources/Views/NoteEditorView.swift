@@ -8,6 +8,7 @@ struct NoteEditorView: View {
     @EnvironmentObject private var player: SpeechPlayer
     @Environment(\.dismiss) private var dismiss
     @State private var draft: String = ""
+    @State private var titleDraft: String = ""
     @State private var didLoad = false
     @State private var showingSettings = false
     @State private var showingVoicePicker = false
@@ -21,40 +22,11 @@ struct NoteEditorView: View {
         notes.notes.first { $0.id == noteId }
     }
 
-    /// True while a note is being spoken — the editable TextEditor is swapped
-    /// for the read-along view so the draft can't change under the highlighter.
-    /// Stop (or finishing) returns to the normal editor with the same draft.
-    private var isReadAlongActive: Bool {
-        player.state == .speaking || player.state == .paused
-    }
-
-    private static let whitespace = CharacterSet.whitespacesAndNewlines
-
-    /// The text handed to the engine (and read-along view) when markdown
-    /// rendering is on: syntax stripped, content intact — no more hearing
-    /// "hashtag hashtag heading". With rendering off it's the raw draft.
+    /// The text handed to the engine when markdown rendering is on: syntax
+    /// stripped, content intact — no more hearing "hashtag hashtag heading".
+    /// With rendering off it's the raw draft.
     private var speechText: String {
         renderMarkdown ? MarkdownText.plainText(draft) : draft
-    }
-
-    /// What the read-along view shows — always the same variant the engine
-    /// was given, so spoken ranges line up with displayed characters.
-    private var displayText: String {
-        isReadAlongActive ? speechText : draft
-    }
-
-    /// Shifts `player.spokenRange` — UTF-16 offsets into the *trimmed* text
-    /// the engine was given — into display coordinates: re-add the length of
-    /// the displayed text's leading whitespace (every whitespace scalar is
-    /// one UTF-16 unit), then clamp to its UTF-16 length.
-    private var draftSpokenRange: Range<Int>? {
-        guard let spoken = player.spokenRange else { return nil }
-        let leading = displayText.unicodeScalars.prefix { Self.whitespace.contains($0) }.count
-        let length = displayText.utf16.count
-        let lower = min(max(spoken.lowerBound + leading, 0), length)
-        let upper = min(max(spoken.upperBound + leading, lower), length)
-        guard upper > lower else { return nil }
-        return lower..<upper
     }
 
     private var playIcon: String {
@@ -93,9 +65,8 @@ struct NoteEditorView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if isReadAlongActive {
-                ReadAlongTextView(text: displayText, spokenRange: draftSpokenRange)
-            } else if renderMarkdown && showPreview {
+            titleField
+            if renderMarkdown && showPreview {
                 markdownPreview
             } else {
                 TextEditor(text: $draft)
@@ -106,37 +77,47 @@ struct NoteEditorView: View {
 
             controlsBar
         }
-        .navigationTitle(currentNote?.title ?? "Note")
+        .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .navigationBarLeading) {
-                Button(role: .destructive) {
-                    showingDeleteConfirm = true
-                } label: {
-                    Image(systemName: "trash")
-                }
-                .tint(.red)
-            }
             ToolbarItem(placement: .navigationBarTrailing) {
-                if renderMarkdown {
+                Menu {
+                    if renderMarkdown {
+                        Button {
+                            Haptics.tap()
+                            showPreview.toggle()
+                            if !showPreview { saveDraft() }
+                        } label: {
+                            Label(
+                                showPreview ? "Edit note" : "Preview markdown",
+                                systemImage: showPreview ? "pencil.circle" : "eye.circle"
+                            )
+                        }
+                    }
                     Button {
                         Haptics.tap()
-                        showPreview.toggle()
-                        if !showPreview { saveDraft() }
+                        player.export(speechText)
                     } label: {
-                        Image(systemName: showPreview ? "pencil.circle" : "eye.circle")
+                        if case .running(let progress) = player.exportState {
+                            Label("Exporting… \(Int(progress * 100))%", systemImage: "square.and.arrow.up")
+                        } else {
+                            Label("Export WAV", systemImage: "square.and.arrow.up")
+                        }
                     }
-                    .accessibilityLabel(showPreview ? "Edit note" : "Preview markdown")
-                }
-            }
-            ToolbarItem(placement: .navigationBarTrailing) {
-                exportButton
-            }
-            ToolbarItem(placement: .navigationBarTrailing) {
-                Button {
-                    showingSettings = true
+                    .disabled(!canExport)
+                    Button {
+                        showingSettings = true
+                    } label: {
+                        Label("Speech settings", systemImage: "speaker.wave.2")
+                    }
+                    Divider()
+                    Button(role: .destructive) {
+                        showingDeleteConfirm = true
+                    } label: {
+                        Label("Delete note", systemImage: "trash")
+                    }
                 } label: {
-                    Image(systemName: "speaker.wave.2")
+                    Image(systemName: "ellipsis.circle")
                 }
             }
             ToolbarItemGroup(placement: .keyboard) {
@@ -190,6 +171,7 @@ struct NoteEditorView: View {
         .onAppear {
             guard !didLoad else { return }
             draft = currentNote?.text ?? ""
+            titleDraft = currentNote?.explicitTitle ?? ""
             didLoad = true
         }
         .onDisappear {
@@ -203,30 +185,13 @@ struct NoteEditorView: View {
         }
     }
 
-    // MARK: - Export
+    // MARK: - Export helpers
 
     private var canExport: Bool {
         !player.usingSystemFallback
             && player.engineKind != .system
             && !player.isExporting
             && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
-    private var exportButton: some View {
-        Button {
-            Haptics.tap()
-            player.export(speechText)
-        } label: {
-            Group {
-                if case .running(let progress) = player.exportState {
-                    ProgressView(value: progress)
-                        .frame(width: 28)
-                } else {
-                    Image(systemName: "square.and.arrow.up")
-                }
-            }
-        }
-        .disabled(!canExport)
     }
 
     private var exportErrorMessage: String? {
@@ -248,32 +213,41 @@ struct NoteEditorView: View {
         )
     }
 
-    // MARK: - Markdown preview
+    // MARK: - Title field
 
-    /// Reading mode for markdown notes: headings, emphasis, lists and links
-    /// rendered; malformed syntax falls back to the verbatim text.
-    private var markdownPreview: some View {
-        ScrollView {
-            Text(markdownAttributed)
-                .font(.body)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
+    /// Editable note title; blank falls back to the first-line-derived title.
+    @ViewBuilder
+    private var titleField: some View {
+        Group {
+            if renderMarkdown && showPreview {
+                Text(titleDraft.trimmingCharacters(in: .whitespaces).isEmpty
+                     ? "Untitled note" : titleDraft)
+                    .font(.title2.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                TextField("Title", text: $titleDraft)
+                    .font(.title2.weight(.semibold))
+                    .padding(.horizontal, 4)
+                    .submitLabel(.done)
+                    .onChange(of: titleDraft) { _ in scheduleDraftSync() }
+            }
         }
-        .onTapGesture {
-            // Tap to edit — readers expect the whole surface to be a toggle.
-            Haptics.tap()
-            showPreview = false
-        }
+        .padding(.horizontal, 12)
+        .padding(.top, 8)
     }
 
-    private var markdownAttributed: AttributedString {
-        // Full parse: headings, lists, emphasis, links. Soft line breaks
-        // collapse within paragraphs — proper markdown semantics.
-        if let parsed = try? AttributedString(markdown: draft) {
-            return parsed
-        }
-        return AttributedString(draft)
+    // MARK: - Markdown preview
+
+    /// Reading mode for markdown notes: block-rendered layout via
+    /// MarkdownPreviewView; tap anywhere to return to editing.
+    private var markdownPreview: some View {
+        MarkdownPreviewView(markdown: draft)
+            .onTapGesture {
+                // Tap to edit — readers expect the whole surface to be a toggle.
+                Haptics.tap()
+                showPreview = false
+            }
     }
 
     // MARK: - Controls
@@ -381,8 +355,12 @@ struct NoteEditorView: View {
     }
 
     private func saveDraft() {
-        guard var note = currentNote, note.text != draft else { return }
+        guard var note = currentNote else { return }
+        let trimmedTitle = titleDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let newTitle = trimmedTitle.isEmpty ? nil : trimmedTitle
+        guard note.text != draft || note.explicitTitle != newTitle else { return }
         note.text = draft
+        note.explicitTitle = newTitle
         notes.update(note)
     }
 

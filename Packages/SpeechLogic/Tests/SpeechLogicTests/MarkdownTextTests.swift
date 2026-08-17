@@ -73,4 +73,42 @@ final class MarkdownTextTests: XCTestCase {
         // snake_case identifiers must not be mangled
         XCTAssertEqual(MarkdownText.plainText("use my_var_name here"), "use my_var_name here")
     }
+
+    // MARK: - blocks() (reading view)
+
+    func testBlocksRespectSingleLineBreaks() {
+        let blocks = MarkdownText.blocks("line one\nline two\n\nsecond paragraph")
+        XCTAssertEqual(blocks, [
+            .paragraph("line one\nline two"),
+            .paragraph("second paragraph"),
+        ])
+    }
+
+    func testBlocksHeadingsAndDivider() {
+        let blocks = MarkdownText.blocks("# Title\n\ntext\n\n---\n\n### Sub")
+        XCTAssertEqual(blocks, [
+            .heading(level: 1, text: "Title"),
+            .paragraph("text"),
+            .divider,
+            .heading(level: 3, text: "Sub"),
+        ])
+    }
+
+    func testBlocksGroupLists() {
+        let blocks = MarkdownText.blocks("- a\n- b\n\n1. one\n2. two")
+        XCTAssertEqual(blocks, [
+            .bulletList(items: ["a", "b"]),
+            .orderedList(items: ["one", "two"]),
+        ])
+    }
+
+    func testBlocksCodeKeptVerbatim() {
+        let blocks = MarkdownText.blocks("```\n**not bold**\n```")
+        XCTAssertEqual(blocks, [.code("**not bold**")])
+    }
+
+    func testBlocksQuoteStripsMarkersButKeepsInlineSyntax() {
+        let blocks = MarkdownText.blocks("> quoted **bold**")
+        XCTAssertEqual(blocks, [.quote("quoted **bold**")])
+    }
 }

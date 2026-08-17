@@ -7,7 +7,6 @@ final class SystemEngine: NSObject, SpeechEngine {
 
     var onStateChanged: ((SpeechState) -> Void)?
     var onProgress: ((Double) -> Void)?
-    var onSpokenRange: ((Int, Int) -> Void)?
 
     private let synthesizer = AVSpeechSynthesizer()
 
@@ -79,18 +78,6 @@ final class SystemEngine: NSObject, SpeechEngine {
 extension SystemEngine: AVSpeechSynthesizerDelegate {
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didStart utterance: AVSpeechUtterance) {
         DispatchQueue.main.async { self.state = .speaking }
-    }
-
-    /// NSRange is UTF-16, matching our chunk-offset convention exactly.
-    func speechSynthesizer(
-        _ synthesizer: AVSpeechSynthesizer,
-        willSpeakRangeOfSpeechString characterRange: NSRange,
-        utterance: AVSpeechUtterance
-    ) {
-        let range = onSpokenRange
-        DispatchQueue.main.async {
-            range?(characterRange.location, characterRange.length)
-        }
     }
 
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
