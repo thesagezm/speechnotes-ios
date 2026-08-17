@@ -71,72 +71,74 @@ struct NoteEditorView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            titleField
-            if renderMarkdown && showPreview {
-                markdownPreview
-            } else {
-                TextEditor(text: $draft)
-                    .font(.body)
-                    .padding(.horizontal, 8)
-                    .onChange(of: draft) { _ in
-                        scheduleDraftSync()
-                        updateSpeechCaches()
-                    }
+        AnyView(
+            VStack(spacing: 0) {
+                titleField
+                if renderMarkdown && showPreview {
+                    markdownPreview
+                } else {
+                    TextEditor(text: $draft)
+                        .font(.body)
+                        .padding(.horizontal, 8)
+                        .onChange(of: draft) { _ in
+                            scheduleDraftSync()
+                            updateSpeechCaches()
+                        }
+                }
             }
-        }
-        .safeAreaInset(edge: isLandscape ? .trailing : .bottom, spacing: 0) {
-            if isLandscape {
-                landscapeRail
-            } else {
-                controlsBar
+            .safeAreaInset(edge: isLandscape ? .trailing : .bottom, spacing: 0) {
+                if isLandscape {
+                    landscapeRail
+                } else {
+                    controlsBar
+                }
             }
-        }
-        .navigationTitle("")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar { toolbarContent }
-        .confirmationDialog(
-            "Delete this note?",
-            isPresented: $showingDeleteConfirm,
-            titleVisibility: .visible
-        ) {
-            Button("Delete note", role: .destructive) {
-                player.stop()
-                notes.delete(noteId: noteId)
-                dismiss()
+            .navigationTitle("")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { toolbarContent }
+            .confirmationDialog(
+                "Delete this note?",
+                isPresented: $showingDeleteConfirm,
+                titleVisibility: .visible
+            ) {
+                Button("Delete note", role: .destructive) {
+                    player.stop()
+                    notes.delete(noteId: noteId)
+                    dismiss()
+                }
+                Button("Cancel", role: .cancel) {}
             }
-            Button("Cancel", role: .cancel) {}
-        }
-        .sheet(isPresented: $showingSettings) { SettingsView() }
-        .sheet(isPresented: $showingVoicePicker) {
-            VoicePickerSheet(scope: voicePickerScope)
-                .environmentObject(player)
-        }
-        .sheet(isPresented: shareSheetBinding) {
-            if let url = player.shareURL { ShareSheet(items: [url]) }
-        }
-        .alert("Export failed", isPresented: exportErrorBinding) {
-            Button("OK") { player.dismissExportError() }
-        } message: {
-            Text(exportErrorMessage ?? "")
-        }
-        .onAppear {
-            guard !didLoad else { return }
-            draft = currentNote?.text ?? ""
-            titleDraft = currentNote?.explicitTitle ?? ""
-            didLoad = true
-            updateSpeechCaches()
-        }
-        .onDisappear {
-            draftSyncTask?.cancel()
-            draftSyncTask = nil
-            saveDraft()
-            notes.flushNow()
-        }
-        .onChange(of: player.shareURL) { newValue in
-            if newValue != nil { Haptics.success() }
-        }
-        .onChange(of: renderMarkdown) { _ in updateSpeechCaches() }
+            .sheet(isPresented: $showingSettings) { SettingsView() }
+            .sheet(isPresented: $showingVoicePicker) {
+                VoicePickerSheet(scope: voicePickerScope)
+                    .environmentObject(player)
+            }
+            .sheet(isPresented: shareSheetBinding) {
+                if let url = player.shareURL { ShareSheet(items: [url]) }
+            }
+            .alert("Export failed", isPresented: exportErrorBinding) {
+                Button("OK") { player.dismissExportError() }
+            } message: {
+                Text(exportErrorMessage ?? "")
+            }
+            .onAppear {
+                guard !didLoad else { return }
+                draft = currentNote?.text ?? ""
+                titleDraft = currentNote?.explicitTitle ?? ""
+                didLoad = true
+                updateSpeechCaches()
+            }
+            .onDisappear {
+                draftSyncTask?.cancel()
+                draftSyncTask = nil
+                saveDraft()
+                notes.flushNow()
+            }
+            .onChange(of: player.shareURL) { newValue in
+                if newValue != nil { Haptics.success() }
+            }
+            .onChange(of: renderMarkdown) { _ in updateSpeechCaches() }
+        )
     }
 
     @ToolbarContentBuilder
