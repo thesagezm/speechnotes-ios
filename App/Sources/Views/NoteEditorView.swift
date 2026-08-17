@@ -79,10 +79,62 @@ struct NoteEditorView: View {
 
     // MARK: - Main content
 
-    /// The actual view tree — extracted out of `body` so the type checker
-    /// doesn't hit its expression-complexity limit on the long modifier
-    /// chain (sheets, alerts, onChange, onAppear/onDisappear, etc.).
+    /// The view tree is split across two computed properties so the Swift
+    /// type checker never hits its per-expression complexity limit on the
+    /// long modifier chain.
     private var editorContent: some View {
+        baseEditor
+            .confirmationDialog(
+                "Delete this note?",
+                isPresented: $showingDeleteConfirm,
+                titleVisibility: .visible
+            ) {
+                Button("Delete note", role: .destructive) {
+                    player.stop()
+                    notes.delete(noteId: noteId)
+                    dismiss()
+                }
+                Button("Cancel", role: .cancel) {}
+            }
+            .sheet(isPresented: $showingSettings) {
+                SettingsView()
+            }
+            .sheet(isPresented: $showingVoicePicker) {
+                VoicePickerSheet(scope: voicePickerScope)
+                    .environmentObject(player)
+            }
+            .sheet(isPresented: shareSheetBinding) {
+                if let url = player.shareURL {
+                    ShareSheet(items: [url])
+                }
+            }
+            .alert("Export failed", isPresented: exportErrorBinding) {
+                Button("OK") { player.dismissExportError() }
+            } message: {
+                Text(exportErrorMessage ?? "")
+            }
+            .onAppear {
+                guard !didLoad else { return }
+                draft = currentNote?.text ?? ""
+                titleDraft = currentNote?.explicitTitle ?? ""
+                didLoad = true
+                updateSpeechCaches()
+            }
+            .onDisappear {
+                draftSyncTask?.cancel()
+                draftSyncTask = nil
+                saveDraft()
+                notes.flushNow()
+            }
+            .onChange(of: player.shareURL) { newValue in
+                if newValue != nil { Haptics.success() }
+            }
+            .onChange(of: renderMarkdown) { _ in updateSpeechCaches() }
+    }
+
+    /// Navigation bar, toolbar, safe-area-inset controls — everything that
+    /// defines the layout structure.
+    private var baseEditor: some View {
         VStack(spacing: 0) {
             titleField
             if renderMarkdown && showPreview {
@@ -107,52 +159,6 @@ struct NoteEditorView: View {
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { toolbarContent }
-        .confirmationDialog(
-            "Delete this note?",
-            isPresented: $showingDeleteConfirm,
-            titleVisibility: .visible
-        ) {
-            Button("Delete note", role: .destructive) {
-                player.stop()
-                notes.delete(noteId: noteId)
-                dismiss()
-            }
-            Button("Cancel", role: .cancel) {}
-        }
-        .sheet(isPresented: $showingSettings) {
-            SettingsView()
-        }
-        .sheet(isPresented: $showingVoicePicker) {
-            VoicePickerSheet(scope: voicePickerScope)
-                .environmentObject(player)
-        }
-        .sheet(isPresented: shareSheetBinding) {
-            if let url = player.shareURL {
-                ShareSheet(items: [url])
-            }
-        }
-        .alert("Export failed", isPresented: exportErrorBinding) {
-            Button("OK") { player.dismissExportError() }
-        } message: {
-            Text(exportErrorMessage ?? "")
-        }
-        .onAppear {
-            guard !didLoad else { return }
-            draft = currentNote?.text ?? ""
-            titleDraft = currentNote?.explicitTitle ?? ""
-            didLoad = true
-            updateSpeechCaches()
-        }
-        .onDisappear {
-            draftSyncTask?.cancel()
-            draftSyncTask = nil
-            saveDraft()
-            notes.flushNow()
-        }
-        .onChange(of: player.shareURL) { newValue in
-            if newValue != nil { Haptics.success() }
-        }
-        .onChange(of: renderMarkdown) { _ in updateSpeechCaches() }
     }
 
     // MARK: - Toolbars
