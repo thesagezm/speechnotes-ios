@@ -146,13 +146,15 @@ HStack of play/stop/slider/label) but change its final background modifier
 from `.background(.bar)` to:
 
 ```swift
-        .background(.bar.ignoresSafeArea(edges: .bottom))
+        .background(.bar)
+        .ignoresSafeArea(.container, edges: .bottom)
 ```
 
 so the material paints under the home indicator now that the bar is inset
-content. `controlsBar` no longer needs its `.padding(.top, 8)` (the
-safeAreaInset `spacing: 0` + its own bottom padding suffice) — keep paddings
-as they are if the result looks right; visual parity with v1.1 is the goal.
+content. **Do NOT write `.background(.bar.ignoresSafeArea(...))`** —
+`ignoresSafeArea` does not exist on `Material` styles; it must be a view
+modifier (`FAILED IN CI 2026-08-17: "value of type 'Material' has no member
+'ignoresSafeArea'"`). Same treatment for `landscapeRail`'s background.
 
 ### 2c. Landscape rail (new)
 
@@ -291,6 +293,14 @@ etc.). Document the swap in the handover if you do.
   unchanged and still works in both orientations.
 - In landscape with the keyboard up, the rail is on the trailing edge and the
   keyboard toolbar carries Speak — no conflict.
+
+**CI note (hit on first push, fixed in the same session):** with everything
+inline, `body` grew past the type checker's expression limit and CI failed
+with `failed to produce diagnostic for expression` at the `safeAreaInset`
+line. Fix: the toolbar Menu and the keyboard accessory bar were extracted
+into computed properties (`toolbarContent` via `@ToolbarContentBuilder`,
+`overflowMenu`, `keyboardBar` — all in `NoteEditorView.swift`). Keep `body`
+lean when adding modifiers; extract into computed properties instead.
 
 **Commit:** `v1.2.0 step 2: anchor editor controls with safeAreaInset (fixes bar stranded mid-screen) + landscape side rail`
 

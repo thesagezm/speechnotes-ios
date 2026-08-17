@@ -103,66 +103,10 @@ struct NoteEditorView: View {
         }
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .navigationBarTrailing) {
-                Menu {
-                    if renderMarkdown {
-                        Button {
-                            Haptics.tap()
-                            showPreview.toggle()
-                            if !showPreview { saveDraft() }
-                        } label: {
-                            Label(
-                                showPreview ? "Edit note" : "Preview markdown",
-                                systemImage: showPreview ? "pencil.circle" : "eye.circle"
-                            )
-                        }
-                    }
-                    Button {
-                        Haptics.tap()
-                        player.export(speechText)
-                    } label: {
-                        if case .running(let progress) = player.exportState {
-                            Label("Exporting… \(Int(progress * 100))%", systemImage: "square.and.arrow.up")
-                        } else {
-                            Label("Export WAV", systemImage: "square.and.arrow.up")
-                        }
-                    }
-                    .disabled(!canExport)
-                    Button {
-                        showingSettings = true
-                    } label: {
-                        Label("Speech settings", systemImage: "speaker.wave.2")
-                    }
-                    Divider()
-                    Button(role: .destructive) {
-                        showingDeleteConfirm = true
-                    } label: {
-                        Label("Delete note", systemImage: "trash")
-                    }
-                } label: {
-                    Image(systemName: "ellipsis.circle")
-                }
-            }
-            ToolbarItemGroup(placement: .keyboard) {
-                Button {
-                    Haptics.tap()
-                    player.togglePlay(speechText, note: currentNote)
-                } label: {
-                    Label(
-                        player.state == .speaking ? "Pause" : "Speak",
-                        systemImage: playIcon
-                    )
-                }
-                .disabled(playButtonDisabled)
-
-                Spacer()
-
-                Text(draftStats)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
+        // Toolbar + keyboard-bar content live in `toolbarContent` below —
+        // inlining them grew `body` past the type checker's expression
+        // limit ("failed to produce diagnostic").
+        .toolbar { toolbarContent }
         .confirmationDialog(
             "Delete this note?",
             isPresented: $showingDeleteConfirm,
@@ -209,6 +153,78 @@ struct NoteEditorView: View {
             if newValue != nil { Haptics.success() }
         }
         .onChange(of: renderMarkdown) { _ in updateSpeechCaches() }
+    }
+
+    // MARK: - Toolbars
+
+    @ToolbarContentBuilder
+    private var toolbarContent: some ToolbarContent {
+        ToolbarItem(placement: .navigationBarTrailing) { overflowMenu }
+        ToolbarItemGroup(placement: .keyboard) { keyboardBar }
+    }
+
+    /// The "…" menu: markdown preview toggle, WAV export, settings, delete.
+    private var overflowMenu: some View {
+        Menu {
+            if renderMarkdown {
+                Button {
+                    Haptics.tap()
+                    showPreview.toggle()
+                    if !showPreview { saveDraft() }
+                } label: {
+                    Label(
+                        showPreview ? "Edit note" : "Preview markdown",
+                        systemImage: showPreview ? "pencil.circle" : "eye.circle"
+                    )
+                }
+            }
+            Button {
+                Haptics.tap()
+                player.export(speechText)
+            } label: {
+                if case .running(let progress) = player.exportState {
+                    Label("Exporting… \(Int(progress * 100))%", systemImage: "square.and.arrow.up")
+                } else {
+                    Label("Export WAV", systemImage: "square.and.arrow.up")
+                }
+            }
+            .disabled(!canExport)
+            Button {
+                showingSettings = true
+            } label: {
+                Label("Speech settings", systemImage: "speaker.wave.2")
+            }
+            Divider()
+            Button(role: .destructive) {
+                showingDeleteConfirm = true
+            } label: {
+                Label("Delete note", systemImage: "trash")
+            }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+        }
+    }
+
+    /// Keyboard accessory bar: speak/pause + live word stats.
+    private var keyboardBar: some View {
+        Group {
+            Button {
+                Haptics.tap()
+                player.togglePlay(speechText, note: currentNote)
+            } label: {
+                Label(
+                    player.state == .speaking ? "Pause" : "Speak",
+                    systemImage: playIcon
+                )
+            }
+            .disabled(playButtonDisabled)
+
+            Spacer()
+
+            Text(draftStats)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
     }
 
     // MARK: - Export helpers
@@ -353,7 +369,8 @@ struct NoteEditorView: View {
         }
         .padding(.top, 8)
         .padding(.bottom, 10)
-        .background(.bar.ignoresSafeArea(edges: .bottom))
+        .background(.bar)
+        .ignoresSafeArea(.container, edges: .bottom)
     }
 
     // MARK: - Landscape side rail
@@ -370,7 +387,8 @@ struct NoteEditorView: View {
         .padding(.trailing, 8)
         .padding(.vertical, 10)
         .frame(maxWidth: 78)
-        .background(.bar.ignoresSafeArea(edges: .bottom))
+        .background(.bar)
+        .ignoresSafeArea(.container, edges: .bottom)
     }
 
     /// Thin vertical progress strip on the rail's leading edge — the
