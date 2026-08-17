@@ -237,9 +237,11 @@ struct NotesListView: View {
     }
 
     /// First ~120 characters of the body (everything after the title line),
-    /// whitespace-normalized.
+    /// whitespace-normalized. The scan is capped: rows re-render on every
+    /// player publish, and whole-text walks were measurable with long notes.
     private func preview(of note: Note) -> String {
-        let body = note.text
+        let source = note.text.count > 800 ? String(note.text.prefix(800)) : note.text
+        let body = source
             .split(whereSeparator: \.isNewline)
             .dropFirst()
             .joined(separator: " ")

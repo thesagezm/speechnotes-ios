@@ -27,9 +27,21 @@ final class SpeechPlayer: ObservableObject {
     @Published private(set) var state: SpeechState = .idle
     /// Speech progress 0…1 (chunk-granular) while speaking; nil otherwise.
     @Published private(set) var progress: Double?
+    /// Speed preference. Persistence is debounced: the slider fires dozens of
+    /// changes per drag and each one wrote UserDefaults; now one write lands
+    /// 0.5 s after the drag settles.
     @Published var rateMultiplier: Double {
-        didSet { UserDefaults.standard.set(rateMultiplier, forKey: "rateMultiplier") }
+        didSet {
+            guard rateMultiplier != oldValue else { return }
+            ratePersistTask?.cancel()
+            ratePersistTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                guard !Task.isCancelled, let self else { return }
+                UserDefaults.standard.set(self.rateMultiplier, forKey: "rateMultiplier")
+            }
+        }
     }
+    private var ratePersistTask: Task<Void, Never>?
     @Published var engineKind: EngineKind {
         didSet {
             UserDefaults.standard.set(engineKind.rawValue, forKey: "engineKind")
