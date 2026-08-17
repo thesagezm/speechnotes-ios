@@ -94,66 +94,7 @@ struct NoteEditorView: View {
         }
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .navigationBarTrailing) {
-                Menu {
-                    if renderMarkdown {
-                        Button {
-                            Haptics.tap()
-                            showPreview.toggle()
-                            if !showPreview { saveDraft() }
-                        } label: {
-                            Label(
-                                showPreview ? "Edit note" : "Preview markdown",
-                                systemImage: showPreview ? "pencil.circle" : "eye.circle"
-                            )
-                        }
-                    }
-                    Button {
-                        Haptics.tap()
-                        player.export(speechText)
-                    } label: {
-                        if case .running(let progress) = player.exportState {
-                            Label("Exporting… \(Int(progress * 100))%", systemImage: "square.and.arrow.up")
-                        } else {
-                            Label("Export WAV", systemImage: "square.and.arrow.up")
-                        }
-                    }
-                    .disabled(!canExport)
-                    Button {
-                        showingSettings = true
-                    } label: {
-                        Label("Speech settings", systemImage: "speaker.wave.2")
-                    }
-                    Divider()
-                    Button(role: .destructive) {
-                        showingDeleteConfirm = true
-                    } label: {
-                        Label("Delete note", systemImage: "trash")
-                    }
-                } label: {
-                    Image(systemName: "ellipsis.circle")
-                }
-            }
-            ToolbarItemGroup(placement: .keyboard) {
-                Button {
-                    Haptics.tap()
-                    player.togglePlay(speechText, note: currentNote)
-                } label: {
-                    Label(
-                        player.state == .speaking ? "Pause" : "Speak",
-                        systemImage: playIcon
-                    )
-                }
-                .disabled(playButtonDisabled)
-
-                Spacer()
-
-                Text(draftStats)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
+        .toolbar { toolbarContent }
         .confirmationDialog(
             "Delete this note?",
             isPresented: $showingDeleteConfirm,
@@ -166,17 +107,13 @@ struct NoteEditorView: View {
             }
             Button("Cancel", role: .cancel) {}
         }
-        .sheet(isPresented: $showingSettings) {
-            SettingsView()
-        }
+        .sheet(isPresented: $showingSettings) { SettingsView() }
         .sheet(isPresented: $showingVoicePicker) {
             VoicePickerSheet(scope: voicePickerScope)
                 .environmentObject(player)
         }
         .sheet(isPresented: shareSheetBinding) {
-            if let url = player.shareURL {
-                ShareSheet(items: [url])
-            }
+            if let url = player.shareURL { ShareSheet(items: [url]) }
         }
         .alert("Export failed", isPresented: exportErrorBinding) {
             Button("OK") { player.dismissExportError() }
@@ -200,6 +137,68 @@ struct NoteEditorView: View {
             if newValue != nil { Haptics.success() }
         }
         .onChange(of: renderMarkdown) { _ in updateSpeechCaches() }
+    }
+
+    @ToolbarContentBuilder
+    private var toolbarContent: some ToolbarContent {
+        ToolbarItem(placement: .navigationBarTrailing) {
+            Menu {
+                if renderMarkdown {
+                    Button {
+                        Haptics.tap()
+                        showPreview.toggle()
+                        if !showPreview { saveDraft() }
+                    } label: {
+                        Label(
+                            showPreview ? "Edit note" : "Preview markdown",
+                            systemImage: showPreview ? "pencil.circle" : "eye.circle"
+                        )
+                    }
+                }
+                Button {
+                    Haptics.tap()
+                    player.export(speechText)
+                } label: {
+                    if case .running(let progress) = player.exportState {
+                        Label("Exporting… \(Int(progress * 100))%", systemImage: "square.and.arrow.up")
+                    } else {
+                        Label("Export WAV", systemImage: "square.and.arrow.up")
+                    }
+                }
+                .disabled(!canExport)
+                Button {
+                    showingSettings = true
+                } label: {
+                    Label("Speech settings", systemImage: "speaker.wave.2")
+                }
+                Divider()
+                Button(role: .destructive) {
+                    showingDeleteConfirm = true
+                } label: {
+                    Label("Delete note", systemImage: "trash")
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+            }
+        }
+        ToolbarItemGroup(placement: .keyboard) {
+            Button {
+                Haptics.tap()
+                player.togglePlay(speechText, note: currentNote)
+            } label: {
+                Label(
+                    player.state == .speaking ? "Pause" : "Speak",
+                    systemImage: playIcon
+                )
+            }
+            .disabled(playButtonDisabled)
+
+            Spacer()
+
+            Text(draftStats)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
     }
 
     // MARK: - Landscape side rail
