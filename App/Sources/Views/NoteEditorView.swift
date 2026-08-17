@@ -7,6 +7,7 @@ struct NoteEditorView: View {
     @EnvironmentObject private var notes: NotesStore
     @EnvironmentObject private var player: SpeechPlayer
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
     @State private var draft: String = ""
     @State private var titleDraft: String = ""
     @State private var didLoad = false
@@ -17,6 +18,12 @@ struct NoteEditorView: View {
     /// setting is on; the editor always opens in edit mode.
     @State private var showPreview = false
     @AppStorage("renderMarkdown") private var renderMarkdown = false
+    /// Whole-draft walks (markdown strip, word count) re-ran on EVERY body
+    /// render — per progress tick, per slider tick — which froze long notes
+    /// mid-speech. Now recomputed only when the draft (or markdown setting)
+    /// actually changes.
+    @State private var cachedSpeechText: String = ""
+    @State private var cachedWordCount: Int = 0
 
     private var currentNote: Note? {
         notes.notes.first { $0.id == noteId }
@@ -24,10 +31,12 @@ struct NoteEditorView: View {
 
     /// The text handed to the engine when markdown rendering is on: syntax
     /// stripped, content intact — no more hearing "hashtag hashtag heading".
-    /// With rendering off it's the raw draft.
-    private var speechText: String {
-        renderMarkdown ? MarkdownText.plainText(draft) : draft
-    }
+    /// With rendering off it's the raw draft. Cached — see
+    /// `updateSpeechCaches`.
+    private var speechText: String { cachedSpeechText }
+
+    /// iPhone landscape = vertically compact; portrait = regular.
+    private var isLandscape: Bool { verticalSizeClass == .compact }
 
     private var playIcon: String {
         switch player.state {
@@ -51,8 +60,11 @@ struct NoteEditorView: View {
         }
     }
 
-    private var draftWordCount: Int {
-        draft.split(whereSeparator: \.isWhitespace).count
+    private var draftWordCount: Int { cachedWordCount }
+
+    private func updateSpeechCaches() {
+        cachedSpeechText = renderMarkdown ? MarkdownText.plainText(draft) : draft
+        cachedWordCount = draft.split(whereSeparator: \.isWhitespace).count
     }
 
     /// "412 words · ~3 min listen" — live stats for the keyboard bar.
@@ -72,10 +84,22 @@ struct NoteEditorView: View {
                 TextEditor(text: $draft)
                     .font(.body)
                     .padding(.horizontal, 8)
-                    .onChange(of: draft) { _ in scheduleDraftSync() }
+                    .onChange(of: draft) { _ in
+                        scheduleDraftSync()
+                        updateSpeechCaches()
+                    }
             }
-
-            controlsBar
+        }
+        // Anchored as safe-area inset content (not a VStack sibling under the
+        // TextEditor): interrupted keyboard animations used to strand that
+        // sibling mid-screen. Inset content tracks the container's safe-area
+        // rects, which UIKit recomputes on keyboard frame changes.
+        .safeAreaInset(edge: isLandscape ? .trailing : .bottom, spacing: 0) {
+            if isLandscape {
+                landscapeRail
+            } else {
+                controlsBar
+            }
         }
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
@@ -173,6 +197,7 @@ struct NoteEditorView: View {
             draft = currentNote?.text ?? ""
             titleDraft = currentNote?.explicitTitle ?? ""
             didLoad = true
+            updateSpeechCaches()
         }
         .onDisappear {
             draftSyncTask?.cancel()
@@ -183,6 +208,7 @@ struct NoteEditorView: View {
         .onChange(of: player.shareURL) { newValue in
             if newValue != nil { Haptics.success() }
         }
+        .onChange(of: renderMarkdown) { _ in updateSpeechCaches() }
     }
 
     // MARK: - Export helpers
@@ -327,7 +353,123 @@ struct NoteEditorView: View {
         }
         .padding(.top, 8)
         .padding(.bottom, 10)
-        .background(.bar)
+        .background(.bar.ignoresSafeArea(edges: .bottom))
+    }
+
+    // MARK: - Landscape side rail
+
+    /// Landscape layout: controls live in a vertical rail on the trailing
+    /// edge (user request — controls on the side, not the top, keeps the
+    /// reading surface tall and clean). Portrait keeps the bottom bar.
+    private var landscapeRail: some View {
+        HStack(spacing: 10) {
+            railProgressStrip
+            railControls
+        }
+        .padding(.leading, 4)
+        .padding(.trailing, 8)
+        .padding(.vertical, 10)
+        .frame(maxWidth: 78)
+        .background(.bar.ignoresSafeArea(edges: .bottom))
+    }
+
+    /// Thin vertical progress strip on the rail's leading edge — the
+    /// landscape twin of the portrait bar's progress capsule, filling
+    /// bottom-up.
+    @ViewBuilder
+    private var railProgressStrip: some View {
+        if let progress = player.progress, player.state == .speaking {
+            GeometryReader { proxy in
+                ZStack(alignment: .bottom) {
+                    Capsule().fill(Color.secondary.opacity(0.25)).frame(width: 3)
+                    Capsule()
+                        .fill(
+                            LinearGradient(
+                                colors: [.accentColor, .purple],
+                                startPoint: .bottom,
+                                endPoint: .top
+                            )
+                        )
+                        .frame(width: 3, height: max(4, proxy.size.height * progress))
+                }
+            }
+            .frame(width: 3)
+        } else {
+            Divider()
+        }
+    }
+
+    private var railControls: some View {
+        VStack(spacing: 10) {
+            Button {
+                showingVoicePicker = true
+            } label: {
+                Image(systemName: "person.wave.2.fill")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 34, height: 34)
+                    .background(Circle().fill(Color.secondary.opacity(0.12)))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Change voice")
+
+            Button {
+                Haptics.tap()
+                player.togglePlay(speechText, note: currentNote)
+            } label: {
+                ZStack {
+                    Circle()
+                        .fill(
+                            LinearGradient(
+                                colors: [.accentColor, .purple],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .shadow(color: .black.opacity(0.15), radius: 6, y: 3)
+                    if player.state == .generating {
+                        ProgressView().tint(.white)
+                    } else {
+                        Image(systemName: playIcon)
+                            .font(.body.bold())
+                            .foregroundStyle(.white)
+                    }
+                }
+                .frame(width: 46, height: 46)
+            }
+            .disabled(playButtonDisabled)
+
+            if player.state == .speaking || player.state == .paused || player.state == .generating {
+                Button {
+                    Haptics.press()
+                    player.stop()
+                } label: {
+                    Image(systemName: "stop.fill")
+                        .font(.footnote.weight(.bold))
+                        .foregroundStyle(.red)
+                        .frame(width: 30, height: 30)
+                        .background(Circle().fill(Color.red.opacity(0.12)))
+                }
+            }
+
+            Spacer(minLength: 0)
+
+            Text(String(format: "%.2f×", player.rateMultiplier))
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+
+            // Vertical slider: lay the slider out horizontally at the slot's
+            // HEIGHT, then rotate the visual 90° counter-clockwise around its
+            // center (hit-testing follows the rotation). Min lands at the
+            // bottom — slower down, faster up.
+            GeometryReader { proxy in
+                Slider(value: $player.rateMultiplier, in: 0.5...2.0, step: 0.05)
+                    .rotationEffect(.degrees(-90))
+                    .frame(width: proxy.size.height)
+                    .position(x: proxy.size.width / 2, y: proxy.size.height / 2)
+            }
+            .frame(width: 34, height: 110)
+        }
     }
 
     /// Current engine + voice, one tap from the picker.
