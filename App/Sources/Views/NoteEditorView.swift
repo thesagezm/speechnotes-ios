@@ -75,7 +75,14 @@ struct NoteEditorView: View {
         return "\(words) words · ~\(minutes) min listen"
     }
 
-    var body: some View {
+    var body: some View { editorContent }
+
+    // MARK: - Main content
+
+    /// The actual view tree — extracted out of `body` so the type checker
+    /// doesn't hit its expression-complexity limit on the long modifier
+    /// chain (sheets, alerts, onChange, onAppear/onDisappear, etc.).
+    private var editorContent: some View {
         VStack(spacing: 0) {
             titleField
             if renderMarkdown && showPreview {
@@ -90,10 +97,6 @@ struct NoteEditorView: View {
                     }
             }
         }
-        // Anchored as safe-area inset content (not a VStack sibling under the
-        // TextEditor): interrupted keyboard animations used to strand that
-        // sibling mid-screen. Inset content tracks the container's safe-area
-        // rects, which UIKit recomputes on keyboard frame changes.
         .safeAreaInset(edge: isLandscape ? .trailing : .bottom, spacing: 0) {
             if isLandscape {
                 landscapeRail
@@ -103,9 +106,6 @@ struct NoteEditorView: View {
         }
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
-        // Toolbar + keyboard-bar content live in `toolbarContent` below —
-        // inlining them grew `body` past the type checker's expression
-        // limit ("failed to produce diagnostic").
         .toolbar { toolbarContent }
         .confirmationDialog(
             "Delete this note?",
