@@ -133,32 +133,36 @@ struct NoteEditorView: View {
     }
 
     /// Navigation bar, toolbar, safe-area-inset controls — everything that
-    /// defines the layout structure.
+    /// defines the layout structure. Erased to `AnyView` so the type checker
+    /// (which has a per-expression complexity budget) doesn't stall on the
+    /// chain of `some View` modifiers feeding into `editorContent`.
     private var baseEditor: some View {
-        VStack(spacing: 0) {
-            titleField
-            if renderMarkdown && showPreview {
-                markdownPreview
-            } else {
-                TextEditor(text: $draft)
-                    .font(.body)
-                    .padding(.horizontal, 8)
-                    .onChange(of: draft) { _ in
-                        scheduleDraftSync()
-                        updateSpeechCaches()
-                    }
+        AnyView(
+            VStack(spacing: 0) {
+                titleField
+                if renderMarkdown && showPreview {
+                    markdownPreview
+                } else {
+                    TextEditor(text: $draft)
+                        .font(.body)
+                        .padding(.horizontal, 8)
+                        .onChange(of: draft) { _ in
+                            scheduleDraftSync()
+                            updateSpeechCaches()
+                        }
+                }
             }
-        }
-        .safeAreaInset(edge: isLandscape ? .trailing : .bottom, spacing: 0) {
-            if isLandscape {
-                landscapeRail
-            } else {
-                controlsBar
+            .safeAreaInset(edge: isLandscape ? .trailing : .bottom, spacing: 0) {
+                if isLandscape {
+                    landscapeRail
+                } else {
+                    controlsBar
+                }
             }
-        }
-        .navigationTitle("")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar { toolbarContent }
+            .navigationTitle("")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { toolbarContent }
+        )
     }
 
     // MARK: - Toolbars
