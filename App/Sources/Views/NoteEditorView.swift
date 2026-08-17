@@ -79,27 +79,41 @@ struct NoteEditorView: View {
 
     // MARK: - Main content
 
-    /// Final sheet/alert/lifecycle chain on top of `baseEditor`. Kept as
-    /// `AnyView` to erase the heavy modifier chain before the type checker
-    /// rechecks it on every state change.
+    /// Final sheet/alert/lifecycle chain on top of `baseEditor`. Each
+    /// modifier group lives in its own `AnyView`-erased computed property
+    /// so the Swift type checker (which has a per-expression complexity
+    /// budget) doesn't stall on the long overloaded modifier chain.
     private var editorContent: AnyView {
+        withLifecycle(
+            withExportAlert(
+                withSheets(
+                    withDeleteDialog(baseEditor)
+                )
+            )
+        )
+    }
+
+    private func withDeleteDialog<V: View>(_ base: V) -> AnyView {
         AnyView(
-            baseEditor
-                .confirmationDialog(
-                    "Delete this note?",
-                    isPresented: $showingDeleteConfirm,
-                    titleVisibility: .visible
-                ) {
-                    Button("Delete note", role: .destructive) {
-                        player.stop()
-                        notes.delete(noteId: noteId)
-                        dismiss()
-                    }
-                    Button("Cancel", role: .cancel) {}
+            base.confirmationDialog(
+                "Delete this note?",
+                isPresented: $showingDeleteConfirm,
+                titleVisibility: .visible
+            ) {
+                Button("Delete note", role: .destructive) {
+                    player.stop()
+                    notes.delete(noteId: noteId)
+                    dismiss()
                 }
-                .sheet(isPresented: $showingSettings) {
-                    SettingsView()
-                }
+                Button("Cancel", role: .cancel) {}
+            }
+        )
+    }
+
+    private func withSheets<V: View>(_ base: V) -> AnyView {
+        AnyView(
+            base
+                .sheet(isPresented: $showingSettings) { SettingsView() }
                 .sheet(isPresented: $showingVoicePicker) {
                     VoicePickerSheet(scope: voicePickerScope)
                         .environmentObject(player)
@@ -109,11 +123,22 @@ struct NoteEditorView: View {
                         ShareSheet(items: [url])
                     }
                 }
-                .alert("Export failed", isPresented: exportErrorBinding) {
-                    Button("OK") { player.dismissExportError() }
-                } message: {
-                    Text(exportErrorMessage ?? "")
-                }
+        )
+    }
+
+    private func withExportAlert<V: View>(_ base: V) -> AnyView {
+        AnyView(
+            base.alert("Export failed", isPresented: exportErrorBinding) {
+                Button("OK") { player.dismissExportError() }
+            } message: {
+                Text(exportErrorMessage ?? "")
+            }
+        )
+    }
+
+    private func withLifecycle<V: View>(_ base: V) -> AnyView {
+        AnyView(
+            base
                 .onAppear {
                     guard !didLoad else { return }
                     draft = currentNote?.text ?? ""
