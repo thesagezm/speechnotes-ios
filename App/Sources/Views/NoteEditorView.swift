@@ -79,90 +79,100 @@ struct NoteEditorView: View {
 
     // MARK: - Main content
 
-    /// The view tree is split across two computed properties so the Swift
-    /// type checker never hits its per-expression complexity limit on the
-    /// long modifier chain.
-    private var editorContent: some View {
-        baseEditor
-            .confirmationDialog(
-                "Delete this note?",
-                isPresented: $showingDeleteConfirm,
-                titleVisibility: .visible
-            ) {
-                Button("Delete note", role: .destructive) {
-                    player.stop()
-                    notes.delete(noteId: noteId)
-                    dismiss()
+    /// Final sheet/alert/lifecycle chain on top of `baseEditor`. Kept as
+    /// `AnyView` to erase the heavy modifier chain before the type checker
+    /// rechecks it on every state change.
+    private var editorContent: AnyView {
+        AnyView(
+            baseEditor
+                .confirmationDialog(
+                    "Delete this note?",
+                    isPresented: $showingDeleteConfirm,
+                    titleVisibility: .visible
+                ) {
+                    Button("Delete note", role: .destructive) {
+                        player.stop()
+                        notes.delete(noteId: noteId)
+                        dismiss()
+                    }
+                    Button("Cancel", role: .cancel) {}
                 }
-                Button("Cancel", role: .cancel) {}
-            }
-            .sheet(isPresented: $showingSettings) {
-                SettingsView()
-            }
-            .sheet(isPresented: $showingVoicePicker) {
-                VoicePickerSheet(scope: voicePickerScope)
-                    .environmentObject(player)
-            }
-            .sheet(isPresented: shareSheetBinding) {
-                if let url = player.shareURL {
-                    ShareSheet(items: [url])
+                .sheet(isPresented: $showingSettings) {
+                    SettingsView()
                 }
-            }
-            .alert("Export failed", isPresented: exportErrorBinding) {
-                Button("OK") { player.dismissExportError() }
-            } message: {
-                Text(exportErrorMessage ?? "")
-            }
-            .onAppear {
-                guard !didLoad else { return }
-                draft = currentNote?.text ?? ""
-                titleDraft = currentNote?.explicitTitle ?? ""
-                didLoad = true
-                updateSpeechCaches()
-            }
-            .onDisappear {
-                draftSyncTask?.cancel()
-                draftSyncTask = nil
-                saveDraft()
-                notes.flushNow()
-            }
-            .onChange(of: player.shareURL) { newValue in
-                if newValue != nil { Haptics.success() }
-            }
-            .onChange(of: renderMarkdown) { _ in updateSpeechCaches() }
+                .sheet(isPresented: $showingVoicePicker) {
+                    VoicePickerSheet(scope: voicePickerScope)
+                        .environmentObject(player)
+                }
+                .sheet(isPresented: shareSheetBinding) {
+                    if let url = player.shareURL {
+                        ShareSheet(items: [url])
+                    }
+                }
+                .alert("Export failed", isPresented: exportErrorBinding) {
+                    Button("OK") { player.dismissExportError() }
+                } message: {
+                    Text(exportErrorMessage ?? "")
+                }
+                .onAppear {
+                    guard !didLoad else { return }
+                    draft = currentNote?.text ?? ""
+                    titleDraft = currentNote?.explicitTitle ?? ""
+                    didLoad = true
+                    updateSpeechCaches()
+                }
+                .onDisappear {
+                    draftSyncTask?.cancel()
+                    draftSyncTask = nil
+                    saveDraft()
+                    notes.flushNow()
+                }
+                .onChange(of: player.shareURL) { newValue in
+                    if newValue != nil { Haptics.success() }
+                }
+                .onChange(of: renderMarkdown) { _ in updateSpeechCaches() }
+        )
     }
 
-    /// Navigation bar, toolbar, safe-area-inset controls — everything that
-    /// defines the layout structure. Erased to `AnyView` so the type checker
-    /// (which has a per-expression complexity budget) doesn't stall on the
-    /// chain of `some View` modifiers feeding into `editorContent`.
-    private var baseEditor: some View {
+    /// Title + editor/preview VStack + safe-area-inset controls + navigation
+    /// bar. `AnyView` erases the chained modifiers so the Swift type checker
+    /// (which has a per-expression complexity budget) never stalls on them.
+    private var baseEditor: AnyView {
         AnyView(
             VStack(spacing: 0) {
                 titleField
-                if renderMarkdown && showPreview {
-                    markdownPreview
-                } else {
-                    TextEditor(text: $draft)
-                        .font(.body)
-                        .padding(.horizontal, 8)
-                        .onChange(of: draft) { _ in
-                            scheduleDraftSync()
-                            updateSpeechCaches()
-                        }
-                }
+                editorBody
             }
             .safeAreaInset(edge: isLandscape ? .trailing : .bottom, spacing: 0) {
-                if isLandscape {
-                    landscapeRail
-                } else {
-                    controlsBar
-                }
+                controlsContainer
             }
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { toolbarContent }
         )
+    }
+
+    /// Just the editor or markdown preview — extracted so the type checker
+    /// handles the VStack above with a simple `some View` child.
+    @ViewBuilder
+    private var editorBody: some View {
+        if renderMarkdown && showPreview {
+            markdownPreview
+        } else {
+            TextEditor(text: $draft)
+                .font(.body)
+                .padding(.horizontal, 8)
+                .onChange(of: draft) { _ in
+                    scheduleDraftSync()
+                    updateSpeechCaches()
+                }
+        }
+    }
+
+    /// The bottom bar (portrait) or right-side rail (landscape).
+    @ViewBuilder
+    private var controlsContainer: some View {
+        if isLandscape { landscapeRail } else { controlsBar }
     }
 
     // MARK: - Toolbars
