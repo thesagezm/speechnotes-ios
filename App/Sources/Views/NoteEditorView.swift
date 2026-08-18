@@ -93,10 +93,24 @@ struct NoteEditorView: View {
     /// minimal pieces so the type checker never chokes.
     private var baseContent: AnyView {
         AnyView(
+            navigationView
+        )
+    }
+
+    /// VStack + safeAreaInset only.
+    private var vStackWithInset: AnyView {
+        AnyView(
             vStackWithTitleAndEditor
                 .safeAreaInset(edge: isLandscape ? .trailing : .bottom, spacing: 0) {
                     controlsContainer
                 }
+        )
+    }
+
+    /// vStackWithInset + navigation title + display mode.
+    private var navigationView: AnyView {
+        AnyView(
+            vStackWithInset
                 .navigationTitle("")
                 .navigationBarTitleDisplayMode(.inline)
         )
