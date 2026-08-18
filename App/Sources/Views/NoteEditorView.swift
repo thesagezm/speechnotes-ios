@@ -7,28 +7,35 @@ struct NoteEditorView: View {
     @EnvironmentObject private var notes: NotesStore
     @EnvironmentObject private var player: SpeechPlayer
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.verticalSizeClass) private var verticalSizeClass
     @State private var draft: String = ""
     @State private var titleDraft: String = ""
     @State private var didLoad = false
     @State private var showingSettings = false
     @State private var showingVoicePicker = false
     @State private var showingDeleteConfirm = false
+    /// Markdown reading mode — only meaningful when the Render Markdown
+    /// setting is on; the editor always opens in edit mode.
     @State private var showPreview = false
     @AppStorage("renderMarkdown") private var renderMarkdown = false
-
-    /// Whole-draft walks (markdown strip, word count) re-ran on EVERY body
-    /// render — per progress tick, per slider tick — which froze long notes
-    /// mid-speech. Now recomputed only when the draft (or markdown setting)
-    /// actually changes.
-    @State private var cachedSpeechText: String = ""
-    @State private var cachedWordCount: Int = 0
 
     private var currentNote: Note? {
         notes.notes.first { $0.id == noteId }
     }
 
+    /// The text handed to the engine when markdown rendering is on: syntax
+    /// stripped, content intact — no more hearing "hashtag hashtag heading".
+    /// With rendering off it's the raw draft. Cached instead of recomputed
+    /// per render: body re-renders fire per progress/slider tick and the
+    /// whole-draft regex walk froze long notes mid-speech.
+    @State private var cachedSpeechText: String = ""
+    @State private var cachedWordCount: Int = 0
+
     private var speechText: String { cachedSpeechText }
+
+    private func updateSpeechCaches() {
+        cachedSpeechText = renderMarkdown ? MarkdownText.plainText(draft) : draft
+        cachedWordCount = draft.split(whereSeparator: \.isWhitespace).count
+    }
 
     private var playIcon: String {
         switch player.state {
@@ -54,11 +61,6 @@ struct NoteEditorView: View {
 
     private var draftWordCount: Int { cachedWordCount }
 
-    private func updateSpeechCaches() {
-        cachedSpeechText = renderMarkdown ? MarkdownText.plainText(draft) : draft
-        cachedWordCount = draft.split(whereSeparator: \.isWhitespace).count
-    }
-
     /// "412 words · ~3 min listen" — live stats for the keyboard bar.
     private var draftStats: String {
         let words = draftWordCount
@@ -68,75 +70,82 @@ struct NoteEditorView: View {
     }
 
     var body: some View {
-        NavigationStack {
-            VStack(spacing: 0) {
-                titleField
-                editorBody
+        VStack(spacing: 0) {
+            titleField
+            if renderMarkdown && showPreview {
+                markdownPreview
+            } else {
+                TextEditor(text: $draft)
+                    .font(.body)
+                    .padding(.horizontal, 8)
+                    .onChange(of: draft) { _ in
+                        scheduleDraftSync()
+                        updateSpeechCaches()
+                    }
             }
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                controlsBar
-            }
-            .navigationTitle("")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Menu {
-                        if renderMarkdown {
-                            Button {
-                                Haptics.tap()
-                                showPreview.toggle()
-                                if !showPreview { saveDraft() }
-                            } label: {
-                                Label(
-                                    showPreview ? "Edit note" : "Preview markdown",
-                                    systemImage: showPreview ? "pencil.circle" : "eye.circle"
-                                )
-                            }
-                        }
+
+            controlsBar
+        }
+        .navigationTitle("")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Menu {
+                    if renderMarkdown {
                         Button {
                             Haptics.tap()
-                            player.export(speechText)
+                            showPreview.toggle()
+                            if !showPreview { saveDraft() }
                         } label: {
-                            if case .running(let progress) = player.exportState {
-                                Label("Exporting… \(Int(progress * 100))%", systemImage: "square.and.arrow.up")
-                            } else {
-                                Label("Export WAV", systemImage: "square.and.arrow.up")
-                            }
+                            Label(
+                                showPreview ? "Edit note" : "Preview markdown",
+                                systemImage: showPreview ? "pencil.circle" : "eye.circle"
+                            )
                         }
-                        .disabled(!canExport)
-                        Button {
-                            showingSettings = true
-                        } label: {
-                            Label("Speech settings", systemImage: "speaker.wave.2")
-                        }
-                        Divider()
-                        Button(role: .destructive) {
-                            showingDeleteConfirm = true
-                        } label: {
-                            Label("Delete note", systemImage: "trash")
-                        }
-                    } label: {
-                        Image(systemName: "ellipsis.circle")
                     }
-                }
-                ToolbarItemGroup(placement: .keyboard) {
                     Button {
                         Haptics.tap()
-                        player.togglePlay(speechText, note: currentNote)
+                        player.export(speechText)
                     } label: {
-                        Label(
-                            player.state == .speaking ? "Pause" : "Speak",
-                            systemImage: playIcon
-                        )
+                        if case .running(let progress) = player.exportState {
+                            Label("Exporting… \(Int(progress * 100))%", systemImage: "square.and.arrow.up")
+                        } else {
+                            Label("Export WAV", systemImage: "square.and.arrow.up")
+                        }
                     }
-                    .disabled(playButtonDisabled)
-
-                    Spacer()
-
-                    Text(draftStats)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    .disabled(!canExport)
+                    Button {
+                        showingSettings = true
+                    } label: {
+                        Label("Speech settings", systemImage: "speaker.wave.2")
+                    }
+                    Divider()
+                    Button(role: .destructive) {
+                        showingDeleteConfirm = true
+                    } label: {
+                        Label("Delete note", systemImage: "trash")
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
                 }
+            }
+            ToolbarItemGroup(placement: .keyboard) {
+                Button {
+                    Haptics.tap()
+                    player.togglePlay(speechText, note: currentNote)
+                } label: {
+                    Label(
+                        player.state == .speaking ? "Pause" : "Speak",
+                        systemImage: playIcon
+                    )
+                }
+                .disabled(playButtonDisabled)
+
+                Spacer()
+
+                Text(draftStats)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
         .confirmationDialog(
@@ -187,34 +196,72 @@ struct NoteEditorView: View {
         .onChange(of: renderMarkdown) { _ in updateSpeechCaches() }
     }
 
-    // MARK: - Editor
+    // MARK: - Export helpers
 
+    private var canExport: Bool {
+        !player.usingSystemFallback
+            && player.engineKind != .system
+            && !player.isExporting
+            && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var exportErrorMessage: String? {
+        if case .failed(let message) = player.exportState { return message }
+        return nil
+    }
+
+    private var exportErrorBinding: Binding<Bool> {
+        Binding(
+            get: { exportErrorMessage != nil },
+            set: { if !$0 { player.dismissExportError() } }
+        )
+    }
+
+    private var shareSheetBinding: Binding<Bool> {
+        Binding(
+            get: { player.shareURL != nil },
+            set: { if !$0 { player.shareURL = nil } }
+        )
+    }
+
+    // MARK: - Title field
+
+    /// Editable note title; blank falls back to the first-line-derived title.
     @ViewBuilder
-    private var editorBody: some View {
-        if renderMarkdown && showPreview {
-            markdownPreview
-        } else {
-            TextEditor(text: $draft)
-                .font(.body)
-                .padding(.horizontal, 8)
-                .onChange(of: draft) { _ in
-                    scheduleDraftSync()
-                    updateSpeechCaches()
-                }
+    private var titleField: some View {
+        Group {
+            if renderMarkdown && showPreview {
+                Text(titleDraft.trimmingCharacters(in: .whitespaces).isEmpty
+                     ? "Untitled note" : titleDraft)
+                    .font(.title2.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                TextField("Title", text: $titleDraft)
+                    .font(.title2.weight(.semibold))
+                    .padding(.horizontal, 4)
+                    .submitLabel(.done)
+                    .onChange(of: titleDraft) { _ in scheduleDraftSync() }
+            }
         }
+        .padding(.horizontal, 12)
+        .padding(.top, 8)
     }
 
     // MARK: - Markdown preview
 
+    /// Reading mode for markdown notes: block-rendered layout via
+    /// MarkdownPreviewView; tap anywhere to return to editing.
     private var markdownPreview: some View {
         MarkdownPreviewView(markdown: draft)
             .onTapGesture {
+                // Tap to edit — readers expect the whole surface to be a toggle.
                 Haptics.tap()
                 showPreview = false
             }
     }
 
-    // MARK: - Controls bar
+    // MARK: - Controls
 
     private var controlsBar: some View {
         VStack(spacing: 8) {
@@ -292,7 +339,6 @@ struct NoteEditorView: View {
         .padding(.top, 8)
         .padding(.bottom, 10)
         .background(.bar)
-        .ignoresSafeArea(.container, edges: .bottom)
     }
 
     /// Current engine + voice, one tap from the picker.
@@ -319,58 +365,15 @@ struct NoteEditorView: View {
         .buttonStyle(.plain)
     }
 
-    // MARK: - Title field
-
-    @ViewBuilder
-    private var titleField: some View {
-        Group {
-            if renderMarkdown && showPreview {
-                Text(titleDraft.trimmingCharacters(in: .whitespaces).isEmpty
-                     ? "Untitled note" : titleDraft)
-                    .font(.title2.weight(.semibold))
-                    .foregroundStyle(.primary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            } else {
-                TextField("Title", text: $titleDraft)
-                    .font(.title2.weight(.semibold))
-                    .padding(.horizontal, 4)
-                    .submitLabel(.done)
-                    .onChange(of: titleDraft) { _ in scheduleDraftSync() }
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.top, 8)
+    private func saveDraft() {
+        guard var note = currentNote else { return }
+        let trimmedTitle = titleDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let newTitle = trimmedTitle.isEmpty ? nil : trimmedTitle
+        guard note.text != draft || note.explicitTitle != newTitle else { return }
+        note.text = draft
+        note.explicitTitle = newTitle
+        notes.update(note)
     }
-
-    // MARK: - Export helpers
-
-    private var canExport: Bool {
-        !player.usingSystemFallback
-            && player.engineKind != .system
-            && !player.isExporting
-            && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
-    private var exportErrorMessage: String? {
-        if case .failed(let message) = player.exportState { return message }
-        return nil
-    }
-
-    private var exportErrorBinding: Binding<Bool> {
-        Binding(
-            get: { exportErrorMessage != nil },
-            set: { if !$0 { player.dismissExportError() } }
-        )
-    }
-
-    private var shareSheetBinding: Binding<Bool> {
-        Binding(
-            get: { player.shareURL != nil },
-            set: { if !$0 { player.shareURL = nil } }
-        )
-    }
-
-    // MARK: - Draft sync
 
     /// Pushing the draft into the store re-sorts and re-renders the whole
     /// notes list; doing that per keystroke was a big part of the editor lag.
@@ -385,15 +388,5 @@ struct NoteEditorView: View {
             guard !Task.isCancelled else { return }
             saveDraft()
         }
-    }
-
-    private func saveDraft() {
-        guard var note = currentNote else { return }
-        let trimmedTitle = titleDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        let newTitle = trimmedTitle.isEmpty ? nil : trimmedTitle
-        guard note.text != draft || note.explicitTitle != newTitle else { return }
-        note.text = draft
-        note.explicitTitle = newTitle
-        notes.update(note)
     }
 }
