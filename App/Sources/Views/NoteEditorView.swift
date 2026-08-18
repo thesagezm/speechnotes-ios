@@ -70,86 +70,61 @@ struct NoteEditorView: View {
         return "\(words) words · ~\(minutes) min listen"
     }
 
-    var body: some View { editorStack }
-
-    /// The full view stack inside an AnyView so the type checker never sees
-    /// the full modifier chain as a single expression (its complexity budget
-    /// is exceeded by the combination of VStack + safeAreaInset + toolbar +
-    /// sheets + alerts + lifecycle modifiers).
-    private var editorStack: AnyView {
-        AnyView(
-            baseStack
-                .confirmationDialog(
-                    "Delete this note?",
-                    isPresented: $showingDeleteConfirm,
-                    titleVisibility: .visible
-                ) {
-                    Button("Delete note", role: .destructive) {
-                        player.stop()
-                        notes.delete(noteId: noteId)
-                        dismiss()
-                    }
-                    Button("Cancel", role: .cancel) {}
-                }
-                .sheet(isPresented: $showingSettings) { SettingsView() }
-                .sheet(isPresented: $showingVoicePicker) {
-                    VoicePickerSheet(scope: voicePickerScope)
-                        .environmentObject(player)
-                }
-                .sheet(isPresented: shareSheetBinding) {
-                    if let url = player.shareURL { ShareSheet(items: [url]) }
-                }
-                .alert("Export failed", isPresented: exportErrorBinding) {
-                    Button("OK") { player.dismissExportError() }
-                } message: {
-                    Text(exportErrorMessage ?? "")
-                }
-                .onAppear {
-                    guard !didLoad else { return }
-                    draft = currentNote?.text ?? ""
-                    titleDraft = currentNote?.explicitTitle ?? ""
-                    didLoad = true
-                    updateSpeechCaches()
-                }
-                .onDisappear {
-                    draftSyncTask?.cancel()
-                    draftSyncTask = nil
-                    saveDraft()
-                    notes.flushNow()
-                }
-                .onChange(of: player.shareURL) { newValue in
-                    if newValue != nil { Haptics.success() }
-                }
-                .onChange(of: renderMarkdown) { _ in updateSpeechCaches() }
-        )
-    }
-
-    /// Title + editor/preview + safe-area-inset controls.
-    /// Wrapped in AnyView so the type checker evaluates this as one opaque
-    /// view, not a giant nested expression.
-    private var coreStack: AnyView {
-        AnyView(
-            VStack(spacing: 0) {
-                titleField
-                editorBody
+    var body: some View {
+        VStack(spacing: 0) {
+            titleField
+            editorBody
+        }
+        .safeAreaInset(edge: isLandscape ? .trailing : .bottom, spacing: 0) {
+            controlsContainer
+        }
+        .navigationTitle("")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar { toolbarContent }
+        .confirmationDialog(
+            "Delete this note?",
+            isPresented: $showingDeleteConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Delete note", role: .destructive) {
+                player.stop()
+                notes.delete(noteId: noteId)
+                dismiss()
             }
-            .safeAreaInset(edge: isLandscape ? .trailing : .bottom, spacing: 0) {
-                controlsContainer
-            }
-        )
+            Button("Cancel", role: .cancel) {}
+        }
+        .sheet(isPresented: $showingSettings) { SettingsView() }
+        .sheet(isPresented: $showingVoicePicker) {
+            VoicePickerSheet(scope: voicePickerScope)
+                .environmentObject(player)
+        }
+        .sheet(isPresented: shareSheetBinding) {
+            if let url = player.shareURL { ShareSheet(items: [url]) }
+        }
+        .alert("Export failed", isPresented: exportErrorBinding) {
+            Button("OK") { player.dismissExportError() }
+        } message: {
+            Text(exportErrorMessage ?? "")
+        }
+        .onAppear {
+            guard !didLoad else { return }
+            draft = currentNote?.text ?? ""
+            titleDraft = currentNote?.explicitTitle ?? ""
+            didLoad = true
+            updateSpeechCaches()
+        }
+        .onDisappear {
+            draftSyncTask?.cancel()
+            draftSyncTask = nil
+            saveDraft()
+            notes.flushNow()
+        }
+        .onChange(of: player.shareURL) { newValue in
+            if newValue != nil { Haptics.success() }
+        }
+        .onChange(of: renderMarkdown) { _ in updateSpeechCaches() }
     }
 
-    /// coreStack + navigation + toolbar.
-    private var baseStack: AnyView {
-        AnyView(
-            coreStack
-                .navigationTitle("")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar { toolbarContent }
-        )
-    }
-
-    /// Just the editor or markdown preview.
     @ViewBuilder
     private var editorBody: some View {
         if renderMarkdown && showPreview {
@@ -165,7 +140,6 @@ struct NoteEditorView: View {
         }
     }
 
-    /// The bottom bar (portrait) or right-side rail (landscape).
     @ViewBuilder
     private var controlsContainer: some View {
         if isLandscape { landscapeRail } else { controlsBar }
