@@ -89,37 +89,49 @@ struct NoteEditorView: View {
         )
     }
 
-    /// Core content: VStack + safeAreaInset + navigation.
+    /// Core content: VStack + safeAreaInset + navigation — split into
+    /// minimal pieces so the type checker never chokes.
     private var baseContent: AnyView {
         AnyView(
-            VStack(spacing: 0) {
-                titleField
-                if renderMarkdown && showPreview {
-                    markdownPreview
-                } else {
-                    TextEditor(text: $draft)
-                        .font(.body)
-                        .padding(.horizontal, 8)
-                        .onChange(of: draft) { _ in
-                            scheduleDraftSync()
-                            updateSpeechCaches()
-                        }
+            vStackWithTitleAndEditor
+                .safeAreaInset(edge: isLandscape ? .trailing : .bottom, spacing: 0) {
+                    controlsContainer
                 }
-            }
-            // Anchored as safe-area inset content (not a VStack sibling under the
-            // TextEditor): interrupted keyboard animations used to strand that
-            // sibling mid-screen. Inset content tracks the container's safe-area
-            // rects, which UIKit recomputes on keyboard frame changes.
-            .safeAreaInset(edge: isLandscape ? .trailing : .bottom, spacing: 0) {
-                if isLandscape {
-                    landscapeRail
-                } else {
-                    controlsBar
-                }
-            }
-            .navigationTitle("")
-            .navigationBarTitleDisplayMode(.inline)
+                .navigationTitle("")
+                .navigationBarTitleDisplayMode(.inline)
         )
+    }
+
+    /// Just the VStack with title and editor/preview.
+    @ViewBuilder
+    private var vStackWithTitleAndEditor: some View {
+        VStack(spacing: 0) {
+            titleField
+            editorBody
+        }
+    }
+
+    /// The editor or markdown preview — extracted so the type checker
+    /// handles a simple `some View` child.
+    @ViewBuilder
+    private var editorBody: some View {
+        if renderMarkdown && showPreview {
+            markdownPreview
+        } else {
+            TextEditor(text: $draft)
+                .font(.body)
+                .padding(.horizontal, 8)
+                .onChange(of: draft) { _ in
+                    scheduleDraftSync()
+                    updateSpeechCaches()
+                }
+        }
+    }
+
+    /// The bottom bar (portrait) or right-side rail (landscape).
+    @ViewBuilder
+    private var controlsContainer: some View {
+        if isLandscape { landscapeRail } else { controlsBar }
     }
 
     private func withToolbar<V: View>(_ base: V) -> AnyView {
