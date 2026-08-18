@@ -72,10 +72,25 @@ struct NoteEditorView: View {
 
     var body: some View { editorStack }
 
-    /// The entire view stack extracted so the type checker sees it as a
-    /// single opaque view (`AnyView`), avoiding the per-expression complexity
-    /// limit that makes the compiler emit "failed to produce diagnostic".
+    /// The full view stack — each modifier group lives in its own
+    /// `AnyView`-erased computed property so the type checker never sees
+    /// the complete chain as one expression (its complexity budget is
+    /// exceeded by the combination of VStack + safeAreaInset + toolbar +
+    /// sheets + alerts + lifecycle modifiers).
     private var editorStack: AnyView {
+        withLifecycle(
+            withExportAlert(
+                withSheets(
+                    withDeleteDialog(
+                        withToolbar(baseContent)
+                    )
+                )
+            )
+        )
+    }
+
+    /// Core content: VStack + safeAreaInset + navigation.
+    private var baseContent: AnyView {
         AnyView(
             VStack(spacing: 0) {
                 titleField
@@ -104,7 +119,12 @@ struct NoteEditorView: View {
             }
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
+        )
+    }
+
+    private func withToolbar<V: View>(_ base: V) -> AnyView {
+        AnyView(
+            base.toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Menu {
                         if renderMarkdown {
@@ -164,7 +184,12 @@ struct NoteEditorView: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            .confirmationDialog(
+        )
+    }
+
+    private func withDeleteDialog<V: View>(_ base: V) -> AnyView {
+        AnyView(
+            base.confirmationDialog(
                 "Delete this note?",
                 isPresented: $showingDeleteConfirm,
                 titleVisibility: .visible
@@ -176,40 +201,57 @@ struct NoteEditorView: View {
                 }
                 Button("Cancel", role: .cancel) {}
             }
-            .sheet(isPresented: $showingSettings) {
-                SettingsView()
-            }
-            .sheet(isPresented: $showingVoicePicker) {
-                VoicePickerSheet(scope: voicePickerScope)
-                    .environmentObject(player)
-            }
-            .sheet(isPresented: shareSheetBinding) {
-                if let url = player.shareURL {
-                    ShareSheet(items: [url])
+        )
+    }
+
+    private func withSheets<V: View>(_ base: V) -> AnyView {
+        AnyView(
+            base
+                .sheet(isPresented: $showingSettings) {
+                    SettingsView()
                 }
-            }
-            .alert("Export failed", isPresented: exportErrorBinding) {
+                .sheet(isPresented: $showingVoicePicker) {
+                    VoicePickerSheet(scope: voicePickerScope)
+                        .environmentObject(player)
+                }
+                .sheet(isPresented: shareSheetBinding) {
+                    if let url = player.shareURL {
+                        ShareSheet(items: [url])
+                    }
+                }
+        )
+    }
+
+    private func withExportAlert<V: View>(_ base: V) -> AnyView {
+        AnyView(
+            base.alert("Export failed", isPresented: exportErrorBinding) {
                 Button("OK") { player.dismissExportError() }
             } message: {
                 Text(exportErrorMessage ?? "")
             }
-            .onAppear {
-                guard !didLoad else { return }
-                draft = currentNote?.text ?? ""
-                titleDraft = currentNote?.explicitTitle ?? ""
-                didLoad = true
-                updateSpeechCaches()
-            }
-            .onDisappear {
-                draftSyncTask?.cancel()
-                draftSyncTask = nil
-                saveDraft()
-                notes.flushNow()
-            }
-            .onChange(of: player.shareURL) { newValue in
-                if newValue != nil { Haptics.success() }
-            }
-            .onChange(of: renderMarkdown) { _ in updateSpeechCaches() }
+        )
+    }
+
+    private func withLifecycle<V: View>(_ base: V) -> AnyView {
+        AnyView(
+            base
+                .onAppear {
+                    guard !didLoad else { return }
+                    draft = currentNote?.text ?? ""
+                    titleDraft = currentNote?.explicitTitle ?? ""
+                    didLoad = true
+                    updateSpeechCaches()
+                }
+                .onDisappear {
+                    draftSyncTask?.cancel()
+                    draftSyncTask = nil
+                    saveDraft()
+                    notes.flushNow()
+                }
+                .onChange(of: player.shareURL) { newValue in
+                    if newValue != nil { Haptics.success() }
+                }
+                .onChange(of: renderMarkdown) { _ in updateSpeechCaches() }
         )
     }
 
