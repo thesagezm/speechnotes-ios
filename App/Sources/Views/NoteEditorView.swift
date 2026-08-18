@@ -71,58 +71,60 @@ struct NoteEditorView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            titleField
-            editorBody
-        }
-        .safeAreaInset(edge: isLandscape ? .trailing : .bottom, spacing: 0) {
-            controlsContainer
-        }
-        .navigationTitle("")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar { toolbarContent }
-        .confirmationDialog(
-            "Delete this note?",
-            isPresented: $showingDeleteConfirm,
-            titleVisibility: .visible
-        ) {
-            Button("Delete note", role: .destructive) {
-                player.stop()
-                notes.delete(noteId: noteId)
-                dismiss()
+        AnyView(
+            VStack(spacing: 0) {
+                titleField
+                editorBody
             }
-            Button("Cancel", role: .cancel) {}
-        }
-        .sheet(isPresented: $showingSettings) { SettingsView() }
-        .sheet(isPresented: $showingVoicePicker) {
-            VoicePickerSheet(scope: voicePickerScope)
-                .environmentObject(player)
-        }
-        .sheet(isPresented: shareSheetBinding) {
-            if let url = player.shareURL { ShareSheet(items: [url]) }
-        }
-        .alert("Export failed", isPresented: exportErrorBinding) {
-            Button("OK") { player.dismissExportError() }
-        } message: {
-            Text(exportErrorMessage ?? "")
-        }
-        .onAppear {
-            guard !didLoad else { return }
-            draft = currentNote?.text ?? ""
-            titleDraft = currentNote?.explicitTitle ?? ""
-            didLoad = true
-            updateSpeechCaches()
-        }
-        .onDisappear {
-            draftSyncTask?.cancel()
-            draftSyncTask = nil
-            saveDraft()
-            notes.flushNow()
-        }
-        .onChange(of: player.shareURL) { newValue in
-            if newValue != nil { Haptics.success() }
-        }
-        .onChange(of: renderMarkdown) { _ in updateSpeechCaches() }
+            .safeAreaInset(edge: isLandscape ? .trailing : .bottom, spacing: 0) {
+                controlsContainer
+            }
+            .navigationTitle("")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { toolbarContent }
+            .confirmationDialog(
+                "Delete this note?",
+                isPresented: $showingDeleteConfirm,
+                titleVisibility: .visible
+            ) {
+                Button("Delete note", role: .destructive) {
+                    player.stop()
+                    notes.delete(noteId: noteId)
+                    dismiss()
+                }
+                Button("Cancel", role: .cancel) {}
+            }
+            .sheet(isPresented: $showingSettings) { SettingsView() }
+            .sheet(isPresented: $showingVoicePicker) {
+                VoicePickerSheet(scope: voicePickerScope)
+                    .environmentObject(player)
+            }
+            .sheet(isPresented: shareSheetBinding) {
+                if let url = player.shareURL { ShareSheet(items: [url]) }
+            }
+            .alert("Export failed", isPresented: exportErrorBinding) {
+                Button("OK") { player.dismissExportError() }
+            } message: {
+                Text(exportErrorMessage ?? "")
+            }
+            .onAppear {
+                guard !didLoad else { return }
+                draft = currentNote?.text ?? ""
+                titleDraft = currentNote?.explicitTitle ?? ""
+                didLoad = true
+                updateSpeechCaches()
+            }
+            .onDisappear {
+                draftSyncTask?.cancel()
+                draftSyncTask = nil
+                saveDraft()
+                notes.flushNow()
+            }
+            .onChange(of: player.shareURL) { newValue in
+                if newValue != nil { Haptics.success() }
+            }
+            .onChange(of: renderMarkdown) { _ in updateSpeechCaches() }
+        )
     }
 
     @ViewBuilder
