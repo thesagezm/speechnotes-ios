@@ -124,10 +124,10 @@ struct NoteEditorView: View {
         )
     }
 
-    /// Title + editor/preview + safe-area-inset controls + navigation + toolbar.
+    /// Title + editor/preview + safe-area-inset controls.
     /// Wrapped in AnyView so the type checker evaluates this as one opaque
     /// view, not a giant nested expression.
-    private var baseStack: AnyView {
+    private var coreStack: AnyView {
         AnyView(
             VStack(spacing: 0) {
                 titleField
@@ -136,9 +136,16 @@ struct NoteEditorView: View {
             .safeAreaInset(edge: isLandscape ? .trailing : .bottom, spacing: 0) {
                 controlsContainer
             }
-            .navigationTitle("")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar { toolbarContent }
+        )
+    }
+
+    /// coreStack + navigation + toolbar.
+    private var baseStack: AnyView {
+        AnyView(
+            coreStack
+                .navigationTitle("")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar { toolbarContent }
         )
     }
 
