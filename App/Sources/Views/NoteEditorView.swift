@@ -30,9 +30,6 @@ struct NoteEditorView: View {
 
     private var speechText: String { cachedSpeechText }
 
-    /// iPhone landscape = vertically compact; portrait = regular.
-    private var isLandscape: Bool { verticalSizeClass == .compact }
-
     private var playIcon: String {
         switch player.state {
         case .generating: return "hourglass"
@@ -70,87 +67,18 @@ struct NoteEditorView: View {
         return "\(words) words · ~\(minutes) min listen"
     }
 
-    var body: some View { editorStack }
-
-    /// The full view stack — each modifier group lives in its own
-    /// `AnyView`-erased computed property so the type checker never sees
-    /// the complete chain as one expression (its complexity budget is
-    /// exceeded by the combination of VStack + safeAreaInset + toolbar +
-    /// sheets + alerts + lifecycle modifiers).
-    private var editorStack: AnyView {
-        withLifecycle(
-            withExportAlert(
-                withSheets(
-                    withDeleteDialog(
-                        withToolbar(baseContent)
-                    )
-                )
-            )
-        )
-    }
-
-    /// Core content: VStack + safeAreaInset + navigation — split into
-    /// minimal pieces so the type checker never chokes.
-    private var baseContent: AnyView {
-        AnyView(
-            navigationView
-        )
-    }
-
-    /// VStack + safeAreaInset only.
-    private var vStackWithInset: AnyView {
-        AnyView(
-            vStackWithTitleAndEditor
-                .safeAreaInset(edge: isLandscape ? .trailing : .bottom, spacing: 0) {
-                    controlsContainer
-                }
-        )
-    }
-
-    /// vStackWithInset + navigation title + display mode.
-    private var navigationView: AnyView {
-        AnyView(
-            vStackWithInset
-                .navigationTitle("")
-                .navigationBarTitleDisplayMode(.inline)
-        )
-    }
-
-    /// Just the VStack with title and editor/preview.
-    @ViewBuilder
-    private var vStackWithTitleAndEditor: some View {
-        VStack(spacing: 0) {
-            titleField
-            editorBody
-        }
-    }
-
-    /// The editor or markdown preview — extracted so the type checker
-    /// handles a simple `some View` child.
-    @ViewBuilder
-    private var editorBody: some View {
-        if renderMarkdown && showPreview {
-            markdownPreview
-        } else {
-            TextEditor(text: $draft)
-                .font(.body)
-                .padding(.horizontal, 8)
-                .onChange(of: draft) { _ in
-                    scheduleDraftSync()
-                    updateSpeechCaches()
-                }
-        }
-    }
-
-    /// The bottom bar (portrait) or right-side rail (landscape).
-    @ViewBuilder
-    private var controlsContainer: some View {
-        if isLandscape { landscapeRail } else { controlsBar }
-    }
-
-    private func withToolbar<V: View>(_ base: V) -> AnyView {
-        AnyView(
-            base.toolbar {
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                titleField
+                editorBody
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                controlsBar
+            }
+            .navigationTitle("")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Menu {
                         if renderMarkdown {
@@ -210,195 +138,83 @@ struct NoteEditorView: View {
                         .foregroundStyle(.secondary)
                 }
             }
-        )
-    }
-
-    private func withDeleteDialog<V: View>(_ base: V) -> AnyView {
-        AnyView(
-            base.confirmationDialog(
-                "Delete this note?",
-                isPresented: $showingDeleteConfirm,
-                titleVisibility: .visible
-            ) {
-                Button("Delete note", role: .destructive) {
-                    player.stop()
-                    notes.delete(noteId: noteId)
-                    dismiss()
-                }
-                Button("Cancel", role: .cancel) {}
+        }
+        .confirmationDialog(
+            "Delete this note?",
+            isPresented: $showingDeleteConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Delete note", role: .destructive) {
+                player.stop()
+                notes.delete(noteId: noteId)
+                dismiss()
             }
-        )
-    }
-
-    private func withSheets<V: View>(_ base: V) -> AnyView {
-        AnyView(
-            base
-                .sheet(isPresented: $showingSettings) {
-                    SettingsView()
-                }
-                .sheet(isPresented: $showingVoicePicker) {
-                    VoicePickerSheet(scope: voicePickerScope)
-                        .environmentObject(player)
-                }
-                .sheet(isPresented: shareSheetBinding) {
-                    if let url = player.shareURL {
-                        ShareSheet(items: [url])
-                    }
-                }
-        )
-    }
-
-    private func withExportAlert<V: View>(_ base: V) -> AnyView {
-        AnyView(
-            base.alert("Export failed", isPresented: exportErrorBinding) {
-                Button("OK") { player.dismissExportError() }
-            } message: {
-                Text(exportErrorMessage ?? "")
+            Button("Cancel", role: .cancel) {}
+        }
+        .sheet(isPresented: $showingSettings) {
+            SettingsView()
+        }
+        .sheet(isPresented: $showingVoicePicker) {
+            VoicePickerSheet(scope: voicePickerScope)
+                .environmentObject(player)
+        }
+        .sheet(isPresented: shareSheetBinding) {
+            if let url = player.shareURL {
+                ShareSheet(items: [url])
             }
-        )
+        }
+        .alert("Export failed", isPresented: exportErrorBinding) {
+            Button("OK") { player.dismissExportError() }
+        } message: {
+            Text(exportErrorMessage ?? "")
+        }
+        .onAppear {
+            guard !didLoad else { return }
+            draft = currentNote?.text ?? ""
+            titleDraft = currentNote?.explicitTitle ?? ""
+            didLoad = true
+            updateSpeechCaches()
+        }
+        .onDisappear {
+            draftSyncTask?.cancel()
+            draftSyncTask = nil
+            saveDraft()
+            notes.flushNow()
+        }
+        .onChange(of: player.shareURL) { newValue in
+            if newValue != nil { Haptics.success() }
+        }
+        .onChange(of: renderMarkdown) { _ in updateSpeechCaches() }
     }
 
-    private func withLifecycle<V: View>(_ base: V) -> AnyView {
-        AnyView(
-            base
-                .onAppear {
-                    guard !didLoad else { return }
-                    draft = currentNote?.text ?? ""
-                    titleDraft = currentNote?.explicitTitle ?? ""
-                    didLoad = true
+    // MARK: - Editor
+
+    @ViewBuilder
+    private var editorBody: some View {
+        if renderMarkdown && showPreview {
+            markdownPreview
+        } else {
+            TextEditor(text: $draft)
+                .font(.body)
+                .padding(.horizontal, 8)
+                .onChange(of: draft) { _ in
+                    scheduleDraftSync()
                     updateSpeechCaches()
                 }
-                .onDisappear {
-                    draftSyncTask?.cancel()
-                    draftSyncTask = nil
-                    saveDraft()
-                    notes.flushNow()
-                }
-                .onChange(of: player.shareURL) { newValue in
-                    if newValue != nil { Haptics.success() }
-                }
-                .onChange(of: renderMarkdown) { _ in updateSpeechCaches() }
-        )
-    }
-
-    // MARK: - Landscape side rail
-
-    /// Landscape layout: controls live in a vertical rail on the trailing
-    /// edge (user request — controls on the side, not the top, keeps the
-    /// reading surface tall and clean). Portrait keeps the bottom bar.
-    private var landscapeRail: some View {
-        HStack(spacing: 10) {
-            railProgressStrip
-            railControls
-        }
-        .padding(.leading, 4)
-        .padding(.trailing, 8)
-        .padding(.vertical, 10)
-        .frame(maxWidth: 78)
-        .background(.bar)
-        .ignoresSafeArea(.container, edges: .bottom)
-    }
-
-    /// Thin vertical progress strip on the rail's leading edge — the
-    /// landscape twin of the portrait bar's progress capsule, filling
-    /// bottom-up.
-    @ViewBuilder
-    private var railProgressStrip: some View {
-        if let progress = player.progress, player.state == .speaking {
-            GeometryReader { proxy in
-                ZStack(alignment: .bottom) {
-                    Capsule().fill(Color.secondary.opacity(0.25)).frame(width: 3)
-                    Capsule()
-                        .fill(
-                            LinearGradient(
-                                colors: [.accentColor, .purple],
-                                startPoint: .bottom,
-                                endPoint: .top
-                            )
-                        )
-                        .frame(width: 3, height: max(4, proxy.size.height * progress))
-                }
-            }
-            .frame(width: 3)
-        } else {
-            Divider()
         }
     }
 
-    private var railControls: some View {
-        VStack(spacing: 10) {
-            Button {
-                showingVoicePicker = true
-            } label: {
-                Image(systemName: "person.wave.2.fill")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 34, height: 34)
-                    .background(Circle().fill(Color.secondary.opacity(0.12)))
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Change voice")
+    // MARK: - Markdown preview
 
-            Button {
+    private var markdownPreview: some View {
+        MarkdownPreviewView(markdown: draft)
+            .onTapGesture {
                 Haptics.tap()
-                player.togglePlay(speechText, note: currentNote)
-            } label: {
-                ZStack {
-                    Circle()
-                        .fill(
-                            LinearGradient(
-                                colors: [.accentColor, .purple],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                        .shadow(color: .black.opacity(0.15), radius: 6, y: 3)
-                    if player.state == .generating {
-                        ProgressView().tint(.white)
-                    } else {
-                        Image(systemName: playIcon)
-                            .font(.body.bold())
-                            .foregroundStyle(.white)
-                    }
-                }
-                .frame(width: 46, height: 46)
+                showPreview = false
             }
-            .disabled(playButtonDisabled)
-
-            if player.state == .speaking || player.state == .paused || player.state == .generating {
-                Button {
-                    Haptics.press()
-                    player.stop()
-                } label: {
-                    Image(systemName: "stop.fill")
-                        .font(.footnote.weight(.bold))
-                        .foregroundStyle(.red)
-                        .frame(width: 30, height: 30)
-                        .background(Circle().fill(Color.red.opacity(0.12)))
-                }
-            }
-
-            Spacer(minLength: 0)
-
-            Text(String(format: "%.2f×", player.rateMultiplier))
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.secondary)
-
-            // Vertical slider: lay the slider out horizontally at the slot's
-            // HEIGHT, then rotate the visual 90° counter-clockwise around its
-            // center (hit-testing follows the rotation). Min lands at the
-            // bottom — slower down, faster up.
-            GeometryReader { proxy in
-                Slider(value: $player.rateMultiplier, in: 0.5...2.0, step: 0.05)
-                    .rotationEffect(.degrees(-90))
-                    .frame(width: proxy.size.height)
-                    .position(x: proxy.size.width / 2, y: proxy.size.height / 2)
-            }
-            .frame(width: 34, height: 110)
-        }
     }
 
-    // MARK: - Controls
+    // MARK: - Controls bar
 
     private var controlsBar: some View {
         VStack(spacing: 8) {
@@ -505,7 +321,6 @@ struct NoteEditorView: View {
 
     // MARK: - Title field
 
-    /// Editable note title; blank falls back to the first-line-derived title.
     @ViewBuilder
     private var titleField: some View {
         Group {
@@ -525,19 +340,6 @@ struct NoteEditorView: View {
         }
         .padding(.horizontal, 12)
         .padding(.top, 8)
-    }
-
-    // MARK: - Markdown preview
-
-    /// Reading mode for markdown notes: block-rendered layout via
-    /// MarkdownPreviewView; tap anywhere to return to editing.
-    private var markdownPreview: some View {
-        MarkdownPreviewView(markdown: draft)
-            .onTapGesture {
-                // Tap to edit — readers expect the whole surface to be a toggle.
-                Haptics.tap()
-                showPreview = false
-            }
     }
 
     // MARK: - Export helpers
