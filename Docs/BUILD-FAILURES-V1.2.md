@@ -181,3 +181,45 @@ git show 9ba9633:App/Sources/Views/NoteEditorView.swift > /tmp/v11.swift
 ```
 
 If that compiles, the rail is the sole blocker.
+
+---
+
+## RESOLUTION (2026-08-18, later the same day)
+
+The type-checker war ended at `f2fb11f` (Option B: rail dropped) — CI green,
+`v1.2.0` released with the IPA. **The build then black-screened at launch on
+the device inside LiveContainer; user deleted the release.**
+
+### Byte-level root-cause hunt
+
+Compared the shipped v1.2 IPA against the working v1.1.0 release IPA:
+
+- File lists **identical** (every bundle/resource byte-identical, MD5s match).
+- Mach-O load commands **identical**: same LC_LOAD_DYLIB set (system/swift
+  only — the CI verify step holds), same platform/minOS/SDK fields → no
+  Xcode-image drift between the two builds.
+- Info.plist delta: **exactly one key** — `UISupportedInterfaceOrientations`
+  gained `LandscapeLeft`/`LandscapeRight` (STEP 1).
+- Code delta: NoteEditorView restructure (not instantiated at launch),
+  SpeechPlayer debounced rate persist (init untouched), NotesListView preview
+  cap (pure string ops). The launch path is unchanged and inert.
+
+**Conclusion (by elimination): the landscape orientation plist keys crash the
+app at launch inside LiveContainer on iOS 26.5.** LiveContainer itself lists
+all three orientations in its container plist and reads nothing from the
+guest's orientation keys, so the crash is in the guest/UIKit scene-setup
+interaction — consistent with LC issue #1461 (guest-app layout bugs caused by
+plist orientation entries).
+
+### v1.2.1 (commit `a011c5c`)
+
+Bisect release: orientations reverted to portrait-only (with a warning
+comment in `project.yml`), everything else kept (safeAreaInset bar anchor +
+perf pass). If v1.2.1 runs on device, the trigger is confirmed and landscape
+returns in v1.3 only via a device-tested LiveContainer-safe route (candidate:
+LC's per-app Orientation Lock; note it only FORCE-locks one orientation, it
+does not enable auto-rotation).
+
+**Lesson: one metadata change + one code change must never ship together —
+the v1.2 cycle burned 19 CI runs on a code theory while the real killer was
+two plist lines.**

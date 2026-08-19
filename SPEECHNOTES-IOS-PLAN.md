@@ -1,5 +1,55 @@
 # Speechnotes iOS — Master Plan
 
+> **HANDOVER v13 (2026-08-19 — THE REAL v1.2, SHIPS AS v1.3.0):** The v1.2
+> cycle ended at **v1.2.2 (`678f020`)**: orientation keys reverted (launch
+> black-screen), then the editor restructure reverted too (NavigationStack +
+> safeAreaInset **crashed on note open on device**) — v1.2.2 = the exact
+> v1.1 editor + perf caches only. User then re-scoped "v1.2" as a FEATURE
+> release: (1) Recycle Bin for deleted notes, (2) a visible Storage tab
+> listing exported WAVs, (3) TTS resume-from-where-I-stopped instead of
+> restarting, (4) a Settings tab with Speech / Appearance (accent + light/
+> dark) / Storage (clear cache + unused files + delete voices) / Import more
+> ONNX voices (<500 MB, GitHub) / About (developer **TheSageZM**).
+> **The complete executable work order is `Docs/PLAN-V1.2-REAL.md` in the
+> repo — read it FIRST, follow it top to bottom.** Versions 1.2.0–1.2.2 are
+> burned; the release ships as **v1.3.0 build 24**. Hard rules baked into
+> that plan: zero `project.yml`/Info.plist changes beyond the version bump;
+> never restructure NoteEditorView (v1.2.2's lesson); new screens in new
+> files (type-checker budget); no new package pins; STT/translation stay
+> dropped. All steps are code-only and device-test checklists are included
+> per step.
+
+> **HANDOVER v12 (2026-08-18 — RECOVERY):** v1.2.0 was released and **withdrawn —
+> the build black-screened at launch on device inside LiveContainer; user
+> deleted the release.** Byte-level IPA diff vs the working v1.1.0 proved the
+> ONLY meaningful delta was the two landscape `UISupportedInterfaceOrientations`
+> plist keys (code delta is launch-inert; Mach-O/dylibs/SDK identical — full
+> writeup in `Docs/BUILD-FAILURES-V1.2.md` in the repo). The 19-commit
+> type-checker war before that was real but ended at `f2fb11f` (rail dropped,
+> CI green). **v1.2.1 (`a011c5c`) = f2fb11f minus the orientation keys: keeps
+> the safeAreaInset bar-freeze fix + perf pass.** If v1.2.1 runs on device →
+> landscape keys confirmed as the killer; landscape returns in v1.3 only via a
+> device-tested LiveContainer-safe route (LC per-app Orientation Lock
+> force-locks one orientation; auto-rotate needs research). If v1.2.1 ALSO
+> black-screens → suspect corrupted LC guest state: remove the app inside
+> LiveContainer and fresh-install before concluding anything. Tag v1.2.0
+> deleted from the remote. **PENDING USER DEVICE TEST of v1.2.1:** (1) app
+> launches; (2) editor bottom controls stay glued through keyboard
+> show/hide/dismiss-swipe; (3) long-note speech + slider drag smooth; (4)
+> regression sweep (export WAV, markdown preview, engine/voice pickers,
+> background playback).
+
+> **HANDOVER v11 (2026-08-17 — SUPERSEDED by v12):** User asked for (1) landscape
+> orientation, (2) fix for the editor's bottom control bar (play/speed/voice)
+> freezing mid-screen, (3) landscape = controls in a RIGHT-side rail, not top,
+> (4) a smoothness/perf pass. The full executable work order is
+> **`Docs/PLAN-V1.2.md` in the repo — read it first; it carries per-step
+> status markers.** Root causes already diagnosed there: orientation locked in
+> `project.yml`; stuck bar = plain-VStack-under-TextEditor keyboard-avoidance
+> bug (fix = `safeAreaInset`); perf = whole-draft walks per render
+> (`speechText`, word count, list previews) + per-tick UserDefaults writes.
+> v1.1's read-along removal stays (user loves it). Target release: v1.2.0.
+
 > **Resuming in a new session?** You're building "Speechnotes iOS" — an offline
 > Speech Note (Linux) clone for iPhone, native Swift/SwiftUI, built from Linux
 > via GitHub Actions (no Mac), sideloaded unsigned via LiveContainer.

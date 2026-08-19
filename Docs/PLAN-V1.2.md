@@ -68,7 +68,7 @@ this plan brings the editor bar to the same pattern.
 
 ---
 
-## STEP 1 — Enable landscape orientation `[x done 2026-08-17]`
+## STEP 1 — Enable landscape orientation `[REVERTED 2026-08-18 — caused the v1.2.0 launch black-screen inside LiveContainer; see Docs/BUILD-FAILURES-V1.2.md resolution. Do NOT re-add without a device-tested LiveContainer-safe plan.]`
 
 **File:** `project.yml`
 
@@ -386,7 +386,12 @@ the preview can only ever show ~120 characters:
 
 ---
 
-## STEP 4 — Version bump, CI, release `[> in progress 2026-08-17]`
+## STEP 4 — Version bump, CI, release `[v1.2.0 shipped & withdrawn; v1.2.1 bisect in flight 2026-08-18]`
+
+**v1.2.0 post-mortem:** release installed → app black-screened at launch on
+device → user deleted the release. Byte-level IPA comparison vs v1.1.0 (see
+`Docs/BUILD-FAILURES-V1.2.md`): the ONLY deltas were the STEP 1 landscape
+plist keys + launch-inert code. v1.2.1 (`a011c5c`) reverts STEP 1 only.
 
 1. `project.yml` settings block: `MARKETING_VERSION: "1.2.0"`,
    `CURRENT_PROJECT_VERSION: "21"`.
