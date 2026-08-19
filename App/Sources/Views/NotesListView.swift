@@ -10,6 +10,7 @@ struct NotesListView: View {
     @State private var sort: SortOrder = SortOrder.stored
     /// Note whose text the share sheet is presenting (leading swipe → Share).
     @State private var sharingNote: Note?
+    @State private var showingRecycleBin = false
 
     enum SortOrder: String, CaseIterable, Identifiable {
         case edited, created, title
@@ -86,6 +87,9 @@ struct NotesListView: View {
             .navigationTitle("Speechnotes")
             .navigationDestination(for: UUID.self) { id in
                 NoteEditorView(noteId: id)
+            }
+            .navigationDestination(isPresented: $showingRecycleBin) {
+                RecycleBinView()
             }
             .searchable(text: $searchText, prompt: "Search notes")
             .toolbar {
@@ -292,11 +296,20 @@ struct NotesListView: View {
                 }
             }
             Divider()
-            Button {
-                showingImporter = true
-            } label: {
-                Label("Import from Files…", systemImage: "folder")
-            }
+ Button {
+ showingImporter = true
+ } label: {
+ Label("Import from Files…", systemImage: "folder")
+ }
+ Divider()
+ Button {
+ showingRecycleBin = true
+ } label: {
+ Label(
+ "Recently Deleted\(!notes.deletedNotes.isEmpty ? " (\(notes.deletedNotes.count))" : "")",
+ systemImage: "trash"
+ )
+ }
             // hasStrings is a cheap content-free check — reading .string here
             // would hit the (possibly remote) pasteboard on every render and
             // can trigger iOS paste prompts. Content is read on tap instead.
