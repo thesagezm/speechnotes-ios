@@ -115,6 +115,126 @@ final class SpeechPlayer: ObservableObject {
     /// the user makes an explicit selection mid-audition.
     private var preAuditionState: (kind: EngineKind, voice: String, kittenVoice: String, supertonicVoice: String)?
 
+    // MARK: - Playback resume bookmark
+
+    struct PlaybackBookmark: Codable {
+        let noteId: UUID
+        let charsDone: Int
+        let textLength: Int
+        let textHash: Int64
+        let savedAt: Date
+    }
+
+    private static let bookmarkKey = "playbackBookmark"
+    /// Set at speak start when a real note is playing; updated per tick.
+    private var inFlightBookmark: PlaybackBookmark?
+    /// Raw engine progress of the CURRENT speak call (0…1 over the text that
+    /// was actually passed to the engine, which on a resume is the suffix).
+    private var lastRawProgress: Double = 0
+    /// Fraction of the full text already spoken when this speak call is a
+    /// resume; published progress is remapped through this.
+    private var resumeBaseFraction: Double = 0
+
+    /// Stable (process-independent) hash — String.hashValue is seeded per
+    /// launch and would invalidate bookmarks across restarts.
+    nonisolated static func stableHash(_ s: String) -> Int64 {
+        var h: Int64 = 5381
+        for scalar in s.unicodeScalars {
+            h = (h &* 33 &+ Int64(scalar.value)) & 0x7FFF_FFFF_FFFF_FFFF
+        }
+        return h
+    }
+
+    /// UTF-16 offset of the last sentence boundary at-or-before charsDone —
+    /// resume re-speaks the interrupted sentence from its start.
+    nonisolated static func resumeOffset(in text: String, charsDone: Int) -> Int {
+        let units = Array(text.utf16)
+        guard charsDone > 0, charsDone < units.count else { return -1 }
+        let terminators: Set<UTF16.CodeUnit> = [
+            UInt16(ascii: "."), UInt16(ascii: "!"), UInt16(ascii: "?"),
+            UInt16(ascii: "\n"), 0x2026, 0x3002, 0xFF01, 0xFF1F, // … 。 ！ ？
+        ]
+        var i = min(charsDone, units.count - 1)
+        while i > 0 {
+            if terminators.contains(units[i]) { return i + 1 }
+            i -= 1
+        }
+        return 0
+    }
+
+    /// Loads the stored bookmark if it's for this note, this exact text,
+    /// recent (<30 days), and at a meaningful position.
+    private func resumePlan(for noteId: UUID, fullText: String) -> (offset: Int, suffix: String)? {
+        guard let data = UserDefaults.standard.data(forKey: Self.bookmarkKey),
+              let mark = try? JSONDecoder().decode(PlaybackBookmark.self, from: data)
+        else { return nil }
+        let length = fullText.utf16.count
+        guard mark.noteId == noteId,
+              mark.textLength == length,
+              mark.textHash == Self.stableHash(fullText),
+              Date().timeIntervalSince(mark.savedAt) < 30 * 24 * 3600,
+              mark.charsDone >= 40,
+              mark.charsDone < length
+        else { return nil }
+        let offset = Self.resumeOffset(in: fullText, charsDone: mark.charsDone)
+        guard offset > 0, offset < length else { return nil }
+        let suffix = String(decoding: Array(fullText.utf16[offset...]), as: UTF16.self)
+        guard !suffix.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return (offset, suffix)
+    }
+
+    /// True when the editor should show "Restart from beginning".
+    func hasResumeOption(for noteId: UUID, text: String) -> Bool {
+        resumePlan(for: noteId, fullText: text) != nil
+    }
+
+    /// Call on background/suspension — wired into SpeechnotesApp's
+    /// scenePhase hook.
+    func persistPlaybackBookmark() {
+        guard let mark = inFlightBookmark else { return }
+        if let data = try? JSONEncoder().encode(mark) {
+            UserDefaults.standard.set(data, forKey: Self.bookmarkKey)
+        }
+    }
+
+    private func clearBookmark() {
+        inFlightBookmark = nil
+        UserDefaults.standard.removeObject(forKey: Self.bookmarkKey)
+    }
+
+    /// Stop + speak the full text from the start, clearing any bookmark.
+    func restartFromBeginning(_ text: String, note: Note?) {
+        clearBookmark()
+        stop()
+        nowPlayingTitle = note?.title
+        nowPlayingNoteId = note?.id
+        resumeBaseFraction = 0
+        lastRawProgress = 0
+        if let note { primeBookmark(noteId: note.id, fullText: text) }
+        engine?.speak(text, rateMultiplier: rateMultiplier)
+    }
+
+    private func primeBookmark(noteId: UUID, fullText: String) {
+        inFlightBookmark = PlaybackBookmark(
+            noteId: noteId,
+            charsDone: 0,
+            textLength: fullText.utf16.count,
+            textHash: Self.stableHash(fullText),
+            savedAt: Date()
+        )
+    }
+
+    /// Raw engine progress maps back to absolute chars: on a resume the
+    /// engine only ever saw the suffix.
+    private func updateBookmarkChars(rawProgress: Double) {
+        guard var mark = inFlightBookmark else { return }
+        let base = resumeBaseFraction * Double(mark.textLength)
+        let suffixLength = max(1, Double(mark.textLength) - base)
+        mark.charsDone = min(mark.textLength - 1, Int(base + rawProgress * suffixLength))
+        mark.savedAt = Date()
+        inFlightBookmark = mark
+    }
+
     /// True while an audition sample is sounding.
     var isAuditioning: Bool { auditioningVoice != nil }
     /// The compact player bar is shown while real speech is active (never
@@ -234,6 +354,13 @@ final class SpeechPlayer: ObservableObject {
             Task { @MainActor in
                 self?.state = newState
                 if newState == .idle {
+                    if self?.lastRawProgress >= 0.98 {
+                        self?.clearBookmark()            // finished naturally
+                    } else if self?.inFlightBookmark != nil {
+                        self?.persistPlaybackBookmark()  // stopped part-way
+                    }
+                    self?.lastRawProgress = 0
+                    self?.resumeBaseFraction = 0
                     self?.nowPlayingTitle = nil
                     self?.nowPlayingNoteId = nil
                     self?.finishAuditionIfActive()
@@ -242,7 +369,12 @@ final class SpeechPlayer: ObservableObject {
         }
         engine?.onProgress = { [weak self] value in
             Task { @MainActor in
-                self?.progress = value > 0 ? value : nil
+                guard let self else { return }
+                self.lastRawProgress = value
+                let mapped = self.resumeBaseFraction
+                    + (1 - self.resumeBaseFraction) * value
+                self.progress = value > 0 ? min(1.0, mapped) : nil
+                self.updateBookmarkChars(rawProgress: value)
             }
         }
     }
@@ -266,6 +398,17 @@ final class SpeechPlayer: ObservableObject {
         case .idle:
             nowPlayingTitle = note?.title
             nowPlayingNoteId = note?.id
+            resumeBaseFraction = 0
+            lastRawProgress = 0
+            if let note {
+                primeBookmark(noteId: note.id, fullText: text)
+                if let plan = resumePlan(for: note.id, fullText: text) {
+                    resumeBaseFraction = Double(plan.offset) / Double(max(1, text.utf16.count))
+                    Log.shared.info("SpeechPlayer: resuming note at char \(plan.offset)/\(text.utf16.count)")
+                    engine?.speak(plan.suffix, rateMultiplier: rateMultiplier)
+                    return
+                }
+            }
             engine?.speak(text, rateMultiplier: rateMultiplier)
         }
     }

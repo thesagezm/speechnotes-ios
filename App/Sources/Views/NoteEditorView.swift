@@ -119,6 +119,14 @@ struct NoteEditorView: View {
                     } label: {
                         Label("Speech settings", systemImage: "speaker.wave.2")
                     }
+                    if player.hasResumeOption(for: noteId, text: speechText) {
+                        Button {
+                            Haptics.tap()
+                            player.restartFromBeginning(speechText, note: currentNote)
+                        } label: {
+                            Label("Restart from beginning", systemImage: "gobackward")
+                        }
+                    }
                     Divider()
                     Button(role: .destructive) {
                         showingDeleteConfirm = true

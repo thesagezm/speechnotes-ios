@@ -87,4 +87,17 @@ extension SystemEngine: AVSpeechSynthesizerDelegate {
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
         DispatchQueue.main.async { self.state = .idle }
     }
+
+    /// Fires before each spoken word-range; location+length ≈ chars spoken
+    /// so far — feeds SpeechPlayer's resume bookmark.
+    func speechSynthesizer(
+        _ synthesizer: AVSpeechSynthesizer,
+        willSpeakRangeOfSpeechString characterRange: NSRange,
+        utterance: AVSpeechUtterance
+    ) {
+        let total = (utterance.speechString as NSString).length
+        guard total > 0, characterRange.location + characterRange.length > 0 else { return }
+        let fraction = Double(characterRange.location + characterRange.length) / Double(total)
+        DispatchQueue.main.async { self.onProgress?(min(1.0, fraction)) }
+    }
 }
