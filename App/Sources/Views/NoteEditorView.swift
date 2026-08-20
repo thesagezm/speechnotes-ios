@@ -102,16 +102,17 @@ struct NoteEditorView: View {
         .toolbar {
             ToolbarItem(placement: .navigationBarLeading) {
                 EditorMicButton(
+                    onTranscribed: { text in
+                        if !draft.isEmpty, !draft.hasSuffix(" "), !draft.hasSuffix("\n") {
+                            draft += " "
+                        }
+                        draft += text
+                        scheduleDraftSync()
+                        updateSpeechCaches()
+                        Haptics.success()
+                    },
                     keyboardRefreshTrigger: { keyboardRefreshTrigger &+= 1 }
-                ) { text in
-                    if !draft.isEmpty, !draft.hasSuffix(" "), !draft.hasSuffix("\n") {
-                        draft += " "
-                    }
-                    draft += text
-                    scheduleDraftSync()
-                    updateSpeechCaches()
-                    Haptics.success()
-                }
+                )
             }
             ToolbarItem(placement: .navigationBarTrailing) {
                 Menu {

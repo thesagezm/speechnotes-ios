@@ -100,15 +100,16 @@ final class WhisperCppEngine: STTEngine {
             guard let outBuf = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: outCapacity) else { return }
             var error: NSError?
             var inputProvided = false
-            converter.convert(to: outBuf, error: &error) { _, status in
+            let supply: AVAudioConverterInputBlock = { _, status in
                 if inputProvided {
                     status.pointee = .endOfStream
-                    return
+                    return nil
                 }
                 inputProvided = true
                 status.pointee = .haveData
                 return buffer
             }
+            converter.convert(to: outBuf, error: &error, withInputFrom: supply)
             if error == nil, let channelData = outBuf.floatChannelData?[0] {
                 let frames = Int(outBuf.frameLength)
                 let samples = Array(UnsafeBufferPointer(start: channelData, count: frames))

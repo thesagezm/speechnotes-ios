@@ -7,10 +7,15 @@ struct EditorMicButton: View {
     /// Called on the main actor with the finalized transcript when the
     /// dictation sheet dismisses. The editor appends it at the cursor.
     var onTranscribed: ((String) -> Void)?
-
-    /// Bumps when the sheet has just dismissed; the editor uses this to
-    /// re-bring the keyboard into the layout and recentre the text view.
     var keyboardRefreshTrigger: (() -> Void)?
+
+    init(
+        onTranscribed: ((String) -> Void)? = nil,
+        keyboardRefreshTrigger: (() -> Void)? = nil
+    ) {
+        self.onTranscribed = onTranscribed
+        self.keyboardRefreshTrigger = keyboardRefreshTrigger
+    }
 
     var body: some View {
         Button {
