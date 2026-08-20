@@ -25,9 +25,9 @@ struct DictationSheetView: View {
 
                 Picker("Language", selection: $languageHint) {
                     Text("Auto").tag("auto")
-                    PickerItem("English", id: "en-US")
-                    PickerItem("Spanish", id: "es-ES")
-                    PickerItem("French", id: "fr-FR")
+                    Text("English").tag("en-US")
+                    Text("Spanish").tag("es-ES")
+                    Text("French").tag("fr-FR")
                 }
                 .pickerStyle(.segmented)
                 .padding(.horizontal)
@@ -57,18 +57,4 @@ struct DictationSheetView: View {
             }
         }
     }
-}
-
-private struct PickerItem: Identifiable {
-    let label: String
-    let id: String
-    var body: Text { Text(label) }
-    var idValue: String { id }
-}
-extension PickerItem: Hashable {
-    static func == (lhs: PickerItem, rhs: PickerItem) -> Bool { lhs.id == rhs.id }
-    func hash(into hasher: inout Hasher) { hasher.combine(id) }
-}
-extension PickerItem {
-    init(_ label: String, id: String) { self.label = label; self.id = id }
 }
