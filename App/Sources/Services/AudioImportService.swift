@@ -57,7 +57,7 @@ final class AudioImportService {
         }.value
     }
 
-    private static func decode(url: URL) throws -> [Float] {
+    nonisolated private static func decode(url: URL) throws -> [Float] {
         let asset = AVURLAsset(url: url)
         guard let track = asset.tracks(withMediaType: .audio).first else {
             throw ImportError.noAudioTrack
@@ -123,7 +123,7 @@ final class AudioImportService {
         return collected
     }
 
-    private static func linearResample(_ samples: [Float], fromRate: Float64, toRate: Float64) -> [Float] {
+    nonisolated private static func linearResample(_ samples: [Float], fromRate: Float64, toRate: Float64) -> [Float] {
         guard fromRate > 0, toRate > 0, !samples.isEmpty else { return samples }
         let ratio = toRate / fromRate
         let outCount = Int(Double(samples.count) * ratio)
