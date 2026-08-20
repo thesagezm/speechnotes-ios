@@ -70,6 +70,9 @@ final class WhisperCppEngine: STTEngine {
         ringBuffer.removeAll(keepingCapacity: true)
         ringLock.unlock()
         if !snapshot.isEmpty { runInference(samples: snapshot, isFinal: true) }
+        // Hand the audio session back to the TTS engines — without this,
+        // Supertonic surfaces `kAUInitialize` -10851 on the next speak.
+        AudioSessionResetter.restoreForPlayback()
         currentState = .idle
     }
 

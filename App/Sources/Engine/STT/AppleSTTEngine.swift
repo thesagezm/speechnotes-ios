@@ -49,6 +49,12 @@ final class AppleSTTEngine: STTEngine {
         audioEngine?.inputNode.removeTap(onBus: 0)
         audioEngine = nil
 
+        // Restore the playback category so the TTS engine's AVAudioEngine
+        // can initialise its output node. Without this, Supertonic /
+        // Kokoro / Apple TTS surfaces `kAUInitialize` -10851 until the user
+        // flips to another engine and back.
+        AudioSessionResetter.restoreForPlayback()
+
         currentState = .idle
         onPartial?("")
     }

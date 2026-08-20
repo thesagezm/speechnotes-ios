@@ -13,6 +13,8 @@ struct NoteEditorView: View {
     @State private var showingSettings = false
     @State private var showingVoicePicker = false
     @State private var showingDeleteConfirm = false
+    @State private var keyboardRefreshTrigger = 0
+    @FocusState private var editorFocused: Bool
     /// Markdown reading mode — only meaningful when the Render Markdown
     /// setting is on; the editor always opens in edit mode.
     @State private var showPreview = false
@@ -78,9 +80,18 @@ struct NoteEditorView: View {
                 TextEditor(text: $draft)
                     .font(.body)
                     .padding(.horizontal, 8)
+                    .focused($editorFocused)
                     .onChange(of: draft) { _ in
                         scheduleDraftSync()
                         updateSpeechCaches()
+                    }
+                    .onChange(of: keyboardRefreshTrigger) { _ in
+                        // Sheet dismissed — re-claim focus so the controls
+                        // bar collapses back below the keyboard instead of
+                        // staying glued above the dismiss position.
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                            editorFocused = true
+                        }
                     }
             }
 
@@ -90,7 +101,9 @@ struct NoteEditorView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .navigationBarLeading) {
-                EditorMicButton { text in
+                EditorMicButton(
+                    keyboardRefreshTrigger: $keyboardRefreshTrigger
+                ) { text in
                     if !draft.isEmpty, !draft.hasSuffix(" "), !draft.hasSuffix("\n") {
                         draft += " "
                     }

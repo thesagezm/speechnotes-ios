@@ -8,6 +8,10 @@ struct EditorMicButton: View {
     /// dictation sheet dismisses. The editor appends it at the cursor.
     var onTranscribed: ((String) -> Void)?
 
+    /// Bumps when the sheet has just dismissed; the editor uses this to
+    /// re-bring the keyboard into the layout and recentre the text view.
+    @Binding var keyboardRefreshTrigger: Int
+
     var body: some View {
         Button {
             showingSheet = true
@@ -21,7 +25,12 @@ struct EditorMicButton: View {
                 .onDisappear {
                     let text = dictation.consumeFinal()
                     if !text.isEmpty { onTranscribed?(text) }
+                    // After a sheet, SwiftUI sometimes forgets the keyboard
+                    // safe-area inset — nudge it by bumping a trigger the
+                    // editor observes (it bounces focus for one tick).
+                    keyboardRefreshTrigger &+= 1
                 }
         }
     }
 }
+
