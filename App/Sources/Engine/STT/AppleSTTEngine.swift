@@ -64,6 +64,82 @@ final class AppleSTTEngine: STTEngine {
         stop()
     }
 
+    // MARK: - File transcription (uses SFSpeechURLRecognitionRequest).
+    func transcribeFile(samples: [Float], language: String?) async throws -> String {
+        // SFSpeechRecognizer prefers a file URL; we hand the samples back
+        // by writing them to a temp WAV and pointing the recogniser at it.
+        let wavURL = try Self.writeTempWAV(samples: samples)
+        defer { try? FileManager.default.removeItem(at: wavURL) }
+        return try await transcribeFile(at: wavURL, language: language)
+    }
+
+    private func transcribeFile(at url: URL, language: String?) async throws -> String {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
+            let localeIdentifier = language ?? Locale.preferredLanguages.first ?? "en-US"
+            guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: localeIdentifier)) else {
+                continuation.resume(throwing: TranscribeFileError.unsupported)
+                return
+            }
+            let request = SFSpeechURLRecognitionRequest(url: url)
+            request.shouldReportPartialResults = false
+            recognizer.recognitionTask(with: request) { result, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                    return
+                }
+                guard let result, result.isFinal else { return }
+                continuation.resume(returning: result.bestTranscription.formattedString)
+            }
+        }
+    }
+
+    /// Tiny 16-bit PCM mono WAV writer — only used by the file-import path
+    /// so SFSpeechURLRecognitionRequest has something on disk to read.
+    private static func writeTempWAV(samples: [Float]) throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("speechnotes-import-\(UUID().uuidString).wav")
+        let pcm = samples.map { Int16(max(-1, min(1, $0)) * 32_767) }
+        var data = Data()
+        let sampleRate: UInt32 = 16_000
+        let bitsPerSample: UInt16 = 16
+        let numChannels: UInt16 = 1
+        let byteRate = sampleRate * UInt32(numChannels) * UInt32(bitsPerSample / 8)
+        let blockAlign = numChannels * (bitsPerSample / 8)
+        let dataSize = UInt32(pcm.count * MemoryLayout<Int16>.size)
+
+        func appendString(_ s: String) {
+            data.append(contentsOf: s.utf8)
+        }
+        func appendUInt32LE(_ v: UInt32) {
+            var be = v.littleEndian
+            withUnsafeBytes(of: &be) { data.append(contentsOf: $0) }
+        }
+        func appendUInt16LE(_ v: UInt16) {
+            var be = v.littleEndian
+            withUnsafeBytes(of: &be) { data.append(contentsOf: $0) }
+        }
+
+        appendString("RIFF")
+        appendUInt32LE(36 + dataSize)
+        appendString("WAVE")
+        appendString("fmt ")
+        appendUInt32LE(16)
+        appendUInt16LE(1) // PCM
+        appendUInt16LE(numChannels)
+        appendUInt32LE(sampleRate)
+        appendUInt32LE(byteRate)
+        appendUInt16LE(blockAlign)
+        appendUInt16LE(bitsPerSample)
+        appendString("data")
+        appendUInt32LE(dataSize)
+        for s in pcm {
+            var little = s.littleEndian
+            withUnsafeBytes(of: &little) { data.append(contentsOf: $0) }
+        }
+        try data.write(to: url)
+        return url
+    }
+
     // MARK: - Permissions + start
     private func requestPermissionsAndStart(language: String?, prompt: String?) {
         let group = DispatchGroup()

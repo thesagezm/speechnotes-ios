@@ -79,6 +79,16 @@ final class DictationCoordinator: ObservableObject {
         return t
     }
 
+    /// File-import transcription (audio recordings dropped into the app).
+    func transcribeAudioFile(at url: URL, language: String? = nil) async throws -> String {
+        guard let engine else { return "" }
+        state = .transcribing
+        defer { state = .idle }
+        return try await AudioImportService.shared.transcribe(url, language: language, engine: engine)
+    }
+
+    var currentEngine: STTEngine? { engine }
+
     private func startTimer() {
         elapsed = 0
         timer?.invalidate()

@@ -64,6 +64,15 @@ targets:
           - CFBundleTypeName: PDF document
             LSHandlerRank: Alternate
             LSItemContentTypes: [com.adobe.pdf]
+          - CFBundleTypeName: WAV audio
+            LSHandlerRank: Alternate
+            LSItemContentTypes: [com.microsoft.waveform-audio, public.aifc-audio, public.aiff-audio, public.audio]
+          - CFBundleTypeName: MP3 audio
+            LSHandlerRank: Alternate
+            LSItemContentTypes: [public.mp3]
+          - CFBundleTypeName: MPEG-4 audio
+            LSHandlerRank: Alternate
+            LSItemContentTypes: [public.mpeg-4-audio]
         CFBundleURLTypes:
           - CFBundleURLName: com.speechnotes.ios
             CFBundleURLSchemes: [speechnotes]

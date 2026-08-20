@@ -98,6 +98,14 @@ final class WhisperCppEngine: STTEngine {
 
     func cancel() { stop() }
 
+    // MARK: - File transcription (WhisperKit accepts Float32 arrays directly).
+    func transcribeFile(samples: [Float], language: String?) async throws -> String {
+        guard let pipe else { throw TranscribeFileError.unsupported }
+        let options = DecodingOptions(language: language)
+        let results = try await pipe.transcribe(audioArray: samples, decodeOptions: options)
+        return results.map(\.text).joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     // MARK: - Audio capture
     private func setupAudioEngine() {
         let engine = AVAudioEngine()
