@@ -89,6 +89,9 @@ struct NoteEditorView: View {
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            ToolbarItem(placement: .navigationBarLeading) {
+                EditorMicButton()
+            }
             ToolbarItem(placement: .navigationBarTrailing) {
                 Menu {
                     if renderMarkdown {

@@ -94,6 +94,9 @@ struct NotesListView: View {
             .searchable(text: $searchText, prompt: "Search notes")
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
+                    MicButtonView()
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
                     sortAndImportMenu
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {

@@ -64,6 +64,7 @@ final class DictationCoordinator: ObservableObject {
     func stopRecording() {
         engine?.stop()
         state = .idle
+        partialText = ""
         stopTimer()
     }
 
