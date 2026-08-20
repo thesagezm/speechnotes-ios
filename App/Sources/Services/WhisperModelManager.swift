@@ -193,9 +193,17 @@ final class WhisperModelManager: ObservableObject {
     }
 
     // MARK: - Download
+    /// Downloads the model through WhisperKit's own downloader so the
+    /// resulting bundle lives in the same `argmaxinc/whisperkit-coreml/`
+    /// tree WhisperKit expects. WhisperKit.download returns a progress
+    /// closure we forward into `states[id]`.
     func startDownload(id: String) {
         guard let model = Self.catalog.first(where: { $0.id == id }) else { return }
         if case .downloading = states[id] { return }
+        guard let variant = Self.variantForId[id] else {
+            states[id] = .failed("Unknown model variant.")
+            return
+        }
 
         // Disk preflight — bail with a clear message if the user won't fit
         // the model plus a safety margin (100 MB).
@@ -205,60 +213,67 @@ final class WhisperModelManager: ObservableObject {
             return
         }
 
-        guard let url = URL(string: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/\(model.filename)") else {
-            states[id] = .failed("Bad model URL.")
-            return
-        }
-
         states[id] = .downloading(0)
-
-        let task: URLSessionDownloadTask
-        if let data = resumeData[id] {
-            task = session.downloadTask(withResumeData: data)
-            resumeData[id] = nil
-        } else {
-            task = session.downloadTask(with: url)
-        }
-        task.taskDescription = model.id
-
-        let progressObs = task.progress.observe(\.fractionCompleted, options: [.new]) { [weak self] progress, _ in
-            Task { @MainActor in
-                guard let self else { return }
-                self.states[id] = .downloading(progress.fractionCompleted)
+        Task { @MainActor in
+            do {
+                try await WhisperKit.download(
+                    variant: variant,
+                    progressCallback: { [weak self] progress in
+                        Task { @MainActor in
+                            self?.states[id] = .downloading(progress.fractionCompleted)
+                        }
+                    }
+                )
+                self.tasks[id] = nil
+                self.progressObservers[id]?.invalidate()
+                self.progressObservers[id] = nil
+                self.states[id] = .ready
+                self.logger.info("WhisperKit model ready: \(variant)")
+                if WhisperModelManager.variantForId[self.activeModelId] == variant {
+                    NotificationCenter.default.post(name: .whisperModelReady, object: variant)
+                }
+            } catch {
+                self.states[id] = .failed(error.localizedDescription)
+                self.logger.error("WhisperKit download failed: \(error.localizedDescription)")
             }
         }
-        progressObservers[id] = progressObs
-
-        tasks[id] = task
-        task.resume()
     }
 
     func cancelDownload(id: String) {
-        if let task = tasks[id] {
-            task.cancel(byProducingResumeData: { [weak self] data in
-                Task { @MainActor in
-                    self?.resumeData[id] = data
-                    self?.states[id] = .notDownloaded
-                }
-            })
-        }
+        // WhisperKit's download API has no public cancel hook; clear the
+        // state so the user can retry.
+        tasks[id] = nil
         progressObservers[id]?.invalidate()
         progressObservers[id] = nil
-        tasks[id] = nil
+        if case .downloading = states[id] {
+            states[id] = .notDownloaded
+        }
     }
 
     func delete(id: String) {
-        if let task = tasks[id] {
-            task.cancel()
-        }
-        tasks[id] = nil
-        progressObservers[id]?.invalidate()
-        progressObservers[id] = nil
+        cancelDownload(id: id)
         resumeData[id] = nil
-        if let url = Self.modelURL(for: id) {
-            try? FileManager.default.removeItem(at: url)
-        }
+        // Delete the WhisperKit-installed bundle.
+        let variant = Self.variantForId[id] ?? id
+        let variantDir = Self.whisperKitDirectory.appendingPathComponent(variant, isDirectory: true)
+        try? FileManager.default.removeItem(at: variantDir)
+        let marker = Self.whisperKitDirectory.appendingPathComponent("\(variant).bin")
+        try? FileManager.default.removeItem(at: marker)
         states[id] = .notDownloaded
+        if activeModelId == id {
+            // Reset to tiny if the user deletes the active model.
+            activeModelId = "tiny"
+        }
+    }
+
+    /// Returns a description of the model's loaded state — useful for
+    /// showing the user which Whisper variant is currently active and
+    /// whether WhisperKit has confirmed it's on disk.
+    var activeModelDescription: String {
+        let variant = Self.variantForId[activeModelId] ?? activeModelId
+        let marker = Self.whisperKitDirectory.appendingPathComponent("\(variant).bin")
+        let installed = FileManager.default.fileExists(atPath: marker.path)
+        return installed ? variant : "\(variant) (not on disk)"
     }
 
     // URLSession callbacks are nonisolated; we hop to the main actor to
@@ -322,3 +337,7 @@ struct WhisperModel: Identifiable, Hashable {
 
 // URLSessionTask already has `progress: Progress` from Foundation — no
 // extension needed. The `task.progress` KVO works directly.
+
+extension Notification.Name {
+    static let whisperModelReady = Notification.Name("WhisperModelManager.modelReady")
+}

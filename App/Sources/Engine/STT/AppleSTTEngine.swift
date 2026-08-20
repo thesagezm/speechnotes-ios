@@ -70,7 +70,37 @@ final class AppleSTTEngine: STTEngine {
         // by writing them to a temp WAV and pointing the recogniser at it.
         let wavURL = try Self.writeTempWAV(samples: samples)
         defer { try? FileManager.default.removeItem(at: wavURL) }
+        // SFSpeech requires the speech-recognition entitlement to be granted
+        // (same one the live mic uses). Without it the recognitionTask
+        // completes with error 203 / "not authorized" — catch and translate.
+        try await Self.ensureSpeechAuthorization()
         return try await transcribeFile(at: wavURL, language: language)
+    }
+
+    private static func ensureSpeechAuthorization() async throws {
+        let status = SFSpeechRecognizer.authorizationStatus()
+        switch status {
+        case .authorized:
+            return
+        case .notDetermined:
+            let granted: Bool = await withCheckedContinuation { cont in
+                SFSpeechRecognizer.requestAuthorization { auth in
+                    cont.resume(returning: auth == .authorized)
+                }
+            }
+            if !granted { throw AppleSTTError.notAuthorized }
+        default:
+            throw AppleSTTError.notAuthorized
+        }
+    }
+
+    private enum AppleSTTError: LocalizedError {
+        case notAuthorized
+        var errorDescription: String? {
+            switch self {
+            case .notAuthorized: return "Speech recognition not authorised. Enable it in Settings → Privacy."
+            }
+        }
     }
 
     private func transcribeFile(at url: URL, language: String?) async throws -> String {
@@ -142,30 +172,34 @@ final class AppleSTTEngine: STTEngine {
 
     // MARK: - Permissions + start
     private func requestPermissionsAndStart(language: String?, prompt: String?) {
-        let group = DispatchGroup()
-        var micGranted = false
-        var speechGranted = false
-
-        group.enter()
-        AVAudioSession.sharedInstance().requestRecordPermission { granted in
-            micGranted = granted
-            group.leave()
-        }
-
-        group.enter()
-        SFSpeechRecognizer.requestAuthorization { auth in
-            speechGranted = (auth == .authorized)
-            group.leave()
-        }
-
-        group.notify(queue: .main) { [weak self] in
-            guard let self else { return }
-            guard micGranted && speechGranted else {
-                self.logger.error("Permissions denied: mic=\(micGranted) speech=\(speechGranted)")
+        // SFSpeech authorization must be requested on the main actor; the
+        // callback API is older than Swift Concurrency so we bridge via
+        // `MainActor.assumeIsolated` and a continuation.
+        Task { @MainActor in
+            do { try await Self.ensureSpeechAuthorization() } catch {
+                self.logger.error("Speech recognition denied: \(error.localizedDescription)")
                 self.currentState = .idle
                 return
             }
-            self.setupSFRecognizer(language: language, prompt: prompt)
+            self.requestMicPermission { micGranted in
+                guard micGranted else {
+                    self.logger.error("Microphone permission denied")
+                    self.currentState = .idle
+                    return
+                }
+                self.setupSFRecognizer(language: language, prompt: prompt)
+            }
+        }
+    }
+
+    private func requestMicPermission(_ completion: @escaping (Bool) -> Void) {
+        let session = AVAudioSession.sharedInstance()
+        if session.recordPermission == .granted {
+            completion(true)
+            return
+        }
+        session.requestRecordPermission { granted in
+            DispatchQueue.main.async { completion(granted) }
         }
     }
 

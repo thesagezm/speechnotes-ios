@@ -8,6 +8,10 @@ final class DictationCoordinator: ObservableObject {
     @Published private(set) var partialText: String = ""
     @Published private(set) var elapsed: TimeInterval = 0
     @Published private(set) var levelMeter: Float = 0
+    /// 0…1 while the engine is processing a non-live request (audio file
+    /// import). nil otherwise.
+    @Published private(set) var importProgress: Double?
+    @Published private(set) var importProgressLabel: String = ""
 
     enum EngineKind: String, CaseIterable, Identifiable {
         case apple
@@ -32,6 +36,18 @@ final class DictationCoordinator: ObservableObject {
 
     init() {
         rebuildEngine()
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(whisperModelDidBecomeReady),
+            name: .whisperModelReady, object: nil
+        )
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    @objc private func whisperModelDidBecomeReady() {
+        Task { @MainActor in self.rebuildEngine() }
     }
 
     private func rebuildEngine() {
@@ -57,9 +73,12 @@ final class DictationCoordinator: ObservableObject {
         }
     }
 
-    /// Phase 0 no-op. Phase 1 starts AVAudioEngine + engine.start()
     func startRecording(language: String? = nil) {
         guard state == .idle else { return }
+        // The previous Apple engine could be torn down here; rebuild for
+        // each session so the SFSpeechRecognizer picks up the latest
+        // language/voice preferences.
+        if engineKind == .apple { rebuildEngine() }
         state = .recording
         startTimer()
         engine?.start(language: language, prompt: nil)
@@ -80,11 +99,35 @@ final class DictationCoordinator: ObservableObject {
     }
 
     /// File-import transcription (audio recordings dropped into the app).
+    /// Publishes `importProgress` so the UI can show a real progress bar
+    /// while WhisperKit streams partial results.
     func transcribeAudioFile(at url: URL, language: String? = nil) async throws -> String {
         guard let engine else { return "" }
         state = .transcribing
-        defer { state = .idle }
-        return try await AudioImportService.shared.transcribe(url, language: language, engine: engine)
+        importProgress = 0
+        importProgressLabel = "Decoding audio…"
+        defer {
+            state = .idle
+            importProgress = nil
+            importProgressLabel = ""
+        }
+
+        let progress: @Sendable (Double, String) -> Void = { [weak self] value, label in
+            Task { @MainActor in
+                self?.importProgress = value
+                self?.importProgressLabel = label
+            }
+        }
+        progress(0.1, "Decoding audio…")
+        let samples = try await AudioImportService.shared.samples(from: url)
+        progress(0.3, "Running transcription…")
+        let text = try await AudioImportService.shared.runTranscription(
+            samples: samples, language: language, engine: engine, progress: { value in
+                Task { @MainActor in self.importProgress = 0.3 + value * 0.7 }
+            }
+        )
+        progress(1.0, "Done")
+        return text
     }
 
     var currentEngine: STTEngine? { engine }

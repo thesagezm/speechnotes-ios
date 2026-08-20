@@ -49,12 +49,21 @@ final class AudioImportService {
         return try await engine.transcribeFile(samples: samples, language: language)
     }
 
-    /// Decodes an audio file to 16 kHz mono Float32. Heavy work; runs on a
-    /// background queue via Task.detached so callers can await it.
-    static func samples(from url: URL) async throws -> [Float] {
+    /// Splits the import into two stages so callers can drive a progress bar.
+    func samples(from url: URL) async throws -> [Float] {
         try await Task.detached(priority: .userInitiated) {
             try decode(url: url)
         }.value
+    }
+
+    func runTranscription(
+        samples: [Float],
+        language: String?,
+        engine: STTEngine,
+        progress: @escaping @Sendable (Double) -> Void
+    ) async throws -> String {
+        progress(0)
+        return try await engine.transcribeFile(samples: samples, language: language)
     }
 
     nonisolated private static func decode(url: URL) throws -> [Float] {

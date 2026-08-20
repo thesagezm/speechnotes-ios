@@ -144,9 +144,11 @@ struct DictationTabView: View {
                     ZStack {
                         Color.black.opacity(0.35).ignoresSafeArea()
                         VStack(spacing: 12) {
-                            ProgressView()
-                                .controlSize(.large)
-                            Text("Transcribing audio…")
+                            ProgressView(value: dictation.importProgress ?? 0.0)
+                                .progressViewStyle(.linear)
+                                .tint(.white)
+                                .frame(width: 220)
+                            Text(dictation.importProgressLabel.isEmpty ? "Transcribing audio…" : dictation.importProgressLabel)
                                 .font(.subheadline)
                                 .foregroundStyle(.white)
                         }
