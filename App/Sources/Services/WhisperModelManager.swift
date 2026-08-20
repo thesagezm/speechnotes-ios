@@ -140,15 +140,50 @@ final class WhisperModelManager: ObservableObject {
         rv.isExcludedFromBackup = true
         try? url.setResourceValues(rv)
 
+        // WhisperKit downloads its models into a parallel folder structure
+        // (coreml/<variant>/*.mlmodelc). The marker file <variant>.bin tells
+        // us it considers the model installed — used here so .ready fires
+        // when WhisperKit sees the model even before WhisperCppEngine has
+        // loaded it.
+        let userActive = UserDefaults.standard.string(forKey: "activeWhisperModelId") ?? "tiny"
+        if let variant = Self.variantForId[userActive] {
+            let marker = Self.whisperKitDirectory.appendingPathComponent("\(variant).bin")
+            if FileManager.default.fileExists(atPath: marker.path) {
+                activeModelId = userActive
+            }
+        }
         for model in Self.catalog {
-            states[model.id] = isInstalled(model) ? .ready : .notDownloaded
+            let marker = Self.whisperKitDirectory.appendingPathComponent("\(Self.variantForId[model.id] ?? model.id).bin")
+            states[model.id] = FileManager.default.fileExists(atPath: marker.path) ? .ready : .notDownloaded
         }
     }
 
+    /// WhisperKit caches its CoreML bundles under Documents/<repo>/<variant>/.
+    /// We use the sentinel `<variant>.bin` file WhisperKit writes there as a
+    /// "model is downloaded" marker so the settings UI can show ✓ even
+    /// before the engine has finished loading.
+    nonisolated static let whisperKitDirectory: URL = {
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        return docs.appendingPathComponent("argmaxinc", isDirectory: true)
+            .appendingPathComponent("whisperkit-coreml", isDirectory: true)
+    }()
+
+    nonisolated static let variantForId: [String: String] = [
+        "tiny": "tiny",
+        "tiny.en": "tiny.en",
+        "base": "base",
+        "base.en": "base.en",
+        "small": "small",
+        "small.en": "small.en",
+        "large-v3-turbo": "large-v3-turbo",
+        "large-v3": "large-v3",
+    ]
+
     // MARK: - State queries
     func isInstalled(_ model: WhisperModel) -> Bool {
-        guard let url = Self.modelURL(for: model.id) else { return false }
-        return FileManager.default.fileExists(atPath: url.path)
+        guard let variant = Self.variantForId[model.id] else { return false }
+        let marker = Self.whisperKitDirectory.appendingPathComponent("\(variant).bin")
+        return FileManager.default.fileExists(atPath: marker.path)
     }
 
     func state(for id: String) -> DownloadState { states[id] ?? .notDownloaded }

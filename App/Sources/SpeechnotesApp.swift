@@ -13,8 +13,8 @@ struct SpeechnotesApp: App {
             TabView {
                 NotesListView()
                     .tabItem { Label("Notes", systemImage: "note.text") }
-                StorageView()
-                    .tabItem { Label("Storage", systemImage: "externaldrive") }
+                DictationTabView()
+                    .tabItem { Label("Speech to text", systemImage: "mic.fill") }
                 SettingsTabView()
                     .tabItem { Label("Settings", systemImage: "gearshape") }
             }
