@@ -1,5 +1,25 @@
 # Speechnotes iOS — Master Plan
 
+> **HANDOVER v14 (2026-08-20 — V2 OFFLINE STT PLANNING):** v1.3.0 shipped
+> (`37a5598`, IPA published as pre-release). v1.3.0 = the real v1.2
+> feature release: Recycle Bin (30-day soft delete), Storage tab (exported
+> WAV browser + playback + share), TTS resume-from-where-stopped (per-note
+> bookmark + sentence-boundary alignment, SystemEngine progress wired),
+> Settings tab split into Speech / Appearance (accent + light/dark) /
+> Storage / Import Voices / About, Logs demoted to a sub-screen under
+> Settings → About (bottom tab bar went Notes / Storage / Settings).
+> Next up is **offline speech-to-text** for v2.0.0 / build 25. Researched
+> Amical (amicalhq/amical, MIT, whisper.cpp) and n0an/VivaDicta (Swift,
+> WhisperKit + Parakeet + Apple Foundation Models + FluidAudio). Full
+> executable work order: **`Docs/PLAN-V2.0-STT.md`** — primary engine is
+> whisper.cpp via vendored single-file C/ObjC bridge (same shape as our
+> Kokoro ONNX integration); Apple `SpeechAnalyzer` (iOS 26) with
+> `SFSpeechRecognizer` fallback is the always-on zero-model path. Models
+> live in `Documents/Whisper/` and download from `ggerganov/whisper.cpp`
+> on Hugging Face (`ggml-tiny.bin` default). Hard rules preserved from
+> v1.3 (no NoteEditorView restructure; project.yml limited to version
+> bump + two permission strings + the WhisperBridge source path).
+
 > **HANDOVER v13 (2026-08-19 — THE REAL v1.2, SHIPS AS v1.3.0):** The v1.2
 > cycle ended at **v1.2.2 (`678f020`)**: orientation keys reverted (launch
 > black-screen), then the editor restructure reverted too (NavigationStack +
