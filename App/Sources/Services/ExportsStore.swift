@@ -88,6 +88,20 @@ final class ExportsStore: ObservableObject {
         exports.reduce(0) { $0 + $1.sizeBytes }
     }
 
+    static var totalFormattedSize: String {
+        let bytes: Int64
+        let fm = FileManager.default
+        if let items = try? fm.contentsOfDirectory(at: exportsDirectory, includingPropertiesForKeys: [.fileSizeKey]) {
+            bytes = items.reduce(0) { acc, url in
+                let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+                return acc + Int64(size)
+            }
+        } else {
+            bytes = 0
+        }
+        return ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+
     // MARK: - Storage helpers (shared with Settings → Storage)
 
     nonisolated static func directorySize(_ url: URL) -> Int64 {
