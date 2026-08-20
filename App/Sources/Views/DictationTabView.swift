@@ -105,7 +105,7 @@ struct DictationTabView: View {
     private var engineSummary: some View {
         HStack(spacing: 10) {
             Image(systemName: "waveform.badge.mic")
-                .foregroundStyle(.accent)
+                        .foregroundStyle(Color.accentColor)
             VStack(alignment: .leading, spacing: 2) {
                 Text(dictation.engineKind.label)
                     .font(.subheadline.weight(.medium))

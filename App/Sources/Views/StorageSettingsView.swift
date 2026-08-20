@@ -8,7 +8,7 @@ struct StorageSettingsView: View {
 
     var body: some View {
         Form {
-            Section("Exported audio") {
+            Section {
                 if exports.exports.isEmpty {
                     Label(
                         "No exports yet — use 'Export WAV' in a note's … menu.",
@@ -41,13 +41,15 @@ struct StorageSettingsView: View {
                 }
             }
 
-            Section("Usage") {
+            Section {
                 usageRow("Notes (notes.json)", NotesStoreSizeReader.notesBytes)
                 usageRow("Kokoro model", ExportsStore.directorySize(ModelManager.onnxDirectory))
                 usageRow("Kitten model", ExportsStore.directorySize(ModelManager.kittenDirectory))
                 usageRow("Supertonic model", ExportsStore.directorySize(ModelManager.supertonicDirectory))
                 usageRow("Exported audio", ExportsStore.directorySize(ExportsStore.exportsDirectory))
                 usageRow("Whisper models", ExportsStore.directorySize(WhisperModelManager.modelsDirectory))
+            } header: {
+                Text("Usage")
             }
 
             Section {
@@ -124,8 +126,4 @@ private enum NotesStoreSizeReader {
             .appendingPathComponent("notes.json")
         return Int64((try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
     }
-}
-
-extension URL: Identifiable {
-    public var id: String { absoluteString }
 }

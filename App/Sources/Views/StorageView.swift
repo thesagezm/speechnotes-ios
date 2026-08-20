@@ -141,7 +141,3 @@ private enum NotesStoreSizeReader {
         return Int64((try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
     }
 }
-
-extension URL: Identifiable {
-    public var id: String { absoluteString }
-}
