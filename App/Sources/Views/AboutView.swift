@@ -7,7 +7,7 @@ struct AboutView: View {
                 HStack(spacing: 12) {
                     Image(systemName: "waveform")
                         .font(.system(size: 36))
-                        .foregroundStyle(.accent)
+                        .foregroundStyle(Color.accentColor)
                     VStack(alignment: .leading) {
                         Text("Speechnotes")
                             .font(.headline)

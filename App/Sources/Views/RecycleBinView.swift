@@ -69,7 +69,7 @@ struct RecycleBinView: View {
         VStack(alignment: .leading, spacing: 4) {
             Text(note.title)
                 .font(.headline)
-            Text(note.text.split(whereSeparator: \isNewline).dropFirst()
+            Text(note.text.split(whereSeparator: \.isNewline).dropFirst()
                 .joined(separator: " ").prefix(90))
                 .font(.subheadline)
                 .foregroundStyle(.secondary)

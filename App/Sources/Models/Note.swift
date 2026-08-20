@@ -39,7 +39,7 @@ struct Note: Identifiable, Codable, Equatable {
             .trimmingCharacters(in: .whitespacesAndNewlines), !explicit.isEmpty {
             return String(explicit.prefix(120))
         }
-        let firstLine = text.split(whereSeparator: \isNewline).first.map(String.init) ?? ""
+        let firstLine = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
         let trimmed = firstLine.trimmingCharacters(in: .whitespaces)
         return trimmed.isEmpty ? "Untitled note" : String(trimmed.prefix(60))
     }

@@ -151,8 +151,8 @@ final class SpeechPlayer: ObservableObject {
         let units = Array(text.utf16)
         guard charsDone > 0, charsDone < units.count else { return -1 }
         let terminators: Set<UTF16.CodeUnit> = [
-            UInt16(ascii: "."), UInt16(ascii: "!"), UInt16(ascii: "?"),
-            UInt16(ascii: "\n"), 0x2026, 0x3002, 0xFF01, 0xFF1F, // … 。 ！ ？
+            0x2E, 0x21, 0x3F,
+            0x0A, 0x2026, 0x3002, 0xFF01, 0xFF1F, // … 。 ！ ？
         ]
         var i = min(charsDone, units.count - 1)
         while i > 0 {
@@ -178,7 +178,8 @@ final class SpeechPlayer: ObservableObject {
         else { return nil }
         let offset = Self.resumeOffset(in: fullText, charsDone: mark.charsDone)
         guard offset > 0, offset < length else { return nil }
-        let suffix = String(decoding: Array(fullText.utf16[offset...]), as: UTF16.self)
+        let units = Array(fullText.utf16)
+        let suffix = String(decoding: Array(units[offset...]), as: UTF16.self)
         guard !suffix.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         return (offset, suffix)
     }
@@ -227,12 +228,17 @@ final class SpeechPlayer: ObservableObject {
     /// Raw engine progress maps back to absolute chars: on a resume the
     /// engine only ever saw the suffix.
     private func updateBookmarkChars(rawProgress: Double) {
-        guard var mark = inFlightBookmark else { return }
+        guard let mark = inFlightBookmark else { return }
         let base = resumeBaseFraction * Double(mark.textLength)
         let suffixLength = max(1, Double(mark.textLength) - base)
-        mark.charsDone = min(mark.textLength - 1, Int(base + rawProgress * suffixLength))
-        mark.savedAt = Date()
-        inFlightBookmark = mark
+        let chars = min(mark.textLength - 1, Int(base + rawProgress * suffixLength))
+        inFlightBookmark = PlaybackBookmark(
+            noteId: mark.noteId,
+            charsDone: chars,
+            textLength: mark.textLength,
+            textHash: mark.textHash,
+            savedAt: Date()
+        )
     }
 
     /// True while an audition sample is sounding.
@@ -354,7 +360,7 @@ final class SpeechPlayer: ObservableObject {
             Task { @MainActor in
                 self?.state = newState
                 if newState == .idle {
-                    if self?.lastRawProgress >= 0.98 {
+                    if (self?.lastRawProgress ?? 0) >= 0.98 {
                         self?.clearBookmark()            // finished naturally
                     } else if self?.inFlightBookmark != nil {
                         self?.persistPlaybackBookmark()  // stopped part-way
