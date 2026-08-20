@@ -23,6 +23,9 @@ final class DictationCoordinator: ObservableObject {
     }
 
     @AppStorage("sttEngineKind") var engineKind: EngineKind = .apple
+    @ObservedObject private var whisperModels = WhisperModelManager.shared
+    /// Latest finalized transcript — exposed to the editor for insertion.
+    @Published var lastFinalText: String = ""
 
     private var engine: STTEngine?
     private var timer: Timer?
@@ -36,7 +39,7 @@ final class DictationCoordinator: ObservableObject {
         case .apple:
             engine = AppleSTTEngine()
         case .whisper:
-            engine = WhisperCppEngine()
+            engine = WhisperCppEngine(modelId: whisperModels.activeModelId)
         }
         engine?.onPartial = { [weak self] text in
             Task { @MainActor in self?.partialText = text }
@@ -44,6 +47,7 @@ final class DictationCoordinator: ObservableObject {
         engine?.onFinal = { [weak self] text in
             Task { @MainActor in
                 self?.partialText = ""
+                self?.lastFinalText = text
                 self?.state = .idle
                 self?.stopTimer()
             }
@@ -66,6 +70,13 @@ final class DictationCoordinator: ObservableObject {
         state = .idle
         partialText = ""
         stopTimer()
+    }
+
+    /// Editor consumes the last finalized text and clears it.
+    func consumeFinal() -> String {
+        let t = lastFinalText
+        lastFinalText = ""
+        return t
     }
 
     private func startTimer() {

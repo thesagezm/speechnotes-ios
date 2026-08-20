@@ -8,6 +8,9 @@ struct SettingsTabView: View {
                     NavigationLink("Speech Settings") {
                         SpeechSettingsView()
                     }
+                    NavigationLink("Speech-to-text") {
+                        SttSettingsView()
+                    }
                 }
                 Section("Appearance") {
                     NavigationLink("Appearance") {

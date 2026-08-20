@@ -4,6 +4,8 @@ struct EditorMicButton: View {
     @EnvironmentObject private var dictation: DictationCoordinator
     @State private var showingSheet = false
 
+    /// Called on the main actor with the finalized transcript when the
+    /// dictation sheet dismisses. The editor appends it at the cursor.
     var onTranscribed: ((String) -> Void)?
 
     var body: some View {
@@ -17,10 +19,8 @@ struct EditorMicButton: View {
         .sheet(isPresented: $showingSheet) {
             DictationSheetView()
                 .onDisappear {
-                    // Phase 1 hook: read final result from dictation and
-                    // hand it back to the editor. For now the sheet is modal
-                    // and the editor can poll `dictation.partialText` after
-                    // dismissal. Phase 2 will inject a completion closure.
+                    let text = dictation.consumeFinal()
+                    if !text.isEmpty { onTranscribed?(text) }
                 }
         }
     }

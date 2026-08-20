@@ -90,7 +90,15 @@ struct NoteEditorView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .navigationBarLeading) {
-                EditorMicButton()
+                EditorMicButton { text in
+                    if !draft.isEmpty, !draft.hasSuffix(" "), !draft.hasSuffix("\n") {
+                        draft += " "
+                    }
+                    draft += text
+                    scheduleDraftSync()
+                    updateSpeechCaches()
+                    Haptics.success()
+                }
             }
             ToolbarItem(placement: .navigationBarTrailing) {
                 Menu {
