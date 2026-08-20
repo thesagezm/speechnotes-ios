@@ -28,6 +28,9 @@ struct SettingsTabView: View {
                     NavigationLink("About") {
                         AboutView()
                     }
+                    NavigationLink("Logs") {
+                        LogsView()
+                    }
                 }
             }
             .navigationTitle("Settings")

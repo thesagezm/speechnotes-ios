@@ -16,8 +16,6 @@ struct SpeechnotesApp: App {
                     .tabItem { Label("Storage", systemImage: "externaldrive") }
                 SettingsTabView()
                     .tabItem { Label("Settings", systemImage: "gearshape") }
-                LogsView()
-                    .tabItem { Label("Logs", systemImage: "ladybug") }
             }
             .accentColor(theme.accentColor)
             .preferredColorScheme(theme.colorScheme)
