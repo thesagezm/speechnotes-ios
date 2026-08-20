@@ -22,6 +22,9 @@ packages:
   MLXUtilsLibrary:
     url: https://github.com/mlalma/MLXUtilsLibrary.git
     exactVersion: "0.0.6"
+  WhisperKit:
+    url: https://github.com/argmaxinc/argmax-oss-swift
+    exactVersion: "0.9.0"
 targets:
   SpeechnotesIOS:
     type: application
@@ -37,6 +40,8 @@ targets:
         product: onnxruntime
       - package: MLX
       - package: MLXUtilsLibrary
+      - package: WhisperKit
+        product: WhisperKit
     info:
       path: App/Resources/Info.plist
       properties:

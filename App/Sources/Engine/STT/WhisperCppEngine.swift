@@ -1,15 +1,14 @@
 import Foundation
 import AVFoundation
 import OSLog
+import WhisperKit
 
-/// Phase-2 Whisper STT. Pulls PCM-16 mono audio at 16 kHz from
-/// `DictationCoordinator`, hands it to whisper.cpp via the Objective-C bridge
-/// (`WhisperBridge`), and publishes partial/final transcripts back through
-/// `onPartial` / `onFinal`. The C context is loaded once per model file.
-///
-/// Until Phase 2's vendored bridge lands, the engine is a no-op stub that
-/// still publishes state transitions so the coordinator and UI work
-/// end-to-end (matching the Apple engine's behaviour).
+/// Phase-4 Whisper STT backed by WhisperKit (Argmax, MIT). WhisperKit
+/// handles model loading, Core ML execution, and inference. We capture
+/// audio via AVAudioEngine, resample to 16 kHz mono Float32, accumulate
+/// a rolling buffer, and re-transcribe the window every ~1.5 s — emitting
+/// partials through `onPartial` and the final result through `onFinal`
+/// when the user stops.
 final class WhisperCppEngine: STTEngine {
     let name: String = "Whisper (offline)"
     var onPartial: ((String) -> Void)?
@@ -18,39 +17,61 @@ final class WhisperCppEngine: STTEngine {
 
     private let logger = Logger(subsystem: "com.speechnotes.ios", category: "WhisperSTT")
     private var audioEngine: AVAudioEngine?
-    private var ringBuffer: [Float] = []
     private let ringLock = NSLock()
-    private var workItem: DispatchWorkItem?
+    private var ringBuffer: [Float] = []
     private let processQueue = DispatchQueue(label: "com.speechnotes.stt.whisper", qos: .userInitiated)
+    private var workItem: DispatchWorkItem?
+
+    private var pipe: WhisperKit?
+    private var currentModelId: String = "tiny"
+    private var loadedModelVariant: String?
+
+    /// Map our catalog ids to WhisperKit's model folder names. WhisperKit
+    /// downloads from `argmaxinc/whisperkit-coreml` on Hugging Face.
+    private static let variantForId: [String: String] = [
+        "tiny": "tiny",
+        "tiny.en": "tiny.en",
+        "base": "base",
+        "base.en": "base.en",
+        "small": "small",
+        "small.en": "small.en",
+        "large-v3-turbo": "large-v3-turbo",
+        "large-v3": "large-v3",
+    ]
 
     private var currentState: STTState = .idle {
         didSet { onStateChanged?(currentState) }
     }
 
-    /// Path to the active `.bin` model. Set via `loadModel(id:)`.
-    private var modelPath: String?
-
     init(modelId: String = "tiny") {
-        Task { @MainActor in loadModel(id: modelId) }
+        self.currentModelId = modelId
+        Task { @MainActor in await loadModel(id: modelId) }
     }
 
     @MainActor
-    func loadModel(id: String) {
-        if let url = WhisperModelManager.modelURL(for: id),
-           FileManager.default.fileExists(atPath: url.path) {
-            modelPath = url.path
-            logger.info("Whisper ready: model id=\(id) path=\(url.lastPathComponent)")
-        } else {
-            modelPath = nil
-            logger.warning("Whisper model not installed: \(id)")
+    func loadModel(id: String) async {
+        guard let variant = Self.variantForId[id] else {
+            logger.error("Unknown Whisper model id: \(id)")
+            return
+        }
+        currentModelId = id
+        if pipe != nil, loadedModelVariant == variant { return }
+        do {
+            let config = WhisperKitConfig(model: variant, modelRepo: "argmaxinc/whisperkit-coreml")
+            pipe = try await WhisperKit(config)
+            loadedModelVariant = variant
+            logger.info("WhisperKit ready: \(variant)")
+        } catch {
+            logger.error("WhisperKit init failed: \(error.localizedDescription)")
+            pipe = nil
         }
     }
 
     // MARK: - STTEngine
     func start(language: String?, prompt: String?) {
         guard currentState == .idle else { return }
-        guard modelPath != nil else {
-            logger.error("No Whisper model available — cannot start")
+        guard pipe != nil else {
+            logger.error("Whisper model not loaded")
             currentState = .idle
             onFinal?("")
             return
@@ -71,30 +92,23 @@ final class WhisperCppEngine: STTEngine {
         ringBuffer.removeAll(keepingCapacity: true)
         ringLock.unlock()
         if !snapshot.isEmpty { runInference(samples: snapshot, isFinal: true) }
-        // Hand the audio session back to the TTS engines — without this,
-        // Supertonic surfaces `kAUInitialize` -10851 on the next speak.
         AudioSessionResetter.restoreForPlayback()
         currentState = .idle
     }
 
     func cancel() { stop() }
 
-    // MARK: - Audio capture + ring buffer
+    // MARK: - Audio capture
     private func setupAudioEngine() {
         let engine = AVAudioEngine()
         audioEngine = engine
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
-
-        // Resample to 16 kHz mono Float32 by installing a tap and using
-        // AVAudioConverter. Falls back to direct append if the format is
-        // already 16 kHz mono.
         let target = AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1)!
-        let converter = AVAudioConverter(from: format, to: target)
+        guard let converter = AVAudioConverter(from: format, to: target) else { return }
 
         input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
             guard let self else { return }
-            guard let converter else { return }
             let ratio = target.sampleRate / format.sampleRate
             let outCapacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio + 32)
             guard let outBuf = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: outCapacity) else { return }
@@ -115,7 +129,6 @@ final class WhisperCppEngine: STTEngine {
                 let samples = Array(UnsafeBufferPointer(start: channelData, count: frames))
                 self.ringLock.lock()
                 self.ringBuffer.append(contentsOf: samples)
-                // Cap ring buffer at ~30 s of audio to bound RAM.
                 let maxSamples = 16_000 * 30
                 if self.ringBuffer.count > maxSamples {
                     self.ringBuffer.removeFirst(self.ringBuffer.count - maxSamples)
@@ -134,9 +147,6 @@ final class WhisperCppEngine: STTEngine {
         }
     }
 
-    /// Re-transcribe the rolling window every 1.5 s. The text we surface is
-    /// the union of stable segments at the bottom of each pass — crude but
-    /// useful as a streaming approximation.
     private func scheduleProcessWindow() {
         workItem?.cancel()
         let item = DispatchWorkItem { [weak self] in
@@ -152,27 +162,35 @@ final class WhisperCppEngine: STTEngine {
     }
 
     private func runInference(samples: [Float], isFinal: Bool) {
-        guard let path = modelPath else { return }
-        // Phase 2 wiring: hand off to the C bridge. Until the vendored
-        // bridge is in, we emit an empty partial and rely on the final
-        // call to surface the captured text via a dummy echo so the UI flow
-        // can be exercised end-to-end.
-        let text = Self.placeholderTranscribe(path: path, samples: samples)
-        if !text.isEmpty {
-            currentState = .transcribing
-            onPartial?(text)
+        guard let pipe else { return }
+        guard !samples.isEmpty else { return }
+        currentState = .transcribing
+        Task.detached(priority: .userInitiated) { [weak self] in
+            do {
+                let options = DecodingOptions(language: nil)
+                let results = try await pipe.transcribe(audioArray: samples, decodeOptions: options)
+                let text = results.map(\.text).joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+                await MainActor.run {
+                    guard let self else { return }
+                    if !text.isEmpty { self.onPartial?(text) }
+                    if isFinal {
+                        self.onFinal?(text)
+                        self.currentState = .idle
+                    } else {
+                        self.currentState = .recording
+                    }
+                }
+            } catch {
+                self?.logger.error("WhisperKit transcribe failed: \(error.localizedDescription)")
+                await MainActor.run {
+                    if isFinal {
+                        self?.onFinal?("")
+                        self?.currentState = .idle
+                    } else {
+                        self?.currentState = .recording
+                    }
+                }
+            }
         }
-        if isFinal {
-            onFinal?(text)
-            currentState = .idle
-        }
-    }
-
-    /// Stub transcription. Replaced by `WhisperBridge.transcribe(...)` once
-    /// the vendored C bridge is wired.
-    private static func placeholderTranscribe(path: String, samples: [Float]) -> String {
-        // Length-based hint keeps the UI responsive without faking words.
-        let seconds = Double(samples.count) / 16_000
-        return seconds > 0.5 ? "(\(String(format: "%.1f", seconds)) s captured)" : ""
     }
 }
