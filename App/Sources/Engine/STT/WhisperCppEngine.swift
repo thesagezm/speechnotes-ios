@@ -31,9 +31,10 @@ final class WhisperCppEngine: STTEngine {
     private var modelPath: String?
 
     init(modelId: String = "tiny") {
-        loadModel(id: modelId)
+        Task { @MainActor in loadModel(id: modelId) }
     }
 
+    @MainActor
     func loadModel(id: String) {
         if let url = WhisperModelManager.modelURL(for: id),
            FileManager.default.fileExists(atPath: url.path) {
@@ -98,10 +99,13 @@ final class WhisperCppEngine: STTEngine {
             let outCapacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio + 32)
             guard let outBuf = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: outCapacity) else { return }
             var error: NSError?
-            var fed = false
+            var inputProvided = false
             converter.convert(to: outBuf, error: &error) { _, status in
-                if fed { status.pointee = .endOfStream; return }
-                fed = true
+                if inputProvided {
+                    status.pointee = .endOfStream
+                    return
+                }
+                inputProvided = true
                 status.pointee = .haveData
                 return buffer
             }

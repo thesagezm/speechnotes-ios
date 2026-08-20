@@ -102,7 +102,7 @@ struct NoteEditorView: View {
         .toolbar {
             ToolbarItem(placement: .navigationBarLeading) {
                 EditorMicButton(
-                    keyboardRefreshTrigger: $keyboardRefreshTrigger
+                    keyboardRefreshTrigger: { keyboardRefreshTrigger &+= 1 }
                 ) { text in
                     if !draft.isEmpty, !draft.hasSuffix(" "), !draft.hasSuffix("\n") {
                         draft += " "

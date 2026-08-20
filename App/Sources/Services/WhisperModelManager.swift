@@ -92,7 +92,9 @@ final class WhisperModelManager: ObservableObject {
     }
 
     @Published private(set) var states: [String: DownloadState] = [:]
-    @AppStorage("activeWhisperModelId") var activeModelId: String = "tiny"
+    @Published var activeModelId: String = "tiny" {
+        didSet { UserDefaults.standard.set(activeModelId, forKey: "activeWhisperModelId") }
+    }
 
     private let logger = Logger(subsystem: "com.speechnotes.ios", category: "WhisperModels")
     private var tasks: [String: URLSessionDownloadTask] = [:]
@@ -112,7 +114,7 @@ final class WhisperModelManager: ObservableObject {
     }
 
     /// Free disk bytes (Bytes free on the volume that holds Documents).
-    static func freeDiskBytes() -> Int64 {
+    nonisolated static func freeDiskBytes() -> Int64 {
         let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         do {
             let values = try url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
@@ -230,8 +232,13 @@ final class WhisperModelManager: ObservableObject {
     nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
         guard let id = downloadTask.taskDescription else { return }
         // Synchronous move INSIDE the callback to avoid the temp-file race
-        // that nukes the file once didFinishDownloadingTo returns.
-        let dest = WhisperModelManager.modelsDirectory.appendingPathComponent(downloadTask.response?.suggestedFilename ?? id)
+        // that nukes the file once didFinishDownloadingTo returns. The
+        // destination folder is also main-actor-isolated, so resolve once
+        // here (FileManager.default.urls is nonisolated) rather than on the
+        // manager.
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let dir = docs.appendingPathComponent("Whisper", isDirectory: true)
+        let dest = dir.appendingPathComponent(downloadTask.response?.suggestedFilename ?? id)
         try? FileManager.default.removeItem(at: dest)
         do {
             try FileManager.default.moveItem(at: location, to: dest)
@@ -278,7 +285,5 @@ struct WhisperModel: Identifiable, Hashable {
     }
 }
 
-// Conform URLSession tasks to be observable by KVO via .progress.
-extension URLSessionTask {
-    var progress: Progress { self }
-}
+// URLSessionTask already has `progress: Progress` from Foundation — no
+// extension needed. The `task.progress` KVO works directly.

@@ -10,7 +10,7 @@ struct EditorMicButton: View {
 
     /// Bumps when the sheet has just dismissed; the editor uses this to
     /// re-bring the keyboard into the layout and recentre the text view.
-    @Binding var keyboardRefreshTrigger: Int
+    var keyboardRefreshTrigger: (() -> Void)?
 
     var body: some View {
         Button {
@@ -28,7 +28,7 @@ struct EditorMicButton: View {
                     // After a sheet, SwiftUI sometimes forgets the keyboard
                     // safe-area inset — nudge it by bumping a trigger the
                     // editor observes (it bounces focus for one tick).
-                    keyboardRefreshTrigger &+= 1
+                    keyboardRefreshTrigger?()
                 }
         }
     }
