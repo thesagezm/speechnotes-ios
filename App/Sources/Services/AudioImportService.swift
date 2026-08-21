@@ -50,9 +50,9 @@ final class AudioImportService {
     }
 
     /// Splits the import into two stages so callers can drive a progress bar.
-    func samples(from url: URL) async throws -> [Float] {
+    static func samples(from url: URL) async throws -> [Float] {
         try await Task.detached(priority: .userInitiated) {
-            try decode(url: url)
+            try Self.decode(url: url)
         }.value
     }
 

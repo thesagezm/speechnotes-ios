@@ -1,5 +1,6 @@
 import Foundation
 import OSLog
+import WhisperKit
 
 /// On-device model catalog + download manager for whisper.cpp ggml models.
 /// Mirrors the shape of `ModelManager` for TTS: a published state machine
@@ -216,14 +217,12 @@ final class WhisperModelManager: ObservableObject {
         states[id] = .downloading(0)
         Task { @MainActor in
             do {
-                try await WhisperKit.download(
-                    variant: variant,
-                    progressCallback: { [weak self] progress in
-                        Task { @MainActor in
-                            self?.states[id] = .downloading(progress.fractionCompleted)
-                        }
+                let progressCallback: @Sendable (Progress) -> Void = { [weak self] progress in
+                    Task { @MainActor in
+                        self?.states[id] = .downloading(progress.fractionCompleted)
                     }
-                )
+                }
+                try await WhisperKit.download(variant: variant, progressCallback: progressCallback)
                 self.tasks[id] = nil
                 self.progressObservers[id]?.invalidate()
                 self.progressObservers[id] = nil
