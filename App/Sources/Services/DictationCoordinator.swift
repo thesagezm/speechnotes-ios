@@ -27,6 +27,7 @@ final class DictationCoordinator: ObservableObject {
     }
 
     @AppStorage("sttEngineKind") var engineKind: EngineKind = .apple
+    @AppStorage("sttLanguage") var languageHint: String = "auto"
     @ObservedObject private var whisperModels = WhisperModelManager.shared
     /// Latest finalized transcript — exposed to the editor for insertion.
     @Published var lastFinalText: String = ""

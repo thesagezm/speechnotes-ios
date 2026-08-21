@@ -1,12 +1,14 @@
 import SwiftUI
 
-/// Speech-to-text settings: engine picker, language hint, model list with
-/// download/delete (mirrors Amical's STT model manager UX).
+/// Speech-to-text settings. Mirrors the TTS settings layout — the model
+/// picker is an inline segmented-style list (like `VoicePickerSheet`), and
+/// download/delete lives on a separate row per model.
 struct SttSettingsView: View {
     @EnvironmentObject private var dictation: DictationCoordinator
     @ObservedObject private var models = WhisperModelManager.shared
 
     private let languages = [
+        ("auto", "Auto"),
         ("en-US", "English (US)"),
         ("en-GB", "English (UK)"),
         ("es-ES", "Spanish"),
@@ -18,33 +20,24 @@ struct SttSettingsView: View {
 
     var body: some View {
         Form {
-            Section("Engine") {
+            Section {
                 Picker("Engine", selection: $dictation.engineKind) {
                     ForEach(DictationCoordinator.EngineKind.allCases) { kind in
                         Text(kind.label).tag(kind)
                     }
                 }
                 .pickerStyle(.inline)
-                .onChange(of: dictation.engineKind) { _ in
-                    // Coordinator rebuilds its engine on kind change
-                }
                 Text("Apple uses your device's built-in speech recognition (English-fluent, works offline once downloaded). Whisper is an offline model for tougher audio, accents, and 100+ languages.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+            } header: {
+                Text("Engine")
             }
 
-            Section("Language") {
-                Picker("Language", selection: $models.activeModelId) {
-                    ForEach(languages, id: \.0) { code, label in
-                        Text(label).tag(code)
-                    }
-                }
-            }
-
-            Section("Whisper models") {
+            Section {
                 if models.installedModels.isEmpty {
                     Label(
-                        "No Whisper models downloaded yet — pick one below to download.",
+                        "No Whisper models downloaded yet — pick one below and tap Download.",
                         systemImage: "info.circle"
                     )
                     .font(.footnote)
@@ -53,84 +46,134 @@ struct SttSettingsView: View {
                 ForEach(WhisperModelManager.catalog) { model in
                     modelRow(model)
                 }
+            } header: {
+                Text("Whisper model")
+            } footer: {
+                Text("Tapping a model switches the active Whisper model. The Download/Delete row manages what's installed.")
+            }
+
+            Section {
+                Picker("Language", selection: $dictation.languageHint) {
+                    ForEach(languages, id: \.0) { code, label in
+                        Text(label).tag(code)
+                    }
+                }
+            } header: {
+                Text("Language")
+            } footer: {
+                Text("Auto lets Whisper detect the spoken language per clip.")
             }
         }
         .navigationTitle("Speech-to-text")
+        .onChange(of: dictation.engineKind) { _ in
+            // The coordinator rebuilds the engine itself when the kind
+            // changes; nothing to do here.
+        }
     }
 
     @ViewBuilder
     private func modelRow(_ model: WhisperModel) -> some View {
-        let state = models.state(for: model.id)
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text(model.displayName)
-                    .font(.subheadline.weight(.medium))
+        let isActive = models.activeModelId == model.id
+        let isInstalled = models.isInstalled(model)
+        Button {
+            // Selecting a model is a passive action — just swap the
+            // preference. The coordinator listens for activeModelId
+            // changes and rebuilds the engine on the next record start.
+            if isInstalled {
+                models.activeModelId = model.id
+                Haptics.tap()
+            }
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: isActive ? "checkmark.circle.fill" : (isInstalled ? "circle" : "circle.dashed"))
+                    .foregroundStyle(isActive ? Color.accentColor : Color.secondary)
+                    .font(.title3)
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(model.displayName)
+                            .font(.subheadline.weight(.medium))
+                        if isActive {
+                            Text("Active")
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 6).padding(.vertical, 2)
+                                .background(Capsule().fill(Color.accentColor))
+                        }
+                        if model.englishOnly {
+                            Text("EN")
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    HStack(spacing: 6) {
+                        Text(model.sizeLabel)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        stars(model.speed, icon: "hare")
+                        stars(model.accuracy, icon: "scope")
+                    }
+                }
                 Spacer()
-                Text(model.sizeLabel)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
-            HStack(spacing: 2) {
-                Image(systemName: "hare.fill").foregroundStyle(.secondary)
-                stars(level: model.speed)
-                Image(systemName: "scope").foregroundStyle(.secondary)
-                stars(level: model.accuracy)
-                if model.englishOnly {
-                    Text("EN")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 6).padding(.vertical, 2)
-                        .background(Capsule().fill(Color.accentColor))
-                }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!isInstalled)
+    }
+
+    @ViewBuilder
+    private func downloadRow(_ model: WhisperModel) -> some View {
+        let state = models.state(for: model.id)
+        switch state {
+        case .notDownloaded:
+            Button {
+                models.startDownload(id: model.id)
+                Haptics.tap()
+            } label: {
+                Label("Download \(model.displayName)", systemImage: "arrow.down.circle")
             }
-            switch state {
-            case .notDownloaded:
-                Button {
-                    models.startDownload(id: model.id)
-                } label: {
-                    Label("Download", systemImage: "arrow.down.circle")
-                }
-            case .downloading(let progress):
+        case .downloading(let progress):
+            VStack(alignment: .leading, spacing: 4) {
                 ProgressView(value: progress) {
-                    Text("Downloading… \(Int(progress * 100))%")
+                    Text("Downloading \(model.displayName)… \(Int(progress * 100))%")
                 }
-                Button("Cancel", role: .destructive) {
-                    models.cancelDownload(id: model.id)
+                HStack {
+                    Button("Cancel", role: .destructive) {
+                        models.cancelDownload(id: model.id)
+                    }
+                    .font(.footnote)
+                    Spacer()
                 }
-                .font(.footnote)
-            case .failed(let message):
+            }
+        case .failed(let message):
+            VStack(alignment: .leading, spacing: 4) {
                 Label("Failed: \(message)", systemImage: "exclamationmark.triangle")
                     .font(.footnote)
-                Button("Retry") { models.startDownload(id: model.id) }
-                    .font(.footnote)
-            case .ready:
+                HStack {
+                    Button("Retry") { models.startDownload(id: model.id) }
+                        .font(.footnote)
+                    Spacer()
+                }
+            }
+        case .ready:
+            HStack {
                 Label("Downloaded", systemImage: "checkmark.circle")
                     .font(.footnote)
                     .foregroundStyle(.green)
-                HStack {
-                    Button {
-                        models.activeModelId = model.id
-                    } label: {
-                        Label(
-                            models.activeModelId == model.id ? "Active" : "Use this model",
-                            systemImage: models.activeModelId == model.id ? "checkmark.circle.fill" : "circle"
-                        )
-                    }
-                    Spacer()
-                    Button(role: .destructive) {
-                        models.delete(id: model.id)
-                    } label: {
-                        Image(systemName: "trash")
-                    }
+                Spacer()
+                Button(role: .destructive) {
+                    models.delete(id: model.id)
+                } label: {
+                    Label("Delete", systemImage: "trash")
                 }
                 .font(.footnote)
             }
         }
-        .padding(.vertical, 4)
     }
 
-    private func stars(level: Int) -> some View {
+    private func stars(_ level: Int, icon: String) -> some View {
         HStack(spacing: 1) {
+            Image(systemName: icon).font(.caption2).foregroundStyle(.secondary)
             ForEach(0..<5, id: \.self) { i in
                 Image(systemName: i < level ? "star.fill" : "star")
                     .font(.caption2)
