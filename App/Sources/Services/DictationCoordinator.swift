@@ -119,7 +119,7 @@ final class DictationCoordinator: ObservableObject {
             }
         }
         progress(0.1, "Decoding audio…")
-        let samples = try await AudioImportService.shared.samples(from: url)
+        let samples = try await AudioImportService.samples(from: url)
         progress(0.3, "Running transcription…")
         let text = try await AudioImportService.shared.runTranscription(
             samples: samples, language: language, engine: engine, progress: { value in
