@@ -256,7 +256,7 @@ final class WhisperCppEngine: STTEngine {
                 self.ringLock.unlock()
                 self.onPartial?(combined)
             } catch {
-                self?.logger.error("WhisperKit finalize failed: \(error.localizedDescription)")
+                self.logger.error("WhisperKit finalize failed: \(error.localizedDescription)")
             }
         }
     }
@@ -279,11 +279,11 @@ final class WhisperCppEngine: STTEngine {
                 self.ringLock.unlock()
                 self.onFinal?(combined)
             } catch {
-                self?.logger.error("WhisperKit final failed: \(error.localizedDescription)")
-                self?.ringLock.lock()
-                self?.finalizedText = ""
-                self?.ringLock.unlock()
-                self?.onFinal?("")
+                self.logger.error("WhisperKit final failed: \(error.localizedDescription)")
+                self.ringLock.lock()
+                self.finalizedText = ""
+                self.ringLock.unlock()
+                self.onFinal?("")
             }
         }
     }
