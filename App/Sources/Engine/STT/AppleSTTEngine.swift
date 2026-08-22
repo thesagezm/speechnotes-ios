@@ -2,6 +2,7 @@ import Foundation
 import Speech
 import AVFoundation
 import OSLog
+import SpeechLogic
 
 /// Phase-1 Apple STT (Speech framework).
 ///
@@ -22,6 +23,24 @@ final class AppleSTTEngine: STTEngine {
     private var audioEngine: AVAudioEngine?
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
+    private var recognizer: SFSpeechRecognizer?
+
+    /// Best transcript of the CURRENT recognition segment, updated on every
+    /// partial/final callback — lets stop() deliver the text SFSpeech would
+    /// otherwise discard when the task is cancelled.
+    private var latestTranscript = ""
+    /// Text from completed (rolled-over) segments; combined with the live
+    /// `latestTranscript` when stop() synthesizes a final.
+    private var accumulatedSegments = ""
+    /// True once this session's final has been delivered (stop() must not
+    /// deliver twice; cancel() must not deliver at all).
+    private var deliveredFinal = false
+    /// True while the user has not requested stop/cancel — gates the ~1-min
+    /// SFSpeech rollover (FIX-5).
+    private var stillRecording = false
+    /// True once stop() has been called — distinguishes "final because we're
+    /// done" from "final because the 1-min rollover kicked in".
+    private var stopRequested = false
 
     private var currentState: STTState = .idle {
         didSet { onStateChanged?(currentState) }
@@ -38,6 +57,8 @@ final class AppleSTTEngine: STTEngine {
 
     func stop() {
         logger.info("stop")
+        stopRequested = true
+        stillRecording = false
         if let task = recognitionTask {
             task.cancel()
             recognitionTask = nil
@@ -56,25 +77,47 @@ final class AppleSTTEngine: STTEngine {
         AudioSessionResetter.restoreForPlayback()
 
         currentState = .idle
-        onPartial?("")
+        // Graceful stop: SFSpeech discards the in-flight transcript when the
+        // task is cancelled — deliver what we recognized so the caller's
+        // save/insert path has text.
+        if !deliveredFinal {
+            deliveredFinal = true
+            let combined = accumulatedSegments + (accumulatedSegments.isEmpty || latestTranscript.isEmpty ? "" : " ") + latestTranscript
+            onFinal?(combined)
+        }
     }
 
     func cancel() {
         logger.info("cancel")
+        deliveredFinal = true   // discard, don't deliver
         stop()
     }
 
     // MARK: - File transcription (uses SFSpeechURLRecognitionRequest).
     func transcribeFile(samples: [Float], language: String?) async throws -> String {
-        // SFSpeechRecognizer prefers a file URL; we hand the samples back
-        // by writing them to a temp WAV and pointing the recogniser at it.
-        let wavURL = try Self.writeTempWAV(samples: samples)
-        defer { try? FileManager.default.removeItem(at: wavURL) }
-        // SFSpeech requires the speech-recognition entitlement to be granted
-        // (same one the live mic uses). Without it the recognitionTask
-        // completes with error 203 / "not authorized" — catch and translate.
+        guard !samples.isEmpty else { return "" }
         try await Self.ensureSpeechAuthorization()
-        return try await transcribeFile(at: wavURL, language: language)
+        // SFSpeech caps one request around a minute of audio — transcribe in
+        // 50 s chunks and join.
+        let chunkSamples = 16_000 * 50
+        var parts: [String] = []
+        var start = 0
+        while start < samples.count {
+            let end = min(start + chunkSamples, samples.count)
+            let wavURL = try Self.writeTempWAV(samples: Array(samples[start..<end]))
+            do {
+                parts.append(try await transcribeFile(at: wavURL, language: language))
+            } catch {
+                try? FileManager.default.removeItem(at: wavURL)
+                throw error
+            }
+            try? FileManager.default.removeItem(at: wavURL)
+            start = end
+        }
+        return parts
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
     }
 
     private static func ensureSpeechAuthorization() async throws {
@@ -128,45 +171,7 @@ final class AppleSTTEngine: STTEngine {
     private static func writeTempWAV(samples: [Float]) throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("speechnotes-import-\(UUID().uuidString).wav")
-        let pcm = samples.map { Int16(max(-1, min(1, $0)) * 32_767) }
-        var data = Data()
-        let sampleRate: UInt32 = 16_000
-        let bitsPerSample: UInt16 = 16
-        let numChannels: UInt16 = 1
-        let byteRate = sampleRate * UInt32(numChannels) * UInt32(bitsPerSample / 8)
-        let blockAlign = numChannels * (bitsPerSample / 8)
-        let dataSize = UInt32(pcm.count * MemoryLayout<Int16>.size)
-
-        func appendString(_ s: String) {
-            data.append(contentsOf: s.utf8)
-        }
-        func appendUInt32LE(_ v: UInt32) {
-            var be = v.littleEndian
-            withUnsafeBytes(of: &be) { data.append(contentsOf: $0) }
-        }
-        func appendUInt16LE(_ v: UInt16) {
-            var be = v.littleEndian
-            withUnsafeBytes(of: &be) { data.append(contentsOf: $0) }
-        }
-
-        appendString("RIFF")
-        appendUInt32LE(36 + dataSize)
-        appendString("WAVE")
-        appendString("fmt ")
-        appendUInt32LE(16)
-        appendUInt16LE(1) // PCM
-        appendUInt16LE(numChannels)
-        appendUInt32LE(sampleRate)
-        appendUInt32LE(byteRate)
-        appendUInt16LE(blockAlign)
-        appendUInt16LE(bitsPerSample)
-        appendString("data")
-        appendUInt32LE(dataSize)
-        for s in pcm {
-            var little = s.littleEndian
-            withUnsafeBytes(of: &little) { data.append(contentsOf: $0) }
-        }
-        try data.write(to: url)
+        try WAVWriter.write(samples: samples, sampleRate: 16_000, to: url)
         return url
     }
 
@@ -212,6 +217,14 @@ final class AppleSTTEngine: STTEngine {
             currentState = .idle
             return
         }
+        // Reset per-session state so the final we synthesize from stop() is
+        // composed from exactly this session's text.
+        self.recognizer = recognizer
+        latestTranscript = ""
+        accumulatedSegments = ""
+        deliveredFinal = false
+        stillRecording = true
+        stopRequested = false
 
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
@@ -248,18 +261,95 @@ final class AppleSTTEngine: STTEngine {
         recognitionTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
             guard let self else { return }
             if let result {
+                self.latestTranscript = result.bestTranscription.formattedString
                 if result.isFinal {
-                    self.currentState = .idle
-                    self.onFinal?(result.bestTranscription.formattedString)
-                    self.stop()
+                    if self.stillRecording && !self.stopRequested {
+                        // ~1-minute SFSpeech per-task limit: roll over into a
+                        // new request and keep transcribing (FIX-5).
+                        self.restartRecognition()
+                    } else {
+                        self.finishSession()
+                    }
                 } else {
-                    self.onPartial?(result.bestTranscription.formattedString)
+                    let combined = self.accumulatedSegments + (self.accumulatedSegments.isEmpty ? "" : " ") + self.latestTranscript
+                    self.onPartial?(combined)
                 }
             }
             if let error {
                 self.logger.error("SFSpeechRecognitionTask error: \(error.localizedDescription)")
-                self.currentState = .idle
-                self.stop()
+                if self.stillRecording && !self.stopRequested {
+                    self.restartRecognition()
+                } else {
+                    self.finishSession()
+                }
+            }
+        }
+    }
+
+    /// Closes the current session and delivers the combined transcript as the
+    /// final, exactly once.
+    private func finishSession() {
+        stillRecording = false
+        if !deliveredFinal {
+            deliveredFinal = true
+            let combined = accumulatedSegments + (accumulatedSegments.isEmpty || latestTranscript.isEmpty ? "" : " ") + latestTranscript
+            onFinal?(combined)
+        }
+        currentState = .idle
+        // Don't double-deliver from stop() — but do release the audio
+        // session so the next start() can install a fresh tap.
+        if let task = recognitionTask {
+            task.cancel()
+            recognitionTask = nil
+        }
+        recognitionRequest = nil
+        audioEngine?.stop()
+        audioEngine?.inputNode.removeTap(onBus: 0)
+        audioEngine = nil
+        AudioSessionResetter.restoreForPlayback()
+    }
+
+    /// Starts a fresh recognition request on the live mic tap. The audio tap
+    /// reads `recognitionRequest` per buffer, so it keeps feeding the new
+    /// request; the previous segment's text moves to `accumulatedSegments`.
+    private func restartRecognition() {
+        guard let recognizer, recognizer.isAvailable else {
+            finishSession()
+            return
+        }
+        // Roll the just-finalized segment into accumulatedSegments.
+        let trimmed = latestTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            accumulatedSegments = accumulatedSegments.isEmpty ? trimmed : accumulatedSegments + " " + trimmed
+        }
+        latestTranscript = ""
+
+        let request = SFSpeechAudioBufferRecognitionRequest()
+        request.shouldReportPartialResults = true
+        recognitionRequest = request
+        recognitionTask?.cancel()
+        recognitionTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
+            guard let self else { return }
+            if let result {
+                self.latestTranscript = result.bestTranscription.formattedString
+                if result.isFinal {
+                    if self.stillRecording && !self.stopRequested {
+                        self.restartRecognition()
+                    } else {
+                        self.finishSession()
+                    }
+                } else {
+                    let combined = self.accumulatedSegments + (self.accumulatedSegments.isEmpty ? "" : " ") + self.latestTranscript
+                    self.onPartial?(combined)
+                }
+            }
+            if let error {
+                self.logger.error("SFSpeechRecognitionTask error: \(error.localizedDescription)")
+                if self.stillRecording && !self.stopRequested {
+                    self.restartRecognition()
+                } else {
+                    self.finishSession()
+                }
             }
         }
     }

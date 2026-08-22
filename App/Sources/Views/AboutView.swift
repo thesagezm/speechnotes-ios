@@ -11,7 +11,7 @@ struct AboutView: View {
                     VStack(alignment: .leading) {
                         Text("Speechnotes")
                             .font(.headline)
-                        Text("v1.3.0 · offline TTS notes")
+                        Text("v\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?") · offline TTS + STT notes")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }

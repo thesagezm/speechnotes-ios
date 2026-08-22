@@ -79,7 +79,6 @@ targets:
             CFBundleURLRole: Viewer
         UIBackgroundModes:
           - audio
-        NSCameraUsageDescription: ''
         NSMicrophoneUsageDescription: 'Speechnotes uses the microphone to transcribe speech into text while you dictate notes.'
         NSSpeechRecognitionUsageDescription: 'Speechnotes uses speech recognition to convert your voice to text when you dictate notes.'
     settings:

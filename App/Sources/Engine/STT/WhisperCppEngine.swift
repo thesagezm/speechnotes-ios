@@ -25,6 +25,13 @@ final class WhisperCppEngine: STTEngine {
     private var pipe: WhisperKit?
     private var currentModelId: String = "tiny"
     private var loadedModelVariant: String?
+    /// Language for the current session (BCP-47 or nil = auto), set in start().
+    private var currentLanguage: String?
+    /// Transcript of evicted (older-than-window) audio, guarded by ringLock.
+    /// Chained finalization tasks append in segment order (see enqueueFinalization).
+    private var finalizedText = ""
+    /// Serializes evicted-segment transcriptions so appended text stays ordered.
+    private var finalizeChain: Task<Void, Never> = Task {}
 
     /// Map our catalog ids to WhisperKit's model folder names. WhisperKit
     /// downloads from `argmaxinc/whisperkit-coreml` on Hugging Face.
@@ -38,6 +45,9 @@ final class WhisperCppEngine: STTEngine {
         "large-v3-turbo": "large-v3-turbo",
         "large-v3": "large-v3",
     ]
+
+    private static let liveWindowSamples = 16_000 * 30   // hard cap kept in memory
+    private static let liveKeepSamples = 16_000 * 20     // floor after an eviction
 
     private var currentState: STTState = .idle {
         didSet { onStateChanged?(currentState) }
@@ -70,12 +80,14 @@ final class WhisperCppEngine: STTEngine {
     // MARK: - STTEngine
     func start(language: String?, prompt: String?) {
         guard currentState == .idle else { return }
+        currentLanguage = language
         guard pipe != nil else {
             logger.error("Whisper model not loaded")
             currentState = .idle
             onFinal?("")
             return
         }
+        finalizedText = ""
         setupAudioEngine()
         currentState = .recording
         scheduleProcessWindow()
@@ -91,9 +103,9 @@ final class WhisperCppEngine: STTEngine {
         let snapshot = ringBuffer
         ringBuffer.removeAll(keepingCapacity: true)
         ringLock.unlock()
-        if !snapshot.isEmpty { runInference(samples: snapshot, isFinal: true) }
         AudioSessionResetter.restoreForPlayback()
         currentState = .idle
+        if !snapshot.isEmpty { runFinal(samples: snapshot) }
     }
 
     func cancel() { stop() }
@@ -101,9 +113,29 @@ final class WhisperCppEngine: STTEngine {
     // MARK: - File transcription (WhisperKit accepts Float32 arrays directly).
     func transcribeFile(samples: [Float], language: String?) async throws -> String {
         guard let pipe else { throw TranscribeFileError.unsupported }
-        let options = DecodingOptions(language: language)
-        let results = try await pipe.transcribe(audioArray: samples, decodeOptions: options)
-        return results.map(\.text).joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !samples.isEmpty else { return "" }
+        // One inference per 30 s keeps memory and latency bounded on-device.
+        let chunkSamples = 16_000 * 30
+        var parts: [String] = []
+        var start = 0
+        while start < samples.count {
+            let end = min(start + chunkSamples, samples.count)
+            let options = DecodingOptions(language: Self.whisperLanguageCode(language))
+            let results = try await pipe.transcribe(audioArray: Array(samples[start..<end]), decodeOptions: options)
+            let chunkText = results.map(\.text)
+                .joined(separator: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !chunkText.isEmpty { parts.append(chunkText) }
+            start = end
+        }
+        return parts.joined(separator: " ")
+    }
+
+    /// BCP-47 ("en-US") → ISO-639-1 ("en"); WhisperKit rejects region-qualified
+    /// codes. nil/auto passes through as nil (language auto-detect).
+    static func whisperLanguageCode(_ bcp47: String?) -> String? {
+        guard let bcp47, !bcp47.isEmpty else { return nil }
+        return String(bcp47.prefix(while: { $0 != "-" })).lowercased()
     }
 
     // MARK: - Audio capture
@@ -160,9 +192,15 @@ final class WhisperCppEngine: STTEngine {
         let item = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.ringLock.lock()
+            var evicted: [Float] = []
+            if self.ringBuffer.count > Self.liveWindowSamples {
+                evicted = Array(self.ringBuffer.prefix(self.ringBuffer.count - Self.liveKeepSamples))
+                self.ringBuffer.removeFirst(evicted.count)
+            }
             let snapshot = self.ringBuffer
             self.ringLock.unlock()
-            self.runInference(samples: snapshot, isFinal: false)
+            if !evicted.isEmpty { self.enqueueFinalization(samples: evicted) }
+            if !snapshot.isEmpty { self.runInference(samples: snapshot, isFinal: false) }
             self.scheduleProcessWindow()
         }
         workItem = item
@@ -172,32 +210,80 @@ final class WhisperCppEngine: STTEngine {
     private func runInference(samples: [Float], isFinal: Bool) {
         guard let pipe else { return }
         guard !samples.isEmpty else { return }
-        currentState = .transcribing
+        if isFinal { currentState = .transcribing }
         Task.detached(priority: .userInitiated) { [weak self] in
             do {
-                let options = DecodingOptions(language: nil)
+                let options = DecodingOptions(language: Self.whisperLanguageCode(self?.currentLanguage))
                 let results = try await pipe.transcribe(audioArray: samples, decodeOptions: options)
                 let text = results.map(\.text).joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
                 await MainActor.run {
                     guard let self else { return }
-                    if !text.isEmpty { self.onPartial?(text) }
-                    if isFinal {
-                        self.onFinal?(text)
-                        self.currentState = .idle
-                    } else {
-                        self.currentState = .recording
+                    if isFinal { self.currentState = .recording }
+                    if !text.isEmpty {
+                        self.ringLock.lock()
+                        let combined = self.finalizedText + (self.finalizedText.isEmpty || text.isEmpty ? "" : " ") + text
+                        self.ringLock.unlock()
+                        self.onPartial?(combined)
                     }
                 }
             } catch {
                 self?.logger.error("WhisperKit transcribe failed: \(error.localizedDescription)")
                 await MainActor.run {
-                    if isFinal {
-                        self?.onFinal?("")
-                        self?.currentState = .idle
-                    } else {
-                        self?.currentState = .recording
-                    }
+                    if isFinal { self?.currentState = .recording }
                 }
+            }
+        }
+    }
+
+    /// Transcribes one evicted segment and appends it to finalizedText. Chained
+    /// onto finalizeChain so segments append strictly in recorded order even
+    /// if inference finishes out of order. Emits combined partials so the UI
+    /// shows the full session text.
+    private func enqueueFinalization(samples: [Float]) {
+        guard let pipe else { return }
+        let prior = finalizeChain
+        finalizeChain = Task.detached(priority: .userInitiated) { [weak self] in
+            await prior.value
+            guard let self else { return }
+            do {
+                let options = DecodingOptions(language: Self.whisperLanguageCode(self.currentLanguage))
+                let results = try await pipe.transcribe(audioArray: samples, decodeOptions: options)
+                let text = results.map(\.text).joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !text.isEmpty else { return }
+                self.ringLock.lock()
+                self.finalizedText += self.finalizedText.isEmpty ? text : " " + text
+                let combined = self.finalizedText
+                self.ringLock.unlock()
+                self.onPartial?(combined)
+            } catch {
+                self?.logger.error("WhisperKit finalize failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// stop() path: wait for pending finalizations, transcribe the live window,
+    /// emit the WHOLE session as the final, reset.
+    private func runFinal(samples: [Float]) {
+        guard let pipe else { return }
+        let prior = finalizeChain
+        finalizeChain = Task.detached(priority: .userInitiated) { [weak self] in
+            await prior.value
+            guard let self else { return }
+            do {
+                let options = DecodingOptions(language: Self.whisperLanguageCode(self.currentLanguage))
+                let results = try await pipe.transcribe(audioArray: samples, decodeOptions: options)
+                let text = results.map(\.text).joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+                self.ringLock.lock()
+                let combined = self.finalizedText + (self.finalizedText.isEmpty || text.isEmpty ? "" : " ") + text
+                self.finalizedText = ""
+                self.ringLock.unlock()
+                self.onFinal?(combined)
+            } catch {
+                self?.logger.error("WhisperKit final failed: \(error.localizedDescription)")
+                self?.ringLock.lock()
+                self?.finalizedText = ""
+                self?.ringLock.unlock()
+                self?.onFinal?("")
             }
         }
     }

@@ -299,20 +299,20 @@ struct NotesListView: View {
                 }
             }
             Divider()
- Button {
- showingImporter = true
- } label: {
- Label("Import from Files…", systemImage: "folder")
- }
- Divider()
- Button {
- showingRecycleBin = true
- } label: {
- Label(
- "Recently Deleted\(!notes.deletedNotes.isEmpty ? " (\(notes.deletedNotes.count))" : "")",
- systemImage: "trash"
- )
- }
+            Button {
+                showingImporter = true
+            } label: {
+                Label("Import from Files…", systemImage: "folder")
+            }
+            Divider()
+            Button {
+                showingRecycleBin = true
+            } label: {
+                Label(
+                    "Recently Deleted\(!notes.deletedNotes.isEmpty ? " (\(notes.deletedNotes.count))" : "")",
+                    systemImage: "trash"
+                )
+            }
             // hasStrings is a cheap content-free check — reading .string here
             // would hit the (possibly remote) pasteboard on every render and
             // can trigger iOS paste prompts. Content is read on tap instead.

@@ -28,7 +28,13 @@ struct EditorMicButton: View {
         .sheet(isPresented: $showingSheet) {
             DictationSheetView()
                 .onDisappear {
-                    let text = dictation.consumeFinal()
+                    // "Done" can dismiss while still recording — stop first
+                    // so the mic session never leaks, then take whatever
+                    // was recognized.
+                    if dictation.state == .recording || dictation.state == .transcribing {
+                        dictation.stopRecording()
+                    }
+                    let text = dictation.consumeFinalOrPartial()
                     if !text.isEmpty { onTranscribed?(text) }
                     // After a sheet, SwiftUI sometimes forgets the keyboard
                     // safe-area inset — nudge it by bumping a trigger the

@@ -3,7 +3,7 @@ import SwiftUI
 struct DictationSheetView: View {
     @EnvironmentObject private var dictation: DictationCoordinator
     @Environment(\.dismiss) private var dismiss
-    @State private var languageHint: String = Locale.current.language.languageCode?.identifier ?? "en-US"
+    @AppStorage("sttLanguage") private var languageHint: String = "auto"
 
     var body: some View {
         NavigationStack {

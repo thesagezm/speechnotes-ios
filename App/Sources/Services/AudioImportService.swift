@@ -1,21 +1,18 @@
 import Foundation
 import AVFoundation
-import OSLog
 
 /// Transcribes an audio file (`.wav`, `.m4a`, `.mp3`, `.caf`, `.flac`,
 /// `.aiff`) using the active STT engine.
 ///
 /// Pipeline:
-/// 1. Security-scope + file coordination read (handles iCloud placeholders).
+/// 1. Security-scope read (fileImporter URLs need it; handles iCloud files).
 /// 2. `AVURLAsset` → `AVAssetReader` → decode to PCM.
 /// 3. Resample to 16 kHz mono Float32 (the format whisper.cpp + Apple SFSpeech
 ///    both expect).
 /// 4. Hand off to the engine via the `STTEngine.transcribeFile(...)` API.
-/// 5. Save the finalised transcript as a new `Note`.
 @MainActor
 final class AudioImportService {
     static let shared = AudioImportService()
-    private let logger = Logger(subsystem: "com.speechnotes.ios", category: "AudioImport")
 
     enum ImportError: LocalizedError {
         case noAudioTrack
@@ -33,25 +30,14 @@ final class AudioImportService {
 
     private init() {}
 
-    /// Reads + transcribes an audio file. Returns the transcript text.
-    /// Caller is responsible for committing it as a note (and handling
-    /// permissions / errors with `Haptics` / alerts).
-    func transcribe(
-        _ url: URL,
-        language: String?,
-        engine: STTEngine
-    ) async throws -> String {
+    /// Splits the import into two stages so callers can drive a progress bar.
+    /// Takes the security scope itself: every caller hands us a URL straight
+    /// from fileImporter / onOpenURL, and AVURLAsset silently sees no tracks
+    /// without it.
+    static func samples(from url: URL) async throws -> [Float] {
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-
-        let samples = try await Self.samples(from: url)
-        logger.info("AudioImport: \(samples.count) samples (\(Double(samples.count) / 16_000) s) ready for transcription")
-        return try await engine.transcribeFile(samples: samples, language: language)
-    }
-
-    /// Splits the import into two stages so callers can drive a progress bar.
-    static func samples(from url: URL) async throws -> [Float] {
-        try await Task.detached(priority: .userInitiated) {
+        return try await Task.detached(priority: .userInitiated) {
             try Self.decode(url: url)
         }.value
     }

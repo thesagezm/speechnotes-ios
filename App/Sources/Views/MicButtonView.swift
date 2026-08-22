@@ -1,23 +1,35 @@
 import SwiftUI
 
-/// Phase 0 placeholder — shows a mic button that does nothing yet.
-/// Phase 1 wires it to DictationCoordinator.startRecording()
+/// Notes-list toolbar mic button: opens the same dictation sheet the editor
+/// uses; the transcript lands as a new note when the sheet dismisses.
 struct MicButtonView: View {
     @EnvironmentObject private var dictation: DictationCoordinator
+    @EnvironmentObject private var notes: NotesStore
+    @State private var showingSheet = false
 
     var body: some View {
         Button {
-            // placeholder: state will be idle in Phase 0
-            dictation.state == .idle ? dictation.startRecording() : dictation.stopRecording()
+            showingSheet = true
         } label: {
             Image(systemName: dictation.state == .recording ? "mic.fill" : "mic")
                 .font(.system(size: 16, weight: .medium))
                 .foregroundStyle(dictation.state == .recording ? .red : .primary)
-                .frame(width: 34, height: 34)
-                .background(
-                    Circle().fill(Color.secondary.opacity(0.12))
-                )
         }
         .accessibilityLabel("Dictate")
+        .sheet(isPresented: $showingSheet) {
+            DictationSheetView()
+                .onDisappear {
+                    if dictation.state == .recording || dictation.state == .transcribing {
+                        dictation.stopRecording()
+                    }
+                    let text = dictation.consumeFinalOrPartial()
+                    guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+                    let note = notes.createNote()
+                    var updated = note
+                    updated.text = text
+                    notes.update(updated)
+                    Haptics.success()
+                }
+        }
     }
 }

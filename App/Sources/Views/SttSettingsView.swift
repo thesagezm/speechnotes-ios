@@ -45,6 +45,7 @@ struct SttSettingsView: View {
                 }
                 ForEach(WhisperModelManager.catalog) { model in
                     modelRow(model)
+                    downloadRow(model)
                 }
             } header: {
                 Text("Whisper model")
@@ -65,10 +66,6 @@ struct SttSettingsView: View {
             }
         }
         .navigationTitle("Speech-to-text")
-        .onChange(of: dictation.engineKind) { _ in
-            // The coordinator rebuilds the engine itself when the kind
-            // changes; nothing to do here.
-        }
     }
 
     @ViewBuilder

@@ -27,7 +27,10 @@ struct SpeechnotesApp: App {
             // Saves are coalesced in NotesStore; the second the app could be
             // suspended is the one moment a pending write must not be lost.
             .onChange(of: scenePhase) { phase in
-                if phase != .active { notes.flushNow() }
+                if phase != .active {
+                    notes.flushNow()
+                    player.persistPlaybackBookmark()
+                }
             }
         }
     }

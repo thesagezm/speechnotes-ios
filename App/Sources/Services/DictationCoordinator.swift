@@ -33,6 +33,7 @@ final class DictationCoordinator: ObservableObject {
     @Published var lastFinalText: String = ""
 
     private var engine: STTEngine?
+    private var lastWhisperModelId: String?
     private var timer: Timer?
 
     init() {
@@ -56,13 +57,18 @@ final class DictationCoordinator: ObservableObject {
         case .apple:
             engine = AppleSTTEngine()
         case .whisper:
+            lastWhisperModelId = whisperModels.activeModelId
             engine = WhisperCppEngine(modelId: whisperModels.activeModelId)
         }
+        wireEngineCallbacks()
+    }
+
+    private func wireEngineCallbacks() {
         engine?.onPartial = { [weak self] text in
-            Task { @MainActor in self?.partialText = text }
+            self?.hopToMain { self?.partialText = text }
         }
         engine?.onFinal = { [weak self] text in
-            Task { @MainActor in
+            self?.hopToMain {
                 self?.partialText = ""
                 self?.lastFinalText = text
                 self?.state = .idle
@@ -70,16 +76,41 @@ final class DictationCoordinator: ObservableObject {
             }
         }
         engine?.onStateChanged = { [weak self] s in
-            Task { @MainActor in self?.state = s }
+            self?.hopToMain { self?.state = s }
+        }
+    }
+
+    /// Engine callbacks arrive from mixed threads. When already on main (the
+    /// common case — stop() is UI-driven and the Apple engine synthesizes its
+    /// final synchronously) run the handler NOW instead of next runloop tick,
+    /// so callers that stop and immediately consume the transcript see it.
+    private func hopToMain(_ body: @escaping @MainActor () -> Void) {
+        if Thread.isMainThread {
+            MainActor.assumeIsolated { body() }
+        } else {
+            Task { @MainActor in body() }
         }
     }
 
     func startRecording(language: String? = nil) {
         guard state == .idle else { return }
-        // The previous Apple engine could be torn down here; rebuild for
-        // each session so the SFSpeechRecognizer picks up the latest
-        // language/voice preferences.
-        if engineKind == .apple { rebuildEngine() }
+        // Reconcile the engine with the CURRENT selection every session: the
+        // Apple engine is cheap to rebuild; the Whisper engine only when the
+        // model id actually changed (WhisperKit reload is expensive).
+        switch engineKind {
+        case .apple:
+            engine = AppleSTTEngine()
+        case .whisper:
+            if !(engine is WhisperCppEngine) || lastWhisperModelId != whisperModels.activeModelId {
+                lastWhisperModelId = whisperModels.activeModelId
+                engine = WhisperCppEngine(modelId: whisperModels.activeModelId)
+            }
+        }
+        wireEngineCallbacks()
+        // Fresh session: drop any stale final/partial so a later save can
+        // never commit the previous session's text.
+        lastFinalText = ""
+        partialText = ""
         state = .recording
         startTimer()
         engine?.start(language: language, prompt: nil)
@@ -88,15 +119,23 @@ final class DictationCoordinator: ObservableObject {
     func stopRecording() {
         engine?.stop()
         state = .idle
-        partialText = ""
         stopTimer()
+        // NOTE: partialText is intentionally NOT cleared here. The Apple
+        // engine delivers its final synchronously from stop(); Whisper's
+        // final lands a moment later — until then the visible partial IS the
+        // transcript, and consumeFinalOrPartial() uses it as the fallback.
     }
 
-    /// Editor consumes the last finalized text and clears it.
-    func consumeFinal() -> String {
-        let t = lastFinalText
+    /// Returns the session transcript: the engine final when it has arrived,
+    /// otherwise the last visible partial (the complete text for Whisper —
+    /// its partials cover the whole session). Clears both. The editor's
+    /// "insert at cursor" and the tab's "Save as note" both go through this.
+    func consumeFinalOrPartial() -> String {
+        let final = lastFinalText
         lastFinalText = ""
-        return t
+        let text = final.isEmpty ? partialText : final
+        partialText = ""
+        return text
     }
 
     /// File-import transcription (audio recordings dropped into the app).

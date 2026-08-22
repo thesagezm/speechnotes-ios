@@ -4,7 +4,7 @@ import UniformTypeIdentifiers
 struct DictationTabView: View {
     @EnvironmentObject private var dictation: DictationCoordinator
     @EnvironmentObject private var notes: NotesStore
-    @State private var languageHint: String = "auto"
+    @AppStorage("sttLanguage") private var languageHint: String = "auto"
     @State private var savingMessage: String?
     @State private var importingAudio = false
     @State private var importingError: String?
@@ -193,7 +193,7 @@ struct DictationTabView: View {
     }
 
     private func saveTranscript() {
-        let text = dictation.consumeFinal()
+        let text = dictation.consumeFinalOrPartial()
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         let note = notes.createNote()
         var updated = note

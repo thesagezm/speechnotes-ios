@@ -98,21 +98,7 @@ final class WhisperModelManager: ObservableObject {
     }
 
     private let logger = Logger(subsystem: "com.speechnotes.ios", category: "WhisperModels")
-    private var tasks: [String: URLSessionDownloadTask] = [:]
-    private var progressObservers: [String: NSKeyValueObservation] = [:]
-    private var resumeData: [String: Data] = [:]
-    private let session: URLSession
-
-    /// Models live in `Documents/Whisper/`. Excluded from iCloud backup.
-    static var modelsDirectory: URL {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Whisper", isDirectory: true)
-    }
-
-    static func modelURL(for id: String) -> URL? {
-        guard let model = catalog.first(where: { $0.id == id }) else { return nil }
-        return modelsDirectory.appendingPathComponent(model.filename)
-    }
+    private var inFlightDownloads: Set<String> = []
 
     /// Free disk bytes (Bytes free on the volume that holds Documents).
     nonisolated static func freeDiskBytes() -> Int64 {
@@ -126,21 +112,6 @@ final class WhisperModelManager: ObservableObject {
     }
 
     init() {
-        let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 120
-        config.timeoutIntervalForResource = 60 * 60 * 2
-        config.allowsCellularAccess = true
-        config.waitsForConnectivity = true
-        self.session = URLSession(configuration: config)
-
-        try? FileManager.default.createDirectory(
-            at: Self.modelsDirectory, withIntermediateDirectories: true
-        )
-        var url = Self.modelsDirectory
-        var rv = URLResourceValues()
-        rv.isExcludedFromBackup = true
-        try? url.setResourceValues(rv)
-
         // WhisperKit downloads its models into a parallel folder structure
         // (coreml/<variant>/*.mlmodelc). The marker file <variant>.bin tells
         // us it considers the model installed — used here so .ready fires
@@ -201,19 +172,22 @@ final class WhisperModelManager: ObservableObject {
     func startDownload(id: String) {
         guard let model = Self.catalog.first(where: { $0.id == id }) else { return }
         if case .downloading = states[id] { return }
+        guard !inFlightDownloads.contains(id) else { return }   // no concurrent downloads
         guard let variant = Self.variantForId[id] else {
             states[id] = .failed("Unknown model variant.")
             return
         }
 
         // Disk preflight — bail with a clear message if the user won't fit
-        // the model plus a safety margin (100 MB).
-        let need = model.sizeBytes + 100_000_000
+        // the model plus a safety margin. CoreML bundles differ from ggml
+        // sizes — use ~1.5× headroom on the catalog size.
+        let need = Int64(Double(model.sizeBytes) * 1.5) + 100_000_000
         if Self.freeDiskBytes() < need {
             states[id] = .failed("Not enough free space — need ~\(model.sizeBytes / 1_000_000) MB.")
             return
         }
 
+        inFlightDownloads.insert(id)
         states[id] = .downloading(0)
         Task { @MainActor in
             do {
@@ -223,15 +197,14 @@ final class WhisperModelManager: ObservableObject {
                     }
                 }
                 try await WhisperKit.download(variant: variant, progressCallback: progressCallback)
-                self.tasks[id] = nil
-                self.progressObservers[id]?.invalidate()
-                self.progressObservers[id] = nil
+                self.inFlightDownloads.remove(id)
                 self.states[id] = .ready
                 self.logger.info("WhisperKit model ready: \(variant)")
                 if WhisperModelManager.variantForId[self.activeModelId] == variant {
                     NotificationCenter.default.post(name: .whisperModelReady, object: variant)
                 }
             } catch {
+                self.inFlightDownloads.remove(id)
                 self.states[id] = .failed(error.localizedDescription)
                 self.logger.error("WhisperKit download failed: \(error.localizedDescription)")
             }
@@ -241,9 +214,6 @@ final class WhisperModelManager: ObservableObject {
     func cancelDownload(id: String) {
         // WhisperKit's download API has no public cancel hook; clear the
         // state so the user can retry.
-        tasks[id] = nil
-        progressObservers[id]?.invalidate()
-        progressObservers[id] = nil
         if case .downloading = states[id] {
             states[id] = .notDownloaded
         }
@@ -251,7 +221,6 @@ final class WhisperModelManager: ObservableObject {
 
     func delete(id: String) {
         cancelDownload(id: id)
-        resumeData[id] = nil
         // Delete the WhisperKit-installed bundle.
         let variant = Self.variantForId[id] ?? id
         let variantDir = Self.whisperKitDirectory.appendingPathComponent(variant, isDirectory: true)
@@ -273,50 +242,6 @@ final class WhisperModelManager: ObservableObject {
         let marker = Self.whisperKitDirectory.appendingPathComponent("\(variant).bin")
         let installed = FileManager.default.fileExists(atPath: marker.path)
         return installed ? variant : "\(variant) (not on disk)"
-    }
-
-    // URLSession callbacks are nonisolated; we hop to the main actor to
-    // mutate state. The session is owned by self but the delegate's calls
-    // come in on a background queue.
-    nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
-        guard let id = downloadTask.taskDescription else { return }
-        // Synchronous move INSIDE the callback to avoid the temp-file race
-        // that nukes the file once didFinishDownloadingTo returns. The
-        // destination folder is also main-actor-isolated, so resolve once
-        // here (FileManager.default.urls is nonisolated) rather than on the
-        // manager.
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let dir = docs.appendingPathComponent("Whisper", isDirectory: true)
-        let dest = dir.appendingPathComponent(downloadTask.response?.suggestedFilename ?? id)
-        try? FileManager.default.removeItem(at: dest)
-        do {
-            try FileManager.default.moveItem(at: location, to: dest)
-        } catch {
-            logger.error("Whisper model move failed: \(error.localizedDescription)")
-        }
-        Task { @MainActor in
-            self.tasks[id] = nil
-            self.progressObservers[id]?.invalidate()
-            self.progressObservers[id] = nil
-            self.states[id] = .ready
-            self.logger.info("Whisper model ready: \(id)")
-        }
-    }
-
-    nonisolated func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        guard let id = task.taskDescription else { return }
-        if let error = error as NSError? {
-            // Preserve resume data for retry (-1001 / network drops)
-            if let data = error.userInfo[NSURLSessionDownloadTaskResumeData] as? Data {
-                Task { @MainActor in self.resumeData[id] = data }
-            }
-            Task { @MainActor in
-                self.states[id] = .failed(error.localizedDescription)
-                self.tasks[id] = nil
-                self.progressObservers[id]?.invalidate()
-                self.progressObservers[id] = nil
-            }
-        }
     }
 }
 
