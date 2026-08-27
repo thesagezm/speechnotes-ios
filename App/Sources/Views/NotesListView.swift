@@ -166,8 +166,8 @@ struct NotesListView: View {
         }
         // Mini-player jump-to-note: the global overlay posts a notification,
         // we switch tabs (SpeechnotesApp) and push the note here.
-        .onReceive(NotificationCenter.default.publisher(for: .miniPlayerJumpToNote)) { note in
-            guard let id = note.object as? UUID,
+        .onReceive(NotificationCenter.default.publisher(for: .miniPlayerJumpToNote)) { notification in
+            guard let id = notification.object as? UUID,
                   notes.notes.contains(where: { $0.id == id }) else { return }
             path.append(id)
         }
