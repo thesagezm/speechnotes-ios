@@ -56,6 +56,32 @@ final class DictationCoordinator: ObservableObject {
         Task { @MainActor in self.rebuildEngine() }
     }
 
+    /// Start recording once the engine's model is actually loaded. WhisperKit
+    /// model load is async; calling engine.start() before it resolves used to
+    /// fail silently ("model isn't loaded") on the very first tap after a
+    /// fresh download or cold start.
+    func startRecording(language: String? = nil) {
+        guard state == .idle else { return }
+        rebuildEngine()
+        lastError = nil
+        lastFinalText = ""
+        partialText = ""
+        state = .recording
+        startedAt = Date()
+        startTimer()
+        if let whisper = engine as? WhisperCppEngine {
+            state = .transcribing                      // "Loading model…" UX
+            Task { @MainActor in
+                await whisper.waitUntilLoaded()
+                guard self.state == .transcribing else { return }   // user cancelled
+                self.state = .recording
+                whisper.start(language: language, prompt: nil)
+            }
+        } else {
+            engine?.start(language: language, prompt: nil)
+        }
+    }
+
     private func rebuildEngine() {
         // Reconcile the engine with the CURRENT selection: the Apple engine
         // is cheap to rebuild; the Whisper engine only when the model id
@@ -105,20 +131,6 @@ final class DictationCoordinator: ObservableObject {
         } else {
             Task { @MainActor in body() }
         }
-    }
-
-    func startRecording(language: String? = nil) {
-        guard state == .idle else { return }
-        rebuildEngine()
-        // Fresh session: drop any stale final/partial/error so a later save
-        // can never commit the previous session's text.
-        lastError = nil
-        lastFinalText = ""
-        partialText = ""
-        state = .recording
-        startedAt = Date()
-        startTimer()
-        engine?.start(language: language, prompt: nil)
     }
 
     func stopRecording() {

@@ -2,79 +2,42 @@ import Foundation
 import OSLog
 import WhisperKit
 
-/// On-device model catalog + download manager for Whisper STT models.
-/// Mirrors the shape of `ModelManager` for TTS: a published state machine
-/// (`notDownloaded` / `downloading(progress)` / `failed(message)` / `ready`),
-/// disk preflight, and delete.
-///
-/// Downloads are delegated to WhisperKit (`argmaxinc/whisperkit-coreml` on
-/// Hugging Face), which fetches CoreML bundles — NOT the ggml `ggml-*.bin`
-/// files the pre-Phase-4 catalog targeted. Catalog `sizeBytes` values are
-/// approximate CoreML install sizes used for display and the disk preflight.
+/// On-device model catalog + download manager for WhisperKit STT models.
+/// Everything routes through WhisperKit's own HuggingFace downloader; we
+/// only keep the path it returns so "is this model present?" survives
+/// app restarts (WhisperKit itself stores the bundle wherever its internal
+/// HubApi decides — we can't derive that location, we have to remember it).
 @MainActor
 final class WhisperModelManager: ObservableObject {
 
     static let shared = WhisperModelManager()
 
-    /// Curated default catalog (Amical-style: tiny → base → small → large-v3-turbo,
-    /// plus `.en` variants for English-only small models).
+    /// Curated default catalog (Amical-style: tiny → base → small →
+    /// large-v3-turbo, plus .en variants for English-only small models).
     static let catalog: [WhisperModel] = [
-        WhisperModel(
-            id: "tiny",
-            displayName: "Tiny",
-            sizeBytes: 77_700_000,
-            englishOnly: false,
-            speed: 5, accuracy: 2
-        ),
-        WhisperModel(
-            id: "tiny.en",
-            displayName: "Tiny (English only)",
-            sizeBytes: 77_700_000,
-            englishOnly: true,
-            speed: 5, accuracy: 3
-        ),
-        WhisperModel(
-            id: "base",
-            displayName: "Base",
-            sizeBytes: 148_000_000,
-            englishOnly: false,
-            speed: 4, accuracy: 3
-        ),
-        WhisperModel(
-            id: "base.en",
-            displayName: "Base (English only)",
-            sizeBytes: 148_000_000,
-            englishOnly: true,
-            speed: 4, accuracy: 3
-        ),
-        WhisperModel(
-            id: "small",
-            displayName: "Small",
-            sizeBytes: 488_000_000,
-            englishOnly: false,
-            speed: 3, accuracy: 4
-        ),
-        WhisperModel(
-            id: "small.en",
-            displayName: "Small (English only)",
-            sizeBytes: 488_000_000,
-            englishOnly: true,
-            speed: 3, accuracy: 4
-        ),
-        WhisperModel(
-            id: "large-v3-turbo",
-            displayName: "Large v3 Turbo",
-            sizeBytes: 1_540_000_000,
-            englishOnly: false,
-            speed: 3, accuracy: 5
-        ),
-        WhisperModel(
-            id: "large-v3",
-            displayName: "Large v3",
-            sizeBytes: 3_100_000_000,
-            englishOnly: false,
-            speed: 1, accuracy: 5
-        ),
+        WhisperModel(id: "tiny",           displayName: "Tiny",                  sizeBytes:   77_700_000, englishOnly: false,  speed: 5, accuracy: 2),
+        WhisperModel(id: "tiny.en",        displayName: "Tiny (English only)",   sizeBytes:   77_700_000, englishOnly: true,   speed: 5, accuracy: 3),
+        WhisperModel(id: "base",           displayName: "Base",                  sizeBytes:  148_000_000, englishOnly: false,  speed: 4, accuracy: 3),
+        WhisperModel(id: "base.en",        displayName: "Base (English only)",   sizeBytes:  148_000_000, englishOnly: true,   speed: 4, accuracy: 3),
+        WhisperModel(id: "small",          displayName: "Small",                 sizeBytes:  488_000_000, englishOnly: false,  speed: 3, accuracy: 4),
+        WhisperModel(id: "small.en",       displayName: "Small (English only)",  sizeBytes:  488_000_000, englishOnly: true,   speed: 3, accuracy: 4),
+        WhisperModel(id: "large-v3-turbo", displayName: "Large v3 Turbo",        sizeBytes: 1540_000_000, englishOnly: false,  speed: 3, accuracy: 5),
+        WhisperModel(id: "large-v3",       displayName: "Large v3",              sizeBytes: 3100_000_000, englishOnly: false,  speed: 1, accuracy: 5),
+    ]
+
+    /// Catalog id → WhisperKit variant name (whisperkittools uses an
+    /// "openai_whisper-" prefix on disk; we hand the prefix to WhisperKit
+    /// only via `WhisperKitConfig.model`, never through folder paths —
+    /// the path lookup below scans actual repo dirs instead of guessing).
+    nonisolated static let variantForId: [String: String] = [
+        "tiny":            "tiny",
+        "tiny.en":         "tiny.en",
+        "base":            "base",
+        "base.en":         "base.en",
+        "small":           "small",
+        "small.en":        "small.en",
+        "large-v3-turbo":  "large-v3-turbo",
+        "large-v3":        "large-v3",
     ]
 
     enum DownloadState: Equatable {
@@ -92,7 +55,7 @@ final class WhisperModelManager: ObservableObject {
     private let logger = Logger(subsystem: "com.speechnotes.ios", category: "WhisperModels")
     private var inFlightDownloads: Set<String> = []
 
-    /// Free disk bytes (Bytes free on the volume that holds Documents).
+    /// Free disk bytes on the volume that holds Documents.
     nonisolated static func freeDiskBytes() -> Int64 {
         let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         do {
@@ -104,52 +67,116 @@ final class WhisperModelManager: ObservableObject {
     }
 
     init() {
-        // WhisperKit downloads its models into a parallel folder structure
-        // (coreml/<variant>/*.mlmodelc). The marker file <variant>.bin tells
-        // us it considers the model installed — used here so .ready fires
-        // when WhisperKit sees the model even before WhisperCppEngine has
-        // loaded it.
+        Self.installedFolders = Self.loadInstalledFolders()
+
+        // Restore the previously-active id only if its folder is still on
+        // disk; otherwise fall back to the first actually-installed model.
         let userActive = UserDefaults.standard.string(forKey: "activeWhisperModelId") ?? "tiny"
-        if let variant = Self.variantForId[userActive] {
-            let marker = Self.whisperKitDirectory.appendingPathComponent("\(variant).bin")
-            if FileManager.default.fileExists(atPath: marker.path) {
-                activeModelId = userActive
+        let firstInstalled = Self.catalog.first(where: { isInstalled($0) })?.id
+        if isInstalled(id: userActive) {
+            activeModelId = userActive
+        } else if let fallback = firstInstalled {
+            activeModelId = fallback
+        }
+
+        // Seed the per-model state machine from what we can verify on disk.
+        for model in Self.catalog {
+            states[model.id] = isInstalled(id: model.id) ? .ready : .notDownloaded
+        }
+        logger.info("Init complete: installed=\(self.installedModels.map(\.id).joined(separator: ",")) active=\(self.activeModelId)")
+    }
+
+    // MARK: - Folder persistence
+
+    /// Persisted map of catalog id → on-disk folder WhisperKit actually
+    /// wrote the model into. This is the ONLY reliable record: we record the
+    /// URL `WhisperKit.download` returns at download time and reuse it.
+    nonisolated private static let installedFoldersKey = "whisperInstalledFolders"
+    nonisolated static private(set) var installedFolders: [String: URL] = [:]
+
+    /// Set + persist in one call. UserDefaults writes are cheap enough for
+    /// once-per-download/scan; the side effect keeps the map consistent.
+    nonisolated static func recordInstalledFolder(_ url: URL, forId id: String) {
+        installedFolders[id] = url
+        persistInstalledFolders()
+    }
+
+    nonisolated static func removeInstalledFolder(forId id: String) {
+        installedFolders.removeValue(forKey: id)
+        persistInstalledFolders()
+    }
+
+    nonisolated private static func persistInstalledFolders() {
+        UserDefaults.standard.set(
+            installedFolders.mapValues { $0.path },
+            forKey: installedFoldersKey
+        )
+    }
+
+    nonisolated private static func loadInstalledFolders() -> [String: URL] {
+        guard let raw = UserDefaults.standard.dictionary(forKey: installedFoldersKey) as? [String: String]
+        else { return [:] }
+        return raw.compactMapValues { URL(fileURLWithPath: $0) }
+    }
+
+    /// Scan the HuggingFace / WhisperKit caches for a folder whose name
+    /// contains the variant string (whisperkittools prefixes variants, e.g.
+    /// `openai_whisper-tiny/`). Covers pre-fix installs and any cross-version
+    /// drift in WhisperKit's folder layout.
+    nonisolated private static func bundledCacheDirs() -> [URL] {
+        let fm = FileManager.default
+        let docs = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let appSupport = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let caches = fm.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        return [
+            docs.appendingPathComponent("huggingface", isDirectory: true),
+            docs.appendingPathComponent("argmaxinc", isDirectory: true),
+            appSupport.appendingPathComponent("huggingface", isDirectory: true),
+            appSupport.appendingPathComponent("argmaxinc", isDirectory: true),
+            caches.appendingPathComponent("huggingface", isDirectory: true),
+        ]
+    }
+
+    /// The on-disk folder containing `variant`'s CoreML bundle (or nil if
+    /// not installed). All "is installed?" checks funnel through here.
+    nonisolated static func modelFolder(forId id: String) -> URL? {
+        // 1. The exact URL WhisperKit returned at download time.
+        if let recorded = installedFolders[id],
+           FileManager.default.fileExists(atPath: recorded.path) {
+            return recorded
+        }
+
+        // 2. Scan known caches for a subfolder whose name contains the variant.
+        guard let variant = variantForId[id] else { return nil }
+        for cacheRoot in bundledCacheDirs() {
+            guard let children = try? FileManager.default.contentsOfDirectory(
+                at: cacheRoot,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            ) else { continue }
+            let candidates = children + children.flatMap { child in
+                (try? FileManager.default.contentsOfDirectory(
+                    at: child,
+                    includingPropertiesForKeys: [.isDirectoryKey],
+                    options: [.skipsHiddenFiles]
+                )) ?? []
+            }
+            if let hit = candidates.first(where: {
+                $0.lastPathComponent.contains(variant) &&
+                (try? FileManager.default.contentsOfDirectory(atPath: $0.path).isEmpty) == false
+            }) {
+                recordInstalledFolder(hit, forId: id)   // learn once
+                return hit
             }
         }
-        for model in Self.catalog {
-            let marker = Self.whisperKitDirectory.appendingPathComponent("\(Self.variantForId[model.id] ?? model.id).bin")
-            states[model.id] = FileManager.default.fileExists(atPath: marker.path) ? .ready : .notDownloaded
-        }
+        return nil
     }
-
-    /// WhisperKit installs CoreML bundles under this directory (it resolves
-    /// to Documents/argmaxinc/whisperkit-coreml/ inside the app sandbox).
-    /// The sentinel `<variant>.bin` file is our "model is downloaded"
-    /// marker so the settings UI can show ✓ even before the engine has
-    /// finished loading.
-    nonisolated static let whisperKitDirectory: URL = {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        return docs.appendingPathComponent("argmaxinc", isDirectory: true)
-            .appendingPathComponent("whisperkit-coreml", isDirectory: true)
-    }()
-
-    nonisolated static let variantForId: [String: String] = [
-        "tiny": "tiny",
-        "tiny.en": "tiny.en",
-        "base": "base",
-        "base.en": "base.en",
-        "small": "small",
-        "small.en": "small.en",
-        "large-v3-turbo": "large-v3-turbo",
-        "large-v3": "large-v3",
-    ]
 
     // MARK: - State queries
-    func isInstalled(_ model: WhisperModel) -> Bool {
-        guard let variant = Self.variantForId[model.id] else { return false }
-        let marker = Self.whisperKitDirectory.appendingPathComponent("\(variant).bin")
-        return FileManager.default.fileExists(atPath: marker.path)
-    }
+
+    func isInstalled(_ model: WhisperModel) -> Bool { isInstalled(id: model.id) }
+    /// Bypasses the public struct so the init can run before any view exists.
+    func isInstalled(id: String) -> Bool { Self.modelFolder(forId: id) != nil }
 
     func state(for id: String) -> DownloadState { states[id] ?? .notDownloaded }
 
@@ -158,22 +185,17 @@ final class WhisperModelManager: ObservableObject {
     }
 
     // MARK: - Download
-    /// Downloads the model through WhisperKit's own downloader so the
-    /// resulting bundle lives in the same `argmaxinc/whisperkit-coreml/`
-    /// tree WhisperKit expects. WhisperKit.download returns a progress
-    /// closure we forward into `states[id]`.
+
     func startDownload(id: String) {
         guard let model = Self.catalog.first(where: { $0.id == id }) else { return }
         if case .downloading = states[id] { return }
-        guard !inFlightDownloads.contains(id) else { return }   // no concurrent downloads
+        guard !inFlightDownloads.contains(id) else { return }
         guard let variant = Self.variantForId[id] else {
             states[id] = .failed("Unknown model variant.")
             return
         }
 
-        // Disk preflight — bail with a clear message if the user won't fit
-        // the model plus a safety margin. CoreML bundles differ from ggml
-        // sizes — use ~1.5× headroom on the catalog size.
+        // Disk preflight.
         let need = Int64(Double(model.sizeBytes) * 1.5) + 100_000_000
         if Self.freeDiskBytes() < need {
             states[id] = .failed("Not enough free space — need ~\(model.sizeBytes / 1_000_000) MB.")
@@ -189,13 +211,12 @@ final class WhisperModelManager: ObservableObject {
                         self?.states[id] = .downloading(progress.fractionCompleted)
                     }
                 }
-                try await WhisperKit.download(variant: variant, progressCallback: progressCallback)
+                let modelFolder = try await WhisperKit.download(variant: variant, progressCallback: progressCallback)
                 self.inFlightDownloads.remove(id)
+                Self.recordInstalledFolder(modelFolder, forId: id)
                 self.states[id] = .ready
-                self.logger.info("WhisperKit model ready: \(variant)")
-                if WhisperModelManager.variantForId[self.activeModelId] == variant {
-                    NotificationCenter.default.post(name: .whisperModelReady, object: variant)
-                }
+                self.logger.info("WhisperKit model ready: \(variant) at \(modelFolder.path)")
+                NotificationCenter.default.post(name: .whisperModelReady, object: id)
             } catch {
                 self.inFlightDownloads.remove(id)
                 self.states[id] = .failed(error.localizedDescription)
@@ -205,8 +226,6 @@ final class WhisperModelManager: ObservableObject {
     }
 
     func cancelDownload(id: String) {
-        // WhisperKit's download API has no public cancel hook; clear the
-        // state so the user can retry.
         if case .downloading = states[id] {
             states[id] = .notDownloaded
         }
@@ -214,27 +233,14 @@ final class WhisperModelManager: ObservableObject {
 
     func delete(id: String) {
         cancelDownload(id: id)
-        // Delete the WhisperKit-installed bundle.
-        let variant = Self.variantForId[id] ?? id
-        let variantDir = Self.whisperKitDirectory.appendingPathComponent(variant, isDirectory: true)
-        try? FileManager.default.removeItem(at: variantDir)
-        let marker = Self.whisperKitDirectory.appendingPathComponent("\(variant).bin")
-        try? FileManager.default.removeItem(at: marker)
+        if let dir = Self.modelFolder(forId: id) {
+            try? FileManager.default.removeItem(at: dir)
+        }
+        Self.removeInstalledFolder(forId: id)
         states[id] = .notDownloaded
         if activeModelId == id {
-            // Reset to tiny if the user deletes the active model.
-            activeModelId = "tiny"
+            activeModelId = Self.catalog.first(where: { isInstalled($0) })?.id ?? "tiny"
         }
-    }
-
-    /// Returns a description of the model's loaded state — useful for
-    /// showing the user which Whisper variant is currently active and
-    /// whether WhisperKit has confirmed it's on disk.
-    var activeModelDescription: String {
-        let variant = Self.variantForId[activeModelId] ?? activeModelId
-        let marker = Self.whisperKitDirectory.appendingPathComponent("\(variant).bin")
-        let installed = FileManager.default.fileExists(atPath: marker.path)
-        return installed ? variant : "\(variant) (not on disk)"
     }
 }
 

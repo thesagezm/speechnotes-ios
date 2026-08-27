@@ -65,8 +65,8 @@ struct SttSettingsView: View {
         let isInstalled = models.isInstalled(model)
         Button {
             // Selecting a model is a passive action — just swap the
-            // preference. The coordinator listens for activeModelId
-            // changes and rebuilds the engine on the next record start.
+            // preference. The coordinator notices on the next record start
+            // and rebuilds the engine.
             if isInstalled {
                 models.activeModelId = model.id
                 Haptics.tap()
@@ -97,8 +97,15 @@ struct SttSettingsView: View {
                         Text(model.sizeLabel)
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        stars(model.speed, icon: "hare")
-                        stars(model.accuracy, icon: "scope")
+                        if models.isInstalled(model) {
+                            if let folder = WhisperModelManager.modelFolder(forId: model.id) {
+                                Text(folder.lastPathComponent)
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                        }
                     }
                 }
                 Spacer()

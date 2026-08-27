@@ -59,13 +59,32 @@ final class WhisperCppEngine: STTEngine {
         currentModelId = id
         if pipe != nil, loadedModelVariant == variant { return }
         do {
-            let config = WhisperKitConfig(model: variant, modelRepo: "argmaxinc/whisperkit-coreml")
-            pipe = try await WhisperKit(config)
+            // Prefer the folder this process recorded at download time; only
+            // fall back to the model-name trigger so a cold start (no folder
+            // remembered yet) asks WhisperKit to resolve it from the repo.
+            if let folder = WhisperModelManager.modelFolder(forId: id) {
+                let config = WhisperKitConfig(modelFolder: folder.path)
+                pipe = try await WhisperKit(config)
+            } else {
+                let config = WhisperKitConfig(model: variant, modelRepo: "argmaxinc/whisperkit-coreml")
+                pipe = try await WhisperKit(config)
+            }
             loadedModelVariant = variant
             logger.info("WhisperKit ready: \(variant)")
         } catch {
             logger.error("WhisperKit init failed: \(error.localizedDescription)")
             pipe = nil
+            onError?("Couldn't load the \(variant) model — try re-downloading it from Settings → Speech-to-text.")
+        }
+    }
+
+    /// Resolves once the WhisperKit pipeline has finished loading — lets the
+    /// coordinator show "Loading model…" instead of failing the tap on cold
+    /// start (the init() Task used to race the first record button press).
+    func waitUntilLoaded() async {
+        while pipe == nil {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            if Task.isCancelled { return }
         }
     }
 
