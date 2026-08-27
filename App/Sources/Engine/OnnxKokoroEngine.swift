@@ -89,7 +89,7 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
             try AVAudioSession.sharedInstance().setCategory(
                 .playback,
                 mode: .spokenAudio,
-                options: [.duckOthers]
+                options: [.duckOthers, .allowBluetooth, .allowBluetoothA2DP]
             )
         } catch {
             Log.shared.error("OnnxKokoroEngine audio session setup failed: \(error)")

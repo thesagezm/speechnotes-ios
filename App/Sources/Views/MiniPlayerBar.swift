@@ -101,20 +101,19 @@ struct MiniPlayerBar: View {
     }
 }
 
-/// Pins a `MiniPlayerBar` above the tab bar whenever speech is active.
-/// `visible` lets screens with their own controls (the editor) opt out;
-/// `onTap` handles body taps (the notes list jumps to the playing note).
+/// Compat shim — the mini-player is now rendered ONCE as a root overlay (see
+/// GlobalMiniPlayerOverlay.swift) because the per-screen `safeAreaInset`
+/// version got dragged across the screen by push/pop transitions and could
+/// end up stuck in the middle. This modifier is retained only as an opt-out
+/// marker: `visible: false` means "this screen's own controls are showing —
+/// don't show the global bar here". That suppression is handled by checking
+/// `path` / editor state at the overlay call site.
 struct MiniPlayerModifier: ViewModifier {
-    @EnvironmentObject private var player: SpeechPlayer
     var visible: Bool = true
     var onTap: (() -> Void)?
 
     func body(content: Content) -> some View {
-        content.safeAreaInset(edge: .bottom, spacing: 0) {
-            if player.showMiniPlayer && visible {
-                MiniPlayerBar(onTap: onTap)
-            }
-        }
+        content
     }
 }
 

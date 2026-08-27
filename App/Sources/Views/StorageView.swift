@@ -21,7 +21,6 @@ struct StorageView: View {
                 ShareSheet(items: [url])
             }
         }
-        .miniPlayer(visible: false, onTap: nil)
         .onDisappear { wavPlayer.stop() }
     }
 
