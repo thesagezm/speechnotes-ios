@@ -81,7 +81,7 @@ final class SupertonicEngine: NSObject, SpeechEngine {
             try AVAudioSession.sharedInstance().setCategory(
                 .playback,
                 mode: .spokenAudio,
-                options: [.duckOthers]
+                options: [.duckOthers, .allowBluetooth, .allowBluetoothA2DP]
             )
         } catch {
             Log.shared.error("SupertonicEngine audio session setup failed: \(error)")

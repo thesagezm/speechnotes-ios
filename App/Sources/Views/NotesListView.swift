@@ -164,11 +164,18 @@ struct NotesListView: View {
         .sheet(item: $sharingNote) { note in
             ShareSheet(items: [note.text])
         }
-        .miniPlayer(visible: path.isEmpty, onTap: jumpToPlayingNote)
+        // Mini-player jump-to-note: the global overlay posts a notification,
+        // we switch tabs (SpeechnotesApp) and push the note here.
+        .onReceive(NotificationCenter.default.publisher(for: .miniPlayerJumpToNote)) { note in
+            guard let id = note.object as? UUID,
+                  notes.notes.contains(where: { $0.id == id }) else { return }
+            path.append(id)
+        }
     }
 
     // MARK: - List
 
+    private var notesList: some View {
     private var notesList: some View {
         List {
             ForEach(sectionedNotes, id: \.title) { section in
@@ -338,12 +345,6 @@ struct NotesListView: View {
     private func exportNote(_ note: Note) {
         Haptics.tap()
         player.export(note.text)
-    }
-
-    private func jumpToPlayingNote() {
-        guard let id = player.nowPlayingNoteId,
-              notes.notes.contains(where: { $0.id == id }) else { return }
-        path.append(id)
     }
 
     private var shareSheetBinding: Binding<Bool> {

@@ -28,10 +28,14 @@ final class SystemEngine: NSObject, SpeechEngine {
         super.init()
         synthesizer.delegate = self
         do {
+            // `.playback` + allowBluetooth* keeps the session valid for the
+            // configured `audio` UIBackgroundMode — playback continues when
+            // the user leaves the app; lock-screen controls come from the
+            // NowPlayingCenter feeding below.
             try AVAudioSession.sharedInstance().setCategory(
                 .playback,
                 mode: .spokenAudio,
-                options: [.duckOthers]
+                options: [.duckOthers, .allowBluetooth, .allowBluetoothA2DP]
             )
         } catch {
             Log.shared.error("Audio session setup failed: \(error)")
