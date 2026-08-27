@@ -29,12 +29,16 @@ final class DictationCoordinator: ObservableObject {
     @AppStorage("sttEngineKind") var engineKind: EngineKind = .apple
     @AppStorage("sttLanguage") var languageHint: String = "auto"
     @ObservedObject private var whisperModels = WhisperModelManager.shared
+    /// User-facing error from the engine (permissions, mic, missing model).
+    /// Views show it as an alert; cleared on the next startRecording.
+    @Published var lastError: String?
     /// Latest finalized transcript — exposed to the editor for insertion.
     @Published var lastFinalText: String = ""
 
     private var engine: STTEngine?
     private var lastWhisperModelId: String?
     private var timer: Timer?
+    private var startedAt: Date?
 
     init() {
         rebuildEngine()
@@ -53,12 +57,17 @@ final class DictationCoordinator: ObservableObject {
     }
 
     private func rebuildEngine() {
+        // Reconcile the engine with the CURRENT selection: the Apple engine
+        // is cheap to rebuild; the Whisper engine only when the model id
+        // actually changed (WhisperKit reload is expensive).
         switch engineKind {
         case .apple:
             engine = AppleSTTEngine()
         case .whisper:
-            lastWhisperModelId = whisperModels.activeModelId
-            engine = WhisperCppEngine(modelId: whisperModels.activeModelId)
+            if !(engine is WhisperCppEngine) || lastWhisperModelId != whisperModels.activeModelId {
+                lastWhisperModelId = whisperModels.activeModelId
+                engine = WhisperCppEngine(modelId: whisperModels.activeModelId)
+            }
         }
         wireEngineCallbacks()
     }
@@ -78,6 +87,12 @@ final class DictationCoordinator: ObservableObject {
         engine?.onStateChanged = { [weak self] s in
             self?.hopToMain { self?.state = s }
         }
+        engine?.onError = { [weak self] message in
+            self?.hopToMain {
+                self?.lastError = message
+                self?.stopTimer()
+            }
+        }
     }
 
     /// Engine callbacks arrive from mixed threads. When already on main (the
@@ -94,24 +109,14 @@ final class DictationCoordinator: ObservableObject {
 
     func startRecording(language: String? = nil) {
         guard state == .idle else { return }
-        // Reconcile the engine with the CURRENT selection every session: the
-        // Apple engine is cheap to rebuild; the Whisper engine only when the
-        // model id actually changed (WhisperKit reload is expensive).
-        switch engineKind {
-        case .apple:
-            engine = AppleSTTEngine()
-        case .whisper:
-            if !(engine is WhisperCppEngine) || lastWhisperModelId != whisperModels.activeModelId {
-                lastWhisperModelId = whisperModels.activeModelId
-                engine = WhisperCppEngine(modelId: whisperModels.activeModelId)
-            }
-        }
-        wireEngineCallbacks()
-        // Fresh session: drop any stale final/partial so a later save can
-        // never commit the previous session's text.
+        rebuildEngine()
+        // Fresh session: drop any stale final/partial/error so a later save
+        // can never commit the previous session's text.
+        lastError = nil
         lastFinalText = ""
         partialText = ""
         state = .recording
+        startedAt = Date()
         startTimer()
         engine?.start(language: language, prompt: nil)
     }
@@ -152,32 +157,42 @@ final class DictationCoordinator: ObservableObject {
             importProgressLabel = ""
         }
 
-        let progress: @Sendable (Double, String) -> Void = { [weak self] value, label in
+        importProgress = 0.1
+        let samples = try await AudioImportService.samples(from: url)
+        importProgress = 0.3
+        importProgressLabel = "Running transcription…"
+        let text = try await engine.transcribeFile(samples: samples, language: language) { [weak self] value in
             Task { @MainActor in
-                self?.importProgress = value
-                self?.importProgressLabel = label
+                self?.importProgress = 0.3 + value * 0.7
             }
         }
-        progress(0.1, "Decoding audio…")
-        let samples = try await AudioImportService.samples(from: url)
-        progress(0.3, "Running transcription…")
-        let text = try await AudioImportService.shared.runTranscription(
-            samples: samples, language: language, engine: engine, progress: { value in
-                Task { @MainActor in self.importProgress = 0.3 + value * 0.7 }
-            }
-        )
-        progress(1.0, "Done")
+        importProgress = 1.0
+        importProgressLabel = "Done"
         return text
     }
 
-    var currentEngine: STTEngine? { engine }
+    /// Shared STT language catalog — one list for all pickers so a choice
+    /// made in Settings shows up in the sheet and tab identically.
+    static let languages: [(code: String, label: String)] = [
+        ("auto", "Auto"),
+        ("en-US", "English (US)"),
+        ("en-GB", "English (UK)"),
+        ("es-ES", "Spanish"),
+        ("fr-FR", "French"),
+        ("de-DE", "German"),
+        ("ja-JP", "Japanese"),
+        ("zh-CN", "Chinese"),
+    ]
 
+    /// Rebuild the engine after each timer tick from wall-clock time, not
+    /// from accumulated ticks — Timer slack (50–100 ms on iOS) otherwise
+    /// makes the readout drift long.
     private func startTimer() {
-        elapsed = 0
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                self?.elapsed += 0.1
+                guard let self, let startedAt = self.startedAt else { return }
+                self.elapsed = Date().timeIntervalSince(startedAt)
             }
         }
     }

@@ -11,16 +11,7 @@ struct DictationTabView: View {
     @State private var isImporting = false
     @State private var lastSavedNoteId: UUID?
 
-    private let languages = [
-        ("auto", "Auto"),
-        ("en-US", "English (US)"),
-        ("en-GB", "English (UK)"),
-        ("es-ES", "Spanish"),
-        ("fr-FR", "French"),
-        ("de-DE", "German"),
-        ("ja-JP", "Japanese"),
-        ("zh-CN", "Chinese"),
-    ]
+    private var languages: [(code: String, label: String)] { DictationCoordinator.languages }
 
     private static var audioTypes: [UTType] {
         var types: [UTType] = [.audio, .wav, .mp3, .mpeg4Audio, .aiff]
@@ -138,6 +129,17 @@ struct DictationTabView: View {
                 Button("OK") { importingError = nil }
             } message: {
                 Text(importingError ?? "")
+            }
+            .alert(
+                "Speech-to-text error",
+                isPresented: Binding(
+                    get: { dictation.lastError != nil },
+                    set: { if !$0 { dictation.lastError = nil } }
+                )
+            ) {
+                Button("OK") { dictation.lastError = nil }
+            } message: {
+                Text(dictation.lastError ?? "")
             }
             .overlay {
                 if isImporting {

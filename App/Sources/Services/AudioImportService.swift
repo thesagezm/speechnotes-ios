@@ -10,9 +10,7 @@ import AVFoundation
 /// 3. Resample to 16 kHz mono Float32 (the format whisper.cpp + Apple SFSpeech
 ///    both expect).
 /// 4. Hand off to the engine via the `STTEngine.transcribeFile(...)` API.
-@MainActor
-final class AudioImportService {
-    static let shared = AudioImportService()
+enum AudioImportService {
 
     enum ImportError: LocalizedError {
         case noAudioTrack
@@ -28,8 +26,6 @@ final class AudioImportService {
         }
     }
 
-    private init() {}
-
     /// Splits the import into two stages so callers can drive a progress bar.
     /// Takes the security scope itself: every caller hands us a URL straight
     /// from fileImporter / onOpenURL, and AVURLAsset silently sees no tracks
@@ -38,18 +34,8 @@ final class AudioImportService {
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
         return try await Task.detached(priority: .userInitiated) {
-            try Self.decode(url: url)
+            try decode(url: url)
         }.value
-    }
-
-    func runTranscription(
-        samples: [Float],
-        language: String?,
-        engine: STTEngine,
-        progress: @escaping @Sendable (Double) -> Void
-    ) async throws -> String {
-        progress(0)
-        return try await engine.transcribeFile(samples: samples, language: language)
     }
 
     nonisolated private static func decode(url: URL) throws -> [Float] {

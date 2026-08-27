@@ -2,15 +2,15 @@ import Foundation
 import OSLog
 import WhisperKit
 
-/// On-device model catalog + download manager for whisper.cpp ggml models.
+/// On-device model catalog + download manager for Whisper STT models.
 /// Mirrors the shape of `ModelManager` for TTS: a published state machine
 /// (`notDownloaded` / `downloading(progress)` / `failed(message)` / `ready`),
-/// resumable downloads, atomic rename from `.part` to the final name, disk
-/// preflight and `.resumeData` for `URLError` `-1001` recoveries.
+/// disk preflight, and delete.
 ///
-/// Hosting: `ggerganov/whisper.cpp` on Hugging Face. URLs follow the
-/// `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/<filename>`
-/// pattern. Sizes are approximate (Hugging Face's `ggml-*.bin`).
+/// Downloads are delegated to WhisperKit (`argmaxinc/whisperkit-coreml` on
+/// Hugging Face), which fetches CoreML bundles — NOT the ggml `ggml-*.bin`
+/// files the pre-Phase-4 catalog targeted. Catalog `sizeBytes` values are
+/// approximate CoreML install sizes used for display and the disk preflight.
 @MainActor
 final class WhisperModelManager: ObservableObject {
 
@@ -21,7 +21,6 @@ final class WhisperModelManager: ObservableObject {
     static let catalog: [WhisperModel] = [
         WhisperModel(
             id: "tiny",
-            filename: "ggml-tiny.bin",
             displayName: "Tiny",
             sizeBytes: 77_700_000,
             englishOnly: false,
@@ -29,7 +28,6 @@ final class WhisperModelManager: ObservableObject {
         ),
         WhisperModel(
             id: "tiny.en",
-            filename: "ggml-tiny.en.bin",
             displayName: "Tiny (English only)",
             sizeBytes: 77_700_000,
             englishOnly: true,
@@ -37,7 +35,6 @@ final class WhisperModelManager: ObservableObject {
         ),
         WhisperModel(
             id: "base",
-            filename: "ggml-base.bin",
             displayName: "Base",
             sizeBytes: 148_000_000,
             englishOnly: false,
@@ -45,7 +42,6 @@ final class WhisperModelManager: ObservableObject {
         ),
         WhisperModel(
             id: "base.en",
-            filename: "ggml-base.en.bin",
             displayName: "Base (English only)",
             sizeBytes: 148_000_000,
             englishOnly: true,
@@ -53,7 +49,6 @@ final class WhisperModelManager: ObservableObject {
         ),
         WhisperModel(
             id: "small",
-            filename: "ggml-small.bin",
             displayName: "Small",
             sizeBytes: 488_000_000,
             englishOnly: false,
@@ -61,7 +56,6 @@ final class WhisperModelManager: ObservableObject {
         ),
         WhisperModel(
             id: "small.en",
-            filename: "ggml-small.en.bin",
             displayName: "Small (English only)",
             sizeBytes: 488_000_000,
             englishOnly: true,
@@ -69,7 +63,6 @@ final class WhisperModelManager: ObservableObject {
         ),
         WhisperModel(
             id: "large-v3-turbo",
-            filename: "ggml-large-v3-turbo.bin",
             displayName: "Large v3 Turbo",
             sizeBytes: 1_540_000_000,
             englishOnly: false,
@@ -77,7 +70,6 @@ final class WhisperModelManager: ObservableObject {
         ),
         WhisperModel(
             id: "large-v3",
-            filename: "ggml-large-v3.bin",
             displayName: "Large v3",
             sizeBytes: 3_100_000_000,
             englishOnly: false,
@@ -130,10 +122,11 @@ final class WhisperModelManager: ObservableObject {
         }
     }
 
-    /// WhisperKit caches its CoreML bundles under Documents/<repo>/<variant>/.
-    /// We use the sentinel `<variant>.bin` file WhisperKit writes there as a
-    /// "model is downloaded" marker so the settings UI can show ✓ even
-    /// before the engine has finished loading.
+    /// WhisperKit installs CoreML bundles under this directory (it resolves
+    /// to Documents/argmaxinc/whisperkit-coreml/ inside the app sandbox).
+    /// The sentinel `<variant>.bin` file is our "model is downloaded"
+    /// marker so the settings UI can show ✓ even before the engine has
+    /// finished loading.
     nonisolated static let whisperKitDirectory: URL = {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         return docs.appendingPathComponent("argmaxinc", isDirectory: true)
@@ -247,7 +240,6 @@ final class WhisperModelManager: ObservableObject {
 
 struct WhisperModel: Identifiable, Hashable {
     let id: String
-    let filename: String
     let displayName: String
     let sizeBytes: Int64
     let englishOnly: Bool
@@ -258,9 +250,6 @@ struct WhisperModel: Identifiable, Hashable {
         ByteCountFormatter.string(fromByteCount: sizeBytes, countStyle: .file)
     }
 }
-
-// URLSessionTask already has `progress: Progress` from Foundation — no
-// extension needed. The `task.progress` KVO works directly.
 
 extension Notification.Name {
     static let whisperModelReady = Notification.Name("WhisperModelManager.modelReady")

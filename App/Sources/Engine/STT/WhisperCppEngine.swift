@@ -14,6 +14,7 @@ final class WhisperCppEngine: STTEngine {
     var onPartial: ((String) -> Void)?
     var onFinal: ((String) -> Void)?
     var onStateChanged: ((STTState) -> Void)?
+    var onError: ((String) -> Void)?
 
     private let logger = Logger(subsystem: "com.speechnotes.ios", category: "WhisperSTT")
     private var audioEngine: AVAudioEngine?
@@ -33,18 +34,9 @@ final class WhisperCppEngine: STTEngine {
     /// Serializes evicted-segment transcriptions so appended text stays ordered.
     private var finalizeChain: Task<Void, Never> = Task {}
 
-    /// Map our catalog ids to WhisperKit's model folder names. WhisperKit
-    /// downloads from `argmaxinc/whisperkit-coreml` on Hugging Face.
-    private static let variantForId: [String: String] = [
-        "tiny": "tiny",
-        "tiny.en": "tiny.en",
-        "base": "base",
-        "base.en": "base.en",
-        "small": "small",
-        "small.en": "small.en",
-        "large-v3-turbo": "large-v3-turbo",
-        "large-v3": "large-v3",
-    ]
+    /// Map our catalog ids to WhisperKit's model folder names — single
+    /// source of truth lives on WhisperModelManager.
+    private static var variantForId: [String: String] { WhisperModelManager.variantForId }
 
     private static let liveWindowSamples = 16_000 * 30   // hard cap kept in memory
     private static let liveKeepSamples = 16_000 * 20     // floor after an eviction
@@ -84,13 +76,42 @@ final class WhisperCppEngine: STTEngine {
         guard pipe != nil else {
             logger.error("Whisper model not loaded")
             currentState = .idle
+            onError?("The Whisper model isn't loaded yet. Wait for the download to finish, then try again.")
             onFinal?("")
             return
         }
-        finalizedText = ""
-        setupAudioEngine()
-        currentState = .recording
-        scheduleProcessWindow()
+        ensureMicPermission { [weak self] granted in
+            guard let self else { return }
+            guard granted else {
+                self.logger.error("Microphone permission denied")
+                self.currentState = .idle
+                self.onError?("Microphone access is off. Enable it in Settings → Privacy & Security → Microphone.")
+                self.onFinal?("")
+                return
+            }
+            guard self.currentState == .idle else { return }   // stopped while the prompt was up
+            self.finalizedText = ""
+            self.setupAudioEngine()
+            guard self.audioEngine != nil else {
+                self.currentState = .idle
+                self.onError?("Couldn't start the microphone. Try again.")
+                self.onFinal?("")
+                return
+            }
+            self.currentState = .recording
+            self.scheduleProcessWindow()
+        }
+    }
+
+    private func ensureMicPermission(_ completion: @escaping (Bool) -> Void) {
+        let session = AVAudioSession.sharedInstance()
+        if session.recordPermission == .granted {
+            completion(true)
+            return
+        }
+        session.requestRecordPermission { granted in
+            DispatchQueue.main.async { completion(granted) }
+        }
     }
 
     func stop() {
@@ -105,19 +126,32 @@ final class WhisperCppEngine: STTEngine {
         ringLock.unlock()
         AudioSessionResetter.restoreForPlayback()
         currentState = .idle
-        if !snapshot.isEmpty { runFinal(samples: snapshot) }
+        if !snapshot.isEmpty {
+            runFinal(samples: snapshot)
+        } else {
+            // Nothing captured (tap-and-release) — still deliver so the
+            // coordinator's state machine settles and any finalized
+            // segments aren't stranded.
+            ringLock.lock()
+            let text = finalizedText
+            finalizedText = ""
+            ringLock.unlock()
+            onFinal?(text)
+        }
     }
 
     func cancel() { stop() }
 
     // MARK: - File transcription (WhisperKit accepts Float32 arrays directly).
-    func transcribeFile(samples: [Float], language: String?) async throws -> String {
+    func transcribeFile(samples: [Float], language: String?, progress: (@Sendable (Double) -> Void)?) async throws -> String {
         guard let pipe else { throw TranscribeFileError.unsupported }
         guard !samples.isEmpty else { return "" }
         // One inference per 30 s keeps memory and latency bounded on-device.
         let chunkSamples = 16_000 * 30
+        let totalChunks = max(1, (samples.count + chunkSamples - 1) / chunkSamples)
         var parts: [String] = []
         var start = 0
+        var chunkIndex = 0
         while start < samples.count {
             let end = min(start + chunkSamples, samples.count)
             let options = DecodingOptions(language: Self.whisperLanguageCode(language))
@@ -127,6 +161,8 @@ final class WhisperCppEngine: STTEngine {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             if !chunkText.isEmpty { parts.append(chunkText) }
             start = end
+            chunkIndex += 1
+            progress?(Double(chunkIndex) / Double(totalChunks))
         }
         return parts.joined(separator: " ")
     }
@@ -169,10 +205,6 @@ final class WhisperCppEngine: STTEngine {
                 let samples = Array(UnsafeBufferPointer(start: channelData, count: frames))
                 self.ringLock.lock()
                 self.ringBuffer.append(contentsOf: samples)
-                let maxSamples = 16_000 * 30
-                if self.ringBuffer.count > maxSamples {
-                    self.ringBuffer.removeFirst(self.ringBuffer.count - maxSamples)
-                }
                 self.ringLock.unlock()
             }
         }
@@ -183,7 +215,10 @@ final class WhisperCppEngine: STTEngine {
             try engine.start()
         } catch {
             logger.error("AVAudioEngine start failed: \(error.localizedDescription)")
-            currentState = .idle
+            engine.stop()
+            input.removeTap(onBus: 0)
+            audioEngine = nil
+            AudioSessionResetter.restoreForPlayback()
         }
     }
 

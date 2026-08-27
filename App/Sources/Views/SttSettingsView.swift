@@ -7,16 +7,7 @@ struct SttSettingsView: View {
     @EnvironmentObject private var dictation: DictationCoordinator
     @ObservedObject private var models = WhisperModelManager.shared
 
-    private let languages = [
-        ("auto", "Auto"),
-        ("en-US", "English (US)"),
-        ("en-GB", "English (UK)"),
-        ("es-ES", "Spanish"),
-        ("fr-FR", "French"),
-        ("de-DE", "German"),
-        ("ja-JP", "Japanese"),
-        ("zh-CN", "Chinese"),
-    ]
+    private var languages: [(code: String, label: String)] { DictationCoordinator.languages }
 
     var body: some View {
         Form {

@@ -18,6 +18,7 @@ final class AppleSTTEngine: STTEngine {
     var onPartial: ((String) -> Void)?
     var onFinal: ((String) -> Void)?
     var onStateChanged: ((STTState) -> Void)?
+    var onError: ((String) -> Void)?
 
     private let logger = Logger(subsystem: "com.speechnotes.ios", category: "AppleSTT")
     private var audioEngine: AVAudioEngine?
@@ -94,14 +95,16 @@ final class AppleSTTEngine: STTEngine {
     }
 
     // MARK: - File transcription (uses SFSpeechURLRecognitionRequest).
-    func transcribeFile(samples: [Float], language: String?) async throws -> String {
+    func transcribeFile(samples: [Float], language: String?, progress: (@Sendable (Double) -> Void)?) async throws -> String {
         guard !samples.isEmpty else { return "" }
         try await Self.ensureSpeechAuthorization()
         // SFSpeech caps one request around a minute of audio — transcribe in
         // 50 s chunks and join.
         let chunkSamples = 16_000 * 50
+        let totalChunks = max(1, (samples.count + chunkSamples - 1) / chunkSamples)
         var parts: [String] = []
         var start = 0
+        var chunkIndex = 0
         while start < samples.count {
             let end = min(start + chunkSamples, samples.count)
             let wavURL = try Self.writeTempWAV(samples: Array(samples[start..<end]))
@@ -113,6 +116,8 @@ final class AppleSTTEngine: STTEngine {
             }
             try? FileManager.default.removeItem(at: wavURL)
             start = end
+            chunkIndex += 1
+            progress?(Double(chunkIndex) / Double(totalChunks))
         }
         return parts
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -184,12 +189,16 @@ final class AppleSTTEngine: STTEngine {
             do { try await Self.ensureSpeechAuthorization() } catch {
                 self.logger.error("Speech recognition denied: \(error.localizedDescription)")
                 self.currentState = .idle
+                self.onError?("Speech recognition is off. Enable it in Settings → Privacy & Security → Speech Recognition.")
+                self.onFinal?("")
                 return
             }
             self.requestMicPermission { micGranted in
                 guard micGranted else {
                     self.logger.error("Microphone permission denied")
                     self.currentState = .idle
+                    self.onError?("Microphone access is off. Enable it in Settings → Privacy & Security → Microphone.")
+                    self.onFinal?("")
                     return
                 }
                 self.setupSFRecognizer(language: language, prompt: prompt)
@@ -215,6 +224,8 @@ final class AppleSTTEngine: STTEngine {
               recognizer.isAvailable else {
             logger.error("SFSpeechRecognizer unavailable for \(localeIdentifier)")
             currentState = .idle
+            onError?("Speech recognition isn't available for \(localeIdentifier) on this device.")
+            onFinal?("")
             return
         }
         // Reset per-session state so the final we synthesize from stop() is
@@ -255,6 +266,8 @@ final class AppleSTTEngine: STTEngine {
         } catch {
             logger.error("AVAudioEngine start failed: \(error.localizedDescription)")
             currentState = .idle
+            onError?("Couldn't start the microphone. Try again.")
+            onFinal?("")
             return
         }
 

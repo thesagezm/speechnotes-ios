@@ -24,12 +24,11 @@ struct DictationSheetView: View {
                 .padding()
 
                 Picker("Language", selection: $languageHint) {
-                    Text("Auto").tag("auto")
-                    Text("English").tag("en-US")
-                    Text("Spanish").tag("es-ES")
-                    Text("French").tag("fr-FR")
+                    ForEach(DictationCoordinator.languages, id: \.code) { item in
+                        Text(item.label).tag(item.code)
+                    }
                 }
-                .pickerStyle(.segmented)
+                .pickerStyle(.menu)
                 .padding(.horizontal)
 
                 Spacer()
@@ -54,6 +53,17 @@ struct DictationSheetView: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Done") { dismiss() }
                 }
+            }
+            .alert(
+                "Speech-to-text error",
+                isPresented: Binding(
+                    get: { dictation.lastError != nil },
+                    set: { if !$0 { dictation.lastError = nil } }
+                )
+            ) {
+                Button("OK") { dictation.lastError = nil }
+            } message: {
+                Text(dictation.lastError ?? "")
             }
         }
     }
