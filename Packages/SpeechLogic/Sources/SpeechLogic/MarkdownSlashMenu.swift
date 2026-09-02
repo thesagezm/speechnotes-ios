@@ -57,23 +57,25 @@ public enum MarkdownSlashMenu {
     }
 
     /// Detect whether the current caret position follows a `/` at the start
-    /// of a line.
+    /// of a line. Returns nil when the `/` is mid-word (e.g. inside
+    /// `path/to/file`) or the caret isn't after a `/`.
     public static func detect(in draft: String, caretOffset: Int) -> Trigger? {
         let utf16 = draft.utf16
         guard caretOffset > 0, caretOffset <= utf16.count else { return nil }
-        // Convert caret offset back to a String.Index.
         let cursorUtf16 = utf16.index(utf16.startIndex, offsetBy: caretOffset)
         guard let cursor = String.Index(cursorUtf16, within: draft) else { return nil }
         let prev = draft.index(before: cursor)
         guard draft[prev] == "/" else { return nil }
-        // Find the start of the line containing the `/`.
+        // Line start is the char AFTER the most recent newline (or the
+        // start of the draft) — the `/` is valid only when nothing other
+        // than whitespace sits between it and lineStart.
         let lineStart = draft.rangeOfCharacter(
             from: .newlines, options: .backwards,
             range: draft.startIndex..<prev
         )?.upperBound ?? draft.startIndex
-        let triggerIndex = lineStart == prev ? prev : prev
-        let isValid = lineStart == prev  // `/` is the first char on the line
-        return Trigger(slashIndex: triggerIndex, cursorIndex: cursor, isValid: isValid)
+        let between = draft[lineStart..<prev]
+        let isValid = between.allSatisfy { $0 == "/" || $0.isWhitespace }
+        return Trigger(slashIndex: prev, cursorIndex: cursor, isValid: isValid)
     }
 
     /// Filter the commands by the prefix the user has typed after `/`.
@@ -99,15 +101,22 @@ public enum MarkdownSlashMenu {
         let snippet = command.snippet
         updated.insert(contentsOf: snippet, at: insertAt)
 
-        // Place caret immediately after the snippet, then walk back to the
-        // end of `placeholder` so the user lands inside it.
+        // Caret lands at the end of the snippet by default.
         let insertEndUtf16 = updated.utf16.distance(from: updated.startIndex, to: insertAt) + snippet.utf16.count
         var caretUtf16 = insertEndUtf16
         if let placeholder = command.placeholder {
-            // Place caret at the start of the placeholder marker.
-            if let range = placeholder.range(of: "](") ?? placeholder.range(of: "]"),
-               let placeholderStart = updated.range(of: placeholder, range: insertAt..<updated.endIndex) {
-                caretUtf16 = updated.utf16.distance(from: updated.startIndex, to: placeholderStart.lowerBound)
+            // Walk back to the start of the placeholder so the user lands
+            // inside it (e.g. `bold` for `**bold**`). We anchor on a
+            // recognised marker inside the placeholder — "](", "]", or the
+            // start of the word.
+            let marker: String? = {
+                if placeholder.contains("](") { return "](" }
+                if placeholder.contains("]") { return "]" }
+                return nil
+            }()
+            if let marker,
+               let markerRange = updated.range(of: marker, range: insertAt..<updated.endIndex) {
+                caretUtf16 = updated.utf16.distance(from: updated.startIndex, to: markerRange.lowerBound)
             }
         }
         return (updated, caretUtf16)
