@@ -111,4 +111,76 @@ final class MarkdownTextTests: XCTestCase {
         let blocks = MarkdownText.blocks("> quoted **bold**")
         XCTAssertEqual(blocks, [.quote("quoted **bold**")])
     }
+
+    // MARK: - Inline images / links
+
+    func testInlineRunsSplitsImagesAndText() {
+        let runs = MarkdownText.inlineRuns("Look ![logo](x.png) here")
+        XCTAssertEqual(runs, [
+            .text("Look "),
+            .image(alt: "logo", url: "x.png"),
+            .text(" here"),
+        ])
+    }
+
+    func testStandaloneImageBecomesImageBlock() {
+        let blocks = MarkdownText.blocks("![my photo](p.png)\n\nafter")
+        XCTAssertEqual(blocks, [
+            .image(alt: "my photo", url: "p.png"),
+            .paragraph("after"),
+        ])
+    }
+
+    func testImageMixedWithTextStaysParagraph() {
+        let blocks = MarkdownText.blocks("text ![in](x.png) more")
+        XCTAssertEqual(blocks, [.paragraph("text ![in](x.png) more")])
+    }
+
+    func testPlainTextStripsImages() {
+        XCTAssertEqual(
+            MarkdownText.plainText("Hello ![x](y.png) world"),
+            "Hello world"
+        )
+    }
+
+    func testLinkTargetsEnumerated() {
+        let md = "see [one](https://a.com) and [two](https://b.com)"
+        let links = MarkdownText.linkTargets(in: md)
+        XCTAssertEqual(links.count, 2)
+        XCTAssertEqual(links.map(\.label), ["one", "two"])
+        XCTAssertEqual(links.map(\.url), ["https://a.com", "https://b.com"])
+    }
+
+    func testImageTokensEnumerated() {
+        let md = "before ![a](x.png) middle ![b](y.jpg) after"
+        let imgs = MarkdownText.imageTokens(in: md)
+        XCTAssertEqual(imgs.count, 2)
+        XCTAssertEqual(imgs.map(\.alt), ["a", "b"])
+        XCTAssertEqual(imgs.map(\.url), ["x.png", "y.jpg"])
+    }
+
+    // MARK: - Slash menu
+
+    func testSlashDetectsAtLineStart() {
+        let t = MarkdownSlashMenu.detect(in: "hello\n/w", caretOffset: 8)
+        XCTAssertNotNil(t)
+        XCTAssertTrue(t!.isValid)
+    }
+
+    func testSlashRejectsMidWord() {
+        XCTAssertNil(MarkdownSlashMenu.detect(in: "path/to/file", caretOffset: 12))
+    }
+
+    func testSlashAppliesRemovesPrefixAndInsertsSnippet() {
+        let t = MarkdownSlashMenu.detect(in: "/bu", caretOffset: 3)!
+        let cmd = MarkdownSlashMenu.commands.first { $0.id == "bullet" }!
+        let (out, caret) = MarkdownSlashMenu.apply(cmd, in: "/bu", trigger: t)
+        XCTAssertEqual(out, "- ")
+        XCTAssertEqual(caret, 2)
+    }
+
+    func testSlashFilterMatchesById() {
+        XCTAssertFalse(MarkdownSlashMenu.filter(prefix: "img").isEmpty)
+        XCTAssertFalse(MarkdownSlashMenu.filter(prefix: "h").isEmpty)
+    }
 }
