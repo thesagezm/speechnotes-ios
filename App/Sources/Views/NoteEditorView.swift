@@ -1,5 +1,7 @@
 import SwiftUI
 import SpeechLogic
+import UIKit
+import UniformTypeIdentifiers
 
 struct NoteEditorView: View {
     let noteId: UUID
@@ -13,6 +15,14 @@ struct NoteEditorView: View {
     @State private var showingSettings = false
     @State private var showingVoicePicker = false
     @State private var showingDeleteConfirm = false
+    @State private var textSelection: Range<String.Index>?
+    @State private var showingImageSource = false
+    @State private var showingPhotoPicker = false
+    @State private var showingImageURLPrompt = false
+    @State private var showingLinkPrompt = false
+    @State private var pendingLinkLabel: String = ""
+    @State private var pendingLinkURL: String = ""
+    @State private var imageURLDraft: String = ""
     /// Markdown reading mode — only meaningful when the Render Markdown
     /// setting is on; the editor always opens in edit mode.
     @State private var showPreview = false
@@ -82,6 +92,18 @@ struct NoteEditorView: View {
                         scheduleDraftSync()
                         updateSpeechCaches()
                     }
+                if renderMarkdown {
+                    MarkdownFormattingBar(
+                        draft: $draft,
+                        selection: $textSelection,
+                        insertImage: { showingImageSource = true },
+                        insertLink: { label, url in
+                            pendingLinkLabel = label
+                            pendingLinkURL = url
+                            showingLinkPrompt = true
+                        }
+                    )
+                }
             }
 
             controlsBar
@@ -180,6 +202,41 @@ struct NoteEditorView: View {
                 ShareSheet(items: [url])
             }
         }
+        .confirmationDialog("Insert image", isPresented: $showingImageSource, titleVisibility: .visible) {
+            Button("Choose from Photos") { showingPhotoPicker = true }
+            Button("Paste from Clipboard") { pasteImageFromClipboard() }
+            Button("From URL…") { showingImageURLPrompt = true }
+            Button("Cancel", role: .cancel) {}
+        }
+        .sheet(isPresented: $showingPhotoPicker) {
+            ImagePicker { data, ext in
+                let fragment = MarkdownImageInserter(noteId: noteId).store(data: data, ext: ext, alt: "image")
+                if let fragment { insertAtCaret(fragment) }
+            }
+        }
+        .alert("Insert from URL", isPresented: $showingImageURLPrompt) {
+            TextField("https://…", text: $imageURLDraft)
+            Button("Insert") {
+                guard let url = URL(string: imageURLDraft) else { return }
+                Task { @MainActor in
+                    let fragment = await MarkdownImageInserter(noteId: noteId).storeFromURL(url, alt: "image")
+                    insertAtCaret(fragment)
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("We'll download the image once and store it locally.")
+        }
+        .alert("Insert link", isPresented: $showingLinkPrompt) {
+            TextField("Label", text: $pendingLinkLabel)
+            TextField("https://…", text: $pendingLinkURL)
+            Button("Insert") {
+                insertAtCaret("[\(pendingLinkLabel)](\(pendingLinkURL))")
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("We'll make the label tappable in the reading view.")
+        }
         .alert("Export failed", isPresented: exportErrorBinding) {
             Button("OK") { player.dismissExportError() }
         } message: {
@@ -263,10 +320,11 @@ struct NoteEditorView: View {
     private var markdownPreview: some View {
         MarkdownPreviewView(markdown: draft)
             .onTapGesture {
-                // Tap to edit — readers expect the whole surface to be a toggle.
                 Haptics.tap()
                 showPreview = false
             }
+            .environment(\.noteId, noteId)
+            .onAppear { EnvironmentValuesHolder.noteId = noteId }
     }
 
     // MARK: - Controls
@@ -396,5 +454,36 @@ struct NoteEditorView: View {
             guard !Task.isCancelled else { return }
             saveDraft()
         }
+    }
+
+    /// Insert `fragment` at the current caret (replaces any selection).
+    /// Used by the formatting bar / image picker / link prompt.
+    private func insertAtCaret(_ fragment: String) {
+        guard let range = textSelection
+                ?? Range(NSRange(location: draft.utf16.count, length: 0), in: draft)
+        else { return }
+        var updated = draft
+        updated.replaceSubrange(range, with: fragment)
+        let insertEndUtf16 = updated.utf16.distance(from: updated.startIndex, to: range.lowerBound) + fragment.utf16.count
+        draft = updated
+        if let idx = updated.utf16.index(updated.utf16.startIndex, offsetBy: insertEndUtf16, limitedBy: updated.utf16.endIndex).flatMap({ String.Index($0, within: updated) }) {
+            textSelection = TextRange(idx, idx)
+        }
+        scheduleDraftSync()
+        updateSpeechCaches()
+        Haptics.tap()
+    }
+
+    /// Try to paste an image from the clipboard. Supports both PNG (most
+    /// common) and any NSItemProvider variant that carries image data.
+    private func pasteImageFromClipboard() {
+        let pb = UIPasteboard.general
+        guard pb.hasImages, let image = pb.image else {
+            Haptics.warning()
+            return
+        }
+        guard let data = image.pngData() else { return }
+        let fragment = MarkdownImageInserter(noteId: noteId).store(data: data, ext: "png", alt: "image")
+        if let fragment { insertAtCaret(fragment) }
     }
 }

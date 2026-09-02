@@ -100,6 +100,114 @@ public enum MarkdownText {
         case quote(String)
         case code(String)
         case divider
+        /// Standalone image (paragraph that contained only an image token).
+        case image(alt: String, url: String)
+    }
+
+    /// An inline run inside a paragraph/heading/list item. Lets the preview
+    /// render text + images together with arbitrary order — e.g.
+    /// "Look ![logo](x.png) here" splits into [.text("Look "), .image("logo", "x.png"), .text(" here")].
+    public enum InlineRun: Equatable {
+        case text(String)
+        case image(alt: String, url: String)
+    }
+
+    /// Inline parse for a single line/paragraph, splitting text and image
+    /// tokens so the preview can render mixed content. Other markdown syntax
+    /// (bold/italic/code/links) is left as raw text for Foundation's
+    /// AttributedString to style — image runs are the only structural token
+    /// we need to lift out for native rendering.
+    public static func inlineRuns(_ line: String) -> [InlineRun] {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"!\[[^\]]*\]\([^)]+\)"
+        ) else {
+            return [.text(line)]
+        }
+        let nsLine = line as NSString
+        let matches = regex.matches(
+            in: line, options: [],
+            range: NSRange(location: 0, length: nsLine.length)
+        )
+        if matches.isEmpty { return [.text(line)] }
+
+        var runs: [InlineRun] = []
+        var cursor = 0
+        let full = NSRange(location: 0, length: nsLine.length)
+        for match in matches {
+            // Text before the image.
+            if match.range.location > cursor {
+                let textRange = NSRange(location: cursor, length: match.range.location - cursor)
+                let before = nsLine.substring(with: textRange)
+                if !before.isEmpty { runs.append(.text(before)) }
+            }
+            // Image token: ![alt](url) — extract alt and url.
+            if let (alt, url) = parseImage(nsLine.substring(with: match.range)) {
+                runs.append(.image(alt: alt, url: url))
+            } else {
+                runs.append(.text(nsLine.substring(with: match.range)))
+            }
+            cursor = match.range.location + match.range.length
+        }
+        // Trailing text.
+        if cursor < full.length {
+            let tail = nsLine.substring(from: cursor)
+            if !tail.isEmpty { runs.append(.text(tail)) }
+        }
+        return runs
+    }
+
+    /// Parses a single image token "![alt](url)". Returns (alt, url) or nil
+    /// on malformed input. URL strings inside parens may not contain ')'.
+    private static func parseImage(_ token: String) -> (alt: String, url: String)? {
+        guard token.hasPrefix("![") else { return nil }
+        let afterBang = token.dropFirst(2)
+        guard let altEnd = afterBang.firstIndex(of: "]") else { return nil }
+        let alt = String(afterBang[..<altEnd])
+        var rest = afterBang[afterBang.index(after: altEnd)...]
+        guard rest.hasPrefix("(") else { return nil }
+        rest = rest.dropFirst()
+        guard rest.hasSuffix(")") else { return nil }
+        let url = String(rest.dropLast()).trimmingCharacters(in: .whitespaces)
+        return (alt, url)
+    }
+
+    /// Extract every link target in `markdown` (without rendering). Used by
+    /// the editor's link-edit popover and by the preview's long-press
+    /// handler.
+    public static func linkTargets(in markdown: String) -> [(label: String, url: String, range: Range<String.Index>)] {
+        guard let regex = try? NSRegularExpression(pattern: #"\[([^\]]+)\]\(([^)]+)\)"#) else {
+            return []
+        }
+        let ns = markdown as NSString
+        let full = NSRange(location: 0, length: ns.length)
+        var results: [(String, String, Range<String.Index>)] = []
+        regex.enumerateMatches(in: markdown, options: [], range: full) { match, _, _ in
+            guard let match, match.numberOfRanges == 3 else { return }
+            let label = ns.substring(with: match.range(at: 1))
+            let url = ns.substring(with: match.range(at: 2))
+            if let swiftRange = Range(match.range, in: markdown) {
+                results.append((label, url, swiftRange))
+            }
+        }
+        return results
+    }
+
+    /// Extract every image token in `markdown` as (alt, url, range). Same
+    /// shape as `linkTargets(in:)` for the editing layer.
+    public static func imageTokens(in markdown: String) -> [(alt: String, url: String, range: Range<String.Index>)] {
+        guard let regex = try? NSRegularExpression(pattern: #"!\[[^\]]*\]\([^)]+\)"#) else {
+            return []
+        }
+        let ns = markdown as NSString
+        let full = NSRange(location: 0, length: ns.length)
+        var results: [(String, String, Range<String.Index>)] = []
+        regex.enumerateMatches(in: markdown, options: [], range: full) { match, _, _ in
+            guard let match, match.numberOfRanges >= 1,
+                  let (alt, url) = parseImage(ns.substring(with: match.range)),
+                  let swiftRange = Range(match.range, in: markdown) else { return }
+            results.append((alt, url, swiftRange))
+        }
+        return results
     }
 
     /// Block structure for the reading view. Same scanning rules as
@@ -107,6 +215,10 @@ public enum MarkdownText {
     /// "1." list markers) but inline syntax is left intact for the display
     /// layer to style. Consecutive non-blank lines form ONE paragraph joined
     /// by "\n" — line breaks stay visible.
+    ///
+    /// Standalone-image paragraphs become `.image` blocks; otherwise a
+    /// paragraph with inline images stays as `.paragraph(text)` and the
+    /// preview calls `inlineRuns` to split text vs image.
     public static func blocks(_ markdown: String) -> [MarkdownBlock] {
         var result: [MarkdownBlock] = []
         var paragraph: [String] = []
@@ -117,7 +229,13 @@ public enum MarkdownText {
         var inFence = false
 
         func flushParagraph() {
-            if !paragraph.isEmpty { result.append(.paragraph(paragraph.joined(separator: "\n"))) }
+            guard !paragraph.isEmpty else { return }
+            let joined = paragraph.joined(separator: "\n")
+            if let (alt, url) = standaloneImage(joined) {
+                result.append(.image(alt: alt, url: url))
+            } else {
+                result.append(.paragraph(joined))
+            }
             paragraph = []
         }
         func flushQuote() {
@@ -194,6 +312,19 @@ public enum MarkdownText {
         return result
     }
 
+    /// If `joined` is JUST an image token (with optional whitespace), returns
+    /// (alt, url). Lets the preview render stand-alone images as a block.
+    private static func standaloneImage(_ joined: String) -> (alt: String, url: String)? {
+        let trimmed = joined.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("!["), trimmed.hasSuffix(")") else { return nil }
+        let runs = inlineRuns(trimmed)
+        // Sole run must be an image with no surrounding text.
+        guard runs.count == 1, case .image(let alt, let url) = runs[0] else {
+            return nil
+        }
+        return (alt, url)
+    }
+
     /// Heading level (count of leading #'s), 1–6, else nil.
     private static func headingLevel(_ line: String) -> Int? {
         guard line.hasPrefix("#") else { return nil }
@@ -268,7 +399,12 @@ public enum MarkdownText {
     // MARK: - Inline helpers
 
     private static func stripImages(_ line: String) -> String {
-        replacePatterns(line, pattern: #"!\[([^\]]*)\]\([^)]*\)"#, with: "$1")
+        // Strip image tokens first so a single standalone image on a line
+        // doesn't leave stray whitespace between the alt text and the next
+        // word.
+        let stripped = replacePatterns(line, pattern: #"!\[[^\]]*\]\([^)]*\)"#, with: "")
+        // Collapse double spaces created by removing the token.
+        return replacePatterns(stripped, pattern: #"  +"#, with: " ")
     }
 
     private static func stripLinks(_ line: String) -> String {
