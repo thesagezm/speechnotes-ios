@@ -137,15 +137,15 @@ final class MarkdownTextTests: XCTestCase {
     }
 
     func testPlainTextStripsImages() {
-        // The image token AND its trailing space collapse so we don't get a
-        // double-space between "Hello" and "world".
+        // Image tokens keep their alt text (so TTS still announces them),
+        // only the URL wrapper goes.
         XCTAssertEqual(
             MarkdownText.plainText("Hello ![x](y.png) world"),
-            "Hello world"
+            "Hello x world"
         )
         XCTAssertEqual(
             MarkdownText.plainText("Hello![x](y.png)world"),
-            "Helloworld"
+            "Helloxworld"
         )
     }
 
@@ -182,7 +182,10 @@ final class MarkdownTextTests: XCTestCase {
         let cmd = MarkdownSlashMenu.commands.first { $0.id == "bullet" }!
         let (out, caret) = MarkdownSlashMenu.apply(cmd, in: "/bu", trigger: t)
         XCTAssertEqual(out, "- ")
-        XCTAssertEqual(caret, 2)
+        // Caret lands at the start of the placeholder marker ("]") for the
+        // link / image commands, and at end-of-snippet otherwise — bullet
+        // has no markdown marker in its placeholder so we expect the end.
+        XCTAssertEqual(caret, "- ".utf16.count)
     }
 
     func testSlashFilterMatchesById() {
