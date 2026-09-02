@@ -398,10 +398,10 @@ public enum MarkdownText {
     // MARK: - Inline helpers
 
     private static func stripImages(_ line: String) -> String {
-        // Drop image tokens AND their trailing space (so "Hello ![x](y) world"
-        // collapses to "Hello world" not "Hello  world").
-        let noImages = replacePatterns(line, pattern: #"!\[[^\]]*\]\([^)]*\) ?"#, with: "")
-        return noImages
+        // Keep the alt text (TTS should still announce "chart") and drop the
+        // URL + brackets. Trailing whitespace gets trimmed later by the
+        // paragraph-collapse pass.
+        replacePatterns(line, pattern: #"!\[([^\]]*)\]\([^)]*\)"#, with: "$1")
     }
 
     private static func stripLinks(_ line: String) -> String {
