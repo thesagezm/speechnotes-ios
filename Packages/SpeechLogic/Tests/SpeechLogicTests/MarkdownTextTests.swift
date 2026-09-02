@@ -137,9 +137,15 @@ final class MarkdownTextTests: XCTestCase {
     }
 
     func testPlainTextStripsImages() {
+        // The image token AND its trailing space collapse so we don't get a
+        // double-space between "Hello" and "world".
         XCTAssertEqual(
             MarkdownText.plainText("Hello ![x](y.png) world"),
             "Hello world"
+        )
+        XCTAssertEqual(
+            MarkdownText.plainText("Hello![x](y.png)world"),
+            "Helloworld"
         )
     }
 
