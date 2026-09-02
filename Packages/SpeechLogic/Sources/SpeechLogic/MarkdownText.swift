@@ -398,12 +398,10 @@ public enum MarkdownText {
     // MARK: - Inline helpers
 
     private static func stripImages(_ line: String) -> String {
-        // Strip image tokens first so a single standalone image on a line
-        // doesn't leave stray whitespace between the alt text and the next
-        // word.
-        let stripped = replacePatterns(line, pattern: #"!\[[^\]]*\]\([^)]*\)"#, with: "")
-        // Collapse double spaces created by removing the token.
-        return replacePatterns(stripped, pattern: #"  +"#, with: " ")
+        // Drop image tokens AND their trailing space (so "Hello ![x](y) world"
+        // collapses to "Hello world" not "Hello  world").
+        let noImages = replacePatterns(line, pattern: #"!\[[^\]]*\]\([^)]*\) ?"#, with: "")
+        return noImages
     }
 
     private static func stripLinks(_ line: String) -> String {
