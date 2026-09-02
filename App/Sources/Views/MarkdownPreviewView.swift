@@ -10,15 +10,7 @@ struct MarkdownPreviewView: View {
     let markdown: String
 
     @State private var safariURL: URL?
-    @State private var editingLink: LinkEdit?
-
-    struct LinkEdit: Identifiable {
-        let id = UUID()
-        let label: String
-        let url: String
-        let range: Range<String.Index>
-    }
-
+    
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
@@ -189,7 +181,7 @@ struct MarkdownPreviewView: View {
         var attributed = AttributedString(string)
         let linkTargets = MarkdownText.linkTargets(in: string)
         for link in linkTargets {
-            if let attrRange = Range(NSRange(link.range, in: attributed.characters...), in: attributed) {
+            if let attrRange = Range(attributed.characters, in: attributed) {
                 attributed[attrRange].link = URL(string: link.url)
                 attributed[attrRange].foregroundColor = .accentColor
                 attributed[attrRange].underlineStyle = .single
@@ -206,27 +198,7 @@ struct MarkdownPreviewView: View {
     /// Done by stacking a transparent tap target on top of each link region.
     private func inlineText(_ string: String) -> Text { tappableText(string) }
 
-    private func bindingForEdit(_ edit: LinkEdit) -> (label: Binding<String>, url: Binding<String>) {
-        // The editor reads these back via a callback the editor passes in;
-        // since this view only renders, we accept the values as read-only.
-        // Editing in-place would require the editor to lift this state up.
-        return (
-            label: .constant(edit.label),
-            url: .constant(edit.url)
-        )
-    }
-
-    private func headingFont(_ level: Int) -> Font {
-        switch level {
-        case 1: return .title.weight(.bold)
-        case 2: return .title2.weight(.semibold)
-        case 3: return .title3.weight(.semibold)
-        case 4: return .headline
-        default: return .subheadline.weight(.semibold)
-        }
-    }
-}
-
+    
 /// Thin wrapper around SFSafariViewController so SwiftUI can show it via
 /// `.sheet(item:)`. No toolbar chrome — we want a minimal in-app browser.
 struct SafariSheet: UIViewControllerRepresentable {
@@ -239,9 +211,6 @@ struct SafariSheet: UIViewControllerRepresentable {
     func updateUIViewController(_ uiViewController: SFSafariViewController, context: Context) {}
 }
 
-extension URL: Identifiable {
-    public var id: String { absoluteString }
-}
 
 /// Shared env key so the preview can read the active note id without a
 /// prop-drilling rewrite. Set by NoteEditorView via

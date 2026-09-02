@@ -16,7 +16,7 @@ struct NoteEditorView: View {
     @State private var showingVoicePicker = false
     @State private var showingDeleteConfirm = false
     @State private var keyboardRefreshTrigger = 0
-    @State private var textSelection: TextRange?
+    @State private var textSelection: Range<String.Index>?
     @State private var showingImageSource = false
     @State private var showingPhotoPicker = false
     @State private var showingImageURLPrompt = false
@@ -87,7 +87,7 @@ struct NoteEditorView: View {
             if renderMarkdown && showPreview {
                 markdownPreview
             } else {
-                TextEditor(text: $draft, selection: $textSelection)
+                TextEditor(text: $draft, )
                     .font(.body)
                     .padding(.horizontal, 8)
                     .focused($editorFocused)
@@ -235,8 +235,8 @@ struct NoteEditorView: View {
         }
         .sheet(isPresented: $showingPhotoPicker) {
             ImagePicker { data, ext in
-                let fragment = MarkdownImageInserter(noteId: noteId).store(data: data, ext: ext, alt: "image")
-                if let fragment { insertAtCaret(fragment) }
+                let fragment = "![image]" + "(data:" + fragment.utf8.map { String(format: "%02x", $0) }.joined() + ")"
+                insertAtCaret(fragment)
             }
         }
         .alert("Insert from URL", isPresented: $showingImageURLPrompt) {
@@ -244,8 +244,8 @@ struct NoteEditorView: View {
             Button("Insert") {
                 guard let url = URL(string: imageURLDraft) else { return }
                 Task { @MainActor in
-                    let fragment = await MarkdownImageInserter(noteId: noteId).storeFromURL(url, alt: "image")
-                    insertAtCaret(fragment)
+                    insertAtCaret(url.absoluteString isValid ? "![image](" + url.absoluteString + ")" : "![image]()")
+
                 }
             }
             Button("Cancel", role: .cancel) {}
@@ -485,14 +485,13 @@ struct NoteEditorView: View {
     /// Used by the formatting bar / image picker / link prompt.
     private func insertAtCaret(_ fragment: String) {
         guard let range = textSelection
-                ?? Range(NSRange(location: draft.utf16.count, length: 0), in: draft)
-        else { return }
+                ?? Range(NSRange(location: draft.utf16.count, length: 0), in: draft) else { return }
         var updated = draft
         updated.replaceSubrange(range, with: fragment)
         let insertEndUtf16 = updated.utf16.distance(from: updated.startIndex, to: range.lowerBound) + fragment.utf16.count
         draft = updated
         if let idx = updated.utf16.index(updated.utf16.startIndex, offsetBy: insertEndUtf16, limitedBy: updated.utf16.endIndex).flatMap({ String.Index($0, within: updated) }) {
-            textSelection = TextRange(idx, idx)
+            textSelection = idx..<idx
         }
         scheduleDraftSync()
         updateSpeechCaches()
