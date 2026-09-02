@@ -47,7 +47,7 @@ struct StorageSettingsView: View {
                 usageRow("Kitten model", ExportsStore.directorySize(ModelManager.kittenDirectory))
                 usageRow("Supertonic model", ExportsStore.directorySize(ModelManager.supertonicDirectory))
                 usageRow("Exported audio", ExportsStore.directorySize(ExportsStore.exportsDirectory))
-                usageRow("Whisper models", ExportsStore.directorySize(WhisperModelManager.whisperKitDirectory))
+                usageRow("Whisper models", WhisperModelManager.installedFootprintBytes)
             } header: {
                 Text("Usage")
             }

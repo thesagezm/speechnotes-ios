@@ -67,7 +67,10 @@ final class WhisperModelManager: ObservableObject {
     }
 
     init() {
-        Self.installedFolders = Self.loadInstalledFolders()
+        let loaded = Self.loadInstalledFolders()
+        Self.foldersLock.lock()
+        Self.foldersStore = loaded
+        Self.foldersLock.unlock()
 
         // Restore the previously-active id only if its folder is still on
         // disk; otherwise fall back to the first actually-installed model.
@@ -91,24 +94,39 @@ final class WhisperModelManager: ObservableObject {
     /// Persisted map of catalog id → on-disk folder WhisperKit actually
     /// wrote the model into. This is the ONLY reliable record: we record the
     /// URL `WhisperKit.download` returns at download time and reuse it.
+    /// A plain lock + class-level storage keeps the property accessible from
+    /// `nonisolated` statics (Swift forbids mutable nonisolated stored
+    /// members on an actor-isolated class, hence the dance).
     nonisolated private static let installedFoldersKey = "whisperInstalledFolders"
-    nonisolated static private(set) var installedFolders: [String: URL] = [:]
+    nonisolated private static let foldersLock = NSLock()
+    nonisolated(unsafe) private static var foldersStore: [String: URL] = [:]
+    nonisolated static var installedFolders: [String: URL] {
+        foldersLock.lock()
+        defer { foldersLock.unlock() }
+        return foldersStore
+    }
 
     /// Set + persist in one call. UserDefaults writes are cheap enough for
     /// once-per-download/scan; the side effect keeps the map consistent.
     nonisolated static func recordInstalledFolder(_ url: URL, forId id: String) {
-        installedFolders[id] = url
-        persistInstalledFolders()
+        foldersLock.lock()
+        foldersStore[id] = url
+        let snapshot = foldersStore
+        foldersLock.unlock()
+        persist(snapshot)
     }
 
     nonisolated static func removeInstalledFolder(forId id: String) {
-        installedFolders.removeValue(forKey: id)
-        persistInstalledFolders()
+        foldersLock.lock()
+        foldersStore.removeValue(forKey: id)
+        let snapshot = foldersStore
+        foldersLock.unlock()
+        persist(snapshot)
     }
 
-    nonisolated private static func persistInstalledFolders() {
+    nonisolated private static func persist(_ folders: [String: URL]) {
         UserDefaults.standard.set(
-            installedFolders.mapValues { $0.path },
+            folders.mapValues { $0.path },
             forKey: installedFoldersKey
         )
     }
@@ -173,6 +191,12 @@ final class WhisperModelManager: ObservableObject {
     }
 
     // MARK: - State queries
+
+    /// Total on-disk size of every installed Whisper model — shown in
+    /// Settings → Storage.
+    nonisolated static var installedFootprintBytes: Int64 {
+        installedFolders.values.reduce(0) { $0 + ExportsStore.directorySize($1) }
+    }
 
     func isInstalled(_ model: WhisperModel) -> Bool { isInstalled(id: model.id) }
     /// Bypasses the public struct so the init can run before any view exists.
