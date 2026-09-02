@@ -18,8 +18,11 @@ struct SpeechnotesApp: App {
     init() {
         // SpeechPlayer can only auto-resume a bookmarked note if it can
         // resolve the note's current text — wire the lookup once here.
+        // Notes is captured by reference so the closure reads its current
+        // contents each call (it mutates on every save).
+        let notesRef = notes
         player.notesProvider = { id in
-            notes.notes.first(where: { $0.id == id })
+            notesRef.notes.first(where: { $0.id == id })
         }
     }
 
