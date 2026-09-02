@@ -119,8 +119,7 @@ public enum MarkdownText {
     /// we need to lift out for native rendering.
     public static func inlineRuns(_ line: String) -> [InlineRun] {
         guard let regex = try? NSRegularExpression(
-            pattern: #"!\[[^\]]*\]\([^)]+\)"
-        ) else {
+            pattern: #"!\[[^\]]*\]\([^)]+\)"#) else {
             return [.text(line)]
         }
         let nsLine = line as NSString
