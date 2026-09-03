@@ -186,6 +186,7 @@ struct NoteEditorView: View {
             Button("Delete note", role: .destructive) {
                 player.stop()
                 notes.delete(noteId: noteId)
+                NoteImageStore.removeAllImages(for: noteId)
                 dismiss()
             }
             Button("Cancel", role: .cancel) {}
@@ -324,7 +325,6 @@ struct NoteEditorView: View {
                 showPreview = false
             }
             .environment(\.noteId, noteId)
-            .onAppear { EnvironmentValuesHolder.noteId = noteId }
     }
 
     // MARK: - Controls
@@ -439,6 +439,8 @@ struct NoteEditorView: View {
         note.text = draft
         note.explicitTitle = newTitle
         notes.update(note)
+        // Drop cached images the markdown no longer references.
+        NoteImageStore.prune(noteId: noteId, markdown: draft)
     }
 
     /// Pushing the draft into the store re-sorts and re-renders the whole
