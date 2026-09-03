@@ -97,8 +97,13 @@ final class MarkdownTextTests: XCTestCase {
     func testBlocksGroupLists() {
         let blocks = MarkdownText.blocks("- a\n- b\n\n1. one\n2. two")
         XCTAssertEqual(blocks, [
+<<<<<<< HEAD
             .bulletList(items: ["a", "b"]),
             .orderedList(items: ["one", "two"]),
+=======
+            .bulletList(items: [MarkdownText.ListItem(text: "a"), MarkdownText.ListItem(text: "b")]),
+            .orderedList(items: [MarkdownText.ListItem(text: "one"), MarkdownText.ListItem(text: "two")]),
+>>>>>>> 439a4c5 (CI fix: drop spurious duplicate notesList declaration (came inside 47c080a's own diff) + qualify MarkdownText.ListItem in tests)
         ])
     }
 

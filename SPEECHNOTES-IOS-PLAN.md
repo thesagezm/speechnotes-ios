@@ -1,5 +1,18 @@
 # Speechnotes iOS — Master Plan
 
+> **HANDOVER v15 (2026-09-03 — STT REVERTED; TTS + MARKDOWN ARE THE MISSION).**
+> The v2.0 STT detour ended: `main` was reset to **v1.3.0 (`37a5598`)** and the
+> STT era (Phase 0–4, WhisperKit, dictation UI, 30+ commits) lives on the
+> remote branch **`archive/stt-v2`** — cherry-pick from there, never merge.
+> Salvaged onto the new base: the background-TTS/mini-player fix and the
+> markdown editor, now running the **markdown engine v2** (unified scanner,
+> tables/tasks/nesting/reference links, image store with thumbnails+prune).
+> **The executable work order for the v1.4 cycle is
+> `Docs/PLAN-V1.4-TTS-MARKDOWN.md` — read it FIRST.** Versions: next release
+> v1.4.0 build 26. Rules stand: zero project.yml changes beyond the version
+> bump, never restructure NoteEditorView wholesale, new screens in new files,
+> no new package pins, portrait-only (LiveContainer), **never push red**.
+
 > **HANDOVER v13 (2026-08-19 — THE REAL v1.2, SHIPS AS v1.3.0):** The v1.2
 > cycle ended at **v1.2.2 (`678f020`)**: orientation keys reverted (launch
 > black-screen), then the editor restructure reverted too (NavigationStack +
