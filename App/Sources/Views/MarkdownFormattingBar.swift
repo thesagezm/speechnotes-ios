@@ -150,7 +150,7 @@ struct MarkdownFormattingBar: View {
             from: .newlines, options: .backwards,
             range: draft.startIndex..<idx
         )?.upperBound ?? draft.startIndex
-        let lineEnd = draft.rangeOfCharacter(
+        let lineEnd: String.Index = draft.rangeOfCharacter(
             from: .newlines, options: [],
             range: idx..<draft.endIndex
         ) ?? draft.endIndex
