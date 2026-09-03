@@ -42,7 +42,8 @@ final class NoteImageStoreTests: XCTestCase {
         XCTAssertEqual(NoteImageStore.sanitiseExtension(".PNG"), "png")
         XCTAssertEqual(NoteImageStore.sanitiseExtension("jpeg"), "jpg")
         XCTAssertEqual(NoteImageStore.sanitiseExtension("exe"), "bin")
-        XCTAssertEqual(NoteImageStore.sanitiseExtension(""), "bin")
+        XCTAssertEqual(NoteImageStore.sanitiseExtension(".bin"), "bin")
+        XCTAssertNil(NoteImageStore.sanitiseExtension(""))
     }
 
     func testResolveReturnsNilForRemoteURL() {
