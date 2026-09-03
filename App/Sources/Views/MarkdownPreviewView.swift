@@ -48,9 +48,9 @@ struct MarkdownPreviewView: View {
                 .lineSpacing(4)
                 .padding(.bottom, 14)
         case .bulletList(let items):
-            listRows(items, marker: { _, _ in "•" })
+            listRows(items, markerBuilder: { _, _ in "•" })
         case .orderedList(let items):
-            listRows(items, marker: { index, _ in "\(index + 1)." })
+            listRows(items, markerBuilder: { index, _ in "\(index + 1)." })
         case .quote(let text):
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 RoundedRectangle(cornerRadius: 2)
