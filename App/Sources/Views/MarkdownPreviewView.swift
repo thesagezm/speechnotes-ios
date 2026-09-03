@@ -2,22 +2,19 @@ import SwiftUI
 import SafariServices
 import SpeechLogic
 
-/// Block-rendered markdown reading view. Extends the previous version with:
-/// - inline image runs (mixed text + images in a paragraph)
-/// - tappable links that open in-app via SFSafariViewController
-/// - long-press a link to edit it inline
+/// Block-rendered markdown reading view.
+///
+/// Renders `MarkdownText.blocks` output: headings, nested lists with task
+/// checkboxes, blockquotes, code blocks (with language label), tables,
+/// thematic breaks, and paragraphs split into text / image / link runs via
+/// `MarkdownText.inlineRuns`. Local `speechnotes://note-image/…` targets
+/// resolve through `NoteImageStore` (thumbnails for big images); remote
+/// URLs render via AsyncImage. Links open in an in-app Safari sheet.
 struct MarkdownPreviewView: View {
     let markdown: String
 
     @State private var safariURL: URL?
-    @State private var editingLink: LinkEdit?
-
-    struct LinkEdit: Identifiable {
-        let id = UUID()
-        let label: String
-        let url: String
-        let range: Range<String.Index>
-    }
+    @Environment(\.noteId) private var envNoteId
 
     var body: some View {
         ScrollView {
@@ -34,22 +31,6 @@ struct MarkdownPreviewView: View {
             SafariSheet(url: url)
                 .ignoresSafeArea()
         }
-        .sheet(item: $editingLink) { edit in
-            NavigationStack {
-                Form {
-                    Section("Label") { TextField("Label", text: bindingForEdit(edit).label) }
-                    Section("URL") { TextField("https://…", text: bindingForEdit(edit).url) }
-                }
-                .navigationTitle("Edit link")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("Cancel") { editingLink = nil }
-                    }
-                }
-            }
-            .presentationDetents([.medium])
-        }
     }
 
     // MARK: - Blocks
@@ -58,7 +39,7 @@ struct MarkdownPreviewView: View {
     private func blockView(_ block: MarkdownText.MarkdownBlock) -> some View {
         switch block {
         case .heading(let level, let text):
-            inlineText(text)
+            styledText(text)
                 .font(headingFont(level))
                 .padding(.top, level <= 2 ? 18 : 14)
                 .padding(.bottom, 6)
@@ -67,66 +48,119 @@ struct MarkdownPreviewView: View {
                 .lineSpacing(4)
                 .padding(.bottom, 14)
         case .bulletList(let items):
-            listRows(items.map { ("•", $0) })
+            listRows(items, marker: { _, _ in "•" })
         case .orderedList(let items):
-            listRows(items.enumerated().map { ("\($0.offset + 1).", $0.element) })
+            listRows(items, marker: { index, _ in "\(index + 1)." })
         case .quote(let text):
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 RoundedRectangle(cornerRadius: 2)
                     .fill(Color.secondary.opacity(0.4))
                     .frame(width: 3)
-                inlineText(text)
+                styledText(text)
                     .foregroundStyle(.secondary)
                     .lineSpacing(3)
             }
             .padding(.bottom, 14)
-        case .code(let code):
-            ScrollView(.horizontal, showsIndicators: false) {
-                Text(code)
-                    .font(.system(.footnote, design: .monospaced))
-                    .textSelection(.enabled)
+        case .code(let language, let text):
+            VStack(alignment: .leading, spacing: 4) {
+                if let language {
+                    Text(language)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .textCase(.uppercase)
+                }
+                ScrollView(.horizontal, showsIndicators: false) {
+                    Text(text)
+                        .font(.system(.footnote, design: .monospaced))
+                        .textSelection(.enabled)
+                }
             }
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.15))
-            )
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.15)))
             .padding(.bottom, 14)
         case .divider:
             Divider().padding(.vertical, 10)
         case .image(let alt, let url):
             imageView(url: url, alt: alt)
                 .padding(.bottom, 14)
+        case .table(let headers, let rows):
+            tableView(headers: headers, rows: rows)
+                .padding(.bottom, 14)
         }
     }
 
-    private func listRows(_ rows: [(marker: String, item: String)]) -> some View {
+    /// Lists render with nesting indentation and task checkboxes; completed
+    /// tasks read with a strikethrough.
+    private func listRows(
+        _ items: [MarkdownText.ListItem],
+        marker: (Int, MarkdownText.ListItem) -> String
+    ) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+            ForEach(Array(items.enumerated()), id: \.offset) { index, item in
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text(row.marker)
-                        .foregroundStyle(.secondary)
-                    inlineText(row.item).lineSpacing(3)
+                    if item.isTask {
+                        Image(systemName: item.isDone ? "checkmark.square.fill" : "square")
+                            .foregroundStyle(item.isDone ? Color.accentColor : Color.secondary)
+                            .font(.callout)
+                    } else {
+                        Text(marker(index, item))
+                            .foregroundStyle(.secondary)
+                    }
+                    styledText(item.text)
+                        .strikethrough(item.isDone)
+                        .foregroundStyle(item.isDone ? Color.secondary : Color.primary)
                 }
+                .padding(.leading, CGFloat(item.level) * 16)
             }
         }
         .padding(.bottom, 14)
     }
 
+    private func tableView(headers: [String], rows: [[String]]) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
+                GridRow {
+                    ForEach(Array(headers.enumerated()), id: \.offset) { _, cell in
+                        styledText(cell).bold()
+                    }
+                }
+                Divider()
+                ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                    GridRow {
+                        ForEach(Array(row.enumerated()), id: \.offset) { _, cell in
+                            styledText(cell)
+                        }
+                    }
+                }
+            }
+            .padding(8)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.08)))
+        }
+    }
+
     // MARK: - Inline runs
 
-    /// Renders mixed text + image runs. Text runs go through the inline-link
-    /// tappable Text; image runs render via AsyncImage.
+    /// Renders mixed text / image / link runs. Text runs go through the
+    /// emphasis styler; link runs become real tappable buttons; image runs
+    /// render via the NoteImageStore / AsyncImage path.
     @ViewBuilder
     private func runsView(_ runs: [MarkdownText.InlineRun]) -> some View {
-        // SwiftUI doesn't compose Text + Image directly in a single Text;
-        // wrap a flow-layout with VStack of HStacks (cheaper than rebuilding
-        // AttributedString for an arbitrary mix of native images and links).
         FlowLayout(spacing: 4) {
             ForEach(Array(runs.enumerated()), id: \.offset) { _, run in
                 switch run {
                 case .text(let s):
-                    tappableText(s)
+                    styledText(s)
+                case .link(let label, let url):
+                    Button {
+                        guard let url = URL(string: url) else { return }
+                        safariURL = url
+                    } label: {
+                        Text(label)
+                            .foregroundColor(.accentColor)
+                            .underline()
+                    }
+                    .buttonStyle(.plain)
                 case .image(let alt, let url):
                     imageView(url: url, alt: alt)
                         .frame(maxWidth: 280)
@@ -137,33 +171,96 @@ struct MarkdownPreviewView: View {
         }
     }
 
+    // MARK: - Emphasis styling
+
+    /// Styles **bold**, *italic*, `code` and ~~strike~~ spans within a text
+    /// run, returning one composed Text. (Links are lifted out earlier as
+    /// separate runs, so no link handling is needed here.)
+    private func styledText(_ string: String) -> Text {
+        let spans = Self.emphasisSpans(in: string)
+        guard !spans.isEmpty else { return Text(string) }
+        var composed = Text("")
+        for span in spans {
+            let piece = Text(span.text)
+            switch span.style {
+            case .plain: composed = composed + piece
+            case .bold: composed = composed + piece.bold()
+            case .italic: composed = composed + piece.italic()
+            case .boldItalic: composed = composed + piece.bold().italic()
+            case .code: composed = composed + piece.font(.system(.callout, design: .monospaced))
+            case .strike: composed = composed + piece.strikethrough()
+            }
+        }
+        return composed
+    }
+
+    private enum SpanStyle { case plain, bold, italic, boldItalic, code, strike }
+    private struct Span { let text: String; let style: SpanStyle }
+
+    /// One-pass tokenizer over inline markers. Unmatched markers stay
+    /// literal, so stray asterisks in prose survive; underscore rules carry
+    /// word-boundary guards so snake_case identifiers are not styled.
+    private static func emphasisSpans(in string: String) -> [Span] {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"`([^`]+)`"#
+                + #"|\*\*\*([^*]+)\*\*\*"#
+                + #"|\*\*([^*]+)\*\*"#
+                + #"|__([^_]+)__"#
+                + #"|~~([^~]+)~~"#
+                + #"|(?<![*\w])\*([^*\s][^*]*)\*(?!\*)"#
+                + #"|(?<![\w_])_([^_\s][^_]*)_(?![\w_])"#
+        ) else { return [] }
+        let ns = string as NSString
+        var spans: [Span] = []
+        var cursor = 0
+        for match in regex.matches(in: string, range: NSRange(location: 0, length: ns.length)) {
+            if match.range.location > cursor {
+                spans.append(Span(text: ns.substring(with: NSRange(location: cursor, length: match.range.location - cursor)), style: .plain))
+            }
+            let content: (String, SpanStyle)
+            // Groups in pattern order: 1 code, 2 bold-italic, 3 bold,
+            // 4 underline-bold, 5 strike, 6 italic, 7 underline-italic.
+            if match.range(at: 1).location != NSNotFound {
+                content = (ns.substring(with: match.range(at: 1)), .code)
+            } else if match.range(at: 2).location != NSNotFound {
+                content = (ns.substring(with: match.range(at: 2)), .boldItalic)
+            } else if match.range(at: 3).location != NSNotFound {
+                content = (ns.substring(with: match.range(at: 3)), .bold)
+            } else if match.range(at: 4).location != NSNotFound {
+                content = (ns.substring(with: match.range(at: 4)), .bold)
+            } else if match.range(at: 5).location != NSNotFound {
+                content = (ns.substring(with: match.range(at: 5)), .strike)
+            } else if match.range(at: 6).location != NSNotFound {
+                content = (ns.substring(with: match.range(at: 6)), .italic)
+            } else if match.range(at: 7).location != NSNotFound {
+                content = (ns.substring(with: match.range(at: 7)), .italic)
+            } else {
+                content = (ns.substring(with: match.range), .plain)
+            }
+            spans.append(Span(text: content.0, style: content.1))
+            cursor = match.range.location + match.range.length
+        }
+        if cursor < ns.length {
+            spans.append(Span(text: ns.substring(from: cursor), style: .plain))
+        }
+        return spans
+    }
+
+    // MARK: - Images
+
     /// Image renderer: resolves local `speechnotes://` targets via
-    /// NoteImageStore; falls through to AsyncImage for remote URLs.
+    /// NoteImageStore (thumbnails where available); falls through to
+    /// AsyncImage for remote URLs.
     @ViewBuilder
     private func imageView(url: String, alt: String) -> some View {
-        if let parsed = NoteImageStore.parseLocalTarget(url),
-           let local = NoteImageStore.resolveLocalURL(url, noteId: currentNoteId()) {
-            // Local: AsyncImage from a file URL.
+        if let local = localImageURL(url) {
             AsyncImage(url: local) { phase in
-                switch phase {
-                case .empty: ProgressView()
-                case .success(let img): img.resizable().scaledToFit()
-                case .failure: Image(systemName: "photo")
-                        .foregroundStyle(.secondary)
-                @unknown default: Image(systemName: "photo")
-                }
+                imagePhaseView(phase)
             }
             .accessibilityLabel(alt.isEmpty ? "image" : alt)
-            .help(parsed.hash) // small DX touch: hash visible on long-press
         } else if let remote = URL(string: url) {
             AsyncImage(url: remote) { phase in
-                switch phase {
-                case .empty: ProgressView()
-                case .success(let img): img.resizable().scaledToFit()
-                case .failure: Image(systemName: "photo")
-                        .foregroundStyle(.secondary)
-                @unknown default: Image(systemName: "photo")
-                }
+                imagePhaseView(phase)
             }
             .accessibilityLabel(alt.isEmpty ? "image" : alt)
         } else {
@@ -172,48 +269,23 @@ struct MarkdownPreviewView: View {
         }
     }
 
-    private func currentNoteId() -> UUID {
-        // Resolve the active note id from the env set by NoteEditorView.
-        // Defaults to a sentinel so previews / standalone usage compile.
-        EnvironmentValuesHolder.noteId ?? UUID()
-    }
-
-    // MARK: - Tappable links
-
-    /// Renders a string as Text, with link tap targets wired up. Long-press
-    /// opens the edit sheet (popover on iPad, sheet on iPhone).
-    private func tappableText(_ string: String) -> Text {
-        // Parse links and create a Text where each link is a separate
-        // tappable span. Foundation AttributedString + custom URL handlers
-        // is the path of least resistance.
-        var attributed = AttributedString(string)
-        let linkTargets = MarkdownText.linkTargets(in: string)
-        for link in linkTargets {
-            if let attrRange = Range(NSRange(link.range, in: attributed.characters...), in: attributed) {
-                attributed[attrRange].link = URL(string: link.url)
-                attributed[attrRange].foregroundColor = .accentColor
-                attributed[attrRange].underlineStyle = .single
-            }
+    @ViewBuilder
+    private func imagePhaseView(_ phase: AsyncImagePhase) -> some View {
+        switch phase {
+        case .empty: ProgressView()
+        case .success(let img): img.resizable().scaledToFit()
+        case .failure: Image(systemName: "photo").foregroundStyle(.secondary)
+        @unknown default: Image(systemName: "photo")
         }
-        return Text(attributed)
-            .environment(\.openURL, OpenURLAction { url in
-                safariURL = url
-                return .handled
-            })
     }
 
-    /// Detects a long-press on a link region and surfaces an edit sheet.
-    /// Done by stacking a transparent tap target on top of each link region.
-    private func inlineText(_ string: String) -> Text { tappableText(string) }
-
-    private func bindingForEdit(_ edit: LinkEdit) -> (label: Binding<String>, url: Binding<String>) {
-        // The editor reads these back via a callback the editor passes in;
-        // since this view only renders, we accept the values as read-only.
-        // Editing in-place would require the editor to lift this state up.
-        return (
-            label: .constant(edit.label),
-            url: .constant(edit.url)
-        )
+    /// Local target → best on-disk URL (cached thumbnail when present,
+    /// original otherwise); nil for remote/unknown targets.
+    private func localImageURL(_ target: String) -> URL? {
+        guard NoteImageStore.parseLocalTarget(target) != nil else { return nil }
+        let noteId = envNoteId ?? UUID()
+        return NoteImageStore.thumbnailURL(for: target, noteId: noteId)
+            ?? NoteImageStore.resolveLocalURL(target, noteId: noteId)
     }
 
     private func headingFont(_ level: Int) -> Font {
@@ -229,6 +301,7 @@ struct MarkdownPreviewView: View {
 
 /// Thin wrapper around SFSafariViewController so SwiftUI can show it via
 /// `.sheet(item:)`. No toolbar chrome — we want a minimal in-app browser.
+/// (`URL: Identifiable` lives in StorageView.swift — one conformance only.)
 struct SafariSheet: UIViewControllerRepresentable {
     let url: URL
 
@@ -239,13 +312,8 @@ struct SafariSheet: UIViewControllerRepresentable {
     func updateUIViewController(_ uiViewController: SFSafariViewController, context: Context) {}
 }
 
-extension URL: Identifiable {
-    public var id: String { absoluteString }
-}
-
-/// Shared env key so the preview can read the active note id without a
-/// prop-drilling rewrite. Set by NoteEditorView via
-/// `.environment(\.noteId, noteId)`.
+/// Environment key so the preview can resolve note-scoped image caches.
+/// Set by NoteEditorView via `.environment(\.noteId, noteId)`.
 struct NoteIdKey: EnvironmentKey {
     static let defaultValue: UUID? = nil
 }
@@ -255,11 +323,4 @@ extension EnvironmentValues {
         get { self[NoteIdKey.self] }
         set { self[NoteIdKey.self] = newValue }
     }
-}
-
-/// Placeholder enum used by the preview before env-based lookup is wired
-/// through every helper. Will be removed once every caller reads
-/// `\.noteId` directly.
-enum EnvironmentValuesHolder {
-    static var noteId: UUID?
 }

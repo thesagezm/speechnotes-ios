@@ -1,5 +1,6 @@
 import Foundation
 import UIKit
+import SpeechLogic
 
 /// Image-insertion helper: routes every image source (Photos picker, paste
 /// board, drag-and-drop, URL download) through `NoteImageStore` so the
@@ -23,7 +24,7 @@ final class MarkdownImageInserter {
             lastError = "Couldn't save the image."
             return nil
         }
-        return "![\\(alt)](\\(target))"
+        return "![\(alt)](\(target))"
     }
 
     /// Insert an image from a remote URL. Downloads the bytes once, caches
@@ -36,7 +37,7 @@ final class MarkdownImageInserter {
             let (data, _) = try await URLSession.shared.data(from: url)
             let ext = NoteImageStore.sanitiseExtension(url.pathExtension.isEmpty ? "png" : url.pathExtension)
             if let target = NoteImageStore.store(data: data, ext: ext ?? "png", noteId: noteId) {
-                return "![\\(alt)](\\(target))"
+                return "![\(alt)](\(target))"
             }
         } catch {
             lastError = error.localizedDescription
@@ -44,12 +45,6 @@ final class MarkdownImageInserter {
         // Offline fallback: keep the raw URL in the markdown so it still
         // renders when the user has network again. AsyncImage in the preview
         // will fetch it on demand.
-        return "![\\(alt)](\\(url.absoluteString))"
-    }
-
-    /// Convenience for the Photos picker.
-    func makeTarget(forImage image: UIImage, suggestedExt: String = "png") -> String? {
-        guard let data = image.pngData() else { return nil }
-        return store(data: data, ext: suggestedExt, alt: "image")
+        return "![\(alt)](\(url.absoluteString))"
     }
 }
