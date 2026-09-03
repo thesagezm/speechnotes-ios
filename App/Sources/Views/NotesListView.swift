@@ -173,7 +173,6 @@ struct NotesListView: View {
     // MARK: - List
 
     private var notesList: some View {
-    private var notesList: some View {
         List {
             ForEach(sectionedNotes, id: \.title) { section in
                 Section {

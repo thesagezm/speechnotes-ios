@@ -188,8 +188,8 @@ final class MarkdownTextTests: XCTestCase {
     func testBlocksGroupLists() {
         let blocks = MarkdownText.blocks("- a\n- b\n\n1. one\n2. two")
         XCTAssertEqual(blocks, [
-            .bulletList(items: [ListItem(text: "a"), ListItem(text: "b")]),
-            .orderedList(items: [ListItem(text: "one"), ListItem(text: "two")]),
+            .bulletList(items: [MarkdownText.ListItem(text: "a"), MarkdownText.ListItem(text: "b")]),
+            .orderedList(items: [MarkdownText.ListItem(text: "one"), MarkdownText.ListItem(text: "two")]),
         ])
     }
 
