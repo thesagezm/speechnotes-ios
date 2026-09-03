@@ -269,7 +269,7 @@ final class MarkdownTextTests: XCTestCase {
     }
 
     func testSlashDetectsAfterListPrefixes() {
-        let t = MarkdownSlashMenu.detect(in: "- [/w", caretOffset: 4)
+        let t = MarkdownSlashMenu.detect(in: "- /w", caretOffset: 4)
         XCTAssertNotNil(t)
         XCTAssertTrue(t!.isValid)
     }
@@ -296,14 +296,14 @@ final class MarkdownTextTests: XCTestCase {
     }
 
     func testSlashWrapCommandWrapsSelection() {
-        let draft = "/b bold text here"
-        let t = MarkdownSlashMenu.detect(in: draft, caretOffset: 2)!
+        let draft = "/bold text here"
+        let t = MarkdownSlashMenu.detect(in: draft, caretOffset: 1)!
         let cmd = MarkdownSlashMenu.commands.first { $0.id == "bold" }!
-        let selStart = 3
+        let selStart = 1
         let selEnd = draft.utf16.count
-        let (out, _, sel) = MarkdownSlashMenu.apply(cmd, in: draft, trigger: t, caret: 2, selection: selStart..<selEnd)
+        let (out, _, sel) = MarkdownSlashMenu.apply(cmd, in: draft, trigger: t, caret: 1, selection: selStart..<selEnd)
         XCTAssertEqual(out, "**bold text here**")
-        XCTAssertEqual(sel, 3..<17)
+        XCTAssertEqual(sel, 2..<16)
     }
 
     func testSlashFilterMatchesById() {

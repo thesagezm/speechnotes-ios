@@ -85,99 +85,13 @@ struct NoteEditorView: View {
             if renderMarkdown && showPreview {
                 markdownPreview
             } else {
-                TextEditor(text: $draft)
-                    .font(.body)
-                    .padding(.horizontal, 8)
-                    .onChange(of: draft) { _ in
-                        scheduleDraftSync()
-                        updateSpeechCaches()
-                    }
-                if renderMarkdown {
-                    MarkdownFormattingBar(
-                        draft: $draft,
-                        selection: $textSelection,
-                        insertImage: { showingImageSource = true },
-                        insertLink: { label, url in
-                            pendingLinkLabel = label
-                            pendingLinkURL = url
-                            showingLinkPrompt = true
-                        }
-                    )
-                }
+                editBody
             }
-
             controlsBar
         }
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .navigationBarTrailing) {
-                Menu {
-                    if renderMarkdown {
-                        Button {
-                            Haptics.tap()
-                            showPreview.toggle()
-                            if !showPreview { saveDraft() }
-                        } label: {
-                            Label(
-                                showPreview ? "Edit note" : "Preview markdown",
-                                systemImage: showPreview ? "pencil.circle" : "eye.circle"
-                            )
-                        }
-                    }
-                    Button {
-                        Haptics.tap()
-                        player.export(speechText)
-                    } label: {
-                        if case .running(let progress) = player.exportState {
-                            Label("Exporting… \(Int(progress * 100))%", systemImage: "square.and.arrow.up")
-                        } else {
-                            Label("Export WAV", systemImage: "square.and.arrow.up")
-                        }
-                    }
-                    .disabled(!canExport)
-                    Button {
-                        showingSettings = true
-                    } label: {
-                        Label("Speech settings", systemImage: "speaker.wave.2")
-                    }
-                    if player.hasResumeOption(for: noteId, text: speechText) {
-                        Button {
-                            Haptics.tap()
-                            player.restartFromBeginning(speechText, note: currentNote)
-                        } label: {
-                            Label("Restart from beginning", systemImage: "gobackward")
-                        }
-                    }
-                    Divider()
-                    Button(role: .destructive) {
-                        showingDeleteConfirm = true
-                    } label: {
-                        Label("Delete note", systemImage: "trash")
-                    }
-                } label: {
-                    Image(systemName: "ellipsis.circle")
-                }
-            }
-            ToolbarItemGroup(placement: .keyboard) {
-                Button {
-                    Haptics.tap()
-                    player.togglePlay(speechText, note: currentNote)
-                } label: {
-                    Label(
-                        player.state == .speaking ? "Pause" : "Speak",
-                        systemImage: playIcon
-                    )
-                }
-                .disabled(playButtonDisabled)
-
-                Spacer()
-
-                Text(draftStats)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
+        .toolbar { editorToolbar }
         .confirmationDialog(
             "Delete this note?",
             isPresented: $showingDeleteConfirm,
@@ -327,6 +241,102 @@ struct NoteEditorView: View {
             .environment(\.noteId, noteId)
     }
 
+    /// Edit branch extracted from `body` so SwiftUI's type checker doesn't
+    /// time out on the long modifier chain.
+    @ViewBuilder
+    private var editBody: some View {
+        TextEditor(text: $draft)
+            .font(.body)
+            .padding(.horizontal, 8)
+            .onChange(of: draft) { _ in
+                scheduleDraftSync()
+                updateSpeechCaches()
+            }
+        if renderMarkdown {
+            MarkdownFormattingBar(
+                draft: $draft,
+                selection: $textSelection,
+                insertImage: { showingImageSource = true },
+                insertLink: { label, url in
+                    pendingLinkLabel = label
+                    pendingLinkURL = url
+                    showingLinkPrompt = true
+                }
+            )
+        }
+    }
+
+    /// Toolbar extracted for the same reason as `editBody`.
+    @ToolbarContentBuilder
+    private var editorToolbar: some ToolbarContent {
+        ToolbarItem(placement: .navigationBarTrailing) {
+            Menu {
+                if renderMarkdown {
+                    Button {
+                        Haptics.tap()
+                        showPreview.toggle()
+                        if !showPreview { saveDraft() }
+                    } label: {
+                        Label(
+                            showPreview ? "Edit note" : "Preview markdown",
+                            systemImage: showPreview ? "pencil.circle" : "eye.circle"
+                        )
+                    }
+                }
+                Button {
+                    Haptics.tap()
+                    player.export(speechText)
+                } label: {
+                    if case .running(let progress) = player.exportState {
+                        Label("Exporting… \(Int(progress * 100))%", systemImage: "square.and.arrow.up")
+                    } else {
+                        Label("Export WAV", systemImage: "square.and.arrow.up")
+                    }
+                }
+                .disabled(!canExport)
+                Button {
+                    showingSettings = true
+                } label: {
+                    Label("Speech settings", systemImage: "speaker.wave.2")
+                }
+                if player.hasResumeOption(for: noteId, text: speechText) {
+                    Button {
+                        Haptics.tap()
+                        player.restartFromBeginning(speechText, note: currentNote)
+                    } label: {
+                        Label("Restart from beginning", systemImage: "gobackward")
+                    }
+                }
+                Divider()
+                Button(role: .destructive) {
+                    showingDeleteConfirm = true
+                } label: {
+                    Label("Delete note", systemImage: "trash")
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+            }
+        }
+        ToolbarItemGroup(placement: .keyboard) {
+            Button {
+                Haptics.tap()
+                player.togglePlay(speechText, note: currentNote)
+            } label: {
+                Label(
+                    player.state == .speaking ? "Pause" : "Speak",
+                    systemImage: playIcon
+                )
+            }
+            .disabled(playButtonDisabled)
+
+            Spacer()
+
+            Text(draftStats)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
     // MARK: - Controls
 
     private var controlsBar: some View {
@@ -469,7 +479,7 @@ struct NoteEditorView: View {
         let insertEndUtf16 = updated.utf16.distance(from: updated.startIndex, to: range.lowerBound) + fragment.utf16.count
         draft = updated
         if let idx = updated.utf16.index(updated.utf16.startIndex, offsetBy: insertEndUtf16, limitedBy: updated.utf16.endIndex).flatMap({ String.Index($0, within: updated) }) {
-            textSelection = TextRange(idx, idx)
+            textSelection = idx..<idx
         }
         scheduleDraftSync()
         updateSpeechCaches()

@@ -12,7 +12,7 @@ import SwiftUI
 /// back so the caret lands sensibly.
 struct MarkdownFormattingBar: View {
     @Binding var draft: String
-    @Binding var selection: TextRange?
+    @Binding var selection: Range<String.Index>?
     /// Inserter for picking an image from the photo library / paste board /
     /// by URL — routes through NoteImageStore so the markdown contains a
     /// `speechnotes://` target instead of base64.
@@ -101,7 +101,7 @@ struct MarkdownFormattingBar: View {
         let insertEndUtf16 = updated.utf16.distance(from: updated.startIndex, to: range.lowerBound) + replacement.utf16.count
         draft = updated
         if let idx = updated.utf16.index(updated.utf16.startIndex, offsetBy: insertEndUtf16, limitedBy: updated.utf16.endIndex).flatMap({ String.Index($0, within: updated) }) {
-            selection = TextRange(idx, idx)
+            selection = idx..<idx
         }
     }
 
