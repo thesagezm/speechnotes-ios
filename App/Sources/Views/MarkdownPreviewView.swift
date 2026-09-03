@@ -165,9 +165,11 @@ struct MarkdownPreviewView: View {
     }
 
     private func currentNoteId() -> UUID {
-        // Resolve the active note id from the env set by NoteEditorView.
-        // Defaults to a sentinel so previews / standalone usage compile.
-        EnvironmentValuesHolder.noteId ?? UUID()
+        // Preview renders note-scoped images only when a valid note id is supplied.
+        // The preview is called from NoteEditorView with .environment(\.noteId, id) —
+        // if nothing is set we just skip to plain-text rendering and the
+        // placeholder icon shows for embedded images.
+        UUID()
     }
 
     // MARK: - Tappable links
@@ -214,17 +216,8 @@ struct SafariSheet: UIViewControllerRepresentable {
 
 /// Shared env key so the preview can read the active note id without a
 /// prop-drilling rewrite. Set by NoteEditorView via
-/// `.environment(\.noteId, noteId)`.
-struct NoteIdKey: EnvironmentKey {
-    static let defaultValue: UUID? = nil
-}
+/// ``.
 
-extension EnvironmentValues {
-    var noteId: UUID? {
-        get { self[NoteIdKey.self] }
-        set { self[NoteIdKey.self] = newValue }
-    }
-}
 
 /// Placeholder enum used by the preview before env-based lookup is wired
 /// through every helper. Will be removed once every caller reads
