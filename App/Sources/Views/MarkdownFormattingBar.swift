@@ -121,8 +121,9 @@ struct MarkdownFormattingBar: View {
         guard let range = currentRange
                 ?? Range(NSRange(location: draft.utf16.count, length: 0), in: draft)
         else { return }
-        let lineStart = draft.rangeOfCharacter(
-            from: .newlines, options: .backwards,
+        let lineStart: String.Index = draft.rangeOfCharacter(
+            from: .newlines,
+            options: .backwards,
             range: draft.startIndex..<range.lowerBound
         )?.upperBound ?? draft.startIndex
         let marker = String(repeating: "#", count: level) + " "
@@ -147,13 +148,15 @@ struct MarkdownFormattingBar: View {
 
     fileprivate func toggleMarkerOnLine(_ idx: String.Index, marker: String) {
         let lineStart: String.Index = draft.rangeOfCharacter(
-            from: .newlines, options: .backwards,
+            from: .newlines,
+            options: .backwards,
             range: draft.startIndex..<idx
         )?.upperBound ?? draft.startIndex
         let lineEnd: String.Index = draft.rangeOfCharacter(
-            from: .newlines, options: [],
+            from: .newlines,
+            options: [],
             range: idx..<draft.endIndex
-        ) ?? draft.endIndex
+        )?.upperBound ?? draft.endIndex
         let line = String(draft[lineStart..<lineEnd])
         let replacement = line.hasPrefix(marker)
             ? String(line.dropFirst(marker.count))
