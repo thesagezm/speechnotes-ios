@@ -316,8 +316,25 @@ final class SpeechPlayer: ObservableObject {
         supertonicLang = defaults.string(forKey: "supertonicLang") ?? "en"
         systemVoiceIdentifier = defaults.string(forKey: "systemVoiceIdentifier")
 
-        rebuildEngine()
+        // Engine + NowPlayingCenter wiring moved out of init — some engines
+        // set up AVAudioSession and observers at construction, which on iOS
+        // 26 / LiveContainer can abort the process before WindowGroup
+        // installation. The default engine is "system" so the user gets
+        // immediate TTS via wirePlayback() on first body run.
+        if engineKind == .system {
+            systemEngine = SystemEngine()
+            engine = systemEngine
+        }
 
+        Log.shared.info("SpeechPlayer initialised (engine=\(engineKind.rawValue), voice=\(voice), kittenVoice=\(kittenVoice), supertonic=\(supertonicVoice)@\(supertonicLang))")
+    }
+
+    /// Idempotent post-init wiring. Called from `SpeechnotesApp.rootView`
+    /// `.onAppear` on the main actor — exactly once per process. Sets up
+    /// NowPlayingCenter + ModelManager hooks and, if no engine was chosen in
+    /// init, picks the right one now.
+    @MainActor
+    func wirePlayback() {
         NowPlayingCenter.shared.configure()
         NowPlayingCenter.shared.onCommand = { [weak self] command in
             Task { @MainActor in
@@ -337,7 +354,10 @@ final class SpeechPlayer: ObservableObject {
         ModelManager.shared.onReady = { [weak self] in
             self?.rebuildEngine()
         }
-        Log.shared.info("SpeechPlayer initialised (engine=\(engineKind.rawValue), voice=\(voice), kittenVoice=\(kittenVoice), supertonic=\(supertonicVoice)@\(supertonicLang))")
+
+        if engine == nil {
+            rebuildEngine()
+        }
     }
 
     var activeEngineName: String {
