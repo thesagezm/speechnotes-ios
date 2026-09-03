@@ -94,7 +94,7 @@ struct MarkdownPreviewView: View {
     /// tasks read with a strikethrough.
     private func listRows(
         _ items: [MarkdownText.ListItem],
-        marker: (Int, MarkdownText.ListItem) -> String
+        markerBuilder: @escaping (Int, MarkdownText.ListItem) -> String
     ) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             ForEach(Array(items.enumerated()), id: \.offset) { index, item in
@@ -104,7 +104,7 @@ struct MarkdownPreviewView: View {
                             .foregroundStyle(item.isDone ? Color.accentColor : Color.secondary)
                             .font(.callout)
                     } else {
-                        Text(marker(index, item))
+                        Text(markerBuilder(index, item))
                             .foregroundStyle(.secondary)
                     }
                     styledText(item.text)
