@@ -146,7 +146,7 @@ struct MarkdownFormattingBar: View {
     }
 
     fileprivate func toggleMarkerOnLine(_ idx: String.Index, marker: String) {
-        let lineStart = draft.rangeOfCharacter(
+        let lineStart: String.Index = draft.rangeOfCharacter(
             from: .newlines, options: .backwards,
             range: draft.startIndex..<idx
         )?.upperBound ?? draft.startIndex
