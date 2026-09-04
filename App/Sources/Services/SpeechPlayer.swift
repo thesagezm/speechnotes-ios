@@ -335,22 +335,6 @@ final class SpeechPlayer: ObservableObject {
     /// init, picks the right one now.
     @MainActor
     func wirePlayback() {
-        NowPlayingCenter.shared.configure()
-        NowPlayingCenter.shared.onCommand = { [weak self] command in
-            Task { @MainActor in
-                guard let self else { return }
-                switch command {
-                case .play:
-                    if self.state == .paused { self.engine?.resume() }
-                case .pause:
-                    if self.state == .speaking { self.engine?.pause() }
-                    else if self.state == .paused { self.engine?.resume() }
-                case .stop:
-                    self.stop()
-                }
-            }
-        }
-
         ModelManager.shared.onReady = { [weak self] in
             self?.rebuildEngine()
         }
@@ -430,14 +414,8 @@ final class SpeechPlayer: ObservableObject {
                     self.nowPlayingTitle = nil
                     self.nowPlayingNoteId = nil
                     self.finishAuditionIfActive()
-                    NowPlayingCenter.shared.clear()
                 } else {
-                    NowPlayingCenter.shared.publish(
-                        title: self.nowPlayingTitle,
-                        isPlaying: newState == .speaking,
-                        progress: self.progress,
-                        rate: Float(self.rateMultiplier)
-                    )
+                    /* np disabled in bisect-d */
                 }
             }
         }
@@ -449,12 +427,7 @@ final class SpeechPlayer: ObservableObject {
                     + (1 - self.resumeBaseFraction) * value
                 self.progress = value > 0 ? min(1.0, mapped) : nil
                 self.updateBookmarkChars(rawProgress: value)
-                NowPlayingCenter.shared.publish(
-                    title: self.nowPlayingTitle,
-                    isPlaying: self.state == .speaking,
-                    progress: self.progress,
-                    rate: Float(self.rateMultiplier)
-                )
+                /* np disabled in bisect-d */
             }
         }
     }

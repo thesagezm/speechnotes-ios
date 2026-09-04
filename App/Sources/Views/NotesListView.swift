@@ -396,3 +396,9 @@ struct NotesListView: View {
         path.append(note.id)
     }
 }
+
+extension Notification.Name {
+    /// Posted by the mini-player when the user taps the bar body.
+    /// `object` is the speaking note's `UUID`.
+    static let miniPlayerJumpToNote = Notification.Name("MiniPlayerBar.jumpToNote")
+}
