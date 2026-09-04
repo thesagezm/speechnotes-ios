@@ -48,9 +48,9 @@ struct MarkdownPreviewView: View {
                 .lineSpacing(4)
                 .padding(.bottom, 14)
         case .bulletList(let items):
-            listRows(items, marker: { _, _ in "•" })
+            listRows(items, markerBuilder: { _, _ in "•" })
         case .orderedList(let items):
-            listRows(items, marker: { index, _ in "\(index + 1)." })
+            listRows(items, markerBuilder: { index, _ in "\(index + 1)." })
         case .quote(let text):
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 RoundedRectangle(cornerRadius: 2)
@@ -94,7 +94,7 @@ struct MarkdownPreviewView: View {
     /// tasks read with a strikethrough.
     private func listRows(
         _ items: [MarkdownText.ListItem],
-        marker: (Int, MarkdownText.ListItem) -> String
+        markerBuilder: @escaping (Int, MarkdownText.ListItem) -> String
     ) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             ForEach(Array(items.enumerated()), id: \.offset) { index, item in
@@ -104,7 +104,7 @@ struct MarkdownPreviewView: View {
                             .foregroundStyle(item.isDone ? Color.accentColor : Color.secondary)
                             .font(.callout)
                     } else {
-                        Text(marker(index, item))
+                        Text(markerBuilder(index, item))
                             .foregroundStyle(.secondary)
                     }
                     styledText(item.text)
