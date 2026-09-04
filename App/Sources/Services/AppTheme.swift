@@ -44,6 +44,9 @@ enum AccentColorChoice: String, CaseIterable, Identifiable {
 final class AppTheme: ObservableObject {
     @AppStorage("accentColorChoice") var accentChoice: AccentColorChoice = .system
     @AppStorage("appAppearance") var appearance: String = "system" // "light", "dark", "system"
+    /// Reading-view text scale — 1.0 = 100%, range 0.75…1.5. Applied to the
+    /// markdown preview's body font so users can size text for their eyes.
+    @AppStorage("previewTextScale") var previewTextScale: Double = 1.0
 
     enum AppearanceMode: String { case light = "light", dark = "dark", system = "system" }
 

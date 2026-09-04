@@ -30,8 +30,8 @@ struct MarkdownFormattingBar: View {
                 }
                 divider
                 group {
-                    button(symbol: "h1") { applyHeading(level: 1) }
-                    button(symbol: "h2") { applyHeading(level: 2) }
+                    iconButton(label: "H1", action: { applyHeading(level: 1) })
+                    iconButton(label: "H2", action: { applyHeading(level: 2) })
                 }
                 divider
                 group {
@@ -69,6 +69,7 @@ struct MarkdownFormattingBar: View {
         Divider().frame(height: 22).padding(.horizontal, 4)
     }
 
+    @ViewBuilder
     private func button(symbol: String, action: @escaping () -> Void) -> some View {
         Button {
             Haptics.tap()
@@ -76,6 +77,23 @@ struct MarkdownFormattingBar: View {
         } label: {
             Image(systemName: symbol)
                 .font(.system(size: 16, weight: .medium))
+                .frame(width: 34, height: 34)
+                .background(Color.secondary.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 7))
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// Text-label button for symbols that don't have a safe SF Symbol name
+    /// on iOS 18+ (h1/h2 live only under the "textformat" family).
+    @ViewBuilder
+    private func iconButton(label: String, action: @escaping () -> Void) -> some View {
+        Button {
+            Haptics.tap()
+            action()
+        } label: {
+            Text(label)
+                .font(.system(size: 13, weight: .semibold))
                 .frame(width: 34, height: 34)
                 .background(Color.secondary.opacity(0.08))
                 .clipShape(RoundedRectangle(cornerRadius: 7))

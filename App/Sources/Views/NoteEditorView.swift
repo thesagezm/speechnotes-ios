@@ -24,8 +24,8 @@ struct NoteEditorView: View {
     @State private var pendingLinkURL: String = ""
     @State private var imageURLDraft: String = ""
     /// Markdown reading mode — only meaningful when the Render Markdown
-    /// setting is on; the editor always opens in edit mode.
-    @State private var showPreview = false
+    /// setting is on; opens in preview (reading) mode, double-tap to edit.
+    @State private var showPreview = true
     @AppStorage("renderMarkdown") private var renderMarkdown = false
 
     private var currentNote: Note? {
@@ -233,12 +233,32 @@ struct NoteEditorView: View {
     /// Reading mode for markdown notes: block-rendered layout via
     /// MarkdownPreviewView; tap anywhere to return to editing.
     private var markdownPreview: some View {
-        MarkdownPreviewView(markdown: draft)
-            .onTapGesture {
-                Haptics.tap()
-                showPreview = false
-            }
-            .environment(\.noteId, noteId)
+        ZStack(alignment: .topTrailing) {
+            MarkdownPreviewView(markdown: draft)
+                .onTapGesture(count: 2) {
+                    Haptics.tap()
+                    showPreview = false
+                }
+                // Single tap in preview: no-op — we don't want readers
+                // accidentally switching to edit mode while scrolling.
+                .onTapGesture(count: 1) {}
+            // Reading-mode indicator with pencil affordance at the corner so
+            // the editor hint is discoverable without a double-tap mystery.
+            Image(systemName: "pencil.circle.fill")
+                .font(.title2)
+                .foregroundStyle(.secondary)
+                .symbolRenderingMode(.hierarchical)
+                .opacity(0.4)
+                .padding(10)
+                .onTapGesture {
+                    Haptics.tap()
+                    showPreview = false
+                }
+                .accessibilityLabel("Switch to edit")
+                .accessibilityHint("Double-tap to switch to edit mode")
+        }
+        .environmentObject(theme)
+        .environment(\.noteId, noteId)
     }
 
     /// Edit branch extracted from `body` so SwiftUI's type checker doesn't

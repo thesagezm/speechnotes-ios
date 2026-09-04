@@ -14,7 +14,9 @@ struct MarkdownPreviewView: View {
     let markdown: String
 
     @State private var safariURL: URL?
+    @State private var zoomedImage: (url: URL, alt: String)?
     @Environment(\.noteId) private var envNoteId
+    @EnvironmentObject private var theme: AppTheme
 
     var body: some View {
         ScrollView {
@@ -26,10 +28,22 @@ struct MarkdownPreviewView: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
             .frame(maxWidth: .infinity, alignment: .leading)
+            // Reading text scale (user-controlled in Appearance settings).
+            // Muliply only Text-bearing content — code is monospaced already.
+            .font(.system(size: 17 * theme.previewTextScale))
         }
         .sheet(item: $safariURL) { url in
             SafariSheet(url: url)
                 .ignoresSafeArea()
+        }
+        .sheet(isPresented: Binding(
+            get: { zoomedImage != nil },
+            set: { if !$0 { zoomedImage = nil } }
+        )) {
+            if let image = zoomedImage {
+                ZoomableImageView(url: image.url, alt: image.alt)
+                    .ignoresSafeArea()
+            }
         }
     }
 
@@ -163,7 +177,7 @@ struct MarkdownPreviewView: View {
                     .buttonStyle(.plain)
                 case .image(let alt, let url):
                     imageView(url: url, alt: alt)
-                        .frame(maxWidth: 280)
+                        .frame(maxWidth: .infinity)
                         .frame(maxHeight: 220)
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                 }
@@ -176,6 +190,24 @@ struct MarkdownPreviewView: View {
     /// Styles **bold**, *italic*, `code` and ~~strike~~ spans within a text
     /// run, returning one composed Text. (Links are lifted out earlier as
     /// separate runs, so no link handling is needed here.)
+    /// One-pass tokenizer over inline markers. Unmatched markers stay
+    /// literal, so stray asterisks in prose survive; underscore rules carry
+    /// word-boundary guards so snake_case identifiers are not styled.
+    private static let emphasisRegex: NSRegularExpression? = {
+        try? NSRegularExpression(
+            pattern: #"`([^`]+)`"#
+                + #"|\*\*\*([^*]+)\*\*\*"#
+                + #"|\*\*([^*]+)\*\*"#
+                + #"|__([^_]+)__"#
+                + #"|~~([^~]+)~~"#
+                + #"|(?<![*\w])\*([^*\s][^*]*)\*(?!\*)"#
+                + #"|(?<![\w_])_([^_\s][^_]*)_(?![\w_])"#
+        )
+    }()
+
+    private enum SpanStyle { case plain, bold, italic, boldItalic, code, strike }
+    private struct Span { let text: String; let style: SpanStyle }
+
     private func styledText(_ string: String) -> Text {
         let spans = Self.emphasisSpans(in: string)
         guard !spans.isEmpty else { return Text(string) }
@@ -194,22 +226,8 @@ struct MarkdownPreviewView: View {
         return composed
     }
 
-    private enum SpanStyle { case plain, bold, italic, boldItalic, code, strike }
-    private struct Span { let text: String; let style: SpanStyle }
-
-    /// One-pass tokenizer over inline markers. Unmatched markers stay
-    /// literal, so stray asterisks in prose survive; underscore rules carry
-    /// word-boundary guards so snake_case identifiers are not styled.
     private static func emphasisSpans(in string: String) -> [Span] {
-        guard let regex = try? NSRegularExpression(
-            pattern: #"`([^`]+)`"#
-                + #"|\*\*\*([^*]+)\*\*\*"#
-                + #"|\*\*([^*]+)\*\*"#
-                + #"|__([^_]+)__"#
-                + #"|~~([^~]+)~~"#
-                + #"|(?<![*\w])\*([^*\s][^*]*)\*(?!\*)"#
-                + #"|(?<![\w_])_([^_\s][^_]*)_(?![\w_])"#
-        ) else { return [] }
+        guard let regex = Self.emphasisRegex else { return [] }
         let ns = string as NSString
         var spans: [Span] = []
         var cursor = 0
@@ -218,8 +236,6 @@ struct MarkdownPreviewView: View {
                 spans.append(Span(text: ns.substring(with: NSRange(location: cursor, length: match.range.location - cursor)), style: .plain))
             }
             let content: (String, SpanStyle)
-            // Groups in pattern order: 1 code, 2 bold-italic, 3 bold,
-            // 4 underline-bold, 5 strike, 6 italic, 7 underline-italic.
             if match.range(at: 1).location != NSNotFound {
                 content = (ns.substring(with: match.range(at: 1)), .code)
             } else if match.range(at: 2).location != NSNotFound {
@@ -248,34 +264,44 @@ struct MarkdownPreviewView: View {
 
     // MARK: - Images
 
-    /// Image renderer: resolves local `speechnotes://` targets via
-    /// NoteImageStore (thumbnails where available); falls through to
-    /// AsyncImage for remote URLs.
+    /// Image renderer: thumbnail-first resolution (never re-downloads a
+    /// cached `speechnotes://` image), remote fallback, tap to zoom.
+    /// We resolve the URL *before* creating the AsyncImage so the zoom
+    /// sheet doesn't need to re-derive it from the alt text.
     @ViewBuilder
     private func imageView(url: String, alt: String) -> some View {
         if let local = localImageURL(url) {
-            AsyncImage(url: local) { phase in
-                imagePhaseView(phase)
-            }
-            .accessibilityLabel(alt.isEmpty ? "image" : alt)
+            asyncZoomableImage(url: local, alt: alt)
         } else if let remote = URL(string: url) {
-            AsyncImage(url: remote) { phase in
-                imagePhaseView(phase)
-            }
-            .accessibilityLabel(alt.isEmpty ? "image" : alt)
+            asyncZoomableImage(url: remote, alt: alt)
         } else {
             Image(systemName: "photo")
                 .foregroundStyle(.secondary)
         }
     }
 
+    /// AsyncImage + tap-to-zoom. Zoom opens the full-resolution URL we just
+    /// resolved — no regex, no alt lookup, no racing the markdown parser.
     @ViewBuilder
-    private func imagePhaseView(_ phase: AsyncImagePhase) -> some View {
-        switch phase {
-        case .empty: ProgressView()
-        case .success(let img): img.resizable().scaledToFit()
-        case .failure: Image(systemName: "photo").foregroundStyle(.secondary)
-        @unknown default: Image(systemName: "photo")
+    private func asyncZoomableImage(url: URL, alt: String) -> some View {
+        AsyncImage(url: url) { phase in
+            switch phase {
+            case .empty:
+                ProgressView()
+            case .success(let img):
+                Button {
+                    zoomedImage = (url: url, alt: alt)
+                } label: {
+                    img.resizable().scaledToFit()
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(alt.isEmpty ? "image" : alt)
+            case .failure:
+                Image(systemName: "photo").foregroundStyle(.secondary)
+            @unknown default:
+                Image(systemName: "photo")
+            }
         }
     }
 
@@ -310,6 +336,89 @@ struct SafariSheet: UIViewControllerRepresentable {
     }
 
     func updateUIViewController(_ uiViewController: SFSafariViewController, context: Context) {}
+}
+
+/// Pinch-to-zoom image sheet for the reader. Pure SwiftUI — no
+/// UIViewRepresentable, just a `MagnificationGesture` on a scroll view
+/// frame.
+struct ZoomableImageView: View {
+    let url: URL
+    let alt: String
+
+    @State private var scale: CGFloat = 1.0
+    @State private var lastScale: CGFloat = 1.0
+    @State private var offset: CGSize = .zero
+    @State private var lastOffset: CGSize = .zero
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+
+            AsyncImage(url: url) { phase in
+                if case .success(let img) = phase {
+                    img
+                        .resizable()
+                        .scaledToFit()
+                        .scaleEffect(scale)
+                        .offset(offset)
+                        .gesture(
+                            MagnificationGesture()
+                                .onChanged { value in
+                                    let delta = value / lastScale
+                                    lastScale = value
+                                    scale = (scale * delta).clamped(to: 0.5...5)
+                                }
+                                .onEnded { _ in lastScale = 1.0 }
+                        )
+                        .gesture(
+                            DragGesture()
+                                .onChanged { gesture in
+                                    offset = CGSize(
+                                        width: lastOffset.width + gesture.translation.width,
+                                        height: lastOffset.height + gesture.translation.height
+                                    )
+                                }
+                                .onEnded { _ in lastOffset = offset }
+                        )
+                        .onTapGesture(count: 2) {
+                            withAnimation {
+                                scale = 1
+                                offset = .zero
+                                lastOffset = .zero
+                            }
+                        }
+                } else {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                        .tint(.white)
+                }
+            }
+
+            VStack {
+                HStack {
+                    Spacer()
+                    Button {
+                        dismiss()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.title)
+                            .foregroundStyle(.white)
+                            .symbolRenderingMode(.hierarchical)
+                    }
+                    .padding()
+                }
+                Spacer()
+            }
+        }
+        .accessibilityLabel(alt)
+    }
+}
+
+extension Comparable {
+    fileprivate func clamped(to limits: ClosedRange<Self>) -> Self {
+        min(max(self, limits.lowerBound), limits.upperBound)
+    }
 }
 
 /// Environment key so the preview can resolve note-scoped image caches.

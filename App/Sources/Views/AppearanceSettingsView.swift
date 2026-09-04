@@ -24,6 +24,28 @@ struct AppearanceSettingsView: View {
                 }
                 .pickerStyle(.segmented)
             }
+            Section("Reading View") {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Text size")
+                        Spacer()
+                        Text("\(Int(round(theme.previewTextScale * 100)))%")
+                            .foregroundStyle(.secondary)
+                            .font(.callout.monospacedDigit())
+                    }
+                    // Steps of 5% feel right on a phone and stay audible to
+                    // VoiceOver.
+                    Slider(
+                        value: $theme.previewTextScale,
+                        in: 0.75...1.5,
+                        step: 0.05
+                    ) { _ in Haptics.tap() }
+                    Text("Scales the markdown preview's text (headings, lists, paragraphs).")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 2)
+            }
         }
         .navigationTitle("Appearance")
     }
