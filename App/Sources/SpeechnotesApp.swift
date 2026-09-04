@@ -17,8 +17,9 @@ struct SpeechnotesApp: App {
     init() {
         // SpeechPlayer can only auto-resume a bookmarked note if it can
         // resolve the note's current text — wire the lookup once here.
+        let store = notes
         player.notesProvider = { id in
-            notes.notes.first(where: { $0.id == id })
+            store.notes.first(where: { $0.id == id })
         }
     }
 
