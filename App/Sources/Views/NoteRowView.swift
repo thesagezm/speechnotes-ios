@@ -10,10 +10,7 @@ struct NoteRowView: View {
     let preview: String
 
     var body: some View {
-        let _ = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("launch-diagnostics.log")
-            .appendLine("NoteRowView body: \(note.id)")
-        return VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 4) {
             Text(note.title)
                 .font(.headline)
             if !preview.isEmpty {
