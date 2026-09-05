@@ -2,7 +2,7 @@ name: Build IPA
 
 on:
   push:
-    branches: [main]
+    branches: [main, bisect-g]
   workflow_dispatch:
 
 jobs:
