@@ -29,9 +29,6 @@ struct SpeechnotesApp: App {
             }
             .accentColor(theme.accentColor)
             .preferredColorScheme(theme.colorScheme)
-            .environmentObject(notes)
-            .environmentObject(player)
-            .environmentObject(theme)
             // Eager StateObject work (engine session setup, NowPlayingCenter)
             // must NOT run during App.init or inside the first render
             // transaction — HANDOVER: this is what crashed the app on launch
@@ -47,6 +44,12 @@ struct SpeechnotesApp: App {
             }
             // One mini-player for the whole window; per-screen insets used
             // to ride push/pop transitions and get stuck mid-screen.
+            // MUST stay ABOVE the .environmentObject(...) calls: a modifier
+            // attached outside the injection node cannot see the injected
+            // objects, and GlobalMiniPlayerOverlay's @EnvironmentObject
+            // player traps (EnvironmentObject.error → EXC_BREAKPOINT) on the
+            // very first layout pass — the confirmed launch crash
+            // (device .ips 2026-09-05 17:39).
             .globalMiniPlayer()
             .onReceive(NotificationCenter.default.publisher(for: .miniPlayerJumpToNote)) { _ in
                 selectedTab = .notes
@@ -66,6 +69,12 @@ struct SpeechnotesApp: App {
                     player.resumeIfBookmarkPending()
                 }
             }
+            // Environment injection is attached LAST (outermost) so every
+            // node below it — TabView content AND the mini-player modifier —
+            // resolves @EnvironmentObject.
+            .environmentObject(notes)
+            .environmentObject(player)
+            .environmentObject(theme)
         }
     }
 }

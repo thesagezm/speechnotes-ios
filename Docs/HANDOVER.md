@@ -260,3 +260,28 @@ Next: CI build from bisect-g → install in LiveContainer → verify launch. If 
 STILL crashes, stop guessing: capture a real crash log via Xcode → Devices →
 device console (or Settings → Privacy → Analytics & Improvements → Analytics
 Data → Speechnotes-*.ips on device) before touching code again.
+
+## 2026-09-06 addendum — ROOT CAUSE FOUND (device crash log, .ips)
+
+EXC_BREAKPOINT / SIGTRAP at launch, main thread:
+    _assertionFailure → EnvironmentObject.error() (SwiftUI)
+    → [app binary] → ModifierBodyAccessor.updateBody → DynamicViewList (TabView)
+    → _UIHostingView.layoutSubviews during UIApplication._firstCommitBlock
+
+Cause: `.globalMiniPlayer()` was attached AFTER `.environmentObject(...)` in
+SpeechnotesApp — making GlobalMiniPlayerOverlay the OUTERMOST node. Environment
+objects only flow DOWN the tree, so the overlay's `@EnvironmentObject player`
+resolved to nothing and SwiftUI trapped on the very first layout pass — before
+anything rendered, hence "crashes without even opening" and no diagnostic line
+was ever written. Introduced when the mini-player moved from per-screen
+(0785f1b, worked) to a root overlay (main/bisect-g era).
+
+Fix: attach `.globalMiniPlayer()` BEFORE (inside) the `.environmentObject(...)`
+modifiers; injection is now the outermost node so TabView content AND the
+overlay modifier both resolve. DO NOT move .environmentObject upward in the
+chain again.
+
+Historical second signature (bug_type 206, CPU watchdog: 94% CPU 51s, killed):
+older-era build spinning ONNX compute at launch. The launch-path scrub
+(deferred wirePlaybackOnce) reduces this; if it reappears with the fp32 model,
+the next step is lazy engine creation on first playback, off the main actor.
