@@ -71,7 +71,7 @@ struct StorageView: View {
                     .font(.caption.monospaced())
                     .foregroundStyle(.primary)
                     .lineLimit(1)
-                Text(extension(of: target))
+                Text(fileExtension(of: target))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
