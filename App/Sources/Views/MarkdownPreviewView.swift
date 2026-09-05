@@ -66,13 +66,15 @@ struct MarkdownPreviewView: View {
         case .orderedList(let items):
             listRows(items, markerBuilder: { index, _ in "\(index + 1)." })
         case .quote(let text):
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
+            HStack(alignment: .top, spacing: 10) {
                 RoundedRectangle(cornerRadius: 2)
                     .fill(Color.secondary.opacity(0.4))
                     .frame(width: 3)
+                    .padding(.top, 2)
                 styledText(text)
                     .foregroundStyle(.secondary)
                     .lineSpacing(3)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
             .padding(.bottom, 14)
         case .code(let language, let text):
@@ -266,42 +268,23 @@ struct MarkdownPreviewView: View {
 
     /// Image renderer: thumbnail-first resolution (never re-downloads a
     /// cached `speechnotes://` image), remote fallback, tap to zoom.
-    /// We resolve the URL *before* creating the AsyncImage so the zoom
+    /// We resolve the URL *before* creating the image view so the zoom
     /// sheet doesn't need to re-derive it from the alt text.
     @ViewBuilder
     private func imageView(url: String, alt: String) -> some View {
         if let local = localImageURL(url) {
-            asyncZoomableImage(url: local, alt: alt)
+            CachedImage(url: local, alt: alt, zoomable: true) {
+                zoomedImage = (url: local, alt: alt)
+            }
+            .padding(.bottom, 14)
         } else if let remote = URL(string: url) {
-            asyncZoomableImage(url: remote, alt: alt)
+            CachedImage(url: remote, alt: alt, zoomable: true) {
+                zoomedImage = (url: remote, alt: alt)
+            }
+            .padding(.bottom, 14)
         } else {
             Image(systemName: "photo")
                 .foregroundStyle(.secondary)
-        }
-    }
-
-    /// AsyncImage + tap-to-zoom. Zoom opens the full-resolution URL we just
-    /// resolved — no regex, no alt lookup, no racing the markdown parser.
-    @ViewBuilder
-    private func asyncZoomableImage(url: URL, alt: String) -> some View {
-        AsyncImage(url: url) { phase in
-            switch phase {
-            case .empty:
-                ProgressView()
-            case .success(let img):
-                Button {
-                    zoomedImage = (url: url, alt: alt)
-                } label: {
-                    img.resizable().scaledToFit()
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(alt.isEmpty ? "image" : alt)
-            case .failure:
-                Image(systemName: "photo").foregroundStyle(.secondary)
-            @unknown default:
-                Image(systemName: "photo")
-            }
         }
     }
 

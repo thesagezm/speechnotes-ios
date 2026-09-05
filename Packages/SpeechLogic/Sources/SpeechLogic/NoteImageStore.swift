@@ -276,6 +276,51 @@ public enum NoteImageStore {
         }
     }
 
+    /// Every stored image across ALL notes. Used by the Storage screen's
+    /// "Cached images" list.
+    public static func allTargets() -> [String] {
+        let root = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("note-images", isDirectory: true)
+        guard let enumerator = FileManager.default.enumerator(
+            at: root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
+        ) else { return [] }
+        return enumerator.compactMap { item in
+            guard let file = item as? URL else { return nil }
+            let path = file.lastPathComponent
+            guard !path.hasSuffix("-thumb.jpg") else { return nil }
+            let parts = path.split(separator: ".", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2 else { return nil }
+            return "\(scheme)://\(pathPrefix)/\(parts[0]).\(parts[1])"
+        }
+    }
+
+    /// Delete the cached file behind a `speechnotes://note-image/<hash>.<ext>`
+    /// target. Used by the Storage list's per-row delete.
+    @discardableResult
+    public static func remove(target: String) -> Bool {
+        guard let (hash, ext) = parseLocalTarget(target) else { return false }
+        // We don't know the noteId from the target alone — scan every
+        // per-note directory for this hash and remove any match.
+        let root = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("note-images", isDirectory: true)
+        guard let noteDirs = try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else {
+            return false
+        }
+        var removed = false
+        for dir in noteDirs {
+            let file = dir.appendingPathComponent("\(hash).\(ext)")
+            if FileManager.default.fileExists(atPath: file.path) {
+                try? FileManager.default.removeItem(at: file)
+                removed = true
+            }
+            let thumb = dir.appendingPathComponent("\(hash)-thumb.jpg")
+            if FileManager.default.fileExists(atPath: thumb.path) {
+                try? FileManager.default.removeItem(at: thumb)
+            }
+        }
+        return removed
+    }
+
     /// Nuke everything for a note (note deletion).
     @discardableResult
     public static func removeAllImages(for noteId: UUID) -> Bool {

@@ -24,6 +24,11 @@ struct NoteEditorView: View {
     @State private var pendingLinkLabel: String = ""
     @State private var pendingLinkURL: String = ""
     @State private var imageURLDraft: String = ""
+    /// Live caret / selection from MarkdownEditorView (UITextView), UTF-16
+    /// offsets. The format bar reads `formattingBarSelection` (a bridged
+    /// String.Index binding) so it doesn't need to know the editor is UIKit.
+    @State private var selectionUTF16: Range<Int>?
+    @FocusState private var editorFocused: Bool
     /// Markdown reading mode — only meaningful when the Render Markdown
     /// setting is on; opens in preview (reading) mode, double-tap to edit.
     @State private var showPreview = true
@@ -46,6 +51,31 @@ struct NoteEditorView: View {
     private func updateSpeechCaches() {
         cachedSpeechText = renderMarkdown ? MarkdownText.plainText(draft) : draft
         cachedWordCount = draft.split(whereSeparator: \.isWhitespace).count
+    }
+
+    /// UITextView reports caret changes as UTF-16 offsets; the markdown
+    /// formatting bar's API takes a `Range<String.Index>?`. This binding does
+    /// the conversion so the bar can read and write selection uniformly.
+    private var formattingBarSelection: Binding<Range<String.Index>?> {
+        Binding(
+            get: {
+                guard let r = selectionUTF16 else { return nil }
+                guard r.lowerBound >= 0, r.upperBound <= draft.utf16.count,
+                      r.lowerBound <= r.upperBound else { return nil }
+                guard let lo = String.Index(draft.utf16.index(draft.utf16.startIndex, offsetBy: r.lowerBound), within: draft),
+                      let hi = String.Index(draft.utf16.index(draft.utf16.startIndex, offsetBy: r.upperBound), within: draft) else { return nil }
+                return lo..<hi
+            },
+            set: { newValue in
+                if let r = newValue {
+                    let lo = draft.utf16.distance(from: draft.utf16.startIndex, to: r.lowerBound)
+                    let hi = draft.utf16.distance(from: draft.utf16.startIndex, to: r.upperBound)
+                    selectionUTF16 = lo..<hi
+                } else {
+                    selectionUTF16 = nil
+                }
+            }
+        )
     }
 
     private var playIcon: String {
@@ -266,17 +296,23 @@ struct NoteEditorView: View {
     /// time out on the long modifier chain.
     @ViewBuilder
     private var editBody: some View {
-        TextEditor(text: $draft)
-            .font(.body)
-            .padding(.horizontal, 8)
-            .onChange(of: draft) { _ in
-                scheduleDraftSync()
-                updateSpeechCaches()
-            }
+        MarkdownEditorView(
+            text: $draft,
+            selection: $selectionUTF16,
+            onCaretMoved: { },
+            focusState: $editorFocused,
+            textScale: theme.previewTextScale
+        )
+        .font(.body)
+        .padding(.horizontal, 8)
+        .onChange(of: draft) { _ in
+            scheduleDraftSync()
+            updateSpeechCaches()
+        }
         if renderMarkdown {
             MarkdownFormattingBar(
                 draft: $draft,
-                selection: $textSelection,
+                selection: formattingBarSelection,
                 insertImage: { showingImageSource = true },
                 insertLink: { label, url in
                     pendingLinkLabel = label
@@ -492,15 +528,19 @@ struct NoteEditorView: View {
     /// Insert `fragment` at the current caret (replaces any selection).
     /// Used by the formatting bar / image picker / link prompt.
     private func insertAtCaret(_ fragment: String) {
-        guard let range = textSelection
-                ?? Range(NSRange(location: draft.utf16.count, length: 0), in: draft)
-        else { return }
+        let utf16: Range<Int> = selectionUTF16 ?? (draft.utf16.count..<draft.utf16.count)
+        guard utf16.lowerBound >= 0, utf16.upperBound <= draft.utf16.count,
+              utf16.lowerBound <= utf16.upperBound else { return }
+        guard let lo = String.Index(draft.utf16.index(draft.utf16.startIndex, offsetBy: utf16.lowerBound), within: draft),
+              let hi = String.Index(draft.utf16.index(draft.utf16.startIndex, offsetBy: utf16.upperBound), within: draft) else { return }
+        let range: Range<String.Index> = lo..<hi
         var updated = draft
         updated.replaceSubrange(range, with: fragment)
         let insertEndUtf16 = updated.utf16.distance(from: updated.startIndex, to: range.lowerBound) + fragment.utf16.count
         draft = updated
         if let idx = updated.utf16.index(updated.utf16.startIndex, offsetBy: insertEndUtf16, limitedBy: updated.utf16.endIndex).flatMap({ String.Index($0, within: updated) }) {
-            textSelection = idx..<idx
+            let caret = idx..<idx
+            selectionUTF16 = caret.upperBound..<caret.upperBound
         }
         scheduleDraftSync()
         updateSpeechCaches()

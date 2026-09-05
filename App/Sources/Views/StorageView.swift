@@ -11,6 +11,7 @@ struct StorageView: View {
     var body: some View {
         NavigationStack {
             List {
+                imagesSection
                 exportsSection
                 usageSection
             }
@@ -23,6 +24,109 @@ struct StorageView: View {
         }
         .miniPlayer(visible: false, onTap: nil)
         .onDisappear { wavPlayer.stop() }
+    }
+
+    // MARK: - Cached images
+
+    /// Shows every cached note-image across all notes (thumbnails excluded),
+    /// plus total bytes. Deleting removes the on-disk file + memory cache —
+    /// the markdown still renders (via the speechnotes:// target) until the
+    /// next save re-prunes the orphan.
+    private var imagesSection: some View {
+        Section {
+            let targets = NoteImageStore.allTargets()
+            if targets.isEmpty {
+                Label(
+                    "No images cached yet — insert one in a markdown note.",
+                    systemImage: "photo.on.rectangle"
+                )
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            } else {
+                ForEach(targets, id: \.self) { target in
+                    imageRow(target)
+                }
+                Button(role: .destructive) {
+                    Haptics.warning()
+                    clearAllImages()
+                } label: {
+                    Label("Clear all cached images", systemImage: "trash.slash")
+                }
+                .disabled(targets.isEmpty)
+            }
+        } header: {
+            Text("Cached images")
+        } footer: {
+            if !targets.isEmpty {
+                Text("\(targets.count) image(s) · \(ByteCountFormatter.string(fromByteCount: NoteImageStore.totalFootprint(), countStyle: .file))")
+            }
+        }
+    }
+
+    private func imageRow(_ target: String) -> some View {
+        HStack(spacing: 12) {
+            thumb(target)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(hash(of: target))
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                Text(extension(of: target))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button(role: .destructive) {
+                Haptics.press()
+                NoteImageStore.remove(target: target)
+                ImageCache.shared.remove(for: NoteImageStore.resolveLocalURL(target, noteId: nil) ?? URL(fileURLWithPath: target))
+            } label: {
+                Image(systemName: "trash").foregroundStyle(.red)
+            }
+            .buttonStyle(.plain)
+            Button {
+                if let local = NoteImageStore.resolveLocalURL(target, noteId: nil) {
+                    sharingURL = local
+                }
+            } label: {
+                Image(systemName: "square.and.arrow.up")
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private func thumb(_ target: String) -> some View {
+        Group {
+            if let local = NoteImageStore.resolveLocalURL(target, noteId: nil),
+               let data = try? Data(contentsOf: local), let img = UIImage(data: data) {
+                Image(uiImage: img)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: 40, height: 40)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+            } else {
+                Image(systemName: "photo")
+                    .foregroundStyle(.secondary)
+                    .frame(width: 40, height: 40)
+            }
+        }
+    }
+
+    private func hash(of target: String) -> String {
+        guard let parsed = NoteImageStore.parseLocalTarget(target) else { return target }
+        let h = parsed.hash
+        return h.count > 12 ? String(h.prefix(12)) + "…" : h
+    }
+
+    private func extension(of target: String) -> String {
+        NoteImageStore.parseLocalTarget(target)?.ext ?? "img"
+    }
+
+    private func clearAllImages() {
+        for target in NoteImageStore.allTargets() {
+            NoteImageStore.remove(target: target)
+            ImageCache.shared.remove(for: NoteImageStore.resolveLocalURL(target, noteId: nil) ?? URL(fileURLWithPath: target))
+        }
     }
 
     // MARK: - Exported audio
