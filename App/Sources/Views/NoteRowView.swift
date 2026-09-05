@@ -8,11 +8,12 @@ import SwiftUI
 struct NoteRowView: View {
     let note: Note
     let preview: String
-    private lazy var cachedWordCount: Int = note.wordCount
-    private lazy var cachedMinutes: Int? = note.estimatedListenMinutes
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        let _ = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("launch-diagnostics.log")
+            .appendLine("NoteRowView body: \(note.id)")
+        return VStack(alignment: .leading, spacing: 4) {
             Text(note.title)
                 .font(.headline)
             if !preview.isEmpty {
@@ -24,8 +25,8 @@ struct NoteRowView: View {
             HStack(spacing: 4) {
                 Text(note.updatedAt, format: .relative(presentation: .named))
                 Text("·").foregroundStyle(.tertiary)
-                Text("\(cachedWordCount) words")
-                if let minutes = cachedMinutes {
+                Text("\(note.wordCount) words")
+                if let minutes = note.estimatedListenMinutes {
                     Text("·").foregroundStyle(.tertiary)
                     Text("~\(minutes) min listen")
                 }
