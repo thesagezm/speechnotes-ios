@@ -19,6 +19,11 @@ struct SettingsTabView: View {
                         StorageSettingsView()
                     }
                 }
+                Section("Voices") {
+                    NavigationLink("Import Voices") {
+                        ImportVoicesView()
+                    }
+                }
                 Section("About") {
                     NavigationLink("About") {
                         AboutView()

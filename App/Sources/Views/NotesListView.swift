@@ -111,6 +111,8 @@ struct NotesListView: View {
                 allowedContentTypes: ImportService.acceptedContentTypes,
                 allowsMultipleSelection: false
             ) { result in
+                // The completion is not guaranteed to arrive on the main
+                // actor — every @State mutation below needs to.
                 Task { @MainActor in
                     switch result {
                     case .success(let urls):
@@ -120,6 +122,8 @@ struct NotesListView: View {
                     }
                 }
             }
+            // Open-In files and speechnotes:// links (LiveContainer forwards
+            // what it can; the Files picker and drag & drop always work).
             .onOpenURL { url in
                 handleOpenURL(url)
             }
@@ -152,9 +156,14 @@ struct NotesListView: View {
                 Text(importErrorMessage ?? "")
             }
         }
+        // Attached OUTSIDE the NavigationStack: two .sheet modifiers on the
+        // same view node is the classic SwiftUI trap where one is ignored.
         .sheet(item: $sharingNote) { note in
             ShareSheet(items: [note.text])
         }
+        // The mini-player is a single root overlay (GlobalMiniPlayerOverlay);
+        // tapping it switches to the Notes tab and lands here — push the
+        // speaking note then.
         .onReceive(NotificationCenter.default.publisher(for: .miniPlayerJumpToNote)) { _ in
             jumpToPlayingNote()
         }
@@ -168,7 +177,7 @@ struct NotesListView: View {
                 Section {
                     ForEach(section.notes) { note in
                         NavigationLink(value: note.id) {
-                            NoteRowView(note: note, preview: notes.preview(for: note))
+                            noteRow(note)
                         }
                         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                             Button(role: .destructive) {
@@ -208,10 +217,46 @@ struct NotesListView: View {
         }
     }
 
-    /// One row in the notes list — legacy path kept for compatibility. The
-    /// list now uses NoteRowView directly so this is unused. Remove at leisure.
     private func noteRow(_ note: Note) -> some View {
-        NoteRowView(note: note, preview: notes.preview(for: note))
+        // Computed once — preview() walks the whole body, twice per row per
+        // render was measurable on device.
+        let previewText = preview(of: note)
+        return VStack(alignment: .leading, spacing: 4) {
+            Text(note.title)
+                .font(.headline)
+            if !previewText.isEmpty {
+                Text(previewText)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            HStack(spacing: 4) {
+                Text(note.updatedAt, format: .relative(presentation: .named))
+                Text("·").foregroundStyle(.tertiary)
+                Text("\(note.wordCount) words")
+                if let minutes = note.estimatedListenMinutes {
+                    Text("·").foregroundStyle(.tertiary)
+                    Text("~\(minutes) min listen")
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 2)
+    }
+
+    /// First ~120 characters of the body (everything after the title line),
+    /// whitespace-normalized. The scan is capped: rows re-render on every
+    /// player publish, and whole-text walks were measurable with long notes.
+    private func preview(of note: Note) -> String {
+        let source = note.text.count > 800 ? String(note.text.prefix(800)) : note.text
+        let body = source
+            .split(whereSeparator: \.isNewline)
+            .dropFirst()
+            .joined(separator: " ")
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+        return String(body.prefix(120))
     }
 
     private func era(for date: Date) -> String {
@@ -300,9 +345,7 @@ struct NotesListView: View {
     private func jumpToPlayingNote() {
         guard let id = player.nowPlayingNoteId,
               notes.notes.contains(where: { $0.id == id }) else { return }
-        if path != [id] {        // re-render once; keep the root stable
-            path = [id]
-        }
+        path.append(id)
     }
 
     private var shareSheetBinding: Binding<Bool> {
