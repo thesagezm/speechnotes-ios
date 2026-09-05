@@ -1,7 +1,7 @@
 import Foundation
 
 /// Downloads and owns the Kokoro model files (Documents/KokoroOnnx/):
-/// uint8 ONNX model (~177 MB) + voice bank (~15 MB) + tokenizer (~4 KB).
+/// fp32 ONNX model (~326 MB) + voice bank (~15 MB) + tokenizer (~4 KB).
 /// One-time download on first launch; everything is offline after that.
 @MainActor
 final class ModelManager: ObservableObject {

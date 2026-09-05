@@ -155,7 +155,7 @@ struct SettingsView: View {
                         Button {
                             models.startDownload()
                         } label: {
-                            Label("Download Kokoro model (~192 MB)", systemImage: "arrow.down.circle")
+                            Label("Download Kokoro model (~341 MB)", systemImage: "arrow.down.circle")
                         }
                     case .downloading(let progress):
                         ProgressView(value: progress) {
@@ -169,14 +169,14 @@ struct SettingsView: View {
                         }
                     case .ready:
                         Label("Model ready — fully offline", systemImage: "checkmark.circle")
-                        Button("Delete model (frees ~192 MB)", role: .destructive) {
+                        Button("Delete model (frees ~341 MB)", role: .destructive) {
                             models.deleteModels()
                         }
                     }
                 } header: {
                     Text("Kokoro model")
                 } footer: {
-                    Text("One-time download, stored inside the app: the uint8 quality model, all 28 voices, and the tokenizer. All speech generation stays on your device.")
+                    Text("One-time download, stored inside the app: the fp32-quality model, all 28 voices, and the tokenizer. All speech generation stays on your device.")
                 }
 
                 Section {

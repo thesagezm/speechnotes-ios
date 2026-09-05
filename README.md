@@ -9,7 +9,7 @@ fully offline (airplane-mode tested):
 
 | Engine | Model size | Voices | Notes |
 |---|---|---|---|
-| **Kokoro** (ONNX, CPU) | ~192 MB | 28 (US/UK, m/f) | Main engine — uint8 quality build |
+| **Kokoro** (ONNX, CPU) | ~341 MB | 28 (US/UK, m/f) | Main engine — fp32 quality build |
 | **Kitten** (ONNX, CPU) | ~82 MB | 8 expressive | Experimental pack |
 | **Supertonic** (ONNX, CPU) | ~399 MB | 10 styles × 31 languages | Multilingual — flow-matching TTS |
 | Apple (system) | 0 | all system voices | Fallback while models download |

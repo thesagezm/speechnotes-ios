@@ -166,7 +166,7 @@ struct SpeechSettingsView: View {
             Section {
                 switch models.state {
                 case .notDownloaded:
-                    Button { models.startDownload() } label: { Label("Download Kokoro model (~192 MB)", systemImage: "arrow.down.circle") }
+                    Button { models.startDownload() } label: { Label("Download Kokoro model (~341 MB)", systemImage: "arrow.down.circle") }
                 case .downloading(let progress):
                     ProgressView(value: progress) { Text("Downloading… \(Int(progress*100))%") }
                 case .failed(let message):
@@ -174,10 +174,10 @@ struct SpeechSettingsView: View {
                     Button("Retry") { models.startDownload() }
                 case .ready:
                     Label("Model ready — fully offline", systemImage: "checkmark.circle")
-                    Button("Delete model (frees ~192 MB)", role: .destructive) { models.deleteModels() }
+                    Button("Delete model (frees ~341 MB)", role: .destructive) { models.deleteModels() }
                 }
             } header: { Text("Kokoro model") } footer: {
-                Text("One-time download, stored inside the app: the uint8 quality model, all 28 voices, and the tokenizer. All speech generation stays on your device.")
+                Text("One-time download, stored inside the app: the fp32-quality model, all 28 voices, and the tokenizer. All speech generation stays on your device.")
             }
 
             Section {
