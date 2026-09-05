@@ -361,7 +361,6 @@ final class SpeechPlayer: ObservableObject {
         }
         Log.shared.info("SpeechPlayer wired (engine=\(engineKind.rawValue), voice=\(voice), kittenVoice=\(kittenVoice), supertonic=\(supertonicVoice)@\(supertonicLang))")
     }
-    }
 
     var activeEngineName: String {
         engine?.name ?? "none"
