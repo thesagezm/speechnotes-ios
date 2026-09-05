@@ -8,6 +8,7 @@ struct NoteEditorView: View {
 
     @EnvironmentObject private var notes: NotesStore
     @EnvironmentObject private var player: SpeechPlayer
+    @EnvironmentObject private var theme: AppTheme
     @Environment(\.dismiss) private var dismiss
     @State private var draft: String = ""
     @State private var titleDraft: String = ""
