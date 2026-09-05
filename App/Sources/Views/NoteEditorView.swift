@@ -153,13 +153,13 @@ struct NoteEditorView: View {
                 editBody
             }
             PlayerControlsBar(speechText: speechText, note: currentNote)
-                .onReceive(NotificationCenter.default.publisher(for: .requestVoicePicker)) {
-                    showingVoicePicker = true
-                }
         }
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { editorToolbar }
+        .onReceive(NotificationCenter.default.publisher(for: .requestVoicePicker)) {
+            showingVoicePicker = true
+        }
         .confirmationDialog(
             "Delete this note?",
             isPresented: $showingDeleteConfirm,
