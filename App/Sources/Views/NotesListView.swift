@@ -161,7 +161,12 @@ struct NotesListView: View {
         .sheet(item: $sharingNote) { note in
             ShareSheet(items: [note.text])
         }
-        .miniPlayer(visible: path.isEmpty, onTap: jumpToPlayingNote)
+        // The mini-player is a single root overlay (GlobalMiniPlayerOverlay);
+        // tapping it switches to the Notes tab and lands here — push the
+        // speaking note then.
+        .onReceive(NotificationCenter.default.publisher(for: .miniPlayerJumpToNote)) { _ in
+            jumpToPlayingNote()
+        }
     }
 
     // MARK: - List

@@ -103,7 +103,7 @@ final class KittenEngine: NSObject, SpeechEngine {
             try AVAudioSession.sharedInstance().setCategory(
                 .playback,
                 mode: .spokenAudio,
-                options: [.duckOthers]
+                options: [.duckOthers, .allowBluetooth, .allowBluetoothA2DP]
             )
         } catch {
             Log.shared.error("KittenEngine audio session setup failed: \(error)")

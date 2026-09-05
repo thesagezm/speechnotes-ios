@@ -31,7 +31,7 @@ final class SystemEngine: NSObject, SpeechEngine {
             try AVAudioSession.sharedInstance().setCategory(
                 .playback,
                 mode: .spokenAudio,
-                options: [.duckOthers]
+                options: [.duckOthers, .allowBluetooth, .allowBluetoothA2DP]
             )
         } catch {
             Log.shared.error("Audio session setup failed: \(error)")
