@@ -14,8 +14,20 @@ struct SpeechnotesApp: App {
         case notes, storage, settings
     }
 
+    init() {
+        // Diagnostics: write directly to a file in case LogStore itself is crashing.
+        let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("launch-diagnostics.log")
+        let ts = ISO8601DateFormatter().string(from: Date())
+        let msg = "\(ts): SpeechnotesApp.init\n"
+        try? msg.write(to: url, atomically: true, encoding: .utf8)
+    }
+
     var body: some Scene {
-        WindowGroup {
+        let _ = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("launch-diagnostics.log")
+            .appendLine("body start")
+        return WindowGroup {
             TabView(selection: $selectedTab) {
                 NotesListView()
                     .tag(Tab.notes)
@@ -37,6 +49,9 @@ struct SpeechnotesApp: App {
             // the app on launch in LiveContainer. Fire it on the first frame
             // instead.
             .onAppear {
+                let _ = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                    .appendingPathComponent("launch-diagnostics.log")
+                    .appendLine("root onAppear")
                 player.notesProvider = { [notes] id in
                     notes.notes.first(where: { $0.id == id })
                 }
@@ -63,6 +78,20 @@ struct SpeechnotesApp: App {
                     player.resumeIfBookmarkPending()
                 }
             }
+        }
+    }
+}
+
+private extension URL {
+    func appendLine(_ line: String) {
+        let ts = ISO8601DateFormatter().string(from: Date())
+        let msg = "\(ts): \(line)\n"
+        if let handle = try? FileHandle(forWritingTo: self) {
+            defer { try? handle.close() }
+            try? handle.seekToEnd()
+            try? handle.write(Data(msg.utf8))
+        } else {
+            try? msg.write(to: self, atomically: true, encoding: .utf8)
         }
     }
 }
