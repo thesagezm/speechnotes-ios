@@ -160,7 +160,24 @@ struct NoteEditorView: View {
         .onReceive(NotificationCenter.default.publisher(for: .requestVoicePicker)) {
             showingVoicePicker = true
         }
-        .confirmationDialog(
+        .noteEditorDialogsAndSheets()
+        .onAppearOrDisappear()
+        .onChange(of: player.shareURL) { newValue in
+            if newValue != nil { Haptics.success() }
+        }
+        .onChange(of: renderMarkdown) { _ in
+            // Reading the setting directly recomputes the full-text regex —
+            // fine on an explicit user toggle (this used to run per keystroke).
+            scheduleSpeechCacheUpdate()
+            if renderMarkdown { showPreview = true }
+        }
+    }
+
+    /// All sheets, confirmationDialogs, and alerts in one place — the long
+    /// modifier chain used to blow the type-checker limit.
+    @ViewBuilder
+    private func noteEditorDialogsAndSheets() -> some View {
+        confirmationDialog(
             "Delete this note?",
             isPresented: $showingDeleteConfirm,
             titleVisibility: .visible
@@ -227,30 +244,27 @@ struct NoteEditorView: View {
         } message: {
             Text(exportErrorMessage ?? "")
         }
-        .onAppear {
-            guard !didLoad else { return }
-            draft = currentNote?.text ?? ""
-            titleDraft = currentNote?.explicitTitle ?? ""
-            didLoad = true
-            updateSpeechCaches()
-        }
-        .onDisappear {
-            draftSyncTask?.cancel()
-            draftSyncTask = nil
-            speechCacheTask?.cancel()
-            speechCacheTask = nil
-            saveDraft()
-            notes.flushNow()
-        }
-        .onChange(of: player.shareURL) { newValue in
-            if newValue != nil { Haptics.success() }
-        }
-        .onChange(of: renderMarkdown) { _ in
-            // Reading the setting directly recomputes the full-text regex —
-            // fine on an explicit user toggle (this used to run per keystroke).
-            scheduleSpeechCacheUpdate()
-            if renderMarkdown { showPreview = true }
-        }
+    }
+
+    /// Appear/disappear handlers broken out to keep body lean.
+    @ViewBuilder
+    private func onAppearOrDisappear() -> some View {
+        EmptyView()
+            .onAppear {
+                guard !didLoad else { return }
+                draft = currentNote?.text ?? ""
+                titleDraft = currentNote?.explicitTitle ?? ""
+                didLoad = true
+                updateSpeechCaches()
+            }
+            .onDisappear {
+                draftSyncTask?.cancel()
+                draftSyncTask = nil
+                speechCacheTask?.cancel()
+                speechCacheTask = nil
+                saveDraft()
+                notes.flushNow()
+            }
     }
 
     // MARK: - Export helpers
