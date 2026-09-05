@@ -24,11 +24,11 @@ struct SpeechnotesApp: App {
     }
 
     var body: some Scene {
-        let _ = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("launch-diagnostics.log")
-            .appendLine("body start")
-        return WindowGroup {
-            TabView(selection: $selectedTab) {
+        WindowGroup {
+            let _ = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("launch-diagnostics.log")
+                .appendLine("WindowGroup content start")
+            return TabView(selection: $selectedTab) {
                 NotesListView()
                     .tag(Tab.notes)
                     .tabItem { Label("Notes", systemImage: "note.text") }
@@ -44,10 +44,6 @@ struct SpeechnotesApp: App {
             .environmentObject(notes)
             .environmentObject(player)
             .environmentObject(theme)
-            // Eager StateObject work (engine session setup, NowPlayingCenter)
-            // must NOT run during App.init — HANDOVER: this is what crashed
-            // the app on launch in LiveContainer. Fire it on the first frame
-            // instead.
             .onAppear {
                 let _ = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
                     .appendingPathComponent("launch-diagnostics.log")
@@ -57,24 +53,16 @@ struct SpeechnotesApp: App {
                 }
                 player.wirePlaybackOnce()
             }
-            // One mini-player for the whole window; per-screen insets used
-            // to ride push/pop transitions and get stuck mid-screen.
             .globalMiniPlayer()
             .onReceive(NotificationCenter.default.publisher(for: .miniPlayerJumpToNote)) { _ in
                 selectedTab = .notes
             }
-            // Saves are coalesced in NotesStore; the second the app could be
-            // suspended is the one moment a pending write must not be lost.
             .onChange(of: scenePhase) { phase in
                 if phase != .active {
                     notes.flushNow()
-                    // Mid-speech: a bookmark lets playback resume where it
-                    // stopped if iOS suspends or kills the process.
                     player.persistPlaybackBookmark()
                 }
                 if phase == .active {
-                    // Returning from the app switcher / lock screen: if iOS
-                    // suspended us mid-speech, restart from the bookmark.
                     player.resumeIfBookmarkPending()
                 }
             }
