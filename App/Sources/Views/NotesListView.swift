@@ -74,10 +74,12 @@ struct NotesListView: View {
     }
 
     var body: some View {
-        let _ = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("launch-diagnostics.log")
-            .appendLine("NotesListView.body")
-        return NavigationStack(path: $path) {
+        let msg = "\(ISO8601DateFormatter().string(from: Date())): NotesListView.body\n"
+        try? msg.append(to: url)
+
+        NavigationStack(path: $path) {
             Group {
                 if notes.notes.isEmpty {
                     emptyState
