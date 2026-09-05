@@ -23,15 +23,21 @@ final class ImageCache {
         cache.totalCostLimit = 64 * 1024 * 1024 // 64 MB decoded budget
     }
 
-    /// Resolve a cached image for a URL, decoding if necessary. Synchronous
-    /// — callers already off the main actor for file/remote IO.
-    func image(for url: URL) -> UIImage? {
-        let key = cacheKey(for: url)
+    /// Cache-hit check only — safe on the main thread. Never does I/O.
+    func peek(_ url: URL) -> UIImage? {
         lock.lock()
         defer { lock.unlock() }
-        if let cached = cache.object(forKey: key) { return cached }
+        return cache.object(forKey: cacheKey(for: url))
+    }
+
+    /// Resolve a cached image for a URL, decoding if necessary. Synchronous
+    /// — callers must ALREADY be off the main actor (disk read + decode).
+    func image(for url: URL) -> UIImage? {
+        if let cached = peek(url) { return cached }
         guard let data = try? Data(contentsOf: url), let decoded = UIImage(data: data) else { return nil }
-        cache.setObject(decoded, forKey: key, cost: data.count)
+        lock.lock()
+        defer { lock.unlock() }
+        cache.setObject(decoded, forKey: cacheKey(for: url), cost: data.count)
         return decoded
     }
 
@@ -66,7 +72,9 @@ struct CachedImage: View {
     let url: URL
     let alt: String
     let zoomable: Bool
-    var maxHeight: CGFloat = 220
+    /// Maximum rendered height. Aspect-fit width stays full unless the
+    /// height cap kicks in (extreme panoramas).
+    var maxHeight: CGFloat = 340
     /// Closure fired when the user taps the image (only if `zoomable`).
     var onTap: (() -> Void)? = nil
 
@@ -77,9 +85,10 @@ struct CachedImage: View {
             switch phase {
             case .empty:
                 ProgressView()
+                    .frame(maxWidth: .infinity)
             case .success(let img):
                 let content = img.resizable().scaledToFit()
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(maxWidth: .infinity)
                 if zoomable {
                     Button { onTap?() } label: { content }
                         .buttonStyle(.plain)
@@ -93,6 +102,7 @@ struct CachedImage: View {
             }
         }
         .accessibilityLabel(alt.isEmpty ? "image" : alt)
+        .frame(maxWidth: .infinity)
         .frame(maxHeight: maxHeight)
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .task(id: url) {
@@ -102,16 +112,16 @@ struct CachedImage: View {
 
     @MainActor
     private func load() async {
-        // Try the in-memory cache first.
-        if let cached = ImageCache.shared.image(for: url) {
-            phase = .success(Image(uiImage: cached))
+        // Cheap cache-hit check — no I/O — so warm images appear synchronously.
+        if let warmed = ImageCache.shared.peek(url) {
+            phase = .success(Image(uiImage: warmed))
             return
         }
-        // Otherwise decode on a background task and seed the cache.
+        // Miss: read + decode strictly off the main actor. (image(for:)
+        // already stores what it decodes — no second insert needed.)
         if let decoded = await Task.detached(priority: .userInitiated) { () -> UIImage? in
             ImageCache.shared.image(for: url)
         }.value {
-            ImageCache.shared.insert(decoded, for: url, cost: Int(decoded.size.width * decoded.size.height * 4))
             phase = .success(Image(uiImage: decoded))
         } else {
             phase = .failure(URLError(.badServerResponse))

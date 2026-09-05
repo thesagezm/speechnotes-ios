@@ -32,15 +32,25 @@ final class NowPlayingCenter {
 
     private let infoCenter = MPNowPlayingInfoCenter.default()
 
-    /// Accumulated seconds of audio spoken, so Control Center's elapsed
-    /// time keeps advancing realistically between progress callbacks.
+    /// Accumulated seconds of audio spoken (banked across pause/resume), so
+    /// Control Center's elapsed time keeps a believable value.
     private var elapsed: TimeInterval = 0
-    private var lastClockIn: Date?
+    /// Wall-clock moment the current playing stretch started; nil when not
+    /// playing (paused / idle / generating).
+    private var playStartedAt: Date?
+    /// Wall-clock of the last publish — writes are throttled since every
+    /// engine progress tick would otherwise spam mediaserverd.
+    private var lastPublishAt: Date?
+
+    private var configured = false
 
     private init() {}
 
-    /// Register remote commands once per app launch.
+    /// Register remote commands once per app lifetime.
     func configure() {
+        guard !configured else { return }
+        configured = true
+
         let commands = MPRemoteCommandCenter.shared()
         commands.togglePlayPauseCommand.isEnabled = true
         commands.playCommand.isEnabled = true
@@ -71,32 +81,44 @@ final class NowPlayingCenter {
 
     /// Publish current playback so the lock screen shows the note title,
     /// an advancing elapsed time, and a roughly-correct total duration.
-    /// Called on every engine state change and progress tick.
+    /// Accepts a title of nil (anonymous text) with a generic fallback — a
+    /// missing surface during backgrounded speech weakens the background
+    /// mode contract.
     func publish(title: String?, isPlaying: Bool, progress: Double?, rate: Float) {
         let now = Date()
 
-        // Bank the speaking time elapsed since the last publish.
-        if let since = lastClockIn {
-            elapsed += now.timeIntervalSince(since)
+        // Bank playing time; pause/resume no longer loses elapsed seconds.
+        if isPlaying {
+            if let started = playStartedAt {
+                elapsed += now.timeIntervalSince(started)
+            }
+            playStartedAt = now
+        } else {
+            playStartedAt = nil
         }
-        lastClockIn = isPlaying ? now : nil
 
-        guard let title, !title.isEmpty else {
-            clear()
+        // Throttle: mediaserverd doesn't need per-tick updates.
+        if !isPlaying, let since = lastPublishAt, now.timeIntervalSince(since) < 0.75 {
             return
         }
+        if isPlaying, let since = lastPublishAt, now.timeIntervalSince(since) < 0.5 {
+            return
+        }
+        lastPublishAt = now
+
+        let displayTitle = (title?.isEmpty == false) ? title! : "Speechnotes"
 
         var info: [String: Any] = [
-            MPMediaItemPropertyTitle: title,
+            MPMediaItemPropertyTitle: displayTitle,
             MPMediaItemPropertyArtist: "Speechnotes",
             MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? rate : 0,
             MPNowPlayingInfoPropertyElapsedPlaybackTime: elapsed,
             MPNowPlayingInfoPropertyIsLiveStream: false,
         ]
-        // Derive a plausible total duration from progress so the scrubber has
-        // scale. Seek commands are deliberately NOT enabled — rewinding TTS
-        // doesn't map onto the engine's chunked pipeline.
-        if let progress, progress > 0.02 {
+        // Derive a plausibly-stable total duration from progress. Only
+        // publish once progress has meaningfully advanced — the early
+        // estimates jump around visibly in Control Center.
+        if let progress, progress > 0.05 {
             info[MPMediaItemPropertyPlaybackDuration] = elapsed / progress
         }
         infoCenter.nowPlayingInfo = info
@@ -106,6 +128,7 @@ final class NowPlayingCenter {
     func clear() {
         infoCenter.nowPlayingInfo = nil
         elapsed = 0
-        lastClockIn = nil
+        playStartedAt = nil
+        lastPublishAt = nil
     }
 }

@@ -29,7 +29,10 @@ struct NoteEditorView: View {
     /// String.Index binding) so it doesn't need to know the editor is UIKit.
     @State private var selectionUTF16: Range<Int>?
     @FocusState private var editorFocused: Bool
-    /// Markdown reading mode — only meaningful when the Render Markdown
+    /// Reading mode's in-app browser for tapped markdown links (the preview
+    /// now uses AttributedString links + openURL instead of per-run buttons).
+    @State private var safariURL: URL?
+    /// Markdown rendering mode — only meaningful when the Render Markdown
     /// setting is on; opens in preview (reading) mode, double-tap to edit.
     @State private var showPreview = true
     @AppStorage("renderMarkdown") private var renderMarkdown = false
@@ -45,12 +48,41 @@ struct NoteEditorView: View {
     /// whole-draft regex walk froze long notes mid-speech.
     @State private var cachedSpeechText: String = ""
     @State private var cachedWordCount: Int = 0
+    /// Debounce task for speech cache updates — running MarkdownText.plainText
+    /// synchronously on every keystroke blocked the main thread for long notes.
+    @State private var speechCacheTask: Task<Void, Never>?
 
     private var speechText: String { cachedSpeechText }
 
     private func updateSpeechCaches() {
         cachedSpeechText = renderMarkdown ? MarkdownText.plainText(draft) : draft
         cachedWordCount = draft.split(whereSeparator: \.isWhitespace).count
+    }
+
+    /// Debounce speech cache updates: MarkdownText.plainText runs a full
+    /// regex parse over the whole draft; doing that synchronously per
+    /// keystroke blocked the main thread for long notes. Now we wait until
+    /// ~300ms after typing stops, run the parse off-main, and hop back to
+    /// update the cached values.
+    private func scheduleSpeechCacheUpdate() {
+        speechCacheTask?.cancel()
+        let draftCopy = draft
+        let render = renderMarkdown
+        speechCacheTask = Task {
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            guard !Task.isCancelled else { return }
+            let plainText = await Task.detached(priority: .userInitiated) {
+                render ? MarkdownText.plainText(draftCopy) : draftCopy
+            }.value
+            let words = await Task.detached(priority: .userInitiated) {
+                draftCopy.split(whereSeparator: \.isWhitespace).count
+            }.value
+            await MainActor.run {
+                guard !Task.isCancelled else { return }
+                cachedSpeechText = plainText
+                cachedWordCount = words
+            }
+        }
     }
 
     /// UITextView reports caret changes as UTF-16 offsets; the markdown
@@ -156,8 +188,10 @@ struct NoteEditorView: View {
         }
         .sheet(isPresented: $showingPhotoPicker) {
             ImagePicker { data, ext in
-                let fragment = MarkdownImageInserter(noteId: noteId).store(data: data, ext: ext, alt: "image")
-                if let fragment { insertAtCaret(fragment) }
+                Task { @MainActor in
+                    let fragment = await MarkdownImageInserter(noteId: noteId).store(data: data, ext: ext, alt: "image")
+                    if let fragment { insertAtCaret(fragment) }
+                }
             }
         }
         .alert("Insert from URL", isPresented: $showingImageURLPrompt) {
@@ -198,13 +232,20 @@ struct NoteEditorView: View {
         .onDisappear {
             draftSyncTask?.cancel()
             draftSyncTask = nil
+            speechCacheTask?.cancel()
+            speechCacheTask = nil
             saveDraft()
             notes.flushNow()
         }
         .onChange(of: player.shareURL) { newValue in
             if newValue != nil { Haptics.success() }
         }
-        .onChange(of: renderMarkdown) { _ in updateSpeechCaches() }
+        .onChange(of: renderMarkdown) { _ in
+            // Reading the setting directly recomputes the full-text regex —
+            // fine on an explicit user toggle (this used to run per keystroke).
+            scheduleSpeechCacheUpdate()
+            if renderMarkdown { showPreview = true }
+        }
     }
 
     // MARK: - Export helpers
@@ -290,6 +331,14 @@ struct NoteEditorView: View {
         }
         .environmentObject(theme)
         .environment(\.noteId, noteId)
+        .environment(\.openURL, OpenURLAction { url in
+            safariURL = url
+            return .handled
+        })
+        .sheet(item: $safariURL) { url in
+            SafariSheet(url: url)
+                .ignoresSafeArea()
+        }
     }
 
     /// Edit branch extracted from `body` so SwiftUI's type checker doesn't
@@ -307,7 +356,7 @@ struct NoteEditorView: View {
         .padding(.horizontal, 8)
         .onChange(of: draft) { _ in
             scheduleDraftSync()
-            updateSpeechCaches()
+            scheduleSpeechCacheUpdate()
         }
         if renderMarkdown {
             MarkdownFormattingBar(
@@ -522,6 +571,9 @@ struct NoteEditorView: View {
             try? await Task.sleep(nanoseconds: 400_000_000)
             guard !Task.isCancelled else { return }
             saveDraft()
+            // plainText() is a full-document regex pass — keep it with the
+            // debounce instead of running it per keystroke.
+            scheduleSpeechCacheUpdate()
         }
     }
 
@@ -543,7 +595,7 @@ struct NoteEditorView: View {
             selectionUTF16 = caret..<caret
         }
         scheduleDraftSync()
-        updateSpeechCaches()
+        scheduleSpeechCacheUpdate()
         Haptics.tap()
     }
 
@@ -556,7 +608,9 @@ struct NoteEditorView: View {
             return
         }
         guard let data = image.pngData() else { return }
-        let fragment = MarkdownImageInserter(noteId: noteId).store(data: data, ext: "png", alt: "image")
-        if let fragment { insertAtCaret(fragment) }
+        Task { @MainActor in
+            let fragment = await MarkdownImageInserter(noteId: noteId).store(data: data, ext: "png", alt: "image")
+            if let fragment { insertAtCaret(fragment) }
+        }
     }
 }

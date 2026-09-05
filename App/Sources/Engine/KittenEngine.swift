@@ -261,11 +261,14 @@ final class KittenEngine: NSObject, SpeechEngine {
         let samples = data.withUnsafeBytes { rawBytes in
             Array(rawBytes.bindMemory(to: Float.self))
         }
-        // Reference trims the trailing 5,000 samples of every chunk.
-        guard samples.count > Self.trailingTrim else {
-            throw KittenEngineError.noOutput
+        // Reference trims the trailing 5,000 samples of every chunk — but a
+        // guard on samples.count > trailingTrim bricks very short outputs
+        // ("OK.", numbers). Trim the tail only when the output comfortably
+        // exceeds it; gracefully pass through whatever we got otherwise.
+        if samples.count > Self.trailingTrim * 2 {
+            return Array(samples[0..<(samples.count - Self.trailingTrim)])
         }
-        return Array(samples[0..<(samples.count - Self.trailingTrim)])
+        return samples
     }
 
     // MARK: - SpeechEngine

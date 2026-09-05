@@ -14,14 +14,6 @@ struct SpeechnotesApp: App {
         case notes, storage, settings
     }
 
-    init() {
-        // SpeechPlayer can only resume a bookmarked note if it can resolve
-        // the note's current text — wire the lookup once here.
-        player.notesProvider = { [notes] id in
-            notes.notes.first(where: { $0.id == id })
-        }
-    }
-
     var body: some Scene {
         WindowGroup {
             TabView(selection: $selectedTab) {
@@ -40,6 +32,16 @@ struct SpeechnotesApp: App {
             .environmentObject(notes)
             .environmentObject(player)
             .environmentObject(theme)
+            // Eager StateObject work (engine session setup, NowPlayingCenter)
+            // must NOT run during App.init — HANDOVER: this is what crashed
+            // the app on launch in LiveContainer. Fire it on the first frame
+            // instead.
+            .onAppear {
+                player.notesProvider = { [notes] id in
+                    notes.notes.first(where: { $0.id == id })
+                }
+                player.wirePlaybackOnce()
+            }
             // One mini-player for the whole window; per-screen insets used
             // to ride push/pop transitions and get stuck mid-screen.
             .globalMiniPlayer()

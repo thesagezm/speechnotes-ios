@@ -214,9 +214,23 @@ final class SpeechPlayer: ObservableObject {
     func resumeIfBookmarkPending() {
         guard state == .idle, auditioningVoice == nil else { return }
         guard let data = UserDefaults.standard.data(forKey: Self.bookmarkKey),
-              let mark = try? JSONDecoder().decode(PlaybackBookmark.self, from: data),
-              let note = notesProvider?(mark.noteId)
+              let mark = try? JSONDecoder().decode(PlaybackBookmark.self, from: data)
         else { return }
+        // Only auto-resume something recorded very recently — a bookmark left
+        // over from days ago is almost certainly stale context, not intent.
+        // The 30-day cap in resumePlan() still governs the explicit
+        // "Resume / restart" affordance in the editor.
+        guard Date().timeIntervalSince(mark.savedAt) < 5 * 60 else {
+            UserDefaults.standard.removeObject(forKey: Self.bookmarkKey)
+            inFlightBookmark = nil
+            return
+        }
+        guard let note = notesProvider?(mark.noteId) else {
+            // Note was deleted — drop the stale bookmark so we stop asking.
+            UserDefaults.standard.removeObject(forKey: Self.bookmarkKey)
+            inFlightBookmark = nil
+            return
+        }
         Log.shared.info("SpeechPlayer: resuming bookmarked note after suspension")
         togglePlay(note.text, note: note)
     }
@@ -310,6 +324,16 @@ final class SpeechPlayer: ObservableObject {
         supertonicVoice = defaults.string(forKey: "supertonicVoice") ?? "M1"
         supertonicLang = defaults.string(forKey: "supertonicLang") ?? "en"
         systemVoiceIdentifier = defaults.string(forKey: "systemVoiceIdentifier")
+    }
+
+    /// Called once the view hierarchy is live — doing this in `init` risks
+    /// the LiveContainer crash the HANDOVER doc bisected: read/writing
+    /// StateObjects from an App-level init forces model creation before any
+    /// scene exists.
+    private var playbackWired = false
+    func wirePlaybackOnce() {
+        guard !playbackWired else { return }
+        playbackWired = true
 
         rebuildEngine()
 
@@ -335,7 +359,8 @@ final class SpeechPlayer: ObservableObject {
         ModelManager.shared.onReady = { [weak self] in
             self?.rebuildEngine()
         }
-        Log.shared.info("SpeechPlayer initialised (engine=\(engineKind.rawValue), voice=\(voice), kittenVoice=\(kittenVoice), supertonic=\(supertonicVoice)@\(supertonicLang))")
+        Log.shared.info("SpeechPlayer wired (engine=\(engineKind.rawValue), voice=\(voice), kittenVoice=\(kittenVoice), supertonic=\(supertonicVoice)@\(supertonicLang))")
+    }
     }
 
     var activeEngineName: String {
@@ -393,9 +418,15 @@ final class SpeechPlayer: ObservableObject {
             }
         }
 
-        engine?.onStateChanged = { [weak self] newState in
+        // Capture the engine instance so a callback arriving from the OLD
+        // engine after a rebuildEngine() swap doesn't clobber live state.
+        let activeEngine = engine
+
+        activeEngine?.onStateChanged = { [weak self] newState in
             Task { @MainActor in
-                guard let self else { return }
+                guard let self,
+                      let activeEngine = activeEngine,
+                      activeEngine === self.engine else { return }
                 self.state = newState
                 if newState == .idle {
                     if self.lastRawProgress >= 0.98 {
@@ -419,9 +450,11 @@ final class SpeechPlayer: ObservableObject {
                 }
             }
         }
-        engine?.onProgress = { [weak self] value in
+        activeEngine?.onProgress = { [weak self] value in
             Task { @MainActor in
-                guard let self else { return }
+                guard let self,
+                      let activeEngine = activeEngine,
+                      activeEngine === self.engine else { return }
                 self.lastRawProgress = value
                 let mapped = self.resumeBaseFraction
                     + (1 - self.resumeBaseFraction) * value
@@ -472,6 +505,10 @@ final class SpeechPlayer: ObservableObject {
     }
 
     func stop() {
+        // An explicit stop is a deliberate end — do NOT let the idle callback
+        // persist a bookmark (which resumeIfBookmarkPending would replay on
+        // the next foreground).
+        clearBookmark()
         engine?.stop()
     }
 
@@ -487,24 +524,46 @@ final class SpeechPlayer: ObservableObject {
             stop()
             return
         }
+
+        // Resolve the codename to its engine kind — auditioning a Kitten voice
+        // with Kokoro active would play through the wrong engine.
+        let targetKind: EngineKind
+        if KittenEngine.friendlyNames.keys.contains(codename) {
+            targetKind = .kitten
+        } else if ModelManager.supertonicVoices.contains(codename) {
+            targetKind = .supertonic
+        } else if ModelManager.knownVoices.contains(codename) {
+            targetKind = .kokoroOnnx
+        } else {
+            return
+        }
+
+        // The engine must match the voice kind before we ask it to speak the
+        // sample — otherwise the codename is silently fed to the wrong engine.
+        if engineKind != targetKind {
+            engineKind = targetKind
+        }
+
         let modelReady: Bool
-        switch engineKind {
+        switch targetKind {
         case .kitten: modelReady = ModelManager.shared.kittenIsReady
         case .supertonic: modelReady = ModelManager.shared.supertonicIsReady
-        default: modelReady = ModelManager.shared.isReady
+        case .kokoroOnnx: modelReady = ModelManager.shared.isReady
+        case .system: modelReady = false
         }
         guard modelReady else { return }
 
         if preAuditionState == nil {
             preAuditionState = (engineKind, voice, kittenVoice, supertonicVoice)
         }
-        switch engineKind {
+        switch targetKind {
         case .kitten: kittenVoice = codename
         case .supertonic: supertonicVoice = codename
-        default: voice = codename
+        case .kokoroOnnx: voice = codename
+        case .system: break
         }
         auditioningVoice = codename
-        let name = VoiceCatalog.shortName(for: codename, kind: engineKind)
+        let name = VoiceCatalog.shortName(for: codename, kind: targetKind)
         Log.shared.info("SpeechPlayer: auditioning \(codename)")
         engine?.speak(VoiceCatalog.auditionText(for: name), rateMultiplier: 1.0)
     }

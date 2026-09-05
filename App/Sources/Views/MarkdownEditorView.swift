@@ -25,6 +25,7 @@ struct MarkdownEditorView: UIViewRepresentable {
         let tv = UITextView()
         tv.delegate = context.coordinator
         tv.isEditable = true
+        tv.isSelectable = true
         tv.isScrollEnabled = true
         tv.backgroundColor = .clear
         tv.autocorrectionType = .no
@@ -36,11 +37,20 @@ struct MarkdownEditorView: UIViewRepresentable {
         tv.textContainerInset = UIEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
         tv.textContainer.lineFragmentPadding = 0
         tv.adjustsFontForContentSizeCategory = true
-        tv.font = UIFont.preferredFont(forTextStyle: .body)
+        let font = Self.editorFont(scale: textScale)
+        tv.font = font
         tv.text = text
         tv.isUserInteractionEnabled = true
         context.coordinator.lastSentText = text
+        context.coordinator.lastAppliedFontSize = font.pointSize
         return tv
+    }
+
+    /// Editor font follows the reading-size setting scaled onto the system
+    /// body size — matches MarkdownPreviewView so edit ↔ preview doesn't jump.
+    static func editorFont(scale: CGFloat) -> UIFont {
+        let base = UIFont.preferredFont(forTextStyle: .body).pointSize
+        return UIFont.systemFont(ofSize: base * scale)
     }
 
     func updateUIView(_ uiView: UITextView, context: Context) {
@@ -55,7 +65,14 @@ struct MarkdownEditorView: UIViewRepresentable {
             uiView.selectedRange = preserved
             context.coordinator.lastSentText = text
         }
-        uiView.font = UIFont.preferredFont(forTextStyle: .body)
+        // Only touch the font when the size actually changed — assigning the
+        // font rebuilds text storage, drops typing attributes, and can kill
+        // an active selection mid-gesture.
+        let wanted = Self.editorFont(scale: textScale)
+        if wanted.pointSize != context.coordinator.lastAppliedFontSize {
+            uiView.font = wanted
+            context.coordinator.lastAppliedFontSize = wanted.pointSize
+        }
         if focusState.wrappedValue && !uiView.isFirstResponder {
             DispatchQueue.main.async { _ = uiView.becomeFirstResponder() }
         } else if !focusState.wrappedValue && uiView.isFirstResponder {
@@ -68,6 +85,7 @@ struct MarkdownEditorView: UIViewRepresentable {
         /// Tracks the last value we pushed *into* UITextView from SwiftUI
         /// so we can skip redundant writes that would clobber the caret.
         var lastSentText: String = ""
+        var lastAppliedFontSize: CGFloat = 0
         init(_ parent: MarkdownEditorView) { self.parent = parent }
 
         func textViewDidChange(_ textView: UITextView) {
@@ -84,8 +102,12 @@ struct MarkdownEditorView: UIViewRepresentable {
             let utf16 = textView.selectedRange
             // A zero-length selection is still a caret position — report it
             // so the formatting bar can insert at the caret instead of
-            // defaulting to end-of-text.
-            parent.selection = utf16.lowerBound..<utf16.upperBound
+            // defaulting to end-of-text. Skip redundant assignments: each
+            // binding write re-renders the editor + formatting bar.
+            let range = utf16.lowerBound..<utf16.upperBound
+            if parent.selection != range {
+                parent.selection = range
+            }
         }
     }
 }

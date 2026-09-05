@@ -17,10 +17,18 @@ final class MarkdownImageInserter {
     init(noteId: UUID) { self.noteId = noteId }
 
     /// Insert an image from `Data` + extension (Photos picker, clipboard,
-    /// drag-and-drop). Returns the markdown fragment to insert at the caret.
+    /// drag-and-drop). Hashing/re-encoding/disk write run off the main thread
+    /// (multi-MB clipboard photos used to freeze typing). Routes through
+    /// `importImageData` so HEIC and oversized photos are re-encoded.
+    /// Returns the markdown fragment to insert at the caret.
     @discardableResult
-    func store(data: Data, ext: String, alt: String) -> String? {
-        guard let target = NoteImageStore.store(data: data, ext: ext, noteId: noteId) else {
+    func store(data: Data, ext: String, alt: String) async -> String? {
+        lastError = nil
+        let noteId = noteId
+        let target = await Task.detached(priority: .userInitiated) {
+            NoteImageStore.importImageData(data, pathExtension: ext, noteId: noteId)
+        }.value
+        guard let target else {
             lastError = "Couldn't save the image."
             return nil
         }
@@ -36,7 +44,11 @@ final class MarkdownImageInserter {
         do {
             let (data, _) = try await URLSession.shared.data(from: url)
             let ext = NoteImageStore.sanitiseExtension(url.pathExtension.isEmpty ? "png" : url.pathExtension)
-            if let target = NoteImageStore.store(data: data, ext: ext ?? "png", noteId: noteId) {
+            let noteId = noteId
+            let target = await Task.detached(priority: .userInitiated) {
+                NoteImageStore.importImageData(data, pathExtension: ext ?? "png", noteId: noteId)
+            }.value
+            if let target {
                 return "![\(alt)](\(target))"
             }
         } catch {
