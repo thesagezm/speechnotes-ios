@@ -8,6 +8,8 @@ import SwiftUI
 struct NoteRowView: View {
     let note: Note
     let preview: String
+    private lazy var cachedWordCount: Int = note.wordCount
+    private lazy var cachedMinutes: Int? = note.estimatedListenMinutes
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -22,8 +24,8 @@ struct NoteRowView: View {
             HStack(spacing: 4) {
                 Text(note.updatedAt, format: .relative(presentation: .named))
                 Text("·").foregroundStyle(.tertiary)
-                Text("\(note.wordCount) words")
-                if let minutes = note.estimatedListenMinutes {
+                Text("\(cachedWordCount) words")
+                if let minutes = cachedMinutes {
                     Text("·").foregroundStyle(.tertiary)
                     Text("~\(minutes) min listen")
                 }

@@ -74,7 +74,13 @@ struct NotesListView: View {
     }
 
     var body: some View {
-        NavigationStack(path: $path) {
+        let _ = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("launch-diagnostics.log")
+            .appendLine("NotesListView.body")
+        return NavigationStack(path: $path) {
+            let _ = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("launch-diagnostics.log")
+                .appendLine("NavigationStack content")
             Group {
                 if notes.notes.isEmpty {
                     emptyState
@@ -111,8 +117,6 @@ struct NotesListView: View {
                 allowedContentTypes: ImportService.acceptedContentTypes,
                 allowsMultipleSelection: false
             ) { result in
-                // The completion is not guaranteed to arrive on the main
-                // actor — every @State mutation below needs to.
                 Task { @MainActor in
                     switch result {
                     case .success(let urls):
@@ -122,8 +126,6 @@ struct NotesListView: View {
                     }
                 }
             }
-            // Open-In files and speechnotes:// links (LiveContainer forwards
-            // what it can; the Files picker and drag & drop always work).
             .onOpenURL { url in
                 handleOpenURL(url)
             }
@@ -156,14 +158,9 @@ struct NotesListView: View {
                 Text(importErrorMessage ?? "")
             }
         }
-        // Attached OUTSIDE the NavigationStack: two .sheet modifiers on the
-        // same view node is the classic SwiftUI trap where one is ignored.
         .sheet(item: $sharingNote) { note in
             ShareSheet(items: [note.text])
         }
-        // The mini-player is a single root overlay (GlobalMiniPlayerOverlay);
-        // tapping it switches to the Notes tab and lands here — push the
-        // speaking note then.
         .onReceive(NotificationCenter.default.publisher(for: .miniPlayerJumpToNote)) { _ in
             jumpToPlayingNote()
         }
