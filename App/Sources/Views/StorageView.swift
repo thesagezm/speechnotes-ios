@@ -1,4 +1,5 @@
 import SwiftUI
+import SpeechLogic
 
 /// Storage tab: every exported WAV (playable in-app, shareable, deletable)
 /// plus a storage-usage breakdown.
@@ -28,14 +29,17 @@ struct StorageView: View {
 
     // MARK: - Cached images
 
+    /// All cached note-image targets across every note. Computed once per
+    /// body evaluation so header / rows / footer stay consistent.
+    private var imageTargets: [String] { NoteImageStore.allTargets() }
+
     /// Shows every cached note-image across all notes (thumbnails excluded),
     /// plus total bytes. Deleting removes the on-disk file + memory cache —
     /// the markdown still renders (via the speechnotes:// target) until the
     /// next save re-prunes the orphan.
     private var imagesSection: some View {
         Section {
-            let targets = NoteImageStore.allTargets()
-            if targets.isEmpty {
+            if imageTargets.isEmpty {
                 Label(
                     "No images cached yet — insert one in a markdown note.",
                     systemImage: "photo.on.rectangle"
@@ -43,7 +47,7 @@ struct StorageView: View {
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
             } else {
-                ForEach(targets, id: \.self) { target in
+                ForEach(imageTargets, id: \.self) { target in
                     imageRow(target)
                 }
                 Button(role: .destructive) {
@@ -52,13 +56,13 @@ struct StorageView: View {
                 } label: {
                     Label("Clear all cached images", systemImage: "trash.slash")
                 }
-                .disabled(targets.isEmpty)
+                .disabled(imageTargets.isEmpty)
             }
         } header: {
             Text("Cached images")
         } footer: {
-            if !targets.isEmpty {
-                Text("\(targets.count) image(s) · \(ByteCountFormatter.string(fromByteCount: NoteImageStore.totalFootprint(), countStyle: .file))")
+            if !imageTargets.isEmpty {
+                Text("\(imageTargets.count) image(s) · \(ByteCountFormatter.string(fromByteCount: NoteImageStore.totalFootprint(), countStyle: .file))")
             }
         }
     }

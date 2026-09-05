@@ -539,8 +539,8 @@ struct NoteEditorView: View {
         let insertEndUtf16 = updated.utf16.distance(from: updated.startIndex, to: range.lowerBound) + fragment.utf16.count
         draft = updated
         if let idx = updated.utf16.index(updated.utf16.startIndex, offsetBy: insertEndUtf16, limitedBy: updated.utf16.endIndex).flatMap({ String.Index($0, within: updated) }) {
-            let caret = idx..<idx
-            selectionUTF16 = caret.upperBound..<caret.upperBound
+            let caret = updated.utf16.distance(from: updated.utf16.startIndex, to: idx)
+            selectionUTF16 = caret..<caret
         }
         scheduleDraftSync()
         updateSpeechCaches()

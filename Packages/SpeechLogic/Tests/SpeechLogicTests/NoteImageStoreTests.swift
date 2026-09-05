@@ -31,6 +31,11 @@ final class NoteImageStoreTests: XCTestCase {
     }
 
     func testParseLocalTarget() {
+        XCTAssertNotNil(url)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url!.path))
+    }
+
+    func testParseLocalTarget() {
         let target = "speechnotes://note-image/abcd.png"
         let parsed = NoteImageStore.parseLocalTarget(target)
         XCTAssertEqual(parsed?.hash, "abcd")
