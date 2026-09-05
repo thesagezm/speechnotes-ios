@@ -17,10 +17,26 @@ public enum NoteImageStore {
 
     // MARK: - Core
 
-    public static func resolveLocalURL(_ target: String, noteId: UUID) -> URL? {
+    /// Resolves a `speechnotes://` target to an on-disk URL. Pass `nil` noteId
+    /// to scan ALL per-note directories (used by the Storage viewer, which
+    /// aggregates across notes).
+    public static func resolveLocalURL(_ target: String, noteId: UUID?) -> URL? {
         guard let (hash, ext) = parseLocalTarget(target) else { return nil }
-        let path = directory(for: noteId).appendingPathComponent("\(hash).\(ext)")
-        return FileManager.default.fileExists(atPath: path.path) ? path : nil
+        if let noteId {
+            let path = directory(for: noteId).appendingPathComponent("\(hash).\(ext)")
+            return FileManager.default.fileExists(atPath: path.path) ? path : nil
+        }
+        // noteId == nil → search every per-note cache directory.
+        let root = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("note-images", isDirectory: true)
+        guard let noteDirs = try? FileManager.default.contentsOfDirectory(
+            at: root, includingPropertiesForKeys: nil
+        ) else { return nil }
+        for dir in noteDirs {
+            let path = dir.appendingPathComponent("\(hash).\(ext)")
+            if FileManager.default.fileExists(atPath: path.path) { return path }
+        }
+        return nil
     }
 
     @discardableResult

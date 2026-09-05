@@ -118,7 +118,7 @@ struct StorageView: View {
         return h.count > 12 ? String(h.prefix(12)) + "…" : h
     }
 
-    private func extension(of target: String) -> String {
+    private func fileExtension(of target: String) -> String {
         NoteImageStore.parseLocalTarget(target)?.ext ?? "img"
     }
 
