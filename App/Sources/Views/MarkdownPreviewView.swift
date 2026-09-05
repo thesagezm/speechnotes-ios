@@ -336,17 +336,22 @@ struct MarkdownPreviewView: View {
     /// cached `speechnotes://` image), remote fallback, tap to zoom.
     /// We resolve the URL *before* creating the image view so the zoom
     /// sheet doesn't need to re-derive it from the alt text.
+    /// Images render at full available width (Joplin parity): the thumbnail
+    /// is generated at 1200px long edge, and we use `.aspectRatioFit` +
+    /// explicit maxWidth so the image fills the screen horizontally.
     @ViewBuilder
     private func imageView(url: String, alt: String) -> some View {
         if let local = localImageURL(url) {
             CachedImage(url: local, alt: alt, zoomable: true) {
                 zoomedImage = (url: local, alt: alt)
             }
+            .frame(maxWidth: .infinity)
             .padding(.bottom, 14)
         } else if let remote = URL(string: url) {
             CachedImage(url: remote, alt: alt, zoomable: true) {
                 zoomedImage = (url: remote, alt: alt)
             }
+            .frame(maxWidth: .infinity)
             .padding(.bottom, 14)
         } else {
             Image(systemName: "photo")

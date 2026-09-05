@@ -177,7 +177,7 @@ struct NotesListView: View {
                 Section {
                     ForEach(section.notes) { note in
                         NavigationLink(value: note.id) {
-                            noteRow(note)
+                            NoteRowView(note: note, preview: notes.preview(for: note))
                         }
                         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                             Button(role: .destructive) {
@@ -217,46 +217,10 @@ struct NotesListView: View {
         }
     }
 
+    /// One row in the notes list — legacy path kept for compatibility. The
+    /// list now uses NoteRowView directly so this is unused. Remove at leisure.
     private func noteRow(_ note: Note) -> some View {
-        // Computed once — preview() walks the whole body, twice per row per
-        // render was measurable on device.
-        let previewText = preview(of: note)
-        return VStack(alignment: .leading, spacing: 4) {
-            Text(note.title)
-                .font(.headline)
-            if !previewText.isEmpty {
-                Text(previewText)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-            }
-            HStack(spacing: 4) {
-                Text(note.updatedAt, format: .relative(presentation: .named))
-                Text("·").foregroundStyle(.tertiary)
-                Text("\(note.wordCount) words")
-                if let minutes = note.estimatedListenMinutes {
-                    Text("·").foregroundStyle(.tertiary)
-                    Text("~\(minutes) min listen")
-                }
-            }
-            .font(.caption)
-            .foregroundStyle(.secondary)
-        }
-        .padding(.vertical, 2)
-    }
-
-    /// First ~120 characters of the body (everything after the title line),
-    /// whitespace-normalized. The scan is capped: rows re-render on every
-    /// player publish, and whole-text walks were measurable with long notes.
-    private func preview(of note: Note) -> String {
-        let source = note.text.count > 800 ? String(note.text.prefix(800)) : note.text
-        let body = source
-            .split(whereSeparator: \.isNewline)
-            .dropFirst()
-            .joined(separator: " ")
-            .split(whereSeparator: \.isWhitespace)
-            .joined(separator: " ")
-        return String(body.prefix(120))
+        NoteRowView(note: note, preview: notes.preview(for: note))
     }
 
     private func era(for date: Date) -> String {

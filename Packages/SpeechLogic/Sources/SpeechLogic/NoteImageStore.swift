@@ -198,7 +198,7 @@ public enum NoteImageStore {
     /// Cached ~`maxDimension`-px JPEG thumbnail for an embedded image
     /// (generated on first request, reused afterwards). Keeps the preview
     /// cheap for 12-megapixel photos.
-    public static func thumbnailURL(for target: String, noteId: UUID, maxDimension: CGFloat = 480) -> URL? {
+    public static func thumbnailURL(for target: String, noteId: UUID, maxDimension: CGFloat = 1200) -> URL? {
         guard let (hash, ext) = parseLocalTarget(target) else { return nil }
         let dir = directory(for: noteId)
         let thumb = dir.appendingPathComponent("\(hash)-thumb.jpg")

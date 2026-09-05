@@ -17,6 +17,9 @@ final class ImageCache {
 
     private let cache = NSCache<NSString, UIImage>()
     private let lock = NSLock()
+    /// In-flight loads keyed by cache key — concurrent requests for the same
+    /// URL share one disk read instead of each triggering their own.
+    private var inFlight: [String: Task<UIImage?, Never>] = [:]
 
     private init() {
         cache.countLimit = 80
@@ -39,6 +42,28 @@ final class ImageCache {
         defer { lock.unlock() }
         cache.setObject(decoded, forKey: cacheKey(for: url), cost: data.count)
         return decoded
+    }
+
+    /// Async load with in-flight deduplication. Multiple callers awaiting the
+    /// same URL share a single disk read + decode.
+    func load(_ url: URL) async -> UIImage? {
+        let key = cacheKey(for: url) as String
+        lock.lock()
+        if let existing = inFlight[key] {
+            lock.unlock()
+            return await existing.value
+        }
+        let task = Task<UIImage?, Never> { [weak self] in
+            guard let self else { return nil }
+            let image = self.image(for: url)
+            self.lock.lock()
+            self.inFlight.removeValue(forKey: key)
+            self.lock.unlock()
+            return image
+        }
+        inFlight[key] = task
+        lock.unlock()
+        return await task.value
     }
 
     /// Pre-seed a known image under its URL key (used after fresh downloads).
@@ -68,13 +93,15 @@ final class ImageCache {
 
 /// SwiftUI image that reads from `ImageCache` first. Falls back to aProgressView
 /// placeholder while the decode runs off-main.
+/// Renders at full available width so images fill the screen horizontally
+/// (Joplin parity). The maxHeight cap only kicks in for extreme panoramas.
 struct CachedImage: View {
     let url: URL
     let alt: String
     let zoomable: Bool
     /// Maximum rendered height. Aspect-fit width stays full unless the
     /// height cap kicks in (extreme panoramas).
-    var maxHeight: CGFloat = 340
+    var maxHeight: CGFloat = 400
     /// Closure fired when the user taps the image (only if `zoomable`).
     var onTap: (() -> Void)? = nil
 
@@ -87,7 +114,8 @@ struct CachedImage: View {
                 ProgressView()
                     .frame(maxWidth: .infinity)
             case .success(let img):
-                let content = img.resizable().scaledToFit()
+                let content = img.resizable()
+                    .aspectRatio(contentMode: .fit)
                     .frame(maxWidth: .infinity)
                 if zoomable {
                     Button { onTap?() } label: { content }
@@ -117,11 +145,10 @@ struct CachedImage: View {
             phase = .success(Image(uiImage: warmed))
             return
         }
-        // Miss: read + decode strictly off the main actor. (image(for:)
-        // already stores what it decodes — no second insert needed.)
-        if let decoded = await Task.detached(priority: .userInitiated) { () -> UIImage? in
-            ImageCache.shared.image(for: url)
-        }.value {
+        // Miss: read + decode strictly off the main actor, with in-flight
+        // dedup so concurrent loads for the same URL share one disk read.
+        let decoded = await ImageCache.shared.load(url)
+        if let decoded {
             phase = .success(Image(uiImage: decoded))
         } else {
             phase = .failure(URLError(.badServerResponse))

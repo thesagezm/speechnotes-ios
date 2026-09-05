@@ -34,8 +34,12 @@ struct MarkdownEditorView: UIViewRepresentable {
         tv.smartQuotesType = .no
         tv.smartInsertDeleteType = .no
         tv.keyboardDismissMode = .interactive
-        tv.textContainerInset = UIEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
-        tv.textContainer.lineFragmentPadding = 0
+        // Gutter inside the text container so text doesn't sit at the very
+        // edge of the screen. lineFragmentPadding is the per-line horizontal
+        // gutter (UIKit default is 5pt); textContainerInset is the outer
+        // padding around the whole text area.
+        tv.textContainerInset = UIEdgeInsets(top: 8, left: 8, bottom: 8, right: 8)
+        tv.textContainer.lineFragmentPadding = 5
         tv.adjustsFontForContentSizeCategory = true
         let font = Self.editorFont(scale: textScale)
         tv.font = font
