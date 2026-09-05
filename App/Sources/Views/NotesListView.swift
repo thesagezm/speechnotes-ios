@@ -74,7 +74,10 @@ struct NotesListView: View {
     }
 
     var body: some View {
-        NavigationStack(path: $path) {
+        let _ = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("launch-diagnostics.log")
+            .appendLine("NotesListView.body")
+        return NavigationStack(path: $path) {
             Group {
                 if notes.notes.isEmpty {
                     emptyState
