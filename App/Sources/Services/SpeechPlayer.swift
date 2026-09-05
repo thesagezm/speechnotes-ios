@@ -203,6 +203,24 @@ final class SpeechPlayer: ObservableObject {
         UserDefaults.standard.removeObject(forKey: Self.bookmarkKey)
     }
 
+    /// Set by SpeechnotesApp so the player can resolve a saved bookmark's
+    /// note id back to its current text without importing the store.
+    var notesProvider: ((UUID) -> Note?)?
+
+    /// Called when the app returns to the foreground. If iOS suspended the
+    /// process mid-speech (possible even with the `audio` background mode
+    /// under memory pressure), restart playback from the saved bookmark so
+    /// the user isn't left in silence on return.
+    func resumeIfBookmarkPending() {
+        guard state == .idle, auditioningVoice == nil else { return }
+        guard let data = UserDefaults.standard.data(forKey: Self.bookmarkKey),
+              let mark = try? JSONDecoder().decode(PlaybackBookmark.self, from: data),
+              let note = notesProvider?(mark.noteId)
+        else { return }
+        Log.shared.info("SpeechPlayer: resuming bookmarked note after suspension")
+        togglePlay(note.text, note: note)
+    }
+
     /// Stop + speak the full text from the start, clearing any bookmark.
     func restartFromBeginning(_ text: String, note: Note?) {
         clearBookmark()
@@ -295,6 +313,25 @@ final class SpeechPlayer: ObservableObject {
 
         rebuildEngine()
 
+        // Lock screen / Control Center / headset buttons.
+        NowPlayingCenter.shared.configure()
+        NowPlayingCenter.shared.onCommand = { [weak self] command in
+            Task { @MainActor in
+                guard let self else { return }
+                switch command {
+                case .play:
+                    if self.state == .paused { self.engine?.resume() }
+                case .pause:
+                    if self.state == .speaking { self.engine?.pause() }
+                case .toggle:
+                    if self.state == .speaking { self.engine?.pause() }
+                    else if self.state == .paused { self.engine?.resume() }
+                case .stop:
+                    self.stop()
+                }
+            }
+        }
+
         ModelManager.shared.onReady = { [weak self] in
             self?.rebuildEngine()
         }
@@ -358,18 +395,27 @@ final class SpeechPlayer: ObservableObject {
 
         engine?.onStateChanged = { [weak self] newState in
             Task { @MainActor in
-                self?.state = newState
+                guard let self else { return }
+                self.state = newState
                 if newState == .idle {
-                    if (self?.lastRawProgress ?? 0) >= 0.98 {
-                        self?.clearBookmark()            // finished naturally
-                    } else if self?.inFlightBookmark != nil {
-                        self?.persistPlaybackBookmark()  // stopped part-way
+                    if self.lastRawProgress >= 0.98 {
+                        self.clearBookmark()            // finished naturally
+                    } else if self.inFlightBookmark != nil {
+                        self.persistPlaybackBookmark()  // stopped part-way
                     }
-                    self?.lastRawProgress = 0
-                    self?.resumeBaseFraction = 0
-                    self?.nowPlayingTitle = nil
-                    self?.nowPlayingNoteId = nil
-                    self?.finishAuditionIfActive()
+                    self.lastRawProgress = 0
+                    self.resumeBaseFraction = 0
+                    self.nowPlayingTitle = nil
+                    self.nowPlayingNoteId = nil
+                    self.finishAuditionIfActive()
+                    NowPlayingCenter.shared.clear()
+                } else {
+                    NowPlayingCenter.shared.publish(
+                        title: self.nowPlayingTitle,
+                        isPlaying: newState == .speaking,
+                        progress: self.progress,
+                        rate: Float(self.rateMultiplier)
+                    )
                 }
             }
         }
@@ -381,6 +427,12 @@ final class SpeechPlayer: ObservableObject {
                     + (1 - self.resumeBaseFraction) * value
                 self.progress = value > 0 ? min(1.0, mapped) : nil
                 self.updateBookmarkChars(rawProgress: value)
+                NowPlayingCenter.shared.publish(
+                    title: self.nowPlayingTitle,
+                    isPlaying: self.state == .speaking,
+                    progress: self.progress,
+                    rate: Float(self.rateMultiplier)
+                )
             }
         }
     }

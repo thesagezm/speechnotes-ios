@@ -345,7 +345,9 @@ struct NotesListView: View {
     private func jumpToPlayingNote() {
         guard let id = player.nowPlayingNoteId,
               notes.notes.contains(where: { $0.id == id }) else { return }
-        path.append(id)
+        if path != [id] {        // re-render once; keep the root stable
+            path = [id]
+        }
     }
 
     private var shareSheetBinding: Binding<Bool> {

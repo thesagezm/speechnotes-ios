@@ -33,10 +33,11 @@ final class ModelManager: ObservableObject {
 
     // MARK: Model set (ONNX engine)
 
-    /// Kokoro uint8 weight-only quant (~177 MB) — fp32 activations, one
-    /// quality tier above dynamic int8/q8f16, comfortably under the 300 MB
-    /// budget. (Next rung would be fp16 ~163 MB, unverified on ORT CPU.)
-    static let onnxModelURL = URL(string: "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/onnx/model_uint8.onnx")!
+    /// Kokoro fp32 (~326 MB) — v1.5 upgrade from the uint8 weight-only quant
+    /// (~177 MB) whose quantization noise was the source of the "choppy /
+    /// metallic" voice complaints. Same graph, same inputs, one render-quality
+    /// tier up.
+    static let onnxModelURL = URL(string: "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/onnx/model.onnx")!
     static let onnxTokenizerURL = URL(string: "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/tokenizer.json")!
     /// Voice bank: 28 style vectors shared by every Kokoro voice.
     static let voicesURL = URL(string: "https://raw.githubusercontent.com/mlalma/KokoroTestApp/main/Resources/voices.npz")!
@@ -73,6 +74,21 @@ final class ModelManager: ObservableObject {
         guard let voicesSize = (try? fm.attributesOfItem(atPath: kittenVoicesFileURL.path))?[.size] as? Int64,
               voicesSize > 1_000_000 else { return false }
         return true
+    }
+
+    /// v1.4-and-earlier downloads were quantized variants of the same
+    /// model — delete them so the new fp32 file isn't blocked by stale
+    /// resume-data and doesn't double the disk footprint.
+    nonisolated private static func removeQuantizedDownloads() {
+        // If model.onnx is smaller than 200 MB it must be a quantized build
+        // (uint8 ≈ 177 MB, fp16/q8f16 ≈ 86 MB) — drop it; validation below
+        // will mark the set as needing a re-download.
+        let modelPath = onnxModelFileURL.path
+        if let size = (try? FileManager.default.attributesOfItem(atPath: modelPath))?[.size] as? Int64,
+           size < 200_000_000 {
+            try? FileManager.default.removeItem(at: onnxModelFileURL)
+            Log.shared.info("ModelManager: removed quantized Kokoro model (\(size / 1_000_000) MB) — fp32 upgrade will re-download")
+        }
     }
 
     // MARK: Supertonic model set (third neural engine)
@@ -151,10 +167,10 @@ final class ModelManager: ObservableObject {
 
     nonisolated static func onnxFilesAreValid() -> Bool {
         let fm = FileManager.default
-        // Threshold rejects the old q8f16 model (~86 MB) so the uint8
+        // Thresholds reject the old uint8 set (~177 MB model) so the fp32
         // upgrade re-downloads.
         guard let modelSize = (try? fm.attributesOfItem(atPath: onnxModelFileURL.path))?[.size] as? Int64,
-              modelSize > 120_000_000 else { return false }
+              modelSize > 200_000_000 else { return false }
         guard let voicesSize = (try? fm.attributesOfItem(atPath: voicesFileURL.path))?[.size] as? Int64,
               voicesSize > 10_000_000 else { return false }
         // tokenizer.json is tiny (~3.5 KB) — validate by parsing it the same
@@ -167,8 +183,9 @@ final class ModelManager: ObservableObject {
         return true
     }
 
-    /// ~192 MB payload; require headroom of roughly 1.5× (PocketPal lesson).
-    nonisolated static let requiredFreeBytes: Int64 = 290_000_000
+    /// ~341 MB payload (fp32 model + voices + tokenizer); require headroom
+    /// of roughly 1.5× (PocketPal lesson).
+    nonisolated static let requiredFreeBytes: Int64 = 520_000_000
     /// Generous idle timeout — the GitHub media CDN can stall for minutes.
     nonisolated static let requestTimeout: TimeInterval = 120
     nonisolated static let resourceTimeout: TimeInterval = 7200
@@ -176,6 +193,7 @@ final class ModelManager: ObservableObject {
 
     init() {
         Self.migrateLegacyMetalFiles()
+        Self.removeQuantizedDownloads()
         if Self.onnxFilesAreValid() {
             state = .ready
             Log.shared.info("ModelManager: model already present")
@@ -402,7 +420,7 @@ final class ModelManager: ObservableObject {
         }
     }
 
-    /// Downloads the model set (~177 MB model + ~15 MB voices + 4 KB tokenizer).
+    /// Downloads the model set (~326 MB fp32 model + ~15 MB voices + 4 KB tokenizer).
     func startDownload() {
         if case .downloading = state { return }
         guard !isReady else { return }
@@ -419,14 +437,14 @@ final class ModelManager: ObservableObject {
         }
 
         state = .downloading(progress: 0)
-        Log.shared.info("ModelManager: starting model download (~192 MB)")
+        Log.shared.info("ModelManager: starting model download (~341 MB fp32)")
 
         Task.detached { [weak self] in
             do {
                 try await self?.download(
                     from: Self.onnxModelURL,
                     to: Self.onnxModelFileURL,
-                    expectedBytes: 177_464_632,
+                    expectedBytes: 325_532_232,
                     progressRange: 0.0...0.8,
                     publishingTo: { [weak self] value in self?.reportProgress(value) }
                 )
