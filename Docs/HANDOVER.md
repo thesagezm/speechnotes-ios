@@ -227,3 +227,36 @@ Packages/SpeechLogic/
 
 Good luck. The project is in a solid state — just don't undo it by re-introducing the
 salvage.
+
+---
+
+## 2026-09-05 addendum — launch-path scrub on bisect-g (post-debug-commits fix)
+
+Delta vs the debug-commit HEAD, aimed at making bisect-g's launch profile match
+the device-proven 0785f1b as closely as possible while keeping v1.5 features:
+
+1. **Removed all `launch-diagnostics.log` writes** (SpeechnotesApp.init, WindowGroup
+   body, NotesListView.body, and the `appendLine` extension). File I/O inside
+   SwiftUI body evaluation during launch is itself a LiveContainer hazard.
+2. **`wirePlaybackOnce()` is deferred** to a `Task { @MainActor in ... }` from
+   `.onAppear` — engine rebuild now happens after the first committed frame,
+   not inside the first render transaction.
+3. **`NowPlayingCenter.configure()` (MPRemoteCommandCenter registration) moved
+   out of launch entirely** into `ensureNowPlayingWired()`, called lazily from
+   `togglePlay(.idle)` and `restartFromBeginning()` — i.e. on first REAL
+   playback. Lock-screen controls still work; launch never touches the
+   remote-command registry (which the LiveContainer host app owns).
+4. **`resumeIfBookmarkPending()` skips the initial scene activation** — a fresh
+   (< 5 min) bookmark replaying speech during launch would turn any
+   mid-speech crash into a launch crash loop. App-switcher returns still
+   auto-resume.
+
+Not changed (audited, judged safe): `ModelManager.init` ran at launch in 0785f1b
+too (proven on device); `removeQuantizedDownloads()` is pure `try?` FileManager
+ops. `SpeechPlayer.init` only touches UserDefaults. `NoteRowView`/preview cache
+are pure string work.
+
+Next: CI build from bisect-g → install in LiveContainer → verify launch. If it
+STILL crashes, stop guessing: capture a real crash log via Xcode → Devices →
+device console (or Settings → Privacy → Analytics & Improvements → Analytics
+Data → Speechnotes-*.ips on device) before touching code again.

@@ -211,7 +211,17 @@ final class SpeechPlayer: ObservableObject {
     /// process mid-speech (possible even with the `audio` background mode
     /// under memory pressure), restart playback from the saved bookmark so
     /// the user isn't left in silence on return.
+    ///
+    /// The INITIAL activation at cold launch is skipped: if the previous run
+    /// crashed mid-speech, a fresh bookmark (< 5 min old) would replay that
+    /// speech during launch and loop the crash. Auto-resume only serves
+    /// returns from the app switcher / lock screen.
+    private var skippedInitialActivation = false
     func resumeIfBookmarkPending() {
+        if !skippedInitialActivation {
+            skippedInitialActivation = true
+            return
+        }
         guard state == .idle, auditioningVoice == nil else { return }
         guard let data = UserDefaults.standard.data(forKey: Self.bookmarkKey),
               let mark = try? JSONDecoder().decode(PlaybackBookmark.self, from: data)
@@ -237,6 +247,7 @@ final class SpeechPlayer: ObservableObject {
 
     /// Stop + speak the full text from the start, clearing any bookmark.
     func restartFromBeginning(_ text: String, note: Note?) {
+        ensureNowPlayingWired()
         clearBookmark()
         stop()
         nowPlayingTitle = note?.title
@@ -337,7 +348,21 @@ final class SpeechPlayer: ObservableObject {
 
         rebuildEngine()
 
-        // Lock screen / Control Center / headset buttons.
+        ModelManager.shared.onReady = { [weak self] in
+            self?.rebuildEngine()
+        }
+        Log.shared.info("SpeechPlayer wired (engine=\(engineKind.rawValue), voice=\(voice), kittenVoice=\(kittenVoice), supertonic=\(supertonicVoice)@\(supertonicLang))")
+    }
+
+    /// Lock screen / Control Center / headset buttons are wired lazily on
+    /// the FIRST real playback, never at launch — registering
+    /// MPRemoteCommandCenter during app startup is a LiveContainer crash
+    /// hazard (the host app owns the remote-command registry).
+    private var nowPlayingWired = false
+    private func ensureNowPlayingWired() {
+        guard !nowPlayingWired else { return }
+        nowPlayingWired = true
+
         NowPlayingCenter.shared.configure()
         NowPlayingCenter.shared.onCommand = { [weak self] command in
             Task { @MainActor in
@@ -355,11 +380,6 @@ final class SpeechPlayer: ObservableObject {
                 }
             }
         }
-
-        ModelManager.shared.onReady = { [weak self] in
-            self?.rebuildEngine()
-        }
-        Log.shared.info("SpeechPlayer wired (engine=\(engineKind.rawValue), voice=\(voice), kittenVoice=\(kittenVoice), supertonic=\(supertonicVoice)@\(supertonicLang))")
     }
 
     var activeEngineName: String {
@@ -486,6 +506,7 @@ final class SpeechPlayer: ObservableObject {
         case .paused:
             engine?.resume()
         case .idle:
+            ensureNowPlayingWired()
             nowPlayingTitle = note?.title
             nowPlayingNoteId = note?.id
             resumeBaseFraction = 0
