@@ -41,6 +41,12 @@ targets:
       path: App/Resources/Info.plist
       properties:
         CFBundleDisplayName: Speechnotes
+        # Literal version in the GENERATED plist: without these keys the
+        # packaged IPA had no version at all and iOS reported 1.0 (About read
+        # a hardcoded string before, which masked it). Bump together with
+        # MARKETING_VERSION / CURRENT_PROJECT_VERSION below on every release.
+        CFBundleShortVersionString: "1.4.1"
+        CFBundleVersion: "28"
         UILaunchScreen: {}
         # Portrait-only: the v1.2.0 release added LandscapeLeft/Right here and
         # the build black-screened at launch inside LiveContainer on iOS 26
@@ -69,6 +75,8 @@ targets:
       base:
         PRODUCT_NAME: Speechnotes
         PRODUCT_BUNDLE_IDENTIFIER: com.speechnotes.ios
+        # Keep CFBundleShortVersionString / CFBundleVersion in info.properties
+        # above in sync — release bump touches all three.
         MARKETING_VERSION: "1.4.1"
         CURRENT_PROJECT_VERSION: "28"
         TARGETED_DEVICE_FAMILY: "1"
