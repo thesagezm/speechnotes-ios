@@ -620,16 +620,3 @@ Branch `v15-books-complete` off main fbfb854. Tip `b530289`, ALL CI jobs green
 Bump the four version fields → 1.5.0/30, README, fast-forward main, tag v1.5.0,
 attach the IPA from the green run. Until then `v15-books-complete` stays the
 integration branch.
-
-### 2026-09-07 addendum — device feedback: PDF pages must turn themselves
-
-User (first v1.5 device round): PDF TTS works well, but the reader must
-AUTOMATICALLY advance to the next page as the reading crosses pages, with a
-short visual sign of the turn. Shipped: for PDFs, read-along no longer swaps
-to the text view — with the read-along toggle ON (default) the PDF view
-follows the sounding page live via `pdfView.go(to:)` and shows a ~1.5s
-"Page N" material capsule on every turn; the offsets sidecar drives the
-sentence→page map (chapter-start fallback when absent); the toggle is the
-kill-switch for follow mode. Notes/epub read-along unchanged. Follow turns
-persist position (PDFViewPageChanged path) and coexist with manual scrolls
-(the next crossing snaps the view back — that's what "follow" means).
