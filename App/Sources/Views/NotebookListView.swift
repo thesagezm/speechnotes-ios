@@ -44,7 +44,7 @@ struct NotebookListView: View {
                             } label: {
                                 HStack {
                                     Image(systemName: "folder")
-                                        .foregroundStyle(.accentColor)
+                                        .foregroundStyle(Color.accentColor)
                                     Text(notebook.name)
                                         .foregroundStyle(.primary)
                                     Spacer()
