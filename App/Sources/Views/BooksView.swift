@@ -223,7 +223,9 @@ struct BooksView: View {
                 // established ImportService pattern).
                 let scoped = url.startAccessingSecurityScopedResource()
                 defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-                await store.importBook(from: url)
+                if let imported = await store.importBook(from: url) {
+                    ToastCenter.shared.show("Imported \"\(imported.title.prefix(32))\"")
+                }
             }
         }
     }

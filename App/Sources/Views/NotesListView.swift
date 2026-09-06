@@ -205,6 +205,13 @@ struct NotesListView: View {
         .sheet(item: $sharingNote) { note in
             ShareSheet(items: [note.text])
         }
+        // Exports triggered from the list's swipe actions have no editor
+        // alert to surface failures — the toast does it here.
+        .onChange(of: player.exportState) { state in
+            if case .failed(let message) = state {
+                ToastCenter.shared.show("Export failed — \(message)")
+            }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .miniPlayerJumpToNote)) { _ in
             jumpToPlayingNote()
         }
@@ -314,7 +321,16 @@ struct NotesListView: View {
                         }
                         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                             Button(role: .destructive) {
+                                let deletedTitle = note.title
                                 notes.delete(noteId: note.id)
+                                // The bin already makes this recoverable; the
+                                // toast just puts recovery one tap away.
+                                ToastCenter.shared.show(
+                                    "Deleted \"\(deletedTitle.prefix(32))\"",
+                                    actionTitle: "Undo"
+                                ) {
+                                    notes.recover(noteId: note.id)
+                                }
                             } label: {
                                 Label("Delete", systemImage: "trash")
                             }

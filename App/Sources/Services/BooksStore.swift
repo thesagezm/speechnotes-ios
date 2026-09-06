@@ -153,8 +153,10 @@ final class BooksStore: ObservableObject {
     /// synchronous and fast (one sequential file); the metadata parse and
     /// cover extraction run detached so a slow/corrupt file can never block
     /// the UI. Metadata failure downgrades to a filename-titled book — a
-    /// book that parses badly is still a book.
-    func importBook(from sourceURL: URL) async {
+    /// book that parses badly is still a book. Returns the imported book,
+    /// or nil when the copy/manifest write failed (importError is set).
+    @discardableResult
+    func importBook(from sourceURL: URL) async -> Book? {
         isImporting = true
         defer { isImporting = false }
 
@@ -165,7 +167,7 @@ final class BooksStore: ObservableObject {
         case "pdf": format = .pdf
         default:
             importError = "Unsupported book format: .\(ext)"
-            return
+            return nil
         }
 
         let id = UUID()
@@ -177,7 +179,7 @@ final class BooksStore: ObservableObject {
         } catch {
             importError = "Could not copy \"\(sourceURL.lastPathComponent)\": \(error.localizedDescription)"
             try? FileManager.default.removeItem(at: dir)
-            return
+            return nil
         }
 
         let fileName = sourceURL.lastPathComponent
@@ -191,9 +193,10 @@ final class BooksStore: ObservableObject {
         } catch {
             importError = "Could not save book metadata: \(error.localizedDescription)"
             try? FileManager.default.removeItem(at: dir)
-            return
+            return nil
         }
         refresh()
+        return parsed
     }
 
     /// Runs off-main. Reads only a few zip entries (epub) or the lazy

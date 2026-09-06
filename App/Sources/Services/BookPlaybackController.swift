@@ -107,6 +107,8 @@ final class BookPlaybackController {
         let next = activeChapterIndex + 1
         guard next < Self.chapterCount(of: book) else {
             Log.shared.info("BookPlayback: finished \(book.title)")
+            Haptics.success()
+            ToastCenter.shared.show("Finished \"\(book.title.prefix(40))\"")
             activeBook = nil
             return
         }
