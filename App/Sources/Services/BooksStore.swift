@@ -170,9 +170,11 @@ final class BooksStore: ObservableObject {
             // string extraction is the pattern we are deliberately avoiding).
             if let document = PDFDocument(url: directory.appendingPathComponent("original.pdf")) {
                 book.pageCount = document.pageCount > 0 ? document.pageCount : nil
+                // documentAttributes bridges as [AnyHashable: Any] — key it
+                // with the full PDFDocumentAttribute spelling.
                 let attrs = document.documentAttributes
-                if let title = attrs?[.titleAttribute] as? String, !title.isEmpty { book.title = title }
-                if let author = attrs?[.authorAttribute] as? String, !author.isEmpty { book.author = author }
+                if let title = attrs?[PDFDocumentAttribute.titleAttribute] as? String, !title.isEmpty { book.title = title }
+                if let author = attrs?[PDFDocumentAttribute.authorAttribute] as? String, !author.isEmpty { book.author = author }
             }
         }
         return book
