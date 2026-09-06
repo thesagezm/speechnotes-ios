@@ -57,7 +57,8 @@ struct Note: Identifiable, Codable, Equatable {
         let window = String(text.prefix(300))
         let firstSentence: String
         if let piece = SentenceChunker.sentencePieces(in: window).first {
-            firstSentence = String(decoding: window.utf16[piece.offset..<piece.endOffset], as: UTF16.self)
+            let units = Array(window.utf16)
+            firstSentence = String(decoding: units[piece.offset..<min(piece.endOffset, units.count)], as: UTF16.self)
         } else {
             firstSentence = window
         }
