@@ -63,6 +63,14 @@ public enum MarkdownSlashMenu {
         public let slashIndex: String.Index
         public let cursorIndex: String.Index
         public let isValid: Bool
+
+        /// Public so tests (and future editors) can exercise `apply`'s index
+        /// math with synthetic triggers, not just `detect`-produced ones.
+        public init(slashIndex: String.Index, cursorIndex: String.Index, isValid: Bool) {
+            self.slashIndex = slashIndex
+            self.cursorIndex = cursorIndex
+            self.isValid = isValid
+        }
     }
 
     /// `/` that opened a command: the LAST `/` between line start and the

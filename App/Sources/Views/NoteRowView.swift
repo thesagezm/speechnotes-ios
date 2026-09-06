@@ -2,19 +2,19 @@ import SwiftUI
 
 /// One row in the notes list. Takes `let note: Note` (a value, not a store
 /// reference) so SwiftUI's diffing skips it when unrelated @Published
-/// properties change (e.g. player.progress ticks during speech). The preview
-/// string is precomputed by NotesStore and passed in — no per-render text
-/// scanning.
+/// properties change (e.g. player.progress ticks during speech). The derived
+/// metadata (title/preview/word count) is precomputed by NotesStore and
+/// passed in — no per-render text scanning or sentence parsing.
 struct NoteRowView: View {
     let note: Note
-    let preview: String
+    let meta: NotesStore.RowMetadata
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(note.title)
+            Text(meta.title)
                 .font(.headline)
-            if !preview.isEmpty {
-                Text(preview)
+            if !meta.preview.isEmpty {
+                Text(meta.preview)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
@@ -30,8 +30,8 @@ struct NoteRowView: View {
                 }
                 Text(note.updatedAt, format: .relative(presentation: .named))
                 Text("·").foregroundStyle(.tertiary)
-                Text("\(note.wordCount) words")
-                if let minutes = note.estimatedListenMinutes {
+                Text("\(meta.wordCount) words")
+                if let minutes = meta.listenMinutes {
                     Text("·").foregroundStyle(.tertiary)
                     Text("~\(minutes) min listen")
                 }

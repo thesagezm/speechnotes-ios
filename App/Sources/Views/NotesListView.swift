@@ -286,7 +286,7 @@ struct NotesListView: View {
                 Section {
                     ForEach(section.notes) { note in
                         NavigationLink(value: note.id) {
-                            NoteRowView(note: note, preview: notes.preview(for: note))
+                            NoteRowView(note: note, meta: notes.metadata(for: note))
                         }
                         .contextMenu {
                             Button {
