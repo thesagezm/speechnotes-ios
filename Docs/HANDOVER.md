@@ -526,7 +526,10 @@ This commit (release commit):
 - Descoped polish, kept for the backlog: library cover GRID + search field
   (library ships as the row list from Phase 1 — what was device-tested).
 
-Immediately after this commit's CI run goes green: fast-forward main to it
-(`git checkout main && git merge --ff-only books-v1.4.2 && git push origin
-main`), tag `v1.4.2`, `gh release create` with the IPA from the green run's
-`SpeechnotesIOS` artifact (CI's "Verify embedded version" step proves 1.4.2/29).
+**SHIPPED 2026-09-06**: main fast-forwarded to this commit (`22e5afb..fbfb854`,
+true fast-forward — the stale LOCAL main ref still pointed at the dead salvage
+line `75cf8a7` and was reset to origin first; origin/main was always the
+bisect-g line). Tagged `v1.4.2`, GitHub Release live with the IPA attached
+(artifact `SpeechnotesIOS` of green run 34048892296; CI's Verify-embedded-
+version step confirmed the IPA reports 1.4.2). STATE: main = books-v1.4.2 =
+fbfb854 = **v1.4.2/29**, everything device-verified.
