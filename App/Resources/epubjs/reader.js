@@ -23,6 +23,25 @@
     try { webkit.messageHandlers.reader.postMessage(msg); } catch (e) { /* no native side */ }
   }
 
+  // epub.js computes location.start.percentage from generated locations —
+  // we deliberately skip locations.generate() (it renders the whole book),
+  // so percentage is always 0/undefined here (v1.4.2 BUG B). The scrolled
+  // flow instead reports which viewport-height chunk of the CURRENT chapter
+  // is visible as start.displayed.page/total — a chapter-local fraction for
+  // free. A chapter shorter than one viewport reports total <= 1 → 0%.
+  function relocatedFraction(location) {
+    var start = location && location.start;
+    if (start && typeof start.percentage === "number" && start.percentage > 0) {
+      return start.percentage;
+    }
+    if (start && start.displayed && start.displayed.total > 1) {
+      var page = start.displayed.page || 1;
+      var fraction = (page - 1) / (start.displayed.total - 1);
+      return Math.min(Math.max(fraction, 0), 1);
+    }
+    return 0;
+  }
+
   function applyFontSize(pct) {
     if (window.RENDITION) window.RENDITION.themes.fontSize(pct + "%");
   }
@@ -79,7 +98,7 @@
         post({
           type: "relocated",
           index: start && typeof start.index === "number" ? start.index : 0,
-          fraction: start && typeof start.percentage === "number" ? start.percentage : 0,
+          fraction: relocatedFraction(location),
           total: book.spine ? book.spine.length : 0
         });
       });

@@ -12,6 +12,12 @@ import SpeechLogic
 /// fixes all three: the position comes from the engine's play-time signal
 /// (`onPlayedChars`), it is snapped to sentence boundaries via
 /// SentenceChunker, and the rendered text IS the spoken text.
+///
+/// Performance: the body re-evaluates on every sentence change (~1–2×/s)
+/// during playback. Rows go through `.equatable()`, so SwiftUI re-renders
+/// only the row whose content or highlighted subrange actually changed —
+/// rebuilding every visible row's AttributedString per evaluation was the
+/// "highlight can't keep up" jank (v1.4.2 BUG A).
 struct ReadAlongView: View {
     let text: String
     /// UTF-16 range in `text` of the sentence currently sounding.
@@ -36,15 +42,25 @@ struct ReadAlongView: View {
     /// old computed property re-split the whole note each time).
     @State private var paragraphs: [Paragraph] = []
 
+    /// Row point size — computed once per body evaluation, not once per row.
+    private var rowPointSize: CGFloat {
+        UIFont.preferredFont(forTextStyle: .body).pointSize * textScale
+    }
+
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
                     ForEach(paragraphs) { paragraph in
-                        Text(attributed(paragraph))
-                            .font(.system(size: UIFont.preferredFont(forTextStyle: .body).pointSize * textScale))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .id(paragraph.id)
+                        ReadAlongRow(
+                            content: String(paragraph.content),
+                            highlight: localHighlight(in: paragraph),
+                            pointSize: rowPointSize,
+                            accent: theme.accentColor,
+                            darkBackground: theme.colorScheme == .dark
+                        )
+                        .equatable()
+                        .id(paragraph.id)
                     }
                 }
                 .padding(16)
@@ -74,32 +90,58 @@ struct ReadAlongView: View {
         paragraphs = result
     }
 
-    /// Paragraph text with the overlapping part of the global highlight
-    /// range tinted. Built as before + highlighted + after so the highlight
-    /// needs no AttributedString index math (emoji-safe).
-    private func attributed(_ paragraph: Paragraph) -> AttributedString {
-        var highlight = AttributedString()
-        if let active = activeRange {
-            let lower = max(active.lowerBound, paragraph.start)
-            let upper = min(active.upperBound, paragraph.end)
-            if lower < upper {
-                let prefixOffset = lower - paragraph.start
-                let length = upper - lower
-                let units = Array(paragraph.content.utf16)
-                let before = String(decoding: units[0..<prefixOffset], as: UTF16.self)
-                let middle = String(decoding: units[prefixOffset..<(prefixOffset + length)], as: UTF16.self)
-                var highlighted = AttributedString(middle)
-                highlighted.backgroundColor = theme.accentColor.opacity(0.28)
-                highlighted.foregroundColor = theme.colorScheme == .dark ? .white : .primary
-                highlight = AttributedString(before) + highlighted
+    /// Project the global active range into the paragraph's local UTF-16
+    /// coordinates — nil when this paragraph isn't (partly) sounding.
+    private func localHighlight(in paragraph: Paragraph) -> Range<Int>? {
+        guard let active = activeRange else { return nil }
+        let lower = max(active.lowerBound, paragraph.start)
+        let upper = min(active.upperBound, paragraph.end)
+        guard lower < upper else { return nil }
+        return (lower - paragraph.start)..<(upper - paragraph.start)
+    }
+}
+
+/// One paragraph row. Equatable on exactly the inputs that change its
+/// pixels; `.equatable()` in the parent makes SwiftUI skip the body (and
+/// the AttributedString rebuild) whenever nothing visible changed.
+private struct ReadAlongRow: View, Equatable {
+    let content: String
+    /// UTF-16 subrange of `content` to tint — nil takes the plain fast path.
+    let highlight: Range<Int>?
+    let pointSize: CGFloat
+    let accent: Color
+    let darkBackground: Bool
+
+    static func == (lhs: ReadAlongRow, rhs: ReadAlongRow) -> Bool {
+        lhs.content == rhs.content
+            && lhs.highlight == rhs.highlight
+            && lhs.pointSize == rhs.pointSize
+            && lhs.accent == rhs.accent
+            && lhs.darkBackground == rhs.darkBackground
+    }
+
+    var body: some View {
+        Group {
+            if let highlight {
+                Text(attributed(highlight))
+            } else {
+                Text(verbatim: content)
             }
         }
-        if highlight.runs.isEmpty {
-            return AttributedString(String(paragraph.content))
-        }
-        let afterOffset = (activeRange.map { min($0.upperBound, paragraph.end) - paragraph.start } ?? 0)
-        let units = Array(paragraph.content.utf16)
-        let after = String(decoding: units[min(afterOffset, units.count)...], as: UTF16.self)
-        return highlight + AttributedString(after)
+        .font(.system(size: pointSize))
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// before + highlighted + after so the highlight needs no AttributedString
+    /// index math (emoji-safe).
+    private func attributed(_ highlight: Range<Int>) -> AttributedString {
+        let units = Array(content.utf16)
+        let before = String(decoding: units[0..<highlight.lowerBound], as: UTF16.self)
+        let middle = String(decoding: units[highlight.lowerBound..<highlight.upperBound], as: UTF16.self)
+        let after = String(decoding: units[highlight.upperBound...], as: UTF16.self)
+        var highlighted = AttributedString(middle)
+        highlighted.backgroundColor = accent.opacity(0.28)
+        highlighted.foregroundColor = darkBackground ? .white : .primary
+        return AttributedString(before) + highlighted + AttributedString(after)
     }
 }
