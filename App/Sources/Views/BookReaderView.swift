@@ -10,7 +10,7 @@ struct BookReaderView: View {
     let book: Book
     let store: BooksStore
     @EnvironmentObject private var player: SpeechPlayer
-    @EnvironmentObject private var theme: AppTheme
+    @EnvironmentObject private var appTheme: AppTheme
 
     @Environment(\.dismiss) private var dismiss
     @State private var webView: WKWebView?
@@ -51,50 +51,9 @@ struct BookReaderView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if showsReadAlong {
-                ReadAlongView(
-                    text: player.activeSpeechText ?? "",
-                    activeRange: player.readAlongRange,
-                    textScale: theme.previewTextScale
-                )
-            } else {
-                BookWebView(
-                    book: book,
-                    startChapter: chapterIndex,
-                    startTheme: theme,
-                    startFontSize: Int(fontSize),
-                    onRelocated: handleRelocated,
-                    onTOC: { toc = $0 },
-                    onError: { errorMessage = $0 },
-                    onWebViewReady: { webView = $0 }
-                )
-                .overlay {
-                    if !bookLoaded {
-                        VStack(spacing: 10) {
-                            ProgressView()
-                            Text("Opening book…")
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .background(theme == "dark" ? Color.black : (theme == "sepia" ? Color(red: 0.96, green: 0.94, blue: 0.89) : Color(.systemBackground)))
-                    }
-                }
-            }
+            readerSurface
             chapterBar
-            BookPlayerBar(
-                book: book,
-                chapterIndex: chapterIndex,
-                player: player,
-                onToggle: {
-                    Task {
-                        await BookPlaybackController.shared.togglePlay(
-                            book: book,
-                            chapterIndex: chapterIndex
-                        )
-                    }
-                }
-            )
+            playerBar
         }
         .navigationTitle(book.title)
         .navigationBarTitleDisplayMode(.inline)
@@ -148,6 +107,77 @@ struct BookReaderView: View {
             // Tear the web book down so its parsed spine doesn't linger.
             webView?.evaluateJavaScript("readerDestroy()", completionHandler: nil)
         }
+    }
+
+    // MARK: - Reader surface (read-along swap + webview + veil)
+
+    /// While this book speaks with read-along on, the webview surface swaps
+    /// to the native ReadAlongView (the editor's exact pattern).
+    private var readerSurface: some View {
+        Group {
+            if showsReadAlong {
+                ReadAlongView(
+                    text: player.activeSpeechText ?? "",
+                    activeRange: player.readAlongRange,
+                    textScale: appTheme.previewTextScale
+                )
+            } else {
+                webSurface
+            }
+        }
+    }
+
+    private var webSurface: some View {
+        BookWebView(
+            book: book,
+            startChapter: chapterIndex,
+            startTheme: theme,
+            startFontSize: Int(fontSize),
+            onRelocated: handleRelocated,
+            onTOC: { toc = $0 },
+            onError: { errorMessage = $0 },
+            onWebViewReady: { webView = $0 }
+        )
+        .overlay {
+            if !bookLoaded {
+                openingVeil
+            }
+        }
+    }
+
+    private var openingVeil: some View {
+        VStack(spacing: 10) {
+            ProgressView()
+            Text("Opening book…")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(veilColor)
+    }
+
+    private var veilColor: Color {
+        switch theme {
+        case "dark": return .black
+        case "sepia": return Color(red: 0.96, green: 0.94, blue: 0.89)
+        default: return Color(.systemBackground)
+        }
+    }
+
+    private var playerBar: some View {
+        BookPlayerBar(
+            book: book,
+            chapterIndex: chapterIndex,
+            player: player,
+            onToggle: {
+                Task {
+                    await BookPlaybackController.shared.togglePlay(
+                        book: book,
+                        chapterIndex: chapterIndex
+                    )
+                }
+            }
+        )
     }
 
     // MARK: - Chapter bar

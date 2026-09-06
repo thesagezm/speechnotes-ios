@@ -77,8 +77,12 @@ public enum XhtmlText {
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 if !text.isEmpty { buffer = text + ", " }
             } else if name == "img" {
+                // Always emit a word boundary — an alt-less image must not
+                // glue the surrounding words together ("Beforeafter").
                 if let alt = attributeDict["alt"], !alt.isEmpty {
                     buffer += " (image: \(alt)) "
+                } else {
+                    buffer += " "
                 }
             }
         }
