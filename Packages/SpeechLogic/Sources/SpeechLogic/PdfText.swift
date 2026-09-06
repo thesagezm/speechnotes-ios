@@ -3,8 +3,9 @@ import PDFKit
 
 /// One speech unit of a PDF: `startPage...endPage` (inclusive). Persisted in
 /// the book manifest (`Book.pdfChapters`) so library, reader and TTS agree
-/// without re-parsing the document.
-public struct PdfChapter: Codable, Equatable {
+/// without re-parsing the document. Hashable so Book keeps its synthesized
+/// Hashable conformance (NavigationLink(value:)).
+public struct PdfChapter: Codable, Equatable, Hashable {
     public var label: String
     public var startPage: Int
     public var endPage: Int
@@ -18,7 +19,7 @@ public struct PdfChapter: Codable, Equatable {
 
 /// Where a page's text starts inside its chapter's speech text — the
 /// read-along page-sync sidecar (`text/NNNN.pages.json`).
-public struct PdfPageOffset: Codable, Equatable {
+public struct PdfPageOffset: Codable, Equatable, Hashable {
     public var page: Int
     public var utf16Offset: Int
 

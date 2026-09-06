@@ -24,11 +24,19 @@ struct BookRowView: View {
 
     private var metaLine: String {
         var parts = [book.authorOrFormat]
-        if let chapters = book.spineCount {
-            parts.append("\(chapters) chapter\(chapters == 1 ? "" : "s")")
-        }
-        if let pages = book.pageCount {
-            parts.append("\(pages) pages")
+        switch book.format {
+        case .epub:
+            if let chapters = book.spineCount {
+                parts.append("\(chapters) chapter\(chapters == 1 ? "" : "s")")
+            }
+        case .pdf:
+            // Chapters appear once resolution lands (import or backfill) —
+            // until then the honest page count is the fallback.
+            if let chapters = book.pdfChapters, !chapters.isEmpty {
+                parts.append("\(chapters.count) chapter\(chapters.count == 1 ? "" : "s")")
+            } else if let pages = book.pageCount {
+                parts.append("\(pages) pages")
+            }
         }
         return parts.joined(separator: " · ")
     }

@@ -46,6 +46,15 @@ final class BooksStore: ObservableObject {
             .appendingPathComponent(String(format: "%04d.txt", chapterIndex))
     }
 
+    /// Read-along page-sync sidecar for PDF chapters: where each page's text
+    /// starts (UTF-16) inside the chapter's speech text, so the reader can
+    /// auto-scroll the PDFView to the sounding page.
+    nonisolated static func speechTextOffsetsURL(_ book: Book, chapterIndex: Int) -> URL {
+        bookDirectory(book.id)
+            .appendingPathComponent("text", isDirectory: true)
+            .appendingPathComponent(String(format: "%04d.pages.json", chapterIndex))
+    }
+
     nonisolated static func manifestURL(_ id: UUID) -> URL {
         bookDirectory(id).appendingPathComponent("manifest.json")
     }
@@ -88,7 +97,8 @@ final class BooksStore: ObservableObject {
     private func backfillMissingPDFCovers() {
         guard !didBackfillLegacyBooks else { return }
         let pending = books.filter { book in
-            (book.format == .pdf && !book.hasCover) || (book.format == .epub && book.spine == nil)
+            (book.format == .pdf && (!book.hasCover || book.pdfChapters == nil))
+                || (book.format == .epub && book.spine == nil)
         }
         guard !pending.isEmpty else { return }
         didBackfillLegacyBooks = true
@@ -98,11 +108,21 @@ final class BooksStore: ObservableObject {
                 switch book.format {
                 case .pdf:
                     guard let document = PDFDocument(url: dir.appendingPathComponent("original.pdf")),
-                          document.pageCount > 0,
-                          let page = document.page(at: 0),
-                          let data = Self.renderPDFCover(page: page) else { continue }
-                    try? data.write(to: dir.appendingPathComponent("cover.jpg"), options: .atomic)
-                    book.hasCover = true
+                          document.pageCount > 0 else { continue }
+                    if !book.hasCover, let page = document.page(at: 0),
+                       let data = Self.renderPDFCover(page: page) {
+                        try? data.write(to: dir.appendingPathComponent("cover.jpg"), options: .atomic)
+                        book.hasCover = true
+                    }
+                    // Books imported before v1.5 have no chapter list — the
+                    // outline/heading/page-range resolver fills it in here.
+                    if book.pdfChapters == nil {
+                        let resolved = PdfText.resolveChapters(in: document)
+                        if !resolved.chapters.isEmpty {
+                            book.pdfChapters = resolved.chapters
+                            book.pdfChapterSource = resolved.source
+                        }
+                    }
                 case .epub:
                     guard let data = try? Data(contentsOf: dir.appendingPathComponent("original.epub"), options: .mappedIfSafe),
                           let info = try? EpubParser.parse(archive: data), !info.spine.isEmpty else { continue }
@@ -228,6 +248,14 @@ final class BooksStore: ObservableObject {
                 let attrs = document.documentAttributes
                 if let title = attrs?[PDFDocumentAttribute.titleAttribute] as? String, !title.isEmpty { book.title = title }
                 if let author = attrs?[PDFDocumentAttribute.authorAttribute] as? String, !author.isEmpty { book.author = author }
+                // Chapters = the PDF's own outline when it has one, heading
+                // detection when it doesn't, labeled page ranges as the
+                // floor. Resolved once here, stored in the manifest.
+                let resolved = PdfText.resolveChapters(in: document)
+                if !resolved.chapters.isEmpty {
+                    book.pdfChapters = resolved.chapters
+                    book.pdfChapterSource = resolved.source
+                }
                 // Cover = page 1 rendered to a JPEG (epubs carry their real
                 // cover; without this PDFs show a generic glyph on the shelf).
                 if let page = document.page(at: 0) {

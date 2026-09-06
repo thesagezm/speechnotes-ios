@@ -60,13 +60,15 @@ final class BookPlaybackController {
         await speak(book: book, from: chapterIndex)
     }
 
-    /// Speaks `from` onward, skipping spine items with no extractable text
-    /// (cover-only files). Re-arms onNaturalFinish after every start —
-    /// explicit stop()s and note takeovers clear it on the player.
+    /// Speaks `from` onward, skipping chapters with no extractable text
+    /// (cover-only epub files, image-only PDF pages). Re-arms onNaturalFinish
+    /// after every start — explicit stop()s and note takeovers clear it on
+    /// the player.
     private func speak(book: Book, from startIndex: Int) async {
-        guard let player, let spine = book.spine else { return }
+        guard let player else { return }
+        let chapterCount = Self.chapterCount(of: book)
         var index = max(0, startIndex)
-        while index < spine.count {
+        while index < chapterCount {
             if let text = await chapterText(for: book, chapterIndex: index) {
                 activeChapterIndex = index
                 prefetchNextChapter(of: book, after: index)
@@ -91,10 +93,19 @@ final class BookPlaybackController {
         activeBook = nil
     }
 
+    /// Format-neutral speech units: epub = spine items, pdf = manifest
+    /// chapters (outline / heading / page-range resolved).
+    static func chapterCount(of book: Book) -> Int {
+        switch book.format {
+        case .epub: return book.spine?.count ?? 0
+        case .pdf: return book.pdfChapters?.count ?? 0
+        }
+    }
+
     private func advanceToNextChapter() {
         guard let book = activeBook else { return }
         let next = activeChapterIndex + 1
-        guard let spine = book.spine, next < spine.count else {
+        guard next < Self.chapterCount(of: book) else {
             Log.shared.info("BookPlayback: finished \(book.title)")
             activeBook = nil
             return
@@ -104,24 +115,35 @@ final class BookPlaybackController {
         }
     }
 
-    /// Chapter speech text: disk cache first, then extract from the archive
-    /// off-main (ZipReader touches one entry; XhtmlText strips to plain
-    /// paragraphs) and cache for every later play/resume.
+    /// Chapter speech text: disk cache first, then extract off-main and cache
+    /// for every later play/resume. epub = one zip entry → XhtmlText; pdf =
+    /// per-page PdfText extraction with Vision OCR for scanned pages, plus
+    /// the per-page offsets sidecar for read-along page sync.
     private func chapterText(for book: Book, chapterIndex: Int) async -> String? {
         let cacheURL = BooksStore.speechTextURL(book, chapterIndex: chapterIndex)
         if let cached = try? String(contentsOf: cacheURL, encoding: .utf8), !cached.isEmpty {
             return cached
         }
-        guard let spine = book.spine, chapterIndex < spine.count else { return nil }
-        let archiveURL = BooksStore.originalFileURL(book)
-        let entry = spine[chapterIndex]
-        let extracted = await Task.detached(priority: .userInitiated) { () -> String? in
-            guard let data = try? Data(contentsOf: archiveURL, options: .mappedIfSafe),
-                  let xhtml = try? ZipReader.readEntry(entry, in: data) else { return nil }
-            let text = XhtmlText.plainText(from: xhtml)
-            return text.isEmpty ? nil : text
-        }.value
-        guard let text = extracted else { return nil }
+        let extracted: (text: String, pageOffsets: [PdfPageOffset]?)?
+        switch book.format {
+        case .epub:
+            guard let spine = book.spine, chapterIndex < spine.count else { return nil }
+            let archiveURL = BooksStore.originalFileURL(book)
+            let entry = spine[chapterIndex]
+            let text = await Task.detached(priority: .userInitiated) { () -> String? in
+                guard let data = try? Data(contentsOf: archiveURL, options: .mappedIfSafe),
+                      let xhtml = try? ZipReader.readEntry(entry, in: data) else { return nil }
+                let plain = XhtmlText.plainText(from: xhtml)
+                return plain.isEmpty ? nil : plain
+            }.value
+            extracted = text.map { (text: $0, pageOffsets: nil as [PdfPageOffset]?) }
+        case .pdf:
+            guard let result = await PdfSpeechText.chapterText(book: book, chapterIndex: chapterIndex) else {
+                return nil
+            }
+            extracted = (result.text, result.pageOffsets)
+        }
+        guard var text = extracted?.text, !text.isEmpty else { return nil }
         if text.utf16.count > 200_000 {
             Log.shared.info("BookPlayback: ch\(chapterIndex) is \(text.utf16.count) chars — engines may take a while")
         }
@@ -130,6 +152,10 @@ final class BookPlaybackController {
             withIntermediateDirectories: true
         )
         try? text.write(to: cacheURL, atomically: true, encoding: .utf8)
+        if let pageOffsets = extracted?.pageOffsets,
+           let data = try? JSONEncoder().encode(pageOffsets) {
+            try? data.write(to: BooksStore.speechTextOffsetsURL(book, chapterIndex: chapterIndex), options: .atomic)
+        }
         return text
     }
 
