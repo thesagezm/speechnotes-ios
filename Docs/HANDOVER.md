@@ -341,3 +341,27 @@ TTS:
   PlayPositionTracker (playerTime samples → chars, 0.3s heartbeat,
   never schedule-ahead). SpeechPlayer maps to sentence ranges via
   SentenceChunker over the EXACT spoken text (activeSpeechText).
+
+## 2026-09-06 addendum #4 — v1.4 complete (all three phases green on CI)
+
+Phase 1 — TTS: small Kokoro tier = uint8 (fp16 NaN'd on ORT CPU per the new
+kokoro-small-spike gate — spike did its job). Kitten fully removed. Bookmark
+resume snaps on SentenceChunker rules. Read-along v2: ReadAlongView (dedicated
+reader while the same note speaks, toggle = book.pages button in the player
+bar / readAlongEnabled) driven by onPlayedChars play-time signals
+(SystemEngine word-exact; Onnx/Supertonic via PlayPositionTracker heartbeat).
+
+Phase 2 — UI: Storage gallery/exports capped with See-all expanders; accent
+picker is a dropdown; mini-player is a rounded material card, minimizable to
+a progress-ring bubble (miniPlayerCollapsed AppStorage).
+
+Phase 3 — Org: flat notebooks (Notebook + NotebooksStore, notebooks.json,
+Note.notebookId), chip-row scoping in NotesListView with counts, Notebook
+manager sheet (delete → notes Unfiled), pin/favorite (context menu + swipe +
+row glyphs, Pinned section on top), 3-page onboarding (hasOnboarded).
+
+main fast-forwarded to the green build (6a5da15); IPA artifact on run
+34011231751. Device test checklist for the next session: small-model
+download + playback (Settings → Kokoro small), resume snap at sentence
+boundary, read-along highlight tracking + toggle, mini-player minimize,
+notebook CRUD + moves, pin/favorite, onboarding on fresh container.
