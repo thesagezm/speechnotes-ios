@@ -55,11 +55,15 @@ struct BookWebView: UIViewRepresentable {
         context.coordinator.parent = self
     }
 
-    /// The shell page + query-encoded book URL, all inside the custom scheme.
+    /// The shell page + query-encoded book path. The EPUB is served under
+    /// the SAME shell origin (bookscheme://shell/book/…) because a fetch
+    /// across two custom-scheme hosts is cross-origin between opaque
+    /// origins and WebKit blocks it ("TypeError: Load failed" — the first
+    /// device build's failure).
     static func shellURL(book: Book, chapter: Int, theme: String, fontSize: Int) -> URL? {
         var components = URLComponents(string: "bookscheme://shell/index.html")
         components?.queryItems = [
-            URLQueryItem(name: "book", value: "bookscheme://book/\(book.id.uuidString)/original.epub"),
+            URLQueryItem(name: "bookPath", value: "/book/\(book.id.uuidString)/original.epub"),
             URLQueryItem(name: "chapter", value: String(chapter)),
             URLQueryItem(name: "theme", value: theme),
             URLQueryItem(name: "fontSize", value: String(fontSize)),
@@ -85,19 +89,27 @@ struct BookWebView: UIViewRepresentable {
                 return
             }
 
-            // Route: bookscheme://shell/<file> -> bundle resource,
-            //        bookscheme://book/<uuid>/original.epub -> the book file.
+            // Route: bookscheme://shell/<file>          -> bundle resource,
+            //        bookscheme://shell/book/<uuid>/…   -> that book's file
+            //        (SAME origin as the shell — see shellURL),
+            //        bookscheme://book/<uuid>/original.epub (legacy alias).
             let response: URLResponse
             let data: Data
             do {
                 switch url.host {
                 case "shell":
-                    let name = url.path.isEmpty || url.path == "/" ? "index.html" : String(url.path.dropFirst())
-                    guard let (resourceData, mime) = Self.bundleResource(name) else {
-                        throw URLError(.fileDoesNotExist)
+                    let path = url.path.isEmpty || url.path == "/" ? "/index.html" : url.path
+                    if path.hasPrefix("/book/") {
+                        data = try Self.bookFile(path: path)
+                        response = Self.httpResponse(url: url, data: data, mime: "application/epub+zip")
+                    } else {
+                        let name = String(path.dropFirst())
+                        guard let (resourceData, mime) = Self.bundleResource(name) else {
+                            throw URLError(.fileDoesNotExist)
+                        }
+                        data = resourceData
+                        response = Self.httpResponse(url: url, data: data, mime: mime)
                     }
-                    data = resourceData
-                    response = URLResponse(url: url, mimeType: mime, expectedContentLength: data.count, textEncodingName: "utf-8")
                 case "book":
                     // Path is /<UUID>/original.epub — parse the UUID and serve
                     // only from that book's own directory.
@@ -106,10 +118,8 @@ struct BookWebView: UIViewRepresentable {
                           let id = UUID(uuidString: String(parts[0])) else {
                         throw URLError(.badURL)
                     }
-                    let fileURL = BooksStore.bookDirectory(id)
-                        .appendingPathComponent("original.epub")
-                    data = try Data(contentsOf: fileURL, options: .mappedIfSafe)
-                    response = URLResponse(url: url, mimeType: "application/epub+zip", expectedContentLength: data.count, textEncodingName: nil)
+                    data = try Self.bookFile(path: url.path)
+                    response = Self.httpResponse(url: url, data: data, mime: "application/epub+zip")
                 default:
                     throw URLError(.unsupportedURL)
                 }
@@ -136,6 +146,36 @@ struct BookWebView: UIViewRepresentable {
 
         func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {
             // Synchronous serving finishes before stop can matter.
+        }
+
+        /// Serves the EPUB of the book named by a /book/<uuid>/original.epub
+        /// path — only ever from that book's own directory.
+        private static func bookFile(path: String) throws -> Data {
+            let parts = path.split(separator: "/")
+            guard parts.count == 3, parts[0] == "book",
+                  let id = UUID(uuidString: String(parts[1])) else {
+                throw URLError(.badURL)
+            }
+            return try Data(
+                contentsOf: BooksStore.bookDirectory(id).appendingPathComponent("original.epub"),
+                options: .mappedIfSafe
+            )
+        }
+
+        /// HTTP-flavoured response so fetch/XHR see status + CORS headers
+        /// (plain URLResponse carries neither).
+        private static func httpResponse(url: URL, data: Data, mime: String) -> URLResponse {
+            let headers = [
+                "Content-Type": mime,
+                "Access-Control-Allow-Origin": "*",
+                "Content-Length": String(data.count),
+            ]
+            return HTTPURLResponse(
+                url: url,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: headers
+            ) ?? URLResponse(url: url, mimeType: mime, expectedContentLength: data.count, textEncodingName: nil)
         }
 
         private static func bundleResource(_ name: String) -> (Data, String)? {

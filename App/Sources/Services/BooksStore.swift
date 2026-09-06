@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 import PDFKit
 import SpeechLogic
 
@@ -73,6 +74,37 @@ final class BooksStore: ObservableObject {
         }
         books = shelf.sorted {
             ($0.lastOpenedAt ?? $0.addedAt) > ($1.lastOpenedAt ?? $1.addedAt)
+        }
+        backfillMissingPDFCovers()
+    }
+
+    /// PDFs imported before covers existed (or whose render failed at import)
+    /// get their page-1 cover generated lazily here — one detached render per
+    /// book, then the manifest updates and the shelf refreshes to show them.
+    /// One-shot per session: a book that keeps failing must not loop.
+    private var didBackfillPDFCovers = false
+
+    private func backfillMissingPDFCovers() {
+        guard !didBackfillPDFCovers else { return }
+        let pending = books.filter { $0.format == .pdf && !$0.hasCover }
+        guard !pending.isEmpty else { return }
+        didBackfillPDFCovers = true
+        Task.detached(priority: .utility) { [weak self] in
+            for var book in pending {
+                let dir = BooksStore.bookDirectory(book.id)
+                guard let document = PDFDocument(url: dir.appendingPathComponent("original.pdf")),
+                      document.pageCount > 0,
+                      let page = document.page(at: 0),
+                      let data = Self.renderPDFCover(page: page) else { continue }
+                try? data.write(to: dir.appendingPathComponent("cover.jpg"), options: .atomic)
+                book.hasCover = true
+                if let manifest = try? JSONEncoder().encode(book) {
+                    try? manifest.write(to: BooksStore.manifestURL(book.id), options: .atomic)
+                }
+            }
+            await MainActor.run { [weak self] in
+                self?.refresh()
+            }
         }
     }
 
@@ -175,9 +207,27 @@ final class BooksStore: ObservableObject {
                 let attrs = document.documentAttributes
                 if let title = attrs?[PDFDocumentAttribute.titleAttribute] as? String, !title.isEmpty { book.title = title }
                 if let author = attrs?[PDFDocumentAttribute.authorAttribute] as? String, !author.isEmpty { book.author = author }
+                // Cover = page 1 rendered to a JPEG (epubs carry their real
+                // cover; without this PDFs show a generic glyph on the shelf).
+                if let page = document.page(at: 0) {
+                    if let data = Self.renderPDFCover(page: page) {
+                        try? data.write(to: directory.appendingPathComponent("cover.jpg"), options: .atomic)
+                        book.hasCover = true
+                    }
+                }
             }
         }
         return book
+    }
+
+    /// Renders one PDF page as a shelf-cover JPEG. Width-fixed (600 pt),
+    /// height follows the page's own aspect ratio.
+    nonisolated private static func renderPDFCover(page: PDFPage) -> Data? {
+        let bounds = page.bounds(for: .cropBox)
+        let width: CGFloat = 600
+        let height = bounds.height > 0 ? width * bounds.height / bounds.width : width
+        let thumbnail = page.thumbnail(of: CGSize(width: width, height: height), for: .cropBox)
+        return thumbnail.jpegData(compressionQuality: 0.85)
     }
 
     // MARK: - Mutations

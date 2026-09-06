@@ -6,7 +6,9 @@
 // evaluateJavaScript would race the rendition's creation.
 (function () {
   var params = new URLSearchParams(location.search);
-  var bookURL = params.get("book");
+  // RELATIVE path under the shell origin — a fetch to a DIFFERENT custom
+  // scheme host is cross-origin between opaque origins and WebKit blocks it.
+  var bookPath = params.get("bookPath");
   var startChapter = parseInt(params.get("chapter") || "0", 10);
   var startTheme = params.get("theme") || "light";
   var startFontSize = parseInt(params.get("fontSize") || "100", 10);
@@ -36,8 +38,28 @@
       THEMES[mode] ? THEMES[mode].body.background : "#ffffff";
   }
 
-  fetch(bookURL)
-    .then(function (r) { return r.arrayBuffer(); })
+  // fetch first; XHR as the belt-and-braces fallback (both go through the
+  // native WKURLSchemeHandler on modern WebKit).
+  function fetchBook(path) {
+    return fetch(path).then(function (r) {
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      return r.arrayBuffer();
+    }).catch(function (fetchErr) {
+      return new Promise(function (resolve, reject) {
+        var xhr = new XMLHttpRequest();
+        xhr.open("GET", path, true);
+        xhr.responseType = "arraybuffer";
+        xhr.onload = function () {
+          if (xhr.status === 200) resolve(xhr.response);
+          else reject(new Error("XHR " + xhr.status + " (fetch said: " + fetchErr + ")"));
+        };
+        xhr.onerror = function () { reject(fetchErr); };
+        xhr.send();
+      });
+    });
+  }
+
+  fetchBook(bookPath)
     .then(function (buf) {
       var book = ePub(buf);
       window.BOOK = book;

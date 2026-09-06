@@ -19,6 +19,9 @@ struct BookReaderView: View {
     @State private var showingTOC = false
     @State private var showingAppearance = false
     @State private var errorMessage: String?
+    /// True once the web book reported its first relocated event — the
+    /// loading veil hides the un-themed (black) webview until then.
+    @State private var bookLoaded = false
     @AppStorage("bookReaderTheme") private var theme = "light"
     @AppStorage("bookReaderFontSize") private var fontSize = 100.0
     /// The chapter whose position was last written to the manifest —
@@ -47,6 +50,18 @@ struct BookReaderView: View {
                 onError: { errorMessage = $0 },
                 onWebViewReady: { webView = $0 }
             )
+            .overlay {
+                if !bookLoaded {
+                    VStack(spacing: 10) {
+                        ProgressView()
+                        Text("Opening book…")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(theme == "dark" ? Color.black : (theme == "sepia" ? Color(red: 0.96, green: 0.94, blue: 0.89) : Color(.systemBackground)))
+                }
+            }
             chapterBar
         }
         .navigationTitle(book.title)
@@ -210,6 +225,7 @@ struct BookReaderView: View {
         chapterIndex = max(0, index)
         chapterFraction = fraction
         if total > 0 { totalChapters = total }
+        if !bookLoaded { bookLoaded = true }
         if index != persistedChapter {
             persistPosition()
         }
