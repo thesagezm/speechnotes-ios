@@ -476,3 +476,30 @@ nothing native (handleRelocated already takes the fraction).
 
 Golden rules unchanged (see §10). Never push red; device-verify before
 promoting; SpeechPlayer changes stay additive; new screens in new files.
+
+## 2026-09-06 addendum #8 — BUG A + B fixed on books-v1.4.2 (0c3256f, CI green, awaiting device test)
+
+- **BUG A (read-along lag)**: ReadAlongView rewritten per the fix sketch —
+  rows are now an Equatable `ReadAlongRow` shown through `.equatable()`.
+  SwiftUI re-renders only the row whose content or highlighted subrange
+  changed; every other row takes a plain `Text(verbatim:)` fast path. This
+  also absorbs the faster player progress ticks (they re-evaluate the
+  parent body without changing the sentence range). Scroll/anchor behavior
+  and the highlight color logic are unchanged.
+- **BUG B (chapter % stuck at 0%)**: verified in the vendored epub.min.js
+  (0.3.93) — `flow: "scrolled"` uses the continuous manager; with no
+  generated locations `percentageFromCfi` returns null, hence 0. Every
+  relocated event DOES carry `start.displayed.{page,total}` (viewport-height
+  chunks within the CURRENT chapter). reader.js now derives the
+  chapter-local fraction from that, clamped 0…1; native side untouched
+  (handleRelocated already takes the fraction). A chapter shorter than one
+  viewport reports 0% — cosmetic, expected.
+- Commit `0c3256f` (pushed, Build IPA run 34045854355 ALL GREEN — logic
+  tests, both/kokoro/epub spikes, IPA build). IPA artifact ready for the
+  device round.
+
+Still pending (unchanged from addendum #7's work order): the device-test
+round on these two fixes, THEN the release commit (bump 4 version fields →
+1.4.2/29, README + this HANDOVER, PLAN §5 checklist, fast-forward main,
+tag v1.4.2, attach IPA). Backlog unchanged (PDF TTS, mini-player → Books
+jump, WAV export stays note-only).
