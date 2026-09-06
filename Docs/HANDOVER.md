@@ -285,3 +285,30 @@ Historical second signature (bug_type 206, CPU watchdog: 94% CPU 51s, killed):
 older-era build spinning ONNX compute at launch. The launch-path scrub
 (deferred wirePlaybackOnce) reduces this; if it reappears with the fp32 model,
 the next step is lazy engine creation on first playback, off the main actor.
+
+## 2026-09-06 addendum #2 — post-launch polish round (bisect-g)
+
+Device-verified launch fix confirmed (app opens). Seven user items:
+1+2. One-letter-per-tap typing + broken selection: MarkdownEditorView's
+   updateUIView force-resigned first responder on every re-render because the
+   `editorFocused` FocusState it mirrored is never set anywhere (dead since
+   2426fb2 editor rewrite). Relay + focusState param removed — UIKit owns
+   focus. ONE root cause for both symptoms.
+3. CachedImage 400pt height cap removed — full width, unlimited height.
+4. Web images now persist: new RemoteImageStore (Caches/remote-images/,
+   sha256(url).ext + .url sidecar) with read-through in ImageCache; Storage
+   "Cached images" is now a browsable grid gallery of BOTH note images and
+   web images (tap → ZoomableImageView, context menu share/delete, combined
+   footer + usage row).
+5. Blurry ⋯ toolbar: root-level .animation(value:) moved off the window
+   ZStack; scoped to a Group wrapping only the conditional mini-player bar.
+   If blur persists it's an iOS 26 Liquid Glass artifact inside LiveContainer.
+6. Two stacked player bars in-app: global MiniPlayerBar now yields while the
+   editor of the SAME note shows its own PlayerControlsBar
+   (SpeechPlayer.miniPlayerSuppressed, set by NoteEditorView on appear/
+   disappear/nowPlayingNoteId change). NOTE: the earlier AVSpeech duplicate
+   Control Center card theory was NOT the user's complaint — no
+   NowPlayingCenter changes in this round.
+7. main promoted to the device-verified build f7b9c5c (force-with-lease).
+   This commit sits ON TOP of that; fast-forward main only after the next
+   device-verified CI build.

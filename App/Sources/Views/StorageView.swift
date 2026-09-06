@@ -28,17 +28,87 @@ struct StorageView: View {
 
     // MARK: - Cached images
 
-    /// All cached note-image targets across every note. Computed once per
-    /// body evaluation so header / rows / footer stay consistent.
-    private var imageTargets: [String] { NoteImageStore.allTargets() }
+    /// One browsable cached image — either a note's own attached image
+    /// (Documents/note-images/) or a file the preview downloaded from the
+    /// internet (Caches/remote-images/).
+    private struct CachedImageEntry: Identifiable {
+        enum Source {
+            case note(target: String)
+            case web(RemoteImageStore.Entry)
+        }
 
-    /// Shows every cached note-image across all notes (thumbnails excluded),
-    /// plus total bytes. Deleting removes the on-disk file + memory cache —
-    /// the markdown still renders (via the speechnotes:// target) until the
-    /// next save re-prunes the orphan.
+        let source: Source
+
+        var id: String {
+            switch source {
+            case .note(let target): return "note-" + target
+            case .web(let entry): return "web-" + entry.id
+            }
+        }
+        var fileURL: URL {
+            switch source {
+            case .note(let target):
+                return NoteImageStore.resolveLocalURL(target, noteId: nil)
+                    ?? URL(fileURLWithPath: target)
+            case .web(let entry): return entry.fileURL
+            }
+        }
+        /// Key under which the preview cached the decoded image in memory,
+        /// so deleting the entry also evicts the NSCache copy.
+        var memoryKey: URL {
+            switch source {
+            case .note(let target):
+                return NoteImageStore.resolveLocalURL(target, noteId: nil)
+                    ?? URL(fileURLWithPath: target)
+            case .web(let entry): return entry.url
+            }
+        }
+        var bytes: Int64 {
+            switch source {
+            case .note(let target):
+                return Int64((try? fileURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+            case .web(let entry): return entry.bytes
+            }
+        }
+        var isFromWeb: Bool {
+            if case .web = source { return true }
+            return false
+        }
+        var label: String {
+            switch source {
+            case .note(let target):
+                guard let parsed = NoteImageStore.parseLocalTarget(target) else { return target }
+                let h = parsed.hash
+                return h.count > 12 ? String(h.prefix(12)) + "…" : h
+            case .web(let entry):
+                return entry.url.host ?? entry.url.absoluteString
+            }
+        }
+    }
+
+    /// Every cached image across both stores. Computed once per body
+    /// evaluation so header / grid / footer stay consistent.
+    private var cachedImages: [CachedImageEntry] {
+        var entries: [CachedImageEntry] = []
+        for target in NoteImageStore.allTargets() {
+            entries.append(CachedImageEntry(source: .note(target: target)))
+        }
+        for entry in RemoteImageStore.allEntries() {
+            entries.append(CachedImageEntry(source: .web(entry)))
+        }
+        return entries
+    }
+
+    private var totalImageBytes: Int64 {
+        cachedImages.reduce(0) { $0 + $1.bytes }
+    }
+
+    /// Browsable gallery: every cached image (notes + web) as tappable
+    /// thumbnails — tap opens the full pinch-to-zoom viewer, long-press
+    /// offers share/delete, and the footer counts both stores together.
     private var imagesSection: some View {
         Section {
-            if imageTargets.isEmpty {
+            if cachedImages.isEmpty {
                 Label(
                     "No images cached yet — insert one in a markdown note.",
                     systemImage: "photo.on.rectangle"
@@ -46,90 +116,86 @@ struct StorageView: View {
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
             } else {
-                ForEach(imageTargets, id: \.self) { target in
-                    imageRow(target)
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: 84), spacing: 10)],
+                    spacing: 10
+                ) {
+                    ForEach(cachedImages) { entry in
+                        galleryCell(entry)
+                    }
                 }
+                .padding(.vertical, 4)
                 Button(role: .destructive) {
                     Haptics.warning()
                     clearAllImages()
                 } label: {
                     Label("Clear all cached images", systemImage: "trash.slash")
                 }
-                .disabled(imageTargets.isEmpty)
             }
         } header: {
             Text("Cached images")
         } footer: {
-            if !imageTargets.isEmpty {
-                Text("\(imageTargets.count) image(s) · \(ByteCountFormatter.string(fromByteCount: NoteImageStore.totalFootprint(), countStyle: .file))")
+            if !cachedImages.isEmpty {
+                Text("\(cachedImages.count) image(s) · \(ByteCountFormatter.string(fromByteCount: totalImageBytes, countStyle: .file)) — attached and web previews")
             }
+        }
+        .sheet(item: $zoomedImage) { entry in
+            ZoomableImageView(url: entry.fileURL, alt: entry.label)
         }
     }
 
-    private func imageRow(_ target: String) -> some View {
-        HStack(spacing: 12) {
-            thumb(target)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(hash(of: target))
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-                Text(fileExtension(of: target))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-            Button(role: .destructive) {
-                Haptics.press()
-                NoteImageStore.remove(target: target)
-                ImageCache.shared.remove(for: NoteImageStore.resolveLocalURL(target, noteId: nil) ?? URL(fileURLWithPath: target))
-            } label: {
-                Image(systemName: "trash").foregroundStyle(.red)
-            }
-            .buttonStyle(.plain)
-            Button {
-                if let local = NoteImageStore.resolveLocalURL(target, noteId: nil) {
-                    sharingURL = local
+    @State private var zoomedImage: CachedImageEntry?
+
+    private func galleryCell(_ entry: CachedImageEntry) -> some View {
+        Button {
+            Haptics.tap()
+            zoomedImage = entry
+        } label: {
+            ZStack(alignment: .topTrailing) {
+                GalleryThumb(fileURL: entry.fileURL)
+                    .frame(width: 84, height: 84)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                if entry.isFromWeb {
+                    Image(systemName: "globe")
+                        .font(.caption2)
+                        .padding(4)
+                        .background(.ultraThinMaterial, in: Circle())
+                        .padding(4)
                 }
+            }
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button {
+                sharingURL = entry.fileURL
             } label: {
-                Image(systemName: "square.and.arrow.up")
+                Label("Share", systemImage: "square.and.arrow.up")
             }
-            .buttonStyle(.plain)
-        }
-    }
-
-    private func thumb(_ target: String) -> some View {
-        Group {
-            if let local = NoteImageStore.resolveLocalURL(target, noteId: nil),
-               let data = try? Data(contentsOf: local), let img = UIImage(data: data) {
-                Image(uiImage: img)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(width: 40, height: 40)
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-            } else {
-                Image(systemName: "photo")
-                    .foregroundStyle(.secondary)
-                    .frame(width: 40, height: 40)
+            Button(role: .destructive) {
+                deleteImage(entry)
+            } label: {
+                Label("Delete", systemImage: "trash")
             }
         }
     }
 
-    private func hash(of target: String) -> String {
-        guard let parsed = NoteImageStore.parseLocalTarget(target) else { return target }
-        let h = parsed.hash
-        return h.count > 12 ? String(h.prefix(12)) + "…" : h
-    }
-
-    private func fileExtension(of target: String) -> String {
-        NoteImageStore.parseLocalTarget(target)?.ext ?? "img"
+    private func deleteImage(_ entry: CachedImageEntry) {
+        Haptics.press()
+        switch entry.source {
+        case .note(let target):
+            NoteImageStore.remove(target: target)
+        case .web(let webEntry):
+            RemoteImageStore.remove(webEntry)
+        }
+        ImageCache.shared.remove(for: entry.memoryKey)
     }
 
     private func clearAllImages() {
         for target in NoteImageStore.allTargets() {
             NoteImageStore.remove(target: target)
-            ImageCache.shared.remove(for: NoteImageStore.resolveLocalURL(target, noteId: nil) ?? URL(fileURLWithPath: target))
         }
+        RemoteImageStore.removeAll()
+        ImageCache.shared.removeAll()
     }
 
     // MARK: - Exported audio
@@ -222,6 +288,10 @@ struct StorageView: View {
             usageRow("Kitten model", ExportsStore.directorySize(ModelManager.kittenDirectory))
             usageRow("Supertonic model", ExportsStore.directorySize(ModelManager.supertonicDirectory))
             usageRow("Exported audio", ExportsStore.directorySize(ExportsStore.exportsDirectory))
+            usageRow(
+                "Cached images",
+                NoteImageStore.totalFootprint() + RemoteImageStore.totalFootprint()
+            )
         } header: {
             Text("Storage used")
         } footer: {
@@ -246,6 +316,36 @@ private enum NotesStoreSizeReader {
         let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("notes.json")
         return Int64((try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+    }
+}
+
+/// One grid thumbnail. Loads + decodes its image once per cell via `.task`
+/// (off the main actor) instead of inline in body — the grid re-renders on
+/// every storage refresh and would otherwise re-read every file each time.
+private struct GalleryThumb: View {
+    let fileURL: URL
+    @State private var image: UIImage?
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                Image(systemName: "photo")
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color.secondary.opacity(0.08))
+            }
+        }
+        .task(id: fileURL) {
+            guard image == nil else { return }
+            image = await Task.detached(priority: .userInitiated) { () -> UIImage? in
+                guard let data = try? Data(contentsOf: fileURL) else { return nil }
+                return UIImage(data: data)
+            }.value
+        }
     }
 }
 

@@ -37,7 +37,22 @@ final class ImageCache {
     /// — callers must ALREADY be off the main actor (disk read + decode).
     func image(for url: URL) -> UIImage? {
         if let cached = peek(url) { return cached }
-        guard let data = try? Data(contentsOf: url), let decoded = UIImage(data: data) else { return nil }
+        let data: Data?
+        if url.isFileURL {
+            data = try? Data(contentsOf: url)
+        } else {
+            // Remote: disk-backed store first (persists across launches —
+            // Storage's gallery browses these files too), then a network
+            // fetch-through on a miss.
+            if let disk = RemoteImageStore.loadData(for: url) {
+                data = disk
+            } else {
+                guard let fetched = try? Data(contentsOf: url), !fetched.isEmpty else { return nil }
+                RemoteImageStore.store(fetched, for: url)
+                data = fetched
+            }
+        }
+        guard let data, let decoded = UIImage(data: data) else { return nil }
         lock.lock()
         defer { lock.unlock() }
         cache.setObject(decoded, forKey: cacheKey(for: url), cost: data.count)
@@ -94,14 +109,12 @@ final class ImageCache {
 /// SwiftUI image that reads from `ImageCache` first. Falls back to aProgressView
 /// placeholder while the decode runs off-main.
 /// Renders at full available width so images fill the screen horizontally
-/// (Joplin parity). The maxHeight cap only kicks in for extreme panoramas.
+/// (Joplin parity) with NO height cap — tall images get as tall as the
+/// aspect ratio requires (user request, was 400pt panorama guard).
 struct CachedImage: View {
     let url: URL
     let alt: String
     let zoomable: Bool
-    /// Maximum rendered height. Aspect-fit width stays full unless the
-    /// height cap kicks in (extreme panoramas).
-    var maxHeight: CGFloat = 400
     /// Closure fired when the user taps the image (only if `zoomable`).
     var onTap: (() -> Void)? = nil
 
@@ -131,7 +144,6 @@ struct CachedImage: View {
         }
         .accessibilityLabel(alt.isEmpty ? "image" : alt)
         .frame(maxWidth: .infinity)
-        .frame(maxHeight: maxHeight)
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .task(id: url) {
             await load()

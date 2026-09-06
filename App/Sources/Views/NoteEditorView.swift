@@ -28,7 +28,6 @@ struct NoteEditorView: View {
     /// offsets. The format bar reads `formattingBarSelection` (a bridged
     /// String.Index binding) so it doesn't need to know the editor is UIKit.
     @State private var selectionUTF16: Range<Int>?
-    @FocusState private var editorFocused: Bool
     /// Reading mode's in-app browser for tapped markdown links (the preview
     /// now uses AttributedString links + openURL instead of per-run buttons).
     @State private var safariURL: URL?
@@ -157,6 +156,14 @@ struct NoteEditorView: View {
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { editorToolbar }
+        // While THIS editor is on top and the speaking note is this note,
+        // the editor's own PlayerControlsBar is the player UI — suppress the
+        // global mini-player so the two never stack at the bottom.
+        .onAppear { player.miniPlayerSuppressed = (player.nowPlayingNoteId == noteId) }
+        .onDisappear { player.miniPlayerSuppressed = false }
+        .onChange(of: player.nowPlayingNoteId) { _ in
+            player.miniPlayerSuppressed = (player.nowPlayingNoteId == noteId)
+        }
         .onReceive(NotificationCenter.default.publisher(for: .requestVoicePicker)) { _ in
             showingVoicePicker = true
         }
@@ -354,7 +361,6 @@ struct NoteEditorView: View {
             text: $draft,
             selection: $selectionUTF16,
             onCaretMoved: { },
-            focusState: $editorFocused,
             textScale: theme.previewTextScale
         )
         .font(.body)

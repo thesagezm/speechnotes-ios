@@ -18,21 +18,27 @@ struct GlobalMiniPlayerOverlay: ViewModifier {
         ZStack(alignment: .bottom) {
             content
 
-            if player.showMiniPlayer {
-                MiniPlayerBar {
-                    NotificationCenter.default.post(
-                        name: .miniPlayerJumpToNote,
-                        object: nil
-                    )
+            // The animation scope wraps ONLY the conditional bar — never the
+            // whole window (nav bar included). A root-level .animation made
+            // toolbar items rasterize blurry until first interaction
+            // (iOS 26 / LiveContainer).
+            Group {
+                if player.showMiniPlayer {
+                    MiniPlayerBar {
+                        NotificationCenter.default.post(
+                            name: .miniPlayerJumpToNote,
+                            object: nil
+                        )
+                    }
+                    // Standard tab bar (49pt) + safe-area bottom inset = lift
+                    // the mini player just above the Notes/Storage/Settings tabs.
+                    .padding(.bottom, 49 + 34)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .zIndex(1)
                 }
-                // Standard tab bar (49pt) + safe-area bottom inset = lift
-                // the mini player just above the Notes/Storage/Settings tabs.
-                .padding(.bottom, 49 + 34)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
-                .zIndex(1)
             }
+            .animation(.easeInOut(duration: 0.2), value: player.showMiniPlayer)
         }
-        .animation(.easeInOut(duration: 0.2), value: player.showMiniPlayer)
     }
 }
 

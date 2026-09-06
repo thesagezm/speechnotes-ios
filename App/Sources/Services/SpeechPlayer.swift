@@ -286,10 +286,16 @@ final class SpeechPlayer: ObservableObject {
 
     /// True while an audition sample is sounding.
     var isAuditioning: Bool { auditioningVoice != nil }
+    /// Set by the note editor while IT shows its full PlayerControlsBar for
+    /// the same note that is speaking — the global mini-player then yields
+    /// so two control bars never stack at the bottom of the screen.
+    @Published var miniPlayerSuppressed = false
     /// The compact player bar is shown while real speech is active (never
-    /// for picker auditions).
+    /// for picker auditions, and never while the editor's own controls for
+    /// the same note are on screen).
     var showMiniPlayer: Bool {
-        (state == .speaking || state == .paused || state == .generating) && !isAuditioning
+        (state == .speaking || state == .paused || state == .generating)
+            && !isAuditioning && !miniPlayerSuppressed
     }
 
     /// Friendly description of the voice the active engine will use.

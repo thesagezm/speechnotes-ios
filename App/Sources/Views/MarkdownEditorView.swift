@@ -13,8 +13,6 @@ struct MarkdownEditorView: UIViewRepresentable {
     @Binding var selection: Range<Int>?
     /// Caret moved — used by the slash-menu detector to re-scan for `/`.
     var onCaretMoved: (() -> Void)?
-    /// Focus relay so the SwiftUI toolbar can claim/reclaim focus.
-    var focusState: FocusState<Bool>.Binding
     /// User-selected reading size, forwarded to the UITextView's font so the
     /// edit buffer matches the preview scale.
     var textScale: CGFloat = 1.0
@@ -77,11 +75,11 @@ struct MarkdownEditorView: UIViewRepresentable {
             uiView.font = wanted
             context.coordinator.lastAppliedFontSize = wanted.pointSize
         }
-        if focusState.wrappedValue && !uiView.isFirstResponder {
-            DispatchQueue.main.async { _ = uiView.becomeFirstResponder() }
-        } else if !focusState.wrappedValue && uiView.isFirstResponder {
-            DispatchQueue.main.async { _ = uiView.resignFirstResponder() }
-        }
+        // Focus is owned entirely by UIKit (taps make the UITextView first
+        // responder). NEVER resign from here: a previous focus relay that
+        // force-resigned whenever SwiftUI re-rendered broke typing (one
+        // letter per tap) and destroyed long-press selections, because every
+        // keystroke/selection change re-renders and re-entered updateUIView.
     }
 
     final class Coordinator: NSObject, UITextViewDelegate {
