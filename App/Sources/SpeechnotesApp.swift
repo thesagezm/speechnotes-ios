@@ -11,7 +11,7 @@ struct SpeechnotesApp: App {
     @State private var selectedTab: Tab = .notes
 
     private enum Tab: Hashable {
-        case notes, storage, settings
+        case notes, books, settings
     }
 
     /// Onboarding gate — true after the first-run flow finishes or is skipped.
@@ -23,9 +23,9 @@ struct SpeechnotesApp: App {
                 NotesListView()
                     .tag(Tab.notes)
                     .tabItem { Label("Notes", systemImage: "note.text") }
-                StorageView()
-                    .tag(Tab.storage)
-                    .tabItem { Label("Storage", systemImage: "externaldrive") }
+                BooksView()
+                    .tag(Tab.books)
+                    .tabItem { Label("Books", systemImage: "books.vertical") }
                 SettingsTabView()
                     .tag(Tab.settings)
                     .tabItem { Label("Settings", systemImage: "gearshape") }

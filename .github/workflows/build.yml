@@ -2,7 +2,7 @@ name: Build IPA
 
 on:
   push:
-    branches: [main, bisect-g]
+    branches: [main, bisect-g, books-v1.4.2]
   workflow_dispatch:
 
 jobs:
@@ -184,6 +184,57 @@ jobs:
         with:
           name: supertonic-spike-log
           path: supertonic-spike.log
+          if-no-files-found: warn
+
+  epub-spike:
+    name: EPUB spike (ZipReader/EpubInfo vs real books)
+    runs-on: macos-latest
+    timeout-minutes: 15
+    # Informative and non-blocking by design (matches the other spikes; the
+    # phone is the real bench) — but a red run here means real-world books
+    # break the parser, so read it before trusting the Books import.
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # curl -I verified 2026-09-06: all three return 200 application/epub+zip.
+      # Content-addressed cache URLs — stable for years.
+      - name: Download real EPUBs (Project Gutenberg)
+        run: |
+          mkdir -p ~/epub-spike
+          for id in 1342 11 84; do
+            curl -L --retry 3 --progress-bar \
+              -o ~/epub-spike/pg$id.epub \
+              "https://www.gutenberg.org/cache/epub/$id/pg$id.epub"
+          done
+          ls -lh ~/epub-spike
+
+      - name: Run EPUB spike test
+        run: |
+          set -o pipefail
+          cd Tests/EpubSpike
+          swift test 2>&1 | tee ../../epub-spike.log
+
+      - name: Show failure summary
+        if: always()
+        run: |
+          grep -E "EPUB-SPIKE|error:|failed|Fatal|Crash|unexpected exit|Executed" epub-spike.log \
+            | grep -vE "warning:" \
+            | tail -n 40 > epub-spike-summary.txt || true
+          echo "----- EPUB SPIKE SUMMARY -----"
+          cat epub-spike-summary.txt
+          echo "------------------------------"
+          if [ -s epub-spike-summary.txt ]; then
+            python3 -c "import pathlib; t = pathlib.Path('epub-spike-summary.txt').read_text()[:5500]; print('::error title=EPUB spike failure::' + t.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A'))"
+          fi
+
+      - name: Upload spike log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: epub-spike-log
+          path: epub-spike.log
           if-no-files-found: warn
 
   build-ipa:

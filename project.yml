@@ -65,6 +65,11 @@ targets:
           - CFBundleTypeName: PDF document
             LSHandlerRank: Alternate
             LSItemContentTypes: [com.adobe.pdf]
+          # v1.4.2 Books: the one planned exception to "project.yml unchanged"
+          # (Docs/PLAN-V1.4.2-EBOOKS.md) — lets Open-In send epubs here.
+          - CFBundleTypeName: EPUB document
+            LSHandlerRank: Alternate
+            LSItemContentTypes: [org.idpf.epub-container]
         CFBundleURLTypes:
           - CFBundleURLName: com.speechnotes.ios
             CFBundleURLSchemes: [speechnotes]

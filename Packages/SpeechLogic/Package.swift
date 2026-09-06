@@ -25,7 +25,11 @@ let package = Package(
         .testTarget(
             name: "SpeechLogicTests",
             dependencies: ["SpeechLogic"],
-            path: "Tests/SpeechLogicTests"
+            path: "Tests/SpeechLogicTests",
+            resources: [
+                // EPUB test fixtures (real ZIP bytes) for ZipReader/EpubInfo.
+                .copy("Fixtures")
+            ]
         )
     ]
 )

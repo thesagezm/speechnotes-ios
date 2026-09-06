@@ -379,7 +379,7 @@ struct MarkdownPreviewView: View {
 
 /// Thin wrapper around SFSafariViewController so SwiftUI can show it via
 /// `.sheet(item:)`. No toolbar chrome — we want a minimal in-app browser.
-/// (`URL: Identifiable` lives in StorageView.swift — one conformance only.)
+/// (`URL: Identifiable` lives in StorageSettingsView.swift — one conformance only.)
 struct SafariSheet: UIViewControllerRepresentable {
     let url: URL
 
