@@ -364,7 +364,23 @@ struct BookReaderView: View {
     }
 
     private func applyAppearance() {
-        webView?.evaluateJavaScript("readerFontSize(\(Int(fontSize)))", completionHandler: nil)
-        webView?.evaluateJavaScript("readerTheme(\"\(theme)\")", completionHandler: nil)
+        applyAppearanceDebounced()
+    }
+
+    /// Slider drags fire onChange per 10% step — each one used to push two
+    /// evaluateJavaScript calls straight into the webview. 150 ms after the
+    /// drag settles is visually indistinguishable and keeps the bridge quiet.
+    @State private var appearanceTask: Task<Void, Never>?
+
+    private func applyAppearanceDebounced() {
+        appearanceTask?.cancel()
+        let size = Int(fontSize)
+        let themeName = theme
+        appearanceTask = Task {
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            guard !Task.isCancelled else { return }
+            webView?.evaluateJavaScript("readerFontSize(\(size))", completionHandler: nil)
+            webView?.evaluateJavaScript("readerTheme(\"\(themeName)\")", completionHandler: nil)
+        }
     }
 }

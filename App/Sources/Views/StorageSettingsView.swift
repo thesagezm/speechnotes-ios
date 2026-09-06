@@ -287,7 +287,7 @@ struct StorageSettingsView: View {
                     Haptics.warning()
                     clearAllImages()
                 } label: {
-                    Label("Clear all cached images", systemImage: "trash.slash")
+                    Label("Clear web-downloaded images", systemImage: "trash.slash")
                 }
             }
         } header: {
@@ -350,10 +350,11 @@ struct StorageSettingsView: View {
         ImageCache.shared.remove(for: entry.memoryKey)
     }
 
+    /// Clears only the WEB image cache. Note-attached images are content,
+    /// not cache — wiping them would break the markdown that references
+    /// them — so they are managed per-note (prune on edit, delete with the
+    /// note) and never by a bulk "clear".
     private func clearAllImages() {
-        for target in NoteImageStore.allTargets() {
-            NoteImageStore.remove(target: target)
-        }
         RemoteImageStore.removeAll()
         ImageCache.shared.removeAll()
     }

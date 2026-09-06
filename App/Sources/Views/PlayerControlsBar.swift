@@ -14,6 +14,7 @@ struct PlayerControlsBar: View {
     var onBeforeToggle: (() -> Void)? = nil
 
     @EnvironmentObject private var player: SpeechPlayer
+    @EnvironmentObject private var theme: AppTheme
     /// Mirrors NoteEditorView's read-along switch — shared via AppStorage.
     @AppStorage("readAlongEnabled") private var readAlongEnabled = true
     /// Collapsed to the slim pill — frees editor space while playing.
@@ -101,13 +102,7 @@ struct PlayerControlsBar: View {
                     ZStack(alignment: .leading) {
                         Capsule().fill(Color.secondary.opacity(0.25))
                         Capsule()
-                            .fill(
-                                LinearGradient(
-                                    colors: [.accentColor, .purple],
-                                    startPoint: .leading,
-                                    endPoint: .trailing
-                                )
-                            )
+                            .fill(theme.accentFadeGradient)
                             .frame(width: max(4, proxy.size.width * progress))
                     }
                 }
@@ -123,13 +118,7 @@ struct PlayerControlsBar: View {
                 } label: {
                     ZStack {
                         Circle()
-                            .fill(
-                                LinearGradient(
-                                    colors: [.accentColor, .purple],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                )
-                            )
+                            .fill(theme.accentGradient)
                             .shadow(color: .black.opacity(0.15), radius: 6, y: 3)
                         if player.state == .generating {
                             ProgressView()

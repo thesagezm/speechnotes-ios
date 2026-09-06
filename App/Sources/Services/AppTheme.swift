@@ -52,6 +52,27 @@ final class AppTheme: ObservableObject {
 
     var accentColor: Color { accentChoice.color }
 
+    /// Accent → translucent-accent fade for buttons, play glyphs and the
+    /// progress ring. Hardcoding a second hue (e.g. .purple) fought 11 of
+    /// the 12 accent choices — everything accent-tinted derives from the
+    /// chosen color now.
+    var accentGradient: LinearGradient {
+        LinearGradient(
+            colors: [accentColor, accentColor.opacity(0.5)],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+    }
+
+    /// Horizontal variant for progress bars.
+    var accentFadeGradient: LinearGradient {
+        LinearGradient(
+            colors: [accentColor, accentColor.opacity(0.5)],
+            startPoint: .leading,
+            endPoint: .trailing
+        )
+    }
+
     var colorScheme: ColorScheme? {
         switch appearance {
         case AppearanceMode.light.rawValue: return .light

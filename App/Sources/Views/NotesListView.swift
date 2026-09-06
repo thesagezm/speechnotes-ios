@@ -136,6 +136,9 @@ struct NotesListView: View {
                 RecycleBinView()
             }
             .searchable(text: $searchText, prompt: "Search notes")
+            .onChange(of: sort) { newValue in
+                newValue.persist()
+            }
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     sortAndImportMenu
@@ -351,12 +354,6 @@ struct NotesListView: View {
                 }
             }
         }
-    }
-
-    /// One row in the notes list — legacy path kept for compatibility. The
-    /// list now uses NoteRowView directly so this is unused. Remove at leisure.
-    private func noteRow(_ note: Note) -> some View {
-        NoteRowView(note: note, preview: notes.preview(for: note))
     }
 
     private func era(for date: Date) -> String {

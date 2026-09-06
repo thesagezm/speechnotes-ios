@@ -41,6 +41,13 @@ final class MarkdownImageInserter {
     @discardableResult
     func storeFromURL(_ url: URL, alt: String) async -> String {
         lastError = nil
+        // Same rule as ImageCache's fetch path: only web schemes get
+        // downloaded. Anything else falls through as raw markdown, where
+        // the preview's guarded renderer shows a failure glyph instead of
+        // fetching.
+        guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
+            return "![\(alt)](\(url.absoluteString))"
+        }
         do {
             let (data, _) = try await URLSession.shared.data(from: url)
             let ext = NoteImageStore.sanitiseExtension(url.pathExtension.isEmpty ? "png" : url.pathExtension)

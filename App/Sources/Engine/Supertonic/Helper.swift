@@ -2,6 +2,13 @@ import Foundation
 import Accelerate
 import OnnxRuntimeBindings
 
+// Vendored from supertone-inc/supertonic (swift/Sources/Helper.swift, MIT).
+// Local deviation from upstream: the invalid-language guard below THROWS
+// (HelperError.invalidLanguage) instead of calling fatalError — a caller bug
+// must not kill the whole process. Keep this file standalone-compilable
+// (Foundation/Accelerate/OnnxRuntimeBindings only): the CI SupertonicSpike
+// copies it verbatim.
+
 // MARK: - Available Languages
 
 let AVAILABLE_LANGS = ["en", "ko", "ja", "ar", "bg", "cs", "da", "de", "el", "es", "et", "fi", "fr", "hi", "hr", "hu", "id", "it", "lt", "lv", "nl", "pl", "pt", "ro", "ru", "sk", "sl", "sv", "tr", "uk", "vi", "na"]
@@ -11,6 +18,11 @@ func isValidLang(_ lang: String) -> Bool {
 }
 
 // MARK: - Configuration Structures
+
+/// Errors thrown by the vendored preprocessing layer.
+enum HelperError: Error {
+    case invalidLanguage(String)
+}
 
 struct Config: Codable {
     struct AEConfig: Codable {
@@ -50,10 +62,10 @@ class UnicodeProcessor {
         self.indexer = try JSONDecoder().decode([Int64].self, from: data)
     }
     
-    func call(_ textList: [String], _ langList: [String]) -> (textIds: [[Int64]], textMask: [[[Float]]]) {
+    func call(_ textList: [String], _ langList: [String]) throws -> (textIds: [[Int64]], textMask: [[[Float]]]) {
         var processedTexts = [String]()
         for (i, text) in textList.enumerated() {
-            processedTexts.append(preprocessText(text, lang: langList[i]))
+            processedTexts.append(try preprocessText(text, lang: langList[i]))
         }
         
         // Use unicodeScalars.count for correct length after NFKD decomposition
@@ -83,7 +95,7 @@ class UnicodeProcessor {
     }
 }
 
-func preprocessText(_ text: String, lang: String) -> String {
+func preprocessText(_ text: String, lang: String) throws -> String {
     // Use NFKD (decomposed) for proper Hangul Jamo decomposition
     var text = text.decomposedStringWithCompatibilityMapping
 
@@ -183,9 +195,11 @@ func preprocessText(_ text: String, lang: String) -> String {
         }
     }
 
-    // Validate language
+    // Validate language — throw instead of the vendored fatalError (see the
+    // file header); the engine's own isValidLang check normally catches this
+    // before text ever reaches the processor.
     guard isValidLang(lang) else {
-        fatalError("Invalid language: \(lang). Available: \(AVAILABLE_LANGS.joined(separator: ", "))")
+        throw HelperError.invalidLanguage(lang)
     }
 
     // Wrap text with language tags
@@ -576,7 +590,7 @@ class TextToSpeech {
         let bsz = textList.count
         
         // Process text
-        let (textIds, textMask) = textProcessor.call(textList, langList)
+        let (textIds, textMask) = try textProcessor.call(textList, langList)
         
         // Flatten text IDs
         let textIdsFlat = textIds.flatMap { $0 }

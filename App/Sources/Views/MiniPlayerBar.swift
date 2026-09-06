@@ -9,6 +9,7 @@ struct MiniPlayerBar: View {
     var onTap: (() -> Void)?
 
     @EnvironmentObject private var player: SpeechPlayer
+    @EnvironmentObject private var theme: AppTheme
     @AppStorage("miniPlayerCollapsed") private var miniPlayerCollapsed = false
 
     private var playIcon: String {
@@ -26,13 +27,7 @@ struct MiniPlayerBar: View {
                     ZStack(alignment: .leading) {
                         Capsule().fill(Color.secondary.opacity(0.25))
                         Capsule()
-                            .fill(
-                                LinearGradient(
-                                    colors: [.accentColor, .purple],
-                                    startPoint: .leading,
-                                    endPoint: .trailing
-                                )
-                            )
+                            .fill(theme.accentFadeGradient)
                             .frame(width: max(4, proxy.size.width * progress))
                     }
                 }
@@ -50,15 +45,7 @@ struct MiniPlayerBar: View {
                         .font(.system(size: 16, weight: .bold))
                         .foregroundStyle(.white)
                         .frame(width: 38, height: 38)
-                        .background(
-                            Circle().fill(
-                                LinearGradient(
-                                    colors: [.accentColor, .purple],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                )
-                            )
-                        )
+                        .background(Circle().fill(theme.accentGradient))
                 }
                 .disabled(player.state == .generating)
 
@@ -127,6 +114,7 @@ struct MiniPlayerBar: View {
 /// and play/pause. Tap to expand back to the bar.
 struct MiniPlayerBubble: View {
     @EnvironmentObject private var player: SpeechPlayer
+    @EnvironmentObject private var theme: AppTheme
     @AppStorage("miniPlayerCollapsed") private var miniPlayerCollapsed = false
 
     var body: some View {
@@ -142,14 +130,7 @@ struct MiniPlayerBubble: View {
                 // Progress ring.
                 Circle()
                     .trim(from: 0, to: player.progress ?? 0)
-                    .stroke(
-                        LinearGradient(
-                            colors: [.accentColor, .purple],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        style: StrokeStyle(lineWidth: 3.5, lineCap: .round)
-                    )
+                    .stroke(theme.accentGradient, style: StrokeStyle(lineWidth: 3.5, lineCap: .round))
                     .rotationEffect(.degrees(-90))
 
                 if player.state == .generating {

@@ -2,7 +2,7 @@ name: Build IPA
 
 on:
   push:
-    branches: [main, bisect-g, books-v1.4.2, v15-books-complete]
+    branches: [main, bisect-g, books-v1.4.2, v15-books-complete, sage-upgrades]
   workflow_dispatch:
 
 jobs:

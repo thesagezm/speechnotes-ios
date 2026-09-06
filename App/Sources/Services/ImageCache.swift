@@ -41,6 +41,12 @@ final class ImageCache {
         if url.isFileURL {
             data = try? Data(contentsOf: url)
         } else {
+            // Only web schemes may be fetched: markdown is user input, and
+            // an arbitrary scheme (file:, data:, custom) must not be turned
+            // into a fetch by the preview's read-through cache.
+            guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
+                return nil
+            }
             // Remote: disk-backed store first (persists across launches —
             // Storage's gallery browses these files too), then a network
             // fetch-through on a miss.

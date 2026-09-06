@@ -505,6 +505,19 @@ final class SpeechPlayer: ObservableObject {
         ModelManager.shared.onReady = { [weak self] in
             self?.rebuildEngine()
         }
+        // A soft-deleted or purged note must not keep talking — the mini
+        // player would otherwise narrate something that no longer exists.
+        NotificationCenter.default.addObserver(
+            forName: .noteDeleted,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let self,
+                  let deletedId = notification.object as? UUID,
+                  self.nowPlayingNoteId == deletedId else { return }
+            Log.shared.info("SpeechPlayer: deleted note was playing — stopping")
+            self.stop()
+        }
         Log.shared.info("SpeechPlayer wired (engine=\(engineKind.rawValue), voice=\(voice), supertonic=\(supertonicVoice)@\(supertonicLang))")
     }
 

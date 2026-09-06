@@ -1,4 +1,5 @@
 import Foundation
+import SpeechLogic
 
 /// Holds all notes in memory and persists them as one JSON file in Documents.
 /// Deleted notes are kept (flagged `deletedAt`) for Note.recycleRetentionDays
@@ -90,14 +91,6 @@ final class NotesStore: ObservableObject {
         scheduleSave()
     }
 
-    func delete(at offsets: IndexSet) {
-        for index in offsets {
-            guard index < allNotes.count else { continue }
-            softDelete(noteId: allNotes[index].id)
-        }
-        save()
-    }
-
     /// Soft-deletes by identity — the editor's delete button and the list's
     /// swipe action both land here. The note moves to Recently Deleted.
     func delete(noteId: UUID) {
@@ -109,6 +102,9 @@ final class NotesStore: ObservableObject {
         guard let index = allNotes.firstIndex(where: { $0.id == noteId }) else { return }
         guard allNotes[index].deletedAt == nil else { return }
         allNotes[index].deletedAt = Date()
+        // If that note is the one speaking, playback must not outlive it —
+        // SpeechPlayer observes and stops.
+        NotificationCenter.default.post(name: .noteDeleted, object: noteId)
     }
 
     /// Moves a binned note back into the active list, timestamps preserved.
@@ -125,13 +121,22 @@ final class NotesStore: ObservableObject {
     func purge(noteId: UUID) {
         allNotes.removeAll { $0.id == noteId }
         previewCache.removeValue(forKey: noteId)
+        // The editor path cleans images at delete-confirm time; the bin's
+        // purge paths are the only other exits — clean here too or the
+        // per-note image directory leaks forever.
+        NoteImageStore.removeAllImages(for: noteId)
+        NotificationCenter.default.post(name: .noteDeleted, object: noteId)
         save()
     }
 
     /// Really deletes every binned note. No undo.
     func emptyRecycleBin() {
+        let purgedIds = allNotes.filter { $0.deletedAt != nil }.map(\.id)
         allNotes.removeAll { $0.deletedAt != nil }
-        previewCache.removeAll()
+        for id in purgedIds {
+            previewCache.removeValue(forKey: id)
+            NoteImageStore.removeAllImages(for: id)
+        }
         save()
     }
 
@@ -202,4 +207,10 @@ final class NotesStore: ObservableObject {
             Log.shared.error("Failed to load notes: \(error)")
         }
     }
+}
+
+extension Notification.Name {
+    /// Posted when a note is soft-deleted or purged (object = note UUID).
+    /// SpeechPlayer stops playback if the deleted note is the live one.
+    static let noteDeleted = Notification.Name("NotesStore.noteDeleted")
 }

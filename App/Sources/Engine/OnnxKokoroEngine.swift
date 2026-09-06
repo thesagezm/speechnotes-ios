@@ -66,6 +66,15 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
         Log.shared.info("OnnxKokoroEngine created")
     }
 
+    deinit {
+        // Tier switches rebuild this engine (fp32 ⇄ uint8 share one slot) —
+        // without this, every rebuild leaked a live interruption observer
+        // onto the dead instance (SupertonicEngine always had the twin).
+        if let interruptionObserver {
+            NotificationCenter.default.removeObserver(interruptionObserver)
+        }
+    }
+
     private static let sampleRate: Double = 24_000
     private static let styleDim = 256
     private static let maxTokens = 510

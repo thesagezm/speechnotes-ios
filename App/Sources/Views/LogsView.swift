@@ -36,17 +36,8 @@ struct LogsView: View {
         }
         .navigationTitle("Logs")
         .toolbar {
-            if !embedded {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    ShareLink(item: logs.exportText)
-                }
-            }
-        }
-        .toolbar {
-            if embedded {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    ShareLink(item: logs.exportText)
-                }
+            ToolbarItem(placement: .navigationBarTrailing) {
+                ShareLink(item: logs.exportText)
             }
         }
     }

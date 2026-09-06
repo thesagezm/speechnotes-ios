@@ -288,7 +288,18 @@ struct NoteEditorView: View {
             draftSyncTask = nil
             speechCacheTask?.cancel()
             speechCacheTask = nil
-            saveDraft()
+            // A note created and abandoned within seconds (mis-tap on +)
+            // must not litter the list as "Untitled note" forever. Older
+            // notes are always saved — clearing one out is deliberate.
+            if let note = currentNote,
+               Date().timeIntervalSince(note.createdAt) < 10,
+               draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               titleDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                notes.purge(noteId: noteId)
+                NoteImageStore.removeAllImages(for: noteId)
+            } else {
+                saveDraft()
+            }
             notes.flushNow()
         }
         .onChange(of: player.shareURL) { newValue in
@@ -488,16 +499,6 @@ struct NoteEditorView: View {
     }
 
     // MARK: - Controls
-
-    /// Controls are rendered by PlayerControlsBar — extracted so player
-    /// state changes don't re-evaluate the title field, editor, or sheets.
-    private var controlsBar: some View {
-        PlayerControlsBar(
-            speechText: speechText,
-            note: currentNote,
-            onBeforeToggle: { updateSpeechCaches() }
-        )
-    }
 
     private func saveDraft() {
         guard var note = currentNote else { return }
