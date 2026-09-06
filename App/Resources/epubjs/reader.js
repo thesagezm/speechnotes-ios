@@ -1,0 +1,111 @@
+// reader.js — the native <-> epub.js glue (ours, see LICENSE-NOTES.md).
+// Loads the EPUB from the bookscheme:// scheme handler into epub.js, renders
+// ONE chapter at a time in scrolled flow (chapter boundaries are the app's
+// memory bounds and TTS units), and reports position/TOC back to SwiftUI.
+// Initial theme/fontSize arrive as query params — applying them later via
+// evaluateJavaScript would race the rendition's creation.
+(function () {
+  var params = new URLSearchParams(location.search);
+  var bookURL = params.get("book");
+  var startChapter = parseInt(params.get("chapter") || "0", 10);
+  var startTheme = params.get("theme") || "light";
+  var startFontSize = parseInt(params.get("fontSize") || "100", 10);
+
+  var THEMES = {
+    light: { body: { background: "#ffffff", color: "#1a1a1a" } },
+    sepia: { body: { background: "#f6efe2", color: "#3b3128" } },
+    dark: { body: { background: "#121212", color: "#d8d4cf" } }
+  };
+
+  function post(msg) {
+    try { webkit.messageHandlers.reader.postMessage(msg); } catch (e) { /* no native side */ }
+  }
+
+  function applyFontSize(pct) {
+    if (window.RENDITION) window.RENDITION.themes.fontSize(pct + "%");
+  }
+
+  function applyTheme(mode) {
+    if (!window.RENDITION) return;
+    Object.keys(THEMES).forEach(function (key) {
+      window.RENDITION.themes.register(key, THEMES[key]);
+    });
+    window.RENDITION.themes.select(mode);
+    // The scroll container's background must match or edges flash white.
+    document.body.style.background =
+      THEMES[mode] ? THEMES[mode].body.background : "#ffffff";
+  }
+
+  fetch(bookURL)
+    .then(function (r) { return r.arrayBuffer(); })
+    .then(function (buf) {
+      var book = ePub(buf);
+      window.BOOK = book;
+      var rendition = book.renderTo("viewer", {
+        width: "100%",
+        height: "100%",
+        flow: "scrolled",
+        spread: "none",
+        allowScriptedContent: true
+      });
+      window.RENDITION = rendition;
+      applyTheme(startTheme);
+      applyFontSize(startFontSize);
+
+      rendition.on("relocated", function (location) {
+        var start = location && location.start;
+        post({
+          type: "relocated",
+          index: start && typeof start.index === "number" ? start.index : 0,
+          fraction: start && typeof start.percentage === "number" ? start.percentage : 0,
+          total: book.spine ? book.spine.length : 0
+        });
+      });
+
+      book.loaded.navigation.then(function (nav) {
+        var flat = [];
+        function walk(items) {
+          (items || []).forEach(function (item) {
+            var label = (item.label || "").replace(/\s+/g, " ").trim();
+            if (label && item.href) flat.push({ label: label, href: item.href });
+            walk(item.subitems);
+          });
+        }
+        walk(nav.toc);
+        post({ type: "toc", items: flat });
+      });
+
+      // Display once the container is open — displaying earlier races
+      // spine parsing on big books.
+      book.opened.then(function () {
+        var target = book.spine.get(startChapter);
+        rendition.display(target ? target.href : undefined);
+      });
+    })
+    .catch(function (err) {
+      post({ type: "error", message: String(err) });
+    });
+
+  // --- native -> reader commands (called via evaluateJavaScript) ---
+
+  window.readerGoToHref = function (href) {
+    if (window.RENDITION && href) window.RENDITION.display(href);
+  };
+
+  window.readerGoChapter = function (index) {
+    if (!window.BOOK || !window.RENDITION) return;
+    var item = window.BOOK.spine.get(index);
+    if (item) window.RENDITION.display(item.href);
+  };
+
+  window.readerFontSize = applyFontSize;
+
+  window.readerTheme = applyTheme;
+
+  window.readerDestroy = function () {
+    try { if (window.RENDITION) window.RENDITION.destroy(); } catch (e) { /* already gone */ }
+    try { if (window.BOOK) window.BOOK.destroy(); } catch (e) { /* already gone */ }
+    window.RENDITION = null;
+    window.BOOK = null;
+  };
+})();

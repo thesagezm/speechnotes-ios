@@ -2,8 +2,8 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 /// Books tab (v1.4.2): the ebook library. Import via the Files picker or
-/// Open-In; delete via swipe/context menu. The reader view lands in the next
-/// phase — rows are intentionally not tappable until it exists.
+/// Open-In; delete via swipe/context menu; tap opens the format's reader
+/// (epub.js webview for EPUB, PDFKit for PDF).
 struct BooksView: View {
     @StateObject private var store = BooksStore()
     @State private var showingImporter = false
@@ -79,21 +79,29 @@ struct BooksView: View {
     private var libraryList: some View {
         List {
             ForEach(store.books) { book in
-                BookRowView(book: book)
-                    .contextMenu {
-                        Button(role: .destructive) {
-                            bookToDelete = book
-                        } label: {
-                            Label("Delete", systemImage: "trash")
-                        }
+                NavigationLink(value: book) {
+                    BookRowView(book: book)
+                }
+                .contextMenu {
+                    Button(role: .destructive) {
+                        bookToDelete = book
+                    } label: {
+                        Label("Delete", systemImage: "trash")
                     }
-                    .swipeActions(edge: .trailing) {
-                        Button(role: .destructive) {
-                            bookToDelete = book
-                        } label: {
-                            Label("Delete", systemImage: "trash")
-                        }
+                }
+                .swipeActions(edge: .trailing) {
+                    Button(role: .destructive) {
+                        bookToDelete = book
+                    } label: {
+                        Label("Delete", systemImage: "trash")
                     }
+                }
+            }
+        }
+        .navigationDestination(for: Book.self) { book in
+            switch book.format {
+            case .epub: BookReaderView(book: book, store: store)
+            case .pdf: BookPDFReaderView(book: book, store: store)
             }
         }
     }

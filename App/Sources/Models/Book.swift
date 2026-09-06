@@ -8,7 +8,7 @@ enum BookFormat: String, Codable {
 /// Where the reader left off. EPUB: spine index + scroll fraction inside the
 /// chapter; PDF: page index + fraction inside the page. One shape keeps the
 /// manifest and the resume logic format-agnostic.
-struct BookPosition: Codable, Equatable {
+struct BookPosition: Codable, Equatable, Hashable {
     var chapterIndex: Int
     var chapterFraction: Double
 }
@@ -16,7 +16,7 @@ struct BookPosition: Codable, Equatable {
 /// One TOC row snapshotted at import time (epub: from EpubInfo's native
 /// parse — the epub.js runtime TOC is the primary navigation, this is the
 /// zero-webview fallback). PDF outlines are read live from PDFKit instead.
-struct BookTocEntry: Codable, Equatable {
+struct BookTocEntry: Codable, Equatable, Hashable {
     var label: String
     /// Zip entry path the entry points at (epub only).
     var href: String
@@ -27,7 +27,7 @@ struct BookTocEntry: Codable, Equatable {
 /// The library's manifest record — ONE manifest.json per book directory.
 /// Deliberately not notes.json: a shelf of 50 MB books must not share the
 /// file the editor rewrites on every save flush.
-struct Book: Identifiable, Codable, Equatable {
+struct Book: Identifiable, Codable, Equatable, Hashable {
     let id: UUID
     var title: String
     var author: String?
