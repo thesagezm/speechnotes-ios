@@ -1,7 +1,7 @@
 import Foundation
 
 /// Downloads and owns the Kokoro model files (Documents/KokoroOnnx/):
-/// fp32 ONNX model (~326 MB, best quality) + fp16 ONNX model (~163 MB, small
+/// fp32 ONNX model (~326 MB, best quality) + uint8 ONNX model (~177 MB, small
 /// tier) sharing one voice bank (~15 MB) + tokenizer (~4 KB), plus the
 /// Supertonic set. One-time downloads; everything is offline after that.
 @MainActor
@@ -43,18 +43,20 @@ final class ModelManager: ObservableObject {
     /// Voice bank: 28 style vectors shared by every Kokoro voice.
     static let voicesURL = URL(string: "https://raw.githubusercontent.com/mlalma/KokoroTestApp/main/Resources/voices.npz")!
 
-    // MARK: Small Kokoro model set (fp16 tier)
+    // MARK: Small Kokoro model set (uint8 tier)
 
-    /// Kokoro fp16 (~163 MB) — the lightweight tier that replaces the
-    /// removed Kitten engine. Same graph, tokenizer, voice bank and
-    /// inference contract as the fp32 set; roughly half the download and
-    /// memory footprint, a small quality step down. Lives in the SAME
+    /// Kokoro uint8 weight-only quant (~177 MB) — the lightweight tier that
+    /// replaces the removed Kitten engine. Same graph, tokenizer, voice bank
+    /// and inference contract as the fp32 set; roughly half the download and
+    /// memory footprint, a small quality step down. The fp16 variant was
+    /// spike-tested first and produces NaN on ORT CPU (CI 34008548349), so
+    /// the proven v0.9–v1.4 uint8 build ships instead. Lives in the SAME
     /// directory as the fp32 set under its own filename — never as
     /// `model.onnx`, which `removeQuantizedDownloads()` deletes when <200 MB.
-    static let smallModelURL = URL(string: "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/onnx/model_fp16.onnx")!
+    static let smallModelURL = URL(string: "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/onnx/model_uint8.onnx")!
 
     nonisolated static var smallModelFileURL: URL {
-        onnxDirectory.appendingPathComponent("model_fp16.onnx")
+        onnxDirectory.appendingPathComponent("model_uint8.onnx")
     }
 
     nonisolated static func smallFilesAreValid() -> Bool {
@@ -213,7 +215,7 @@ final class ModelManager: ObservableObject {
         }
         if Self.smallFilesAreValid() {
             smallState = .ready
-            Log.shared.info("ModelManager: small (fp16) model already present")
+            Log.shared.info("ModelManager: small (uint8) model already present")
         } else {
             smallState = .notDownloaded
         }
@@ -361,7 +363,7 @@ final class ModelManager: ObservableObject {
         }
     }
 
-    /// Downloads the small Kokoro set (fp16 ~163 MB; shared voices +
+    /// Downloads the small Kokoro set (uint8 ~177 MB; shared voices +
     /// tokenizer only when missing — the fp32 set usually already has them).
     func startSmallDownload() {
         if case .downloading = smallState { return }
@@ -378,14 +380,14 @@ final class ModelManager: ObservableObject {
         }
 
         smallState = .downloading(progress: 0)
-        Log.shared.info("ModelManager: starting small Kokoro download (~163 MB fp16)")
+        Log.shared.info("ModelManager: starting small Kokoro download (~177 MB uint8)")
 
         Task.detached { [weak self] in
             do {
                 try await self?.download(
                     from: Self.smallModelURL,
                     to: Self.smallModelFileURL,
-                    expectedBytes: 163_234_740,
+                    expectedBytes: 177_464_632,
                     progressRange: 0.0...0.9,
                     publishingTo: { [weak self] value in self?.reportSmallProgress(value) }
                 )
@@ -428,7 +430,7 @@ final class ModelManager: ObservableObject {
         }
     }
 
-    /// Removes the fp16 model only — voices + tokenizer stay for the fp32
+    /// Removes the uint8 model only — voices + tokenizer stay for the fp32
     /// set (and vice versa).
     func deleteSmallModel() {
         try? FileManager.default.removeItem(at: Self.smallModelFileURL)

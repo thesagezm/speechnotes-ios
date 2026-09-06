@@ -5,7 +5,10 @@ struct AppearanceSettingsView: View {
 
     var body: some View {
         Form {
-            Section("Accent Color") {
+            Section {
+                // Dropdown (menu style): one row showing the current color,
+                // expanding to all 12 choices on tap — the inline list was
+                // too long (user feedback).
                 Picker("Accent", selection: $theme.accentChoice) {
                     ForEach(AccentColorChoice.allCases) { c in
                         HStack {
@@ -14,7 +17,11 @@ struct AppearanceSettingsView: View {
                         }.tag(c)
                     }
                 }
-                .pickerStyle(.inline)
+                .pickerStyle(.menu)
+            } header: {
+                Text("Accent Color")
+            } footer: {
+                Text("Used across notes, playback controls and highlights.")
             }
             Section("Appearance") {
                 Picker("Theme", selection: $theme.appearance) {

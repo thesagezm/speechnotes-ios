@@ -251,26 +251,32 @@ final class SentenceChunkerTests: XCTestCase {
     }
 
     func testResumeOffsetIsTheLastBoundaryBeforeCharsDone() {
-        // The core playback guarantee: between the resume offset and
-        // charsDone there is NO sentence boundary — the interrupted sentence
-        // is re-spoken from its start.
-        let text = String(repeating: "Alpha bravo charlie delta. Echo foxtrot golf hotel.\n", count: 6)
-        for charsDone in stride(from: 5, to: text.utf16.count, by: 7) {
-            let resume = SentenceChunker.resumeOffset(in: text, charsDone: charsDone)
-            XCTAssertLessThanOrEqual(resume, charsDone)
-            var i = resume
-            let units = Array(text.utf16)
-            while i < charsDone {
-                let unit = units[i]
-                let isTerminator =
-                    unit == 0x2E || unit == 0x21 || unit == 0x3F
-                    || unit == 0x2026 || unit == 0x3002 || unit == 0xFF01
-                    || unit == 0xFF1F || unit == 0x0A || unit == 0x0D
-                XCTAssertFalse(
-                    isTerminator,
-                    "boundary at \(i) between resume \(resume) and charsDone \(charsDone)"
+        // The core playback guarantee: the resume offset is the start of the
+        // sentence that contains charsDone. The repeating text has known
+        // sentence starts: 0 and 27 within every 52-char cycle.
+        let unit = "Alpha bravo charlie delta. Echo foxtrot golf hotel.\n"
+        let text = String(repeating: unit, count: 6)
+        for cycle in 0..<6 {
+            let starts = [52 * cycle, 52 * cycle + 27]
+            for start in starts {
+                // Mid-sentence snaps back to the sentence start…
+                XCTAssertEqual(
+                    SentenceChunker.resumeOffset(in: text, charsDone: start + 10),
+                    start,
+                    "cycle \(cycle), start \(start)"
                 )
-                i += 1
+                // …and a charsDone exactly at a boundary counts the NEXT
+                // sentence as current (it is about to be read).
+                let nextStart = start == 52 * cycle + 27
+                    ? (cycle + 1 < 6 ? 52 * (cycle + 1) : text.utf16.count)
+                    : start + 27
+                if nextStart < text.utf16.count {
+                    XCTAssertEqual(
+                        SentenceChunker.resumeOffset(in: text, charsDone: nextStart),
+                        nextStart,
+                        "cycle \(cycle), start \(start)"
+                    )
+                }
             }
         }
     }

@@ -120,11 +120,24 @@ struct StorageView: View {
                     columns: [GridItem(.adaptive(minimum: 84), spacing: 10)],
                     spacing: 10
                 ) {
-                    ForEach(cachedImages) { entry in
+                    ForEach(visibleCachedImages) { entry in
                         galleryCell(entry)
                     }
                 }
                 .padding(.vertical, 4)
+                if cachedImages.count > imagePreviewLimit {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            showingAllImages.toggle()
+                        }
+                    } label: {
+                        Label(
+                            showingAllImages ? "Show fewer" : "See all \(cachedImages.count) images",
+                            systemImage: showingAllImages ? "chevron.up" : "chevron.down"
+                        )
+                        .font(.subheadline.weight(.medium))
+                    }
+                }
                 Button(role: .destructive) {
                     Haptics.warning()
                     clearAllImages()
@@ -145,6 +158,13 @@ struct StorageView: View {
     }
 
     @State private var zoomedImage: CachedImageEntry?
+    @State private var showingAllImages = false
+    /// ~4 rows of an 84 pt adaptive grid before "See all" appears.
+    private let imagePreviewLimit = 16
+
+    private var visibleCachedImages: [CachedImageEntry] {
+        showingAllImages ? cachedImages : Array(cachedImages.prefix(imagePreviewLimit))
+    }
 
     private func galleryCell(_ entry: CachedImageEntry) -> some View {
         Button {
@@ -210,7 +230,7 @@ struct StorageView: View {
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
             } else {
-                ForEach(exports.exports) { item in
+                ForEach(visibleExports) { item in
                     exportRow(item)
                         .swipeActions(edge: .trailing) {
                             Button(role: .destructive) {
@@ -228,6 +248,19 @@ struct StorageView: View {
                         }
                 }
             }
+                if exports.exports.count > exportPreviewLimit {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            showingAllExports.toggle()
+                        }
+                    } label: {
+                        Label(
+                            showingAllExports ? "Show fewer" : "See all \(exports.exports.count) recordings",
+                            systemImage: showingAllExports ? "chevron.up" : "chevron.down"
+                        )
+                        .font(.subheadline.weight(.medium))
+                    }
+                }
         } header: {
             Text("Exported audio")
         } footer: {
@@ -284,7 +317,7 @@ struct StorageView: View {
     private var usageSection: some View {
         Section {
             usageRow("Notes (notes.json)", NotesStoreSizeReader.notesBytes)
-            usageRow("Kokoro models (fp32 + fp16)", ExportsStore.directorySize(ModelManager.onnxDirectory))
+            usageRow("Kokoro models (fp32 + uint8)", ExportsStore.directorySize(ModelManager.onnxDirectory))
             usageRow("Supertonic model", ExportsStore.directorySize(ModelManager.supertonicDirectory))
             usageRow("Exported audio", ExportsStore.directorySize(ExportsStore.exportsDirectory))
             usageRow(

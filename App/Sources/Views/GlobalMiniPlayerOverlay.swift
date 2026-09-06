@@ -13,6 +13,7 @@ import SwiftUI
 /// to the Notes tab and `NotesListView` pushes the speaking note.
 struct GlobalMiniPlayerOverlay: ViewModifier {
     @EnvironmentObject private var player: SpeechPlayer
+    @AppStorage("miniPlayerCollapsed") private var miniPlayerCollapsed = false
 
     func body(content: Content) -> some View {
         ZStack(alignment: .bottom) {
@@ -24,20 +25,30 @@ struct GlobalMiniPlayerOverlay: ViewModifier {
             // (iOS 26 / LiveContainer).
             Group {
                 if player.showMiniPlayer {
-                    MiniPlayerBar {
-                        NotificationCenter.default.post(
-                            name: .miniPlayerJumpToNote,
-                            object: nil
-                        )
+                    if miniPlayerCollapsed {
+                        MiniPlayerBubble()
+                            .frame(maxWidth: .infinity, alignment: .trailing)
+                            .padding(.horizontal, 16)
+                            .padding(.bottom, 49 + 34 + 8)
+                            .transition(.scale.combined(with: .opacity))
+                            .zIndex(1)
+                    } else {
+                        MiniPlayerBar {
+                            NotificationCenter.default.post(
+                                name: .miniPlayerJumpToNote,
+                                object: nil
+                            )
+                        }
+                        // Standard tab bar (49pt) + safe-area bottom inset = lift
+                        // the mini player just above the Notes/Storage/Settings tabs.
+                        .padding(.bottom, 49 + 34)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                        .zIndex(1)
                     }
-                    // Standard tab bar (49pt) + safe-area bottom inset = lift
-                    // the mini player just above the Notes/Storage/Settings tabs.
-                    .padding(.bottom, 49 + 34)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                    .zIndex(1)
                 }
             }
             .animation(.easeInOut(duration: 0.2), value: player.showMiniPlayer)
+            .animation(.easeInOut(duration: 0.2), value: miniPlayerCollapsed)
         }
     }
 }

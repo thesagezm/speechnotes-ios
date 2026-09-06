@@ -61,8 +61,8 @@ final class PlayPositionTracker {
 
     private func report() {
         guard playerNode.isPlaying else { return }
-        let renderTime = playerNode.lastRenderTime
-        guard renderTime.isSampleTimeValid,
+        guard let renderTime = playerNode.lastRenderTime,
+              renderTime.isSampleTimeValid,
               let playerTime = playerNode.playerTime(forNodeTime: renderTime),
               playerTime.isSampleTimeValid else { return }
         let sample = playerTime.sampleTime

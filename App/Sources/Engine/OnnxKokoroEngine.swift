@@ -7,7 +7,7 @@ import SpeechLogic
 
 /// Plan B engine: Kokoro via ONNX Runtime on the CPU — the PocketPal AI
 /// approach. The instance is pointed at one model file (fp32 `model.onnx`
-/// ~326 MB or the small fp16 tier `model_fp16.onnx` ~163 MB — same graph)
+/// ~326 MB or the small uint8 tier `model_uint8.onnx` ~177 MB — same graph)
 /// plus the shared tokenizer.json/voices.npz in Documents/KokoroOnnx.
 /// Inference spec verified against PocketPal's
 /// react-native-speech engine: inputs `input_ids` int64 [1, N],
@@ -32,7 +32,7 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
     var voice = "am_eric"
 
     /// Which model file + validator this instance serves — the fp32 tier and
-    /// the small fp16 tier share one engine class.
+    /// the small uint8 tier share one engine class.
     private let modelFileURL: URL
     private let modelFilesValid: () -> Bool
 

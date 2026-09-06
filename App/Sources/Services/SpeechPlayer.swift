@@ -17,7 +17,7 @@ final class SpeechPlayer: ObservableObject {
 
         var label: String {
             switch self {
-            case .kokoroSmall: return "Kokoro — small · fp16 (~163 MB)"
+            case .kokoroSmall: return "Kokoro — small · uint8 (~177 MB)"
             case .system: return "Apple system voice"
             case .kokoroOnnx: return "Kokoro — on-device neural, 28 voices"
             case .supertonic: return "Supertonic — best quality, multilingual"
@@ -444,7 +444,7 @@ final class SpeechPlayer: ObservableObject {
     }
 
     /// Which model file the cached OnnxKokoroEngine instance points at —
-    /// the fp32 and fp16 tiers share one slot, so a tier switch must
+    /// the fp32 and uint8 tiers share one slot, so a tier switch must
     /// rebuild it rather than reuse the other tier's session.
     private var onnxEngineFileIsBig = true
 
@@ -492,7 +492,7 @@ final class SpeechPlayer: ObservableObject {
             rebuildOnnxEngine(big: false)
             engine = onnxEngine
             usingSystemFallback = false
-            Log.shared.info("SpeechPlayer: engine → Kokoro small fp16 (\(voice))")
+            Log.shared.info("SpeechPlayer: engine → Kokoro small uint8 (\(voice))")
         } else if engineKind == .kokoroOnnx, ModelManager.shared.isReady {
             rebuildOnnxEngine(big: true)
             engine = onnxEngine

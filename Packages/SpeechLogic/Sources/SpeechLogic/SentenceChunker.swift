@@ -167,22 +167,31 @@ public enum SentenceChunker {
     }
 
     /// UTF-16 offset where speech should resume so it starts at a sentence
-    /// (or oversized-sentence piece) boundary instead of mid-word: the start
-    /// of the piece containing `charsDone`, applying the same boundary rules
-    /// as `chunks(for:)`. Returns 0 when no earlier boundary exists — callers
-    /// treat 0 as "restart from the beginning".
+    /// boundary instead of mid-word: the start of the sentence containing
+    /// `charsDone`, applying the same boundary rules as `chunks(for:)`.
+    /// Returns 0 when no earlier boundary exists — callers treat 0 as
+    /// "restart from the beginning".
     ///
     /// - Parameters:
     ///   - text: The full text playback was started with.
     ///   - charsDone: UTF-16 character count already spoken.
     public static func resumeOffset(in text: String, charsDone: Int) -> Int {
         guard !text.isEmpty, charsDone > 0 else { return 0 }
-        // No packing limits: only the sentence-aligned start offsets matter
-        // here, and running the standard splitter keeps resume positions
-        // exactly consistent with what the engines speak.
-        let pieces = chunks(for: text, firstMaxChars: .max, batchMaxChars: .max)
-        guard let current = pieces.last(where: { charsDone >= $0.offset }) else { return 0 }
-        return current.offset
+
+        // Walk sentence starts directly (NOT chunk starts — chunks pack
+        // several sentences, and resuming at a packed chunk's start would
+        // re-speak whole sentences).
+        var cursor = text.startIndex
+        var lastStartOffset = 0
+        while cursor < text.endIndex {
+            let startOffset = text[text.startIndex..<cursor].utf16.count
+            // `>` not `>=`: a charsDone exactly at a boundary means the next
+            // sentence is the one being read now.
+            if startOffset > charsDone { break }
+            lastStartOffset = startOffset
+            cursor = sentenceEnd(in: text, from: cursor, limit: text.endIndex) ?? text.endIndex
+        }
+        return lastStartOffset
     }
 
     /// Splits the sentence span `start..<end` into pieces whose UTF-16 length

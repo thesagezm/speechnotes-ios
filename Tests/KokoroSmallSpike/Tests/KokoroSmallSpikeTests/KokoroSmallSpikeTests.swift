@@ -2,17 +2,17 @@ import XCTest
 import OnnxRuntimeBindings
 import SpeechLogic
 
-/// CI spike: proves the small Kokoro tier (fp16, ~163 MB) runs on ONNX
+/// CI spike: proves the small Kokoro tier (uint8, ~177 MB) runs on ONNX
 /// Runtime CPU before any device build — the model loads, the
 /// input_ids/style/speed contract holds, tokenizer.json's vocab accepts the
 /// app's per-character lookup, and the output is audible-length non-silent
-/// audio written as a WAV. This is the gate that validates the fp16 build
-/// on ORT CPU (the repo's docs flagged it unverified).
+/// audio written as a WAV. This gate caught the fp16 variant producing NaN
+/// on ORT CPU (CI 34008548349) — the proven uint8 build ships instead.
 final class KokoroSmallSpikeTests: XCTestCase {
 
     func testGenerateSpeech() throws {
         let env = ProcessInfo.processInfo.environment
-        let modelPath = env["KOKORO_MODEL"] ?? NSHomeDirectory() + "/kokoro-small-spike/model_fp16.onnx"
+        let modelPath = env["KOKORO_MODEL"] ?? NSHomeDirectory() + "/kokoro-small-spike/model_uint8.onnx"
         let voicePath = env["KOKORO_VOICE"] ?? NSHomeDirectory() + "/kokoro-small-spike/voice.f32"
         let tokenizerPath = env["KOKORO_TOKENIZER"] ?? NSHomeDirectory() + "/kokoro-small-spike/tokenizer.json"
         let outPath = env["KOKORO_OUT"] ?? NSHomeDirectory() + "/kokoro-small-spike/sample.wav"
@@ -102,7 +102,7 @@ final class KokoroSmallSpikeTests: XCTestCase {
         XCTAssertGreaterThan(seconds, 1.0, "output too short to be real speech")
         let peak = samples.map { abs($0) }.max() ?? 0
         print("KOKORO-SMALL-SPIKE peak amplitude \(peak)")
-        XCTAssertGreaterThan(peak, 0.01, "output is silence — fp16 graph produced nothing")
+        XCTAssertGreaterThan(peak, 0.01, "output is silence — the graph produced nothing")
 
         try WAVWriter.write(samples: samples, sampleRate: 24_000, to: URL(fileURLWithPath: outPath))
     }

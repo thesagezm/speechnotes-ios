@@ -37,7 +37,7 @@ struct MiniPlayerBar: View {
                 }
                 .frame(height: 3)
                 .padding(.horizontal, 14)
-                .padding(.top, 6)
+                .padding(.top, 10)
             }
 
             HStack(spacing: 14) {
@@ -90,14 +90,80 @@ struct MiniPlayerBar: View {
                     ProgressView()
                         .controlSize(.small)
                 }
+
+                // Minimize to the floating bubble.
+                Button {
+                    Haptics.tap()
+                    miniPlayerCollapsed = true
+                } label: {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 32, height: 32)
+                        .background(Circle().fill(Color.secondary.opacity(0.12)))
+                }
+                .accessibilityLabel("Minimize player")
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 8)
             .contentShape(Rectangle())
             .onTapGesture { onTap?() }
         }
-        .background(.ultraThinMaterial)
-        .overlay(alignment: .top) { Divider() }
+        .background(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .shadow(color: .black.opacity(0.18), radius: 12, y: 4)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.06))
+        )
+        .padding(.horizontal, 12)
+    }
+}
+
+/// The minimized mini-player: a floating bubble with a live progress ring
+/// and play/pause. Tap to expand back to the bar.
+struct MiniPlayerBubble: View {
+    @EnvironmentObject private var player: SpeechPlayer
+    @AppStorage("miniPlayerCollapsed") private var miniPlayerCollapsed = false
+
+    var body: some View {
+        Button {
+            Haptics.tap()
+            miniPlayerCollapsed = false
+        } label: {
+            ZStack {
+                Circle()
+                    .fill(.ultraThinMaterial)
+                    .shadow(color: .black.opacity(0.2), radius: 10, y: 3)
+
+                // Progress ring.
+                Circle()
+                    .trim(from: 0, to: player.progress ?? 0)
+                    .stroke(
+                        LinearGradient(
+                            colors: [.accentColor, .purple],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        style: StrokeStyle(lineWidth: 3.5, lineCap: .round)
+                    )
+                    .rotationEffect(.degrees(-90))
+
+                if player.state == .generating {
+                    ProgressView()
+                        .tint(.accentColor)
+                } else {
+                    Image(systemName: player.state == .speaking ? "pause.fill" : "play.fill")
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundStyle(.accentColor)
+                }
+            }
+            .frame(width: 58, height: 58)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Expand player")
     }
 }
 
