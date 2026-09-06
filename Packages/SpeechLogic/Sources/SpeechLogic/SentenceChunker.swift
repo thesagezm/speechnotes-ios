@@ -177,21 +177,29 @@ public enum SentenceChunker {
     ///   - charsDone: UTF-16 character count already spoken.
     public static func resumeOffset(in text: String, charsDone: Int) -> Int {
         guard !text.isEmpty, charsDone > 0 else { return 0 }
+        return sentencePieces(in: text).last(where: { charsDone >= $0.offset })?.offset ?? 0
+    }
 
-        // Walk sentence starts directly (NOT chunk starts — chunks pack
-        // several sentences, and resuming at a packed chunk's start would
-        // re-speak whole sentences).
+    /// Sentence-aligned playback pieces: UNPACKED (one piece ≈ one sentence,
+    /// oversized sentences word-split at `maxChars`), as UTF-16 spans that
+    /// cover the text exactly. This is the source of truth for both resume
+    /// offsets and read-along highlighting — do NOT use `chunks(for:)` for
+    /// either: it packs consecutive sentences into batches, which made the
+    /// highlight (and once the resume) jump across whole batches.
+    public static func sentencePieces(in text: String, maxChars: Int = 200) -> [(offset: Int, endOffset: Int)] {
+        guard !text.isEmpty, text.contains(where: { !$0.isWhitespace }) else { return [] }
+        var result: [(offset: Int, endOffset: Int)] = []
         var cursor = text.startIndex
-        var lastStartOffset = 0
         while cursor < text.endIndex {
-            let startOffset = text[text.startIndex..<cursor].utf16.count
-            // `>` not `>=`: a charsDone exactly at a boundary means the next
-            // sentence is the one being read now.
-            if startOffset > charsDone { break }
-            lastStartOffset = startOffset
-            cursor = sentenceEnd(in: text, from: cursor, limit: text.endIndex) ?? text.endIndex
+            let end = sentenceEnd(in: text, from: cursor, limit: text.endIndex) ?? text.endIndex
+            for piece in splitOversized(text, start: cursor, end: end, maxUtf16: max(1, maxChars)) {
+                let offset = text[text.startIndex..<piece.start].utf16.count
+                let endOffset = offset + text[piece.start..<piece.end].utf16.count
+                result.append((offset: offset, endOffset: endOffset))
+            }
+            cursor = end
         }
-        return lastStartOffset
+        return result
     }
 
     /// Splits the sentence span `start..<end` into pieces whose UTF-16 length

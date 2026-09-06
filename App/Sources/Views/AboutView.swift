@@ -1,6 +1,12 @@
 import SwiftUI
 
 struct AboutView: View {
+    /// Live from the bundle — a hardcoded string always goes stale (sat at
+    /// "v1.3.0" through two releases).
+    static var versionString: String {
+        "v" + (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?")
+    }
+
     var body: some View {
         Form {
             Section {
@@ -11,7 +17,7 @@ struct AboutView: View {
                     VStack(alignment: .leading) {
                         Text("Speechnotes")
                             .font(.headline)
-                        Text("v1.3.0 · offline TTS notes")
+                        Text("\(Self.versionString) · offline TTS notes")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }

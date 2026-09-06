@@ -7,9 +7,11 @@ import SpeechLogic
 @MainActor
 final class SpeechPlayer: ObservableObject {
     enum EngineKind: String, CaseIterable, Identifiable {
-        // Declaration order = picker order, worst quality first (user-set).
-        case kokoroSmall
+        // Declaration order = picker order, worst quality first (user-set):
+        // Apple system voice, small Kokoro (uint8), full Kokoro (fp32),
+        // Supertonic. The Settings picker and download sections mirror this.
         case system
+        case kokoroSmall
         case kokoroOnnx
         case supertonic
 
@@ -115,8 +117,10 @@ final class SpeechPlayer: ObservableObject {
     @Published private(set) var activeSpeechText: String?
     /// UTF-16 range in `activeSpeechText` of the sentence currently sounding.
     @Published private(set) var readAlongRange: Range<Int>?
-    /// Sentence-aligned pieces of activeSpeechText (SentenceChunker rules).
-    private var readAlongPieces: [Chunk] = []
+    /// Sentence-aligned pieces of activeSpeechText — UNPACKED one-piece-per-
+    /// sentence spans from SentenceChunker.sentencePieces (chunks(for:) packs
+    /// batches, which made the highlight cover whole batches of text).
+    private var readAlongPieces: [(offset: Int, endOffset: Int)] = []
     /// UTF-16 offset of the trimmed string the engine received within
     /// activeSpeechText (engines trim; a resume adds the bookmark offset).
     private var engineSpeechOffset: Int = 0
@@ -130,7 +134,7 @@ final class SpeechPlayer: ObservableObject {
     private func beginReadAlong(fullText: String) {
         activeSpeechText = fullText
         readAlongRange = nil
-        readAlongPieces = SentenceChunker.chunks(for: fullText, firstMaxChars: .max, batchMaxChars: .max)
+        readAlongPieces = SentenceChunker.sentencePieces(in: fullText)
     }
 
     private static func leadingWhitespaceUTF16(_ s: String) -> Int {
@@ -148,11 +152,20 @@ final class SpeechPlayer: ObservableObject {
     }
 
     private func updateReadAlongRange(fullChar: Int) {
-        guard let piece = readAlongPieces.last(where: { fullChar >= $0.offset }) else {
-            readAlongRange = readAlongPieces.first.map { $0.offset..<$0.endOffset }
-            return
+        // Publish ONLY when the sentence changes: the play-position
+        // heartbeat fires ~3×/s and republishing every tick re-rendered the
+        // read-along view constantly — the reported playback lag.
+        let newRange: Range<Int>?
+        if let piece = readAlongPieces.last(where: { fullChar >= $0.offset }) {
+            newRange = piece.offset..<piece.endOffset
+        } else if let first = readAlongPieces.first {
+            newRange = first.offset..<first.endOffset
+        } else {
+            newRange = nil
         }
-        readAlongRange = piece.offset..<piece.endOffset
+        if readAlongRange != newRange {
+            readAlongRange = newRange
+        }
     }
 
     private func endReadAlong() {

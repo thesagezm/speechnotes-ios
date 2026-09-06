@@ -210,6 +210,46 @@ final class SentenceChunkerTests: XCTestCase {
         XCTAssertEqual(SentenceChunker.firstChunk(in: "🎉🎉🎉🎉", maxChars: 3)?.text, "🎉")
     }
 
+    // MARK: - Sentence pieces (read-along + resume source of truth)
+
+    func testSentencePiecesAreUnpackedSentences() {
+        let text = "First sentence. Second one here. Third."
+        let pieces = SentenceChunker.sentencePieces(in: text)
+        // One piece PER SENTENCE — never packed (packing made the read-along
+        // highlight cover every sentence after the first).
+        XCTAssertEqual(pieces.count, 3)
+        XCTAssertEqual(pieces[0].offset, 0)
+        XCTAssertEqual(pieces[1].offset, 16)
+        XCTAssertEqual(pieces[2].offset, 33)
+        // Pieces cover the text exactly, back to back.
+        XCTAssertEqual(pieces.first?.offset, 0)
+        XCTAssertEqual(pieces.last?.endOffset, text.utf16.count)
+        for (a, b) in zip(pieces, pieces.dropFirst()) {
+            XCTAssertEqual(a.endOffset, b.offset)
+        }
+    }
+
+    func testSentencePiecesSplitOversizedSentences() {
+        let long = String(repeating: "word ", count: 100) // 500 chars, no terminator
+        let pieces = SentenceChunker.sentencePieces(in: long, maxChars: 200)
+        XCTAssertGreaterThan(pieces.count, 1)
+        XCTAssertTrue(pieces.allSatisfy { $0.endOffset - $0.offset <= 200 })
+        XCTAssertEqual(pieces.first?.offset, 0)
+        XCTAssertEqual(pieces.last?.endOffset, long.utf16.count)
+    }
+
+    func testSentencePiecesDriveResumeOffset() {
+        let cjk = "一。二。三。"
+        XCTAssertEqual(SentenceChunker.sentencePieces(in: cjk).count, 3)
+        XCTAssertEqual(SentenceChunker.resumeOffset(in: cjk, charsDone: 3), 2)
+
+        let english = "Alpha one. Bravo two. Charlie three."
+        let pieces = SentenceChunker.sentencePieces(in: english)
+        XCTAssertEqual(pieces.count, 3)
+        let midSecond = (pieces[1].offset + pieces[1].endOffset) / 2
+        XCTAssertEqual(SentenceChunker.resumeOffset(in: english, charsDone: midSecond), pieces[1].offset)
+    }
+
     // MARK: - Resume offsets
 
     /// UTF-16 offset of a String.Index (UTF16View.Index == String.Index).

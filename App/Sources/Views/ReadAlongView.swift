@@ -31,15 +31,10 @@ struct ReadAlongView: View {
         var end: Int { start + content.utf16.count }
     }
 
-    private var paragraphs: [Paragraph] {
-        var result: [Paragraph] = []
-        var start = 0
-        for (index, line) in text.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
-            result.append(Paragraph(id: index, start: start, content: line))
-            start += line.utf16.count + 1 // +1 for the \n
-        }
-        return result
-    }
+    /// Cached paragraph split — computed once per text, never per render
+    /// (body re-evaluates on every sentence change during playback; the
+    /// old computed property re-split the whole note each time).
+    @State private var paragraphs: [Paragraph] = []
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -56,16 +51,27 @@ struct ReadAlongView: View {
             }
             .onChange(of: activeRange?.lowerBound) { start in
                 guard let start else { return }
-                // Scroll the paragraph containing the highlight to center.
+                // Scroll the paragraph containing the highlight to center —
+                // only fires when the sentence changes, never per tick.
                 if let paragraph = paragraphs.last(where: { start >= $0.start && start < $0.end }),
                    paragraph.id != paragraphs.first?.id {
-                    withAnimation(.easeInOut(duration: 0.25)) {
-                        proxy.scrollTo(paragraph.id, anchor: .center)
-                    }
+                    proxy.scrollTo(paragraph.id, anchor: .center)
                 }
             }
+            .onAppear { rebuildParagraphs() }
+            .onChange(of: text) { _ in rebuildParagraphs() }
         }
         .background(theme.colorScheme == .dark ? Color.black : Color(.systemBackground))
+    }
+
+    private func rebuildParagraphs() {
+        var result: [Paragraph] = []
+        var start = 0
+        for (index, line) in text.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
+            result.append(Paragraph(id: index, start: start, content: line))
+            start += line.utf16.count + 1 // +1 for the \n
+        }
+        paragraphs = result
     }
 
     /// Paragraph text with the overlapping part of the global highlight

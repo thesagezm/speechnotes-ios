@@ -51,14 +51,40 @@ struct NotebookListView: View {
                                     Text("\(notes.notes(inNotebook: notebook.id).count)")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
+                                    Image(systemName: "trash")
+                                        .font(.caption)
+                                        .foregroundStyle(.red)
+                                }
+                            }
+                            // Make deletion discoverable: a visible trash
+                            // glyph, a swipe action and the context menu all
+                            // route through the same confirmation.
+                            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                Button {
+                                    deletingNotebook = notebook
+                                } label: {
+                                    Label("Delete", systemImage: "trash")
+                                }
+                                .tint(.red)
+                            }
+                            .contextMenu {
+                                Button {
+                                    renameDraft = notebook.name
+                                    renamingNotebook = notebook
+                                } label: {
+                                    Label("Rename", systemImage: "pencil")
+                                }
+                                Button(role: .destructive) {
+                                    deletingNotebook = notebook
+                                } label: {
+                                    Label("Delete notebook", systemImage: "trash")
                                 }
                             }
                         }
                         .onDelete { offsets in
                             for index in offsets {
                                 let notebook = notebooks.notebooks[index]
-                                notes.clearNotebook(notebook.id)
-                                notebooks.delete(notebook)
+                                deletingNotebook = notebook
                             }
                         }
                     }
@@ -70,6 +96,24 @@ struct NotebookListView: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
                 }
+            }
+            .confirmationDialog(
+                "Delete \(deletingNotebook?.name ?? "notebook")?",
+                isPresented: Binding(
+                    get: { deletingNotebook != nil },
+                    set: { if !$0 { deletingNotebook = nil } }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button("Delete notebook", role: .destructive) {
+                    if let notebook = deletingNotebook {
+                        notes.clearNotebook(notebook.id)
+                        notebooks.delete(notebook)
+                    }
+                    deletingNotebook = nil
+                }
+            } message: {
+                Text("Its notes are kept and become Unfiled.")
             }
             .alert("Rename notebook", isPresented: Binding(
                 get: { renamingNotebook != nil },
