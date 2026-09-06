@@ -365,3 +365,15 @@ main fast-forwarded to the green build (6a5da15); IPA artifact on run
 download + playback (Settings → Kokoro small), resume snap at sentence
 boundary, read-along highlight tracking + toggle, mini-player minimize,
 notebook CRUD + moves, pin/favorite, onboarding on fresh container.
+
+## 2026-09-06 addendum #5 — Supertonic noOutput resilience + v1.4.1 UI round
+
+Supertonic "failing like crazy": the Helper's duration model intermittently
+predicts a ZERO-length result (noOutput) mid-stream; one flaky chunk aborted
+the whole reading. Both neural engines now retry each chunk 3× (log includes
+the chunk text head — watch for content-dependence) and on final failure
+insert 0.5s silence and CONTINUE. Same for WAV-export loops.
+
+v1.4.1 UI round (all in this build): Note.title = first sentence (editable);
+editor title lives in the nav bar (.principal) — the title row is gone;
+PlayerControlsBar minimizes to a slim pill (editorBarMinimized).
