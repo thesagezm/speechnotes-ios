@@ -1,4 +1,5 @@
 import Foundation
+import SpeechLogic
 
 enum BookFormat: String, Codable {
     case epub
@@ -44,6 +45,12 @@ struct Book: Identifiable, Codable, Equatable, Hashable {
     var spine: [String]?
     /// pdf: page count.
     var pageCount: Int?
+    /// pdf: speech chapters, resolved once at import (or lazily backfilled):
+    /// the PDF's own outline tree when it has one, else heading detection,
+    /// else labeled page ranges (`pdfChapterSource` records which). The TTS
+    /// chapter pipeline reads these exactly like an epub's spine.
+    var pdfChapters: [PdfChapter]?
+    var pdfChapterSource: String?
     var hasCover: Bool
     var toc: [BookTocEntry]?
     var position: BookPosition?
@@ -59,6 +66,8 @@ struct Book: Identifiable, Codable, Equatable, Hashable {
         spineCount: Int? = nil,
         spine: [String]? = nil,
         pageCount: Int? = nil,
+        pdfChapters: [PdfChapter]? = nil,
+        pdfChapterSource: String? = nil,
         hasCover: Bool = false,
         toc: [BookTocEntry]? = nil,
         position: BookPosition? = nil
@@ -73,6 +82,8 @@ struct Book: Identifiable, Codable, Equatable, Hashable {
         self.spineCount = spineCount
         self.spine = spine
         self.pageCount = pageCount
+        self.pdfChapters = pdfChapters
+        self.pdfChapterSource = pdfChapterSource
         self.hasCover = hasCover
         self.toc = toc
         self.position = position

@@ -213,7 +213,7 @@ public enum PdfText {
     /// columns); everything else uses the page's default string.
     public static func pageText(_ page: PDFPage) -> String {
         let lines = lines(of: page)
-        if lines.count >= 6, let split = twoColumnSplit(pageBounds: page.bounds(for: .mediaBox), lines: lines) {
+        if let split = columnSplit(page: page, lines: lines) {
             let left = page.selection(for: split.left)?.string ?? ""
             let right = page.selection(for: split.right)?.string ?? ""
             if !left.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -222,6 +222,16 @@ public enum PdfText {
             }
         }
         return normalize(page.string ?? "")
+    }
+
+    /// Gutter detection for real pages: the line-geometry scan first, then a
+    /// selection probe for pages where PDFKit's line grouping merges or spans
+    /// the columns (running heads, equations, tight measures).
+    public static func columnSplit(page: PDFPage, lines: [Line]) -> (left: CGRect, right: CGRect)? {
+        guard lines.count >= 6 else { return nil }
+        let pageBounds = page.bounds(for: .mediaBox)
+        return twoColumnSplit(pageBounds: pageBounds, lines: lines)
+            ?? probedGutter(page: page, pageBounds: pageBounds)
     }
 
     /// A page carries a text layer only if it yields real characters —
@@ -275,6 +285,46 @@ public enum PdfText {
             height: pageBounds.height
         )
         return (left, right)
+    }
+
+    /// Selection-probe gutter for real-world pages: a candidate band IS the
+    /// gutter when the page yields NO text inside it (top/bottom margins
+    /// excluded so running heads and page numbers can't veto a true gutter)
+    /// while both halves carry real text. Costs one selection per candidate
+    /// band, and only runs when the geometry scan found nothing.
+    private static func probedGutter(page: PDFPage, pageBounds: CGRect) -> (left: CGRect, right: CGRect)? {
+        let width = pageBounds.width
+        let height = pageBounds.height
+        guard width > 0, height > 0 else { return nil }
+        let contentY = pageBounds.minY + height * 0.06
+        let contentHeight = height * 0.88
+        let bandWidth = width * 0.012
+        var cursor = pageBounds.minX + width * 0.30
+        let limit = pageBounds.minX + width * 0.70
+        while cursor + bandWidth <= limit {
+            let band = CGRect(x: cursor, y: contentY, width: bandWidth, height: contentHeight)
+            let bandText = (page.selection(for: band)?.string ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if bandText.isEmpty {
+                let left = CGRect(
+                    x: pageBounds.minX, y: contentY,
+                    width: cursor - pageBounds.minX, height: contentHeight
+                )
+                let right = CGRect(
+                    x: cursor + bandWidth, y: contentY,
+                    width: pageBounds.maxX - (cursor + bandWidth), height: contentHeight
+                )
+                let leftText = (page.selection(for: left)?.string ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let rightText = (page.selection(for: right)?.string ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if leftText.count >= 40, rightText.count >= 40 {
+                    return (left, right)
+                }
+            }
+            cursor += bandWidth
+        }
+        return nil
     }
 
     /// One chapter's speech text, built page by page (the caller caches the

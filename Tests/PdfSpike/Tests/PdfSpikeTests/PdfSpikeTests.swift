@@ -57,7 +57,7 @@ final class PdfSpikeTests: XCTestCase {
             guard let page = document.page(at: pageIndex) else { continue }
             let text = PdfText.pageText(page)
             XCTAssertFalse(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, "page \(pageIndex) extracted nothing")
-            if PdfText.twoColumnSplit(pageBounds: page.bounds(for: .mediaBox), lines: PdfText.lines(of: page)) != nil {
+            if PdfText.columnSplit(page: page, lines: PdfText.lines(of: page)) != nil {
                 splitPages += 1
             }
             checkedPages += 1
@@ -67,9 +67,9 @@ final class PdfSpikeTests: XCTestCase {
         print("PDF-SPIKE acl page 0 head: \(String(firstPageText.prefix(90)).replacingOccurrences(of: "\n", with: " / "))")
     }
 
-    /// arXiv: single-column, no bookmarks — must resolve to page-range
-    /// chapters (the honest fallback) and extract quickly.
-    func testArxivPaperFallsBackToPageRanges() throws {
+    /// arXiv: hyperref usually emits section bookmarks, but NOT always —
+    /// whichever path wins, chapters must resolve and extract fast.
+    func testArxivPaperResolvesAndExtracts() throws {
         let document = try document("arxiv-1706.03762.pdf")
         XCTAssertGreaterThanOrEqual(document.pageCount, 5)
 
@@ -78,7 +78,9 @@ final class PdfSpikeTests: XCTestCase {
         let resolveMs = Int(Date().timeIntervalSince(start) * 1000)
         print("PDF-SPIKE arxiv: source=\(resolved.source) chapters=\(resolved.chapters.count) resolve=\(resolveMs)ms")
 
-        XCTAssertEqual(resolved.source, "pages", "arXiv papers have no bookmarks or heading structure → page ranges")
+        // Modern arXiv toolchains emit bookmarks; a bare one must fall through
+        // to heading detection or page ranges — never nil/empty.
+        XCTAssertGreaterThanOrEqual(resolved.chapters.count, 2, "chapters must resolve one way or another")
 
         let extractStart = Date()
         var chars = 0
