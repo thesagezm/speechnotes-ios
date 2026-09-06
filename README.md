@@ -3,16 +3,54 @@
 An offline, Speech Note (Linux)-style app for iPhone — built entirely from Linux,
 compiled on GitHub Actions macOS runners, sideloaded via SideStore + LiveContainer.
 
-**Current status: v1.0.0 — three on-device engines, markdown option, polished UI.**
-Pick an engine in Speech Settings, download its model once, and notes are spoken
-fully offline (airplane-mode tested):
+**Current status: v1.4.1 — three on-device engines, notebooks, read-along,
+polished UI.** Pick an engine in Speech Settings (listed worst → best), download
+its model once, and notes are spoken fully offline (airplane-mode tested):
 
 | Engine | Model size | Voices | Notes |
 |---|---|---|---|
-| **Kokoro small** (ONNX, CPU) | ~178 MB | 28 (US/UK, m/f) | Lightweight fp16 tier |
+| Apple (system) | 0 | all system voices | Instant, no download |
+| **Kokoro small** (ONNX, CPU) | ~178 MB | 28 (US/UK, m/f) | Lightweight uint8 tier |
 | **Kokoro** (ONNX, CPU) | ~341 MB | 28 (US/UK, m/f) | Main engine — fp32 quality build |
 | **Supertonic** (ONNX, CPU) | ~399 MB | 10 styles × 31 languages | Multilingual — flow-matching TTS |
-| Apple (system) | 0 | all system voices | Fallback while models download |
+
+Chunk generation retries on failure — one flaky chunk never ends a reading.
+
+Feature tour:
+
+- **Notes** — create/edit/delete, autosave (debounced, flushed on exit and
+  backgrounding), search, sort (edited/created/title), date sections, swipe
+  actions (pin / delete / share text / export audio), drag & drop.
+- **Notebooks & organization** (Joplin-style) — flat notebooks with a chip
+  row for scoping, move notes between them, plus pin (Pinned section on top)
+  and favorite (star). Titles auto-derive from the note's first sentence.
+- **Streaming playback** — sentence-chunked generation with playback starting
+  after the first sentence; pause/resume/stop; speed slider; phone-call
+  interruption handling; lock-screen / Control Center controls.
+- **Read-along highlighting** — a dedicated reader replaces the editor while
+  a note speaks (toggleable from the player bar), highlighting the sentence
+  actually sounding via play-time position tracking, with auto-scroll.
+- **Resume bookmarks** — stopped notes resume from the prior sentence
+  boundary (valid 30 days); auto-resume after a brief backgrounding.
+- **Mini-player** — rounded card above the tab bar, minimizable to a
+  floating progress-ring bubble; it yields whenever the note's own editor
+  controls are on screen.
+- **Voice picker** — searchable, grouped, recent voices, tap-to-audition
+  (hear a voice before committing). Supertonic adds a language selector
+  (English, Korean, Japanese, German, French, +26 more).
+- **Markdown option** (Settings → Notes) — preview rendered markdown in the
+  editor (eye/pencil toggle), and speech reads the plain text without
+  markdown symbols.
+- **Import** — .txt / .md / .pdf via the Files picker, drag & drop,
+  `speechnotes://import?text=…` links, and clipboard; iCloud-aware with
+  encoding fallbacks (UTF-8/16/32, latin-1).
+- **Export** — WAV audio of any note via the Share Sheet; share note text too.
+- **Storage** — browsable gallery of every cached image (attached AND
+  web-downloaded, tap to zoom, share/delete), exported audio list, and a
+  usage breakdown.
+- **Onboarding** — a three-page first-launch tour.
+- **Logs** (Settings → About) — crash-persistent on-device logs, shareable
+  for debugging.
 
 Feature tour:
 
@@ -60,12 +98,15 @@ speechnotes-ios/
 ├── project.yml                  # XcodeGen spec (targets, pins, version)
 ├── .github/workflows/build.yml  # CI: tests + spikes + unsigned IPA
 ├── App/Sources/
-│   ├── Engine/                  # SpeechEngine protocol + 4 engines
+│   ├── Engine/                  # SpeechEngine protocol + 3 engines
+│   │   │                        #   + PlayPositionTracker (read-along sync)
 │   │   └── Supertonic/Helper.swift  # vendored upstream runner (MIT)
-│   ├── Services/                # NotesStore, SpeechPlayer, ModelManager,
-│   │                            # ImportService, LogStore, Haptics
-│   ├── Models/                  # Note, VoiceCatalog
-│   └── Views/                   # list, editor, picker, settings, mini-player…
+│   ├── Services/                # NotesStore, NotebooksStore, SpeechPlayer,
+│   │                            # ModelManager, RemoteImageStore, ImportService,
+│   │                            # LogStore, Haptics
+│   ├── Models/                  # Note, Notebook, VoiceCatalog
+│   └── Views/                   # list, editor, read-along, notebooks,
+│                                #   picker, settings, mini-player, onboarding…
 ├── Packages/SpeechLogic/        # pure-logic SPM package (tested on CI)
 │                                #   SentenceChunker, WAVWriter,
 │                                #   MarkdownText
@@ -77,9 +118,11 @@ speechnotes-ios/
 
 ## Building & installing
 
-1. Push to `main` (or let CI run) → grab the `SpeechnotesIOS` artifact from
-   the latest [Actions run](https://github.com/thesagezm/speechnotes-ios/actions).
-2. Unzip once — inside is `SpeechnotesIOS.ipa` (unsigned on purpose).
+1. Grab `SpeechnotesIOS.ipa` from the
+   [Releases](https://github.com/thesagezm/speechnotes-ios/releases) page
+   (or the `SpeechnotesIOS` artifact of the latest
+   [Actions run](https://github.com/thesagezm/speechnotes-ios/actions)).
+2. Unzip once if needed — the `.ipa` is unsigned on purpose.
 3. Import into **LiveContainer** (or sign with SideStore).
 4. First launch: Settings → pick an engine → download its model on Wi-Fi.
    After that, everything works in airplane mode.
