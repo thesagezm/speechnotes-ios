@@ -9,15 +9,15 @@ import Foundation
 final class NotebooksStore: ObservableObject {
     static let shared = NotebooksStore()
 
-    @Published private(set) var notebooks: [Notebook]
+    @Published private(set) var notebooks: [Notebook] = []
 
-    private var fileURL: URL {
+    private static var fileURL: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("notebooks.json")
     }
 
     init() {
-        load()
+        notebooks = Self.loadNotebooks()
     }
 
     /// Creates a notebook with a unique, non-empty name. Returns nil (and
@@ -62,16 +62,15 @@ final class NotebooksStore: ObservableObject {
 
     // MARK: - Persistence
 
-    private func load() {
+    private static func loadNotebooks() -> [Notebook] {
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
-            notebooks = []
-            return
+            return []
         }
         do {
-            notebooks = try JSONDecoder().decode([Notebook].self, from: try Data(contentsOf: fileURL))
+            return try JSONDecoder().decode([Notebook].self, from: try Data(contentsOf: fileURL))
         } catch {
             Log.shared.error("Failed to load notebooks: \(error)")
-            notebooks = []
+            return []
         }
     }
 

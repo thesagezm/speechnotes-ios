@@ -43,6 +43,27 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
         self.modelFileURL = modelFileURL
         self.modelFilesValid = modelFilesValid
         super.init()
+        setupAudioSession()
+    }
+
+    private func setupAudioSession() {
+        do {
+            try AVAudioSession.sharedInstance().setCategory(
+                .playback,
+                mode: .spokenAudio,
+                options: [.duckOthers, .allowBluetooth, .allowBluetoothA2DP]
+            )
+        } catch {
+            Log.shared.error("OnnxKokoroEngine audio session setup failed: \(error)")
+        }
+        interruptionObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            self?.handleInterruption(note)
+        }
+        Log.shared.info("OnnxKokoroEngine created")
     }
 
     private static let sampleRate: Double = 24_000
@@ -105,43 +126,6 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
         }
     }
 
-    override init() {
-        super.init()
-        do {
-            try AVAudioSession.sharedInstance().setCategory(
-                .playback,
-                mode: .spokenAudio,
-                options: [.duckOthers, .allowBluetooth, .allowBluetoothA2DP]
-            )
-        } catch {
-            Log.shared.error("OnnxKokoroEngine audio session setup failed: \(error)")
-        }
-        interruptionObserver = NotificationCenter.default.addObserver(
-            forName: AVAudioSession.interruptionNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] notification in
-            self?.handleInterruption(notification)
-        }
-        Log.shared.info("OnnxKokoroEngine created")
-    }
-
-    deinit {
-        if let interruptionObserver {
-            NotificationCenter.default.removeObserver(interruptionObserver)
-        }
-    }
-
-    private func handleInterruption(_ notification: Notification) {
-        let typeRaw = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
-        let optionsRaw = notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
-        if typeRaw == AVAudioSession.InterruptionType.began.rawValue {
-            if state == .speaking { pause() }
-        } else if typeRaw == AVAudioSession.InterruptionType.ended.rawValue,
-                  optionsRaw & AVAudioSession.InterruptionOptions.shouldResume.rawValue != 0 {
-            if state == .paused { resume() }
-        }
-    }
 
     // MARK: - Model loading (engineQueue)
 
