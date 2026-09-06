@@ -15,14 +15,13 @@ struct SettingsView: View {
     /// Any neural engine is selected AND its model is ready — the system
     /// engine (and so the system voice) is not in the playback path.
     private var neuralEngineIsActive: Bool {
-        (player.engineKind == .kokoroOnnx || player.engineKind == .kitten || player.engineKind == .supertonic)
+        (player.engineKind == .kokoroOnnx || player.engineKind == .kokoroSmall || player.engineKind == .supertonic)
             && !player.usingSystemFallback
     }
 
     /// The voice preference of whichever engine is selected.
     private var activeVoiceCodename: String {
         switch player.engineKind {
-        case .kitten: return player.kittenVoice
         case .supertonic: return player.supertonicVoice
         default: return player.voice
         }
@@ -31,7 +30,7 @@ struct SettingsView: View {
     private var neuralModelMissing: Bool {
         switch player.engineKind {
         case .kokoroOnnx: return !models.isReady
-        case .kitten: return !models.kittenIsReady
+        case .kokoroSmall: return !models.smallIsReady
         case .supertonic: return !models.supertonicIsReady
         default: return false
         }
@@ -39,7 +38,7 @@ struct SettingsView: View {
 
     private var voicePickerScope: VoicePickerSheet.Scope {
         switch player.engineKind {
-        case .kitten: return .kitten
+        case .kokoroSmall: return .kokoroSmall
         case .supertonic: return .supertonic
         default: return .kokoro
         }
@@ -47,7 +46,7 @@ struct SettingsView: View {
 
     private var voiceSectionHeader: String {
         switch player.engineKind {
-        case .kitten: return "Kitten voice"
+        case .kokoroSmall, .kokoroOnnx: return "Kokoro voice"
         case .supertonic: return "Supertonic voice"
         default: return "Kokoro voice"
         }
@@ -83,7 +82,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Speech engine")
                 } footer: {
-                    Text("Listed worst to best. Supertonic sounds the best (10 voice styles, 31 languages). Kokoro is the solid default (28 voices). Apple's system voice beats Kitten, which is tiny and rough.")
+                    Text("Listed worst to best. Supertonic sounds the best (10 voice styles, 31 languages). Kokoro fp16 is the lightweight tier; Kokoro fp32 is the solid default. All use the same 28 voices.")
                 }
 
                 Section {
@@ -110,8 +109,6 @@ struct SettingsView: View {
                     Text(voiceSectionHeader)
                 } footer: {
                     switch player.engineKind {
-                    case .kitten:
-                        Text("Tap a voice in the picker to hear a sample before committing.")
                     case .supertonic:
                         Text("10 voice styles, all fluent in 31 languages — pick the language in the voice picker. Tap a voice to hear a sample.")
                     default:
@@ -180,33 +177,33 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    switch models.kittenState {
+                    switch models.smallState {
                     case .notDownloaded:
                         Button {
-                            models.startKittenDownload()
+                            models.startSmallDownload()
                         } label: {
-                            Label("Download Kitten model (~82 MB)", systemImage: "arrow.down.circle")
+                            Label("Download Kokoro small model (~163 MB)", systemImage: "arrow.down.circle")
                         }
                     case .downloading(let progress):
                         ProgressView(value: progress) {
-                            Text("Downloading Kitten… \(Int(progress * 100))%")
+                            Text("Downloading Kokoro small… \(Int(progress * 100))%")
                         }
                     case .failed(let message):
-                        Label("Kitten download failed: \(message)", systemImage: "exclamationmark.triangle")
+                        Label("Download failed: \(message)", systemImage: "exclamationmark.triangle")
                             .font(.footnote)
                         Button("Retry") {
-                            models.startKittenDownload()
+                            models.startSmallDownload()
                         }
                     case .ready:
-                        Label("Kitten model ready", systemImage: "checkmark.circle")
-                        Button("Delete Kitten model (frees ~82 MB)", role: .destructive) {
-                            models.deleteKittenModels()
+                        Label("Small model ready — fully offline", systemImage: "checkmark.circle")
+                        Button("Delete small model (frees ~163 MB)", role: .destructive) {
+                            models.deleteSmallModel()
                         }
                     }
                 } header: {
-                    Text("Kitten model")
+                    Text("Kokoro small model")
                 } footer: {
-                    Text("KittenTTS mini 0.8 — 80M parameters, 8 expressive voices. Optional; Kokoro above is the main engine.")
+                    Text("The fp16 build of the same Kokoro graph — half the footprint of fp32 with a small quality step down. Shares the 28-voice catalog, tokenizer and voice bank with the model above.")
                 }
 
                 Section {

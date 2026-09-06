@@ -209,4 +209,69 @@ final class SentenceChunkerTests: XCTestCase {
         // last whole Character instead.
         XCTAssertEqual(SentenceChunker.firstChunk(in: "🎉🎉🎉🎉", maxChars: 3)?.text, "🎉")
     }
+
+    // MARK: - Resume offsets
+
+    /// UTF-16 offset of a String.Index (UTF16View.Index == String.Index).
+    private func utf16Offset(_ text: String, _ index: String.Index) -> Int {
+        text.utf16.distance(from: text.utf16.startIndex, to: index)
+    }
+
+    func testResumeOffsetSnapsToPriorSentence() {
+        let text = "First sentence. Second one here. Third."
+        // Mid-word in "Second" → resume at "Second" (after ". ").
+        let secondStart = utf16Offset(text, text.firstIndex(of: "S")!)
+        XCTAssertEqual(SentenceChunker.resumeOffset(in: text, charsDone: secondStart + 3), secondStart)
+        // Exactly at a boundary → that sentence is the one being read now.
+        XCTAssertEqual(SentenceChunker.resumeOffset(in: text, charsDone: secondStart), secondStart)
+        // No boundary before → 0.
+        XCTAssertEqual(SentenceChunker.resumeOffset(in: text, charsDone: 3), 0)
+        // charsDone 0 → 0.
+        XCTAssertEqual(SentenceChunker.resumeOffset(in: text, charsDone: 0), 0)
+    }
+
+    func testResumeOffsetHonorsChunkerRules() {
+        // Decimals are not boundaries — resume from inside "3.14159" snaps
+        // all the way back to 0.
+        let decimals = "Pi is 3.14159 exactly right. Tail sentence."
+        let midDecimal = utf16Offset(decimals, decimals.range(of: "59")!.lowerBound)
+        XCTAssertEqual(SentenceChunker.resumeOffset(in: decimals, charsDone: midDecimal), 0)
+        let tail = utf16Offset(decimals, decimals.range(of: "Tail")!.lowerBound)
+        XCTAssertEqual(SentenceChunker.resumeOffset(in: decimals, charsDone: tail + 4), tail)
+
+        // CJK terminators always end a sentence.
+        let cjk = "最初の文。二番目の文です。三番目。"
+        let third = utf16Offset(cjk, cjk.range(of: "三番目")!.lowerBound)
+        XCTAssertEqual(SentenceChunker.resumeOffset(in: cjk, charsDone: third + 1), third)
+
+        // Newlines are boundaries.
+        let lines = "First line\nSecond line\nThird line"
+        let thirdLine = utf16Offset(lines, lines.range(of: "Third")!.lowerBound)
+        XCTAssertEqual(SentenceChunker.resumeOffset(in: lines, charsDone: thirdLine + 2), thirdLine)
+    }
+
+    func testResumeOffsetIsTheLastBoundaryBeforeCharsDone() {
+        // The core playback guarantee: between the resume offset and
+        // charsDone there is NO sentence boundary — the interrupted sentence
+        // is re-spoken from its start.
+        let text = String(repeating: "Alpha bravo charlie delta. Echo foxtrot golf hotel.\n", count: 6)
+        for charsDone in stride(from: 5, to: text.utf16.count, by: 7) {
+            let resume = SentenceChunker.resumeOffset(in: text, charsDone: charsDone)
+            XCTAssertLessThanOrEqual(resume, charsDone)
+            var i = resume
+            let units = Array(text.utf16)
+            while i < charsDone {
+                let unit = units[i]
+                let isTerminator =
+                    unit == 0x2E || unit == 0x21 || unit == 0x3F
+                    || unit == 0x2026 || unit == 0x3002 || unit == 0xFF01
+                    || unit == 0xFF1F || unit == 0x0A || unit == 0x0D
+                XCTAssertFalse(
+                    isTerminator,
+                    "boundary at \(i) between resume \(resume) and charsDone \(charsDone)"
+                )
+                i += 1
+            }
+        }
+    }
 }

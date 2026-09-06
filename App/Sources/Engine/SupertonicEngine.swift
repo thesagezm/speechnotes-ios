@@ -20,6 +20,8 @@ final class SupertonicEngine: NSObject, SpeechEngine {
 
     var onStateChanged: ((SpeechState) -> Void)?
     var onProgress: ((Double) -> Void)?
+    /// Play-time position (see SpeechEngine.onPlayedChars).
+    var onPlayedChars: ((Int) -> Void)?
 
     /// Voice style id — one of ModelManager.supertonicVoices ("M1"…"F5").
     var voice = "M1"
@@ -52,6 +54,10 @@ final class SupertonicEngine: NSObject, SpeechEngine {
     private var connectedFormat: AVAudioFormat?
 
     private var playbackGeneration = 0
+
+    // Play-time position (see PlayPositionTracker) — read-along highlighting
+    // follows the ACTUAL audio, not the schedule cursor.
+    private lazy var playTracker = PlayPositionTracker(playerNode: playerNode)
 
     // Streaming pipeline state — main thread only.
     private var chunks: [Chunk] = []
@@ -270,6 +276,10 @@ final class SupertonicEngine: NSObject, SpeechEngine {
         let charsDone = chunks.prefix(scheduledUpTo + 1).reduce(0) { $0 + $1.length }
         onProgress?(min(1.0, Double(charsDone) / Double(totalChars)))
 
+        // Sample marker for play-time position tracking.
+        playTracker.onPlayedChars = onPlayedChars
+        playTracker.willSchedule(buffer: buffer, endChar: charsDone, totalChars: totalChars)
+
         playerNode.scheduleBuffer(buffer, at: nil, options: []) { [weak self] in
             DispatchQueue.main.async {
                 guard let self, self.playbackGeneration == generation else { return }
@@ -277,6 +287,7 @@ final class SupertonicEngine: NSObject, SpeechEngine {
                 if isLast {
                     if self.state == .speaking || self.state == .paused || self.state == .generating {
                         self.onProgress?(1.0)
+                        self.playTracker.finish(totalChars: self.totalChars)
                         self.state = .idle
                     }
                     return
@@ -314,6 +325,7 @@ final class SupertonicEngine: NSObject, SpeechEngine {
     }
 
     private func teardownPlayback() {
+        playTracker.reset()
         playerNode.stop()
         audioEngine.stop()
         audioEngineRunning = false

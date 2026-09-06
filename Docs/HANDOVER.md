@@ -312,3 +312,32 @@ Device-verified launch fix confirmed (app opens). Seven user items:
 7. main promoted to the device-verified build f7b9c5c (force-with-lease).
    This commit sits ON TOP of that; fast-forward main only after the next
    device-verified CI build.
+
+## 2026-09-06 addendum #3 — v1.4 Phase 1: small Kokoro, Kitten removal, bookmark snap, read-along
+
+TTS:
+- Kitten engine REMOVED (quality). EngineKind.kitten → kokoroSmall; UserDefaults
+  migrate "kitten" → "kokoroSmall", kittenVoice/recents keys cleared;
+  Documents/Kitten deleted on launch (removeLegacyKittenFiles).
+- Small tier = Kokoro fp16, model_fp16.onnx 163,234,740 bytes in the SAME
+  KokoroOnnx/ dir (own filename so removeQuantizedDownloads' <200MB rule can't
+  eat it). Shares tokenizer.json/voices.npz with fp32 (kokoroVoicesAreValid/
+  kokoroTokenizerIsValid split out). startSmallDownload fills missing shared
+  files. deleteModels/deleteSmallModel each remove only their own model.
+- OnnxKokoroEngine parameterized: init(modelFileURL:modelFilesValid:) — fp32
+  and fp16 tiers share the class; one engine slot, tier switch rebuilds it
+  (onnxEngineFileIsBig flag).
+- CI: kitten-spike → kokoro-small-spike (validates fp16 on ORT CPU; artifacts
+  kokoro-small-sample/-log). If the spike ever fails, fall back to
+  model_uint8.onnx (177 MB) — decision documented then.
+- Bookmark resume: SpeechPlayer.resumeOffset now delegates to
+  SentenceChunker.resumeOffset (chunker-grade rules: whitespace-after-.,
+  decimal guard, CJK, all line breaks). 30-day/≥40-char validity unchanged.
+- Read-along v2 (see ReadAlongView.swift header): dedicated reader replaces
+  the editor while the SAME note speaks (toggle: book.pages button in
+  PlayerControlsBar + readAlongEnabled AppStorage). Position = play-time
+  signal: SpeechEngine.onPlayedChars — SystemEngine per word from
+  willSpeakRangeOfSpeechString; buffer engines (Onnx/Supertonic) via
+  PlayPositionTracker (playerTime samples → chars, 0.3s heartbeat,
+  never schedule-ahead). SpeechPlayer maps to sentence ranges via
+  SentenceChunker over the EXACT spoken text (activeSpeechText).

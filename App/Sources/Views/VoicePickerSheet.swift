@@ -6,12 +6,12 @@ import SwiftUI
 struct VoicePickerSheet: View {
     enum Scope {
         case kokoro
-        case kitten
+        case kokoroSmall
         case supertonic
 
         var engineKind: SpeechPlayer.EngineKind {
             switch self {
-            case .kitten: return .kitten
+            case .kokoroSmall: return .kokoroSmall
             case .supertonic: return .supertonic
             case .kokoro: return .kokoroOnnx
             }
@@ -19,7 +19,7 @@ struct VoicePickerSheet: View {
 
         var title: String {
             switch self {
-            case .kitten: return "Kitten voice"
+            case .kokoroSmall: return "Kokoro voice (small model)"
             case .supertonic: return "Supertonic voice"
             case .kokoro: return "Kokoro voice"
             }
@@ -39,15 +39,14 @@ struct VoicePickerSheet: View {
 
     private var selectedVoice: String {
         switch scope {
-        case .kitten: return player.kittenVoice
+        case .kokoroSmall, .kokoro: return player.voice
         case .supertonic: return player.supertonicVoice
-        case .kokoro: return player.voice
         }
     }
 
     private var modelReady: Bool {
         switch scope {
-        case .kitten: return models.kittenIsReady
+        case .kokoroSmall: return models.smallIsReady
         case .supertonic: return models.supertonicIsReady
         case .kokoro: return models.isReady
         }
@@ -71,7 +70,7 @@ struct VoicePickerSheet: View {
 
     private var recentKey: String {
         switch scope {
-        case .kitten: return "recentKittenVoices"
+        case .kokoroSmall: return "recentKokoroSmallVoices"
         case .supertonic: return "recentSupertonicVoices"
         case .kokoro: return "recentKokoroVoices"
         }
@@ -253,9 +252,8 @@ struct VoicePickerSheet: View {
     private func select(_ descriptor: VoiceDescriptor) {
         Haptics.tap()
         switch scope {
-        case .kitten: player.kittenVoice = descriptor.id
+        case .kokoroSmall, .kokoro: player.voice = descriptor.id
         case .supertonic: player.supertonicVoice = descriptor.id
-        case .kokoro: player.voice = descriptor.id
         }
         // An explicit pick during a sounding audition wins over the restore.
         player.cancelAuditionRestore()

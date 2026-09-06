@@ -1,8 +1,9 @@
 import Foundation
 
 /// Downloads and owns the Kokoro model files (Documents/KokoroOnnx/):
-/// fp32 ONNX model (~326 MB) + voice bank (~15 MB) + tokenizer (~4 KB).
-/// One-time download on first launch; everything is offline after that.
+/// fp32 ONNX model (~326 MB, best quality) + fp16 ONNX model (~163 MB, small
+/// tier) sharing one voice bank (~15 MB) + tokenizer (~4 KB), plus the
+/// Supertonic set. One-time downloads; everything is offline after that.
 @MainActor
 final class ModelManager: ObservableObject {
     static let shared = ModelManager()
@@ -15,7 +16,7 @@ final class ModelManager: ObservableObject {
     }
 
     @Published private(set) var state: State
-    @Published private(set) var kittenState: State
+    @Published private(set) var smallState: State
     @Published private(set) var supertonicState: State
 
     /// Called on the main actor when any model becomes ready.
@@ -42,38 +43,37 @@ final class ModelManager: ObservableObject {
     /// Voice bank: 28 style vectors shared by every Kokoro voice.
     static let voicesURL = URL(string: "https://raw.githubusercontent.com/mlalma/KokoroTestApp/main/Resources/voices.npz")!
 
-    // MARK: Kitten model set (second neural engine)
+    // MARK: Small Kokoro model set (fp16 tier)
 
-    /// KittenTTS mini 0.8 — 80M params (Kokoro's size class), int8 ONNX
-    /// ~78 MB, CPU-only English. Contract identical to nano 0.1 (same
-    /// inputs, style dim 256, tokenizer, 24 kHz); voices.npz now carries a
-    /// [400, 256] style matrix per voice — the engine's reference
-    /// row-selection already handles multi-row banks.
-    static let kittenModelURL = URL(string: "https://huggingface.co/KittenML/kitten-tts-mini-0.8/resolve/main/kitten_tts_mini_v0_8.onnx")!
-    static let kittenVoicesURL = URL(string: "https://huggingface.co/KittenML/kitten-tts-mini-0.8/resolve/main/voices.npz")!
+    /// Kokoro fp16 (~163 MB) — the lightweight tier that replaces the
+    /// removed Kitten engine. Same graph, tokenizer, voice bank and
+    /// inference contract as the fp32 set; roughly half the download and
+    /// memory footprint, a small quality step down. Lives in the SAME
+    /// directory as the fp32 set under its own filename — never as
+    /// `model.onnx`, which `removeQuantizedDownloads()` deletes when <200 MB.
+    static let smallModelURL = URL(string: "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/onnx/model_fp16.onnx")!
 
-    nonisolated static var kittenDirectory: URL {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Kitten")
+    nonisolated static var smallModelFileURL: URL {
+        onnxDirectory.appendingPathComponent("model_fp16.onnx")
     }
 
-    nonisolated static var kittenModelFileURL: URL {
-        kittenDirectory.appendingPathComponent("model.onnx")
-    }
-
-    nonisolated static var kittenVoicesFileURL: URL {
-        kittenDirectory.appendingPathComponent("voices.npz")
-    }
-
-    nonisolated static func kittenFilesAreValid() -> Bool {
+    nonisolated static func smallFilesAreValid() -> Bool {
         let fm = FileManager.default
-        // Thresholds reject the old nano-0.1 set (~24 MB model, ~10 KB
-        // voices) so the mini-0.8 upgrade re-downloads.
-        guard let modelSize = (try? fm.attributesOfItem(atPath: kittenModelFileURL.path))?[.size] as? Int64,
-              modelSize > 60_000_000 else { return false }
-        guard let voicesSize = (try? fm.attributesOfItem(atPath: kittenVoicesFileURL.path))?[.size] as? Int64,
-              voicesSize > 1_000_000 else { return false }
-        return true
+        // Threshold rejects the q8f16 variant (~86 MB) so it re-downloads.
+        guard let modelSize = (try? fm.attributesOfItem(atPath: smallModelFileURL.path))?[.size] as? Int64,
+              modelSize > 120_000_000 else { return false }
+        return kokoroVoicesAreValid() && kokoroTokenizerIsValid()
+    }
+
+    /// v1.3 shipped the Kitten engine (Documents/Kitten/). Removed this
+    /// round (voice quality) — reclaim its ~82 MB on launch.
+    nonisolated private static func removeLegacyKittenFiles() {
+        let fm = FileManager.default
+        let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Kitten")
+        guard fm.fileExists(atPath: dir.path) else { return }
+        try? fm.removeItem(at: dir)
+        Log.shared.info("ModelManager: removed retired Kitten engine files")
     }
 
     /// v1.4-and-earlier downloads were quantized variants of the same
@@ -165,22 +165,32 @@ final class ModelManager: ObservableObject {
         onnxDirectory.appendingPathComponent("voices.npz")
     }
 
-    nonisolated static func onnxFilesAreValid() -> Bool {
-        let fm = FileManager.default
-        // Thresholds reject the old uint8 set (~177 MB model) so the fp32
-        // upgrade re-downloads.
-        guard let modelSize = (try? fm.attributesOfItem(atPath: onnxModelFileURL.path))?[.size] as? Int64,
-              modelSize > 200_000_000 else { return false }
-        guard let voicesSize = (try? fm.attributesOfItem(atPath: voicesFileURL.path))?[.size] as? Int64,
+    /// Voice bank + tokenizer are shared by BOTH Kokoro tiers — validated
+    /// once each so either tier's download can fill in a missing file.
+    nonisolated static func kokoroVoicesAreValid() -> Bool {
+        guard let voicesSize = (try? FileManager.default.attributesOfItem(atPath: voicesFileURL.path))?[.size] as? Int64,
               voicesSize > 10_000_000 else { return false }
-        // tokenizer.json is tiny (~3.5 KB) — validate by parsing it the same
-        // way the engine does, not by size. (A >10 KB size check once
-        // rejected every successful download.)
+        return true
+    }
+
+    /// tokenizer.json is tiny (~3.5 KB) — validate by parsing it the same
+    /// way the engine does, not by size. (A >10 KB size check once rejected
+    /// every successful download.)
+    nonisolated static func kokoroTokenizerIsValid() -> Bool {
         guard let data = try? Data(contentsOf: onnxTokenizerFileURL),
               let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               let vocab = (json["model"] as? [String: Any])?["vocab"] as? [String: Int],
               vocab.count > 100 else { return false }
         return true
+    }
+
+    nonisolated static func onnxFilesAreValid() -> Bool {
+        let fm = FileManager.default
+        // Threshold rejects the old uint8 set (~177 MB model) so the fp32
+        // upgrade re-downloads.
+        guard let modelSize = (try? fm.attributesOfItem(atPath: onnxModelFileURL.path))?[.size] as? Int64,
+              modelSize > 200_000_000 else { return false }
+        return kokoroVoicesAreValid() && kokoroTokenizerIsValid()
     }
 
     /// ~341 MB payload (fp32 model + voices + tokenizer); require headroom
@@ -194,17 +204,18 @@ final class ModelManager: ObservableObject {
     init() {
         Self.migrateLegacyMetalFiles()
         Self.removeQuantizedDownloads()
+        Self.removeLegacyKittenFiles()
         if Self.onnxFilesAreValid() {
             state = .ready
-            Log.shared.info("ModelManager: model already present")
+            Log.shared.info("ModelManager: fp32 model already present")
         } else {
             state = .notDownloaded
         }
-        if Self.kittenFilesAreValid() {
-            kittenState = .ready
-            Log.shared.info("ModelManager: Kitten model already present")
+        if Self.smallFilesAreValid() {
+            smallState = .ready
+            Log.shared.info("ModelManager: small (fp16) model already present")
         } else {
-            kittenState = .notDownloaded
+            smallState = .notDownloaded
         }
         if Self.supertonicFilesAreValid() {
             supertonicState = .ready
@@ -252,8 +263,8 @@ final class ModelManager: ObservableObject {
         return false
     }
 
-    var kittenIsReady: Bool {
-        if case .ready = kittenState { return true }
+    var smallIsReady: Bool {
+        if case .ready = smallState { return true }
         return false
     }
 
@@ -350,73 +361,89 @@ final class ModelManager: ObservableObject {
         }
     }
 
-    /// Downloads the Kitten set (~78 MB model + ~3.3 MB voices).
-    func startKittenDownload() {
-        if case .downloading = kittenState { return }
-        guard !kittenIsReady else { return }
+    /// Downloads the small Kokoro set (fp16 ~163 MB; shared voices +
+    /// tokenizer only when missing — the fp32 set usually already has them).
+    func startSmallDownload() {
+        if case .downloading = smallState { return }
+        guard !smallIsReady else { return }
 
+        // PocketPal lesson: estimate × ~1.5 headroom (model + shared files).
         if let attrs = try? FileManager.default.attributesOfFileSystem(forPath: NSHomeDirectory()),
            let free = attrs[.systemFreeSize] as? Int64,
-           free < 130_000_000 {
-            let message = "Not enough free space for the Kitten model (need ~130 MB, have \(free / 1_000_000) MB)"
-            kittenState = .failed(message)
+           free < 300_000_000 {
+            let message = "Not enough free space for the small Kokoro model (need ~300 MB, have \(free / 1_000_000) MB)"
+            smallState = .failed(message)
             Log.shared.error("ModelManager: \(message)")
             return
         }
 
-        kittenState = .downloading(progress: 0)
-        Log.shared.info("ModelManager: starting Kitten model download (~82 MB)")
+        smallState = .downloading(progress: 0)
+        Log.shared.info("ModelManager: starting small Kokoro download (~163 MB fp16)")
 
         Task.detached { [weak self] in
             do {
                 try await self?.download(
-                    from: Self.kittenModelURL,
-                    to: Self.kittenModelFileURL,
-                    expectedBytes: 78_268_016,
-                    progressRange: 0.0...0.99,
-                    publishingTo: { [weak self] value in self?.reportKittenProgress(value) }
+                    from: Self.smallModelURL,
+                    to: Self.smallModelFileURL,
+                    expectedBytes: 163_234_740,
+                    progressRange: 0.0...0.9,
+                    publishingTo: { [weak self] value in self?.reportSmallProgress(value) }
                 )
-                try await self?.download(
-                    from: Self.kittenVoicesURL,
-                    to: Self.kittenVoicesFileURL,
-                    expectedBytes: 3_278_902,
-                    progressRange: 0.99...1.0,
-                    publishingTo: { [weak self] value in self?.reportKittenProgress(value) }
-                )
+                if !Self.kokoroVoicesAreValid() {
+                    try await self?.download(
+                        from: Self.voicesURL,
+                        to: Self.voicesFileURL,
+                        expectedBytes: 14_629_684,
+                        progressRange: 0.9...0.98,
+                        publishingTo: { [weak self] value in self?.reportSmallProgress(value) }
+                    )
+                }
+                if !Self.kokoroTokenizerIsValid() {
+                    try await self?.download(
+                        from: Self.onnxTokenizerURL,
+                        to: Self.onnxTokenizerFileURL,
+                        expectedBytes: 3_497,
+                        progressRange: 0.98...1.0,
+                        publishingTo: { [weak self] value in self?.reportSmallProgress(value) }
+                    )
+                }
                 await MainActor.run {
                     guard let self else { return }
-                    if Self.kittenFilesAreValid() {
-                        self.kittenState = .ready
-                        Log.shared.info("ModelManager: Kitten download complete")
+                    if Self.smallFilesAreValid() {
+                        self.smallState = .ready
+                        Log.shared.info("ModelManager: small Kokoro download complete")
                         self.onReady?()
                     } else {
-                        self.kittenState = .failed("Downloaded Kitten files failed validation")
-                        Log.shared.error("ModelManager: Kitten files failed validation after download")
+                        self.smallState = .failed("Downloaded small-Kokoro files failed validation")
+                        Log.shared.error("ModelManager: small Kokoro files failed validation after download")
                     }
                 }
             } catch {
                 await MainActor.run {
                     guard let self else { return }
-                    self.kittenState = .failed(error.localizedDescription)
-                    Log.shared.error("ModelManager: Kitten download failed: \(error)")
+                    self.smallState = .failed(error.localizedDescription)
+                    Log.shared.error("ModelManager: small Kokoro download failed: \(error)")
                 }
             }
         }
     }
 
-    func deleteKittenModels() {
-        try? FileManager.default.removeItem(at: Self.kittenDirectory)
-        for base in [Self.kittenModelFileURL, Self.kittenVoicesFileURL] {
+    /// Removes the fp16 model only — voices + tokenizer stay for the fp32
+    /// set (and vice versa).
+    func deleteSmallModel() {
+        try? FileManager.default.removeItem(at: Self.smallModelFileURL)
+        for base in [Self.smallModelFileURL] {
             try? FileManager.default.removeItem(at: base.appendingPathExtension("part"))
             try? FileManager.default.removeItem(at: base.appendingPathExtension("resumeData"))
+            try? FileManager.default.removeItem(at: base.appendingPathExtension("resumeSource"))
         }
-        kittenState = .notDownloaded
-        Log.shared.info("ModelManager: Kitten models deleted")
+        smallState = .notDownloaded
+        Log.shared.info("ModelManager: small Kokoro model deleted")
     }
 
-    private func reportKittenProgress(_ value: Double) {
-        if case .downloading = kittenState {
-            kittenState = .downloading(progress: value)
+    private func reportSmallProgress(_ value: Double) {
+        if case .downloading = smallState {
+            smallState = .downloading(progress: value)
         }
     }
 
@@ -483,14 +510,17 @@ final class ModelManager: ObservableObject {
         }
     }
 
+    /// Removes the fp32 model only. Voices + tokenizer stay — the small
+    /// tier (and a re-download) still needs them.
     func deleteModels() {
-        try? FileManager.default.removeItem(at: Self.onnxDirectory)
+        try? FileManager.default.removeItem(at: Self.onnxModelFileURL)
         for base in [Self.onnxModelFileURL, Self.voicesFileURL, Self.onnxTokenizerFileURL] {
             try? FileManager.default.removeItem(at: base.appendingPathExtension("part"))
             try? FileManager.default.removeItem(at: base.appendingPathExtension("resumeData"))
+            try? FileManager.default.removeItem(at: base.appendingPathExtension("resumeSource"))
         }
         state = .notDownloaded
-        Log.shared.info("ModelManager: models deleted")
+        Log.shared.info("ModelManager: fp32 model deleted")
     }
 
     private func reportProgress(_ value: Double) {

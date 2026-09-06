@@ -284,8 +284,7 @@ struct StorageView: View {
     private var usageSection: some View {
         Section {
             usageRow("Notes (notes.json)", NotesStoreSizeReader.notesBytes)
-            usageRow("Kokoro model", ExportsStore.directorySize(ModelManager.onnxDirectory))
-            usageRow("Kitten model", ExportsStore.directorySize(ModelManager.kittenDirectory))
+            usageRow("Kokoro models (fp32 + fp16)", ExportsStore.directorySize(ModelManager.onnxDirectory))
             usageRow("Supertonic model", ExportsStore.directorySize(ModelManager.supertonicDirectory))
             usageRow("Exported audio", ExportsStore.directorySize(ExportsStore.exportsDirectory))
             usageRow(

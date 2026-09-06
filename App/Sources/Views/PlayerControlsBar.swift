@@ -9,6 +9,8 @@ struct PlayerControlsBar: View {
     let note: Note?
 
     @EnvironmentObject private var player: SpeechPlayer
+    /// Mirrors NoteEditorView's read-along switch — shared via AppStorage.
+    @AppStorage("readAlongEnabled") private var readAlongEnabled = true
 
     private var playIcon: String {
         switch player.state {
@@ -76,6 +78,20 @@ struct PlayerControlsBar: View {
                 .disabled(playButtonDisabled)
 
                 if player.state == .speaking || player.state == .paused || player.state == .generating {
+                    // Live read-along toggle: sentence-highlighted reader
+                    // replaces the editor while this note is speaking.
+                    Button {
+                        Haptics.press()
+                        readAlongEnabled.toggle()
+                    } label: {
+                        Image(systemName: readAlongEnabled ? "book.pages.fill" : "book.pages")
+                            .font(.body.weight(.medium))
+                            .foregroundStyle(readAlongEnabled ? Color.accentColor : .secondary)
+                            .frame(width: 36, height: 36)
+                            .background(Circle().fill(Color.secondary.opacity(0.12)))
+                    }
+                    .accessibilityLabel(readAlongEnabled ? "Read-along on" : "Read-along off")
+
                     Button {
                         Haptics.press()
                         player.stop()

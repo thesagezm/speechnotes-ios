@@ -7,6 +7,9 @@ final class SystemEngine: NSObject, SpeechEngine {
 
     var onStateChanged: ((SpeechState) -> Void)?
     var onProgress: ((Double) -> Void)?
+    /// Play-time signal — willSpeakRangeOfSpeechString fires per word as the
+    /// audio sounds, so this is exact (see SpeechEngine.onPlayedChars).
+    var onPlayedChars: ((Int) -> Void)?
 
     private let synthesizer = AVSpeechSynthesizer()
 
@@ -98,6 +101,10 @@ extension SystemEngine: AVSpeechSynthesizerDelegate {
         let total = (utterance.speechString as NSString).length
         guard total > 0, characterRange.location + characterRange.length > 0 else { return }
         let fraction = Double(characterRange.location + characterRange.length) / Double(total)
-        DispatchQueue.main.async { self.onProgress?(min(1.0, fraction)) }
+        let charsDone = characterRange.location + characterRange.length
+        DispatchQueue.main.async {
+            self.onProgress?(min(1.0, fraction))
+            self.onPlayedChars?(charsDone)
+        }
     }
 }

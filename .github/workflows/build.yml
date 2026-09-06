@@ -44,13 +44,14 @@ jobs:
   # the xctest runner doesn't expose the bundle where mlx looks for it, and
   # copying default.metallib + mlx-swift_Cmlx.bundle into the xctest Resources
   # didn't help either. It tested the Metal path v0.7.0 removed from the app;
-  # kitten-spike (ONNX) is the live contract test. Package archived in git
+  # kokoro-small-spike (ONNX) is the live contract test. KittenSpike was
+  # archived in git
   # history (Tests/KokoroSpike, removed in the same commit).
 
-  kitten-spike:
-    name: Kitten spike (validates ONNX contract)
+  kokoro-small-spike:
+    name: Kokoro small spike (validates fp16 on ORT CPU)
     runs-on: macos-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     # Informative and non-blocking by design (the phone is the real bench)
     # — but read this job's results via the API before trusting the engine.
     continue-on-error: true
@@ -58,71 +59,73 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download Kitten model + extract voice vector
+      - name: Download Kokoro fp16 model + shared files
         run: |
-          mkdir -p ~/kitten-spike
+          mkdir -p ~/kokoro-small-spike
           curl -L --retry 3 --progress-bar \
-            -o ~/kitten-spike/model.onnx \
-            "https://huggingface.co/KittenML/kitten-tts-mini-0.8/resolve/main/kitten_tts_mini_v0_8.onnx"
+            -o ~/kokoro-small-spike/model_fp16.onnx \
+            "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/onnx/model_fp16.onnx"
           curl -L --retry 3 --progress-bar \
-            -o /tmp/kitten-voices.npz \
-            "https://huggingface.co/KittenML/kitten-tts-mini-0.8/resolve/main/voices.npz"
-          # mini-0.8 stores a [400, 256] float32 style matrix per voice —
-          # extract row 0 as the raw vector the engine would select for
-          # short inputs, keeping the spike free of npz/MLX dependencies.
+            -o ~/kokoro-small-spike/tokenizer.json \
+            "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/tokenizer.json"
+          curl -L --retry 3 --progress-bar \
+            -o /tmp/kokoro-voices.npz \
+            "https://raw.githubusercontent.com/mlalma/KokoroTestApp/main/Resources/voices.npz"
+          # voices.npz carries one [rows, 256] float32 style matrix per
+          # voice — extract the full af_heart matrix; the engine slices
+          # row clamp(N-2, 0, rows-1) exactly like OnnxKokoroEngine.
           python3 -c "
-          import zipfile, struct, os
-          z = zipfile.ZipFile('/tmp/kitten-voices.npz')
-          data = z.read('expr-voice-5-m.npy')
+          import zipfile, os
+          z = zipfile.ZipFile('/tmp/kokoro-voices.npz')
+          data = z.read('af_heart.npy')
           hlen = int.from_bytes(data[8:10], 'little')
           body = data[10 + hlen:]
-          assert len(body) == 400 * 256 * 4, len(body)
-          row = body[:256 * 4]
-          print('CI voice head:', ', '.join(f'{v:.4f}' for v in struct.unpack('<4f', row[:16])))
-          open(os.path.expanduser('~/kitten-spike/voice.f32'), 'wb').write(row)
+          assert len(body) % (256 * 4) == 0, len(body)
+          print('CI voice matrix:', len(body) // (256 * 4), 'rows')
+          open(os.path.expanduser('~/kokoro-small-spike/voice.f32'), 'wb').write(body)
           "
-          ls -lh ~/kitten-spike
+          ls -lh ~/kokoro-small-spike
 
-      - name: Run Kitten spike test
+      - name: Run Kokoro small spike test
         run: |
           set -o pipefail
-          cd Tests/KittenSpike
-          swift test 2>&1 | tee ../../kitten-spike.log
+          cd Tests/KokoroSmallSpike
+          swift test 2>&1 | tee ../../kokoro-small-spike.log
 
       - name: Show failure summary
         if: always()
         run: |
-          grep -E "KITTEN-SPIKE|error:|failed|Fatal|Crash|unexpected exit|Executed" kitten-spike.log \
+          grep -E "KOKORO-SMALL-SPIKE|error:|failed|Fatal|Crash|unexpected exit|Executed" kokoro-small-spike.log \
             | grep -vE "warning:" \
-            | tail -n 40 > kitten-summary.txt || true
-          echo "----- KITTEN SPIKE SUMMARY -----"
-          cat kitten-summary.txt
-          echo "--------------------------------"
-          if [ -s kitten-summary.txt ]; then
-            python3 -c "import pathlib; t = pathlib.Path('kitten-summary.txt').read_text()[:5500]; print('::error title=Kitten spike failure::' + t.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A'))"
+            | tail -n 40 > kokoro-small-summary.txt || true
+          echo "----- KOKORO SMALL SPIKE SUMMARY -----"
+          cat kokoro-small-summary.txt
+          echo "--------------------------------------"
+          if [ -s kokoro-small-summary.txt ]; then
+            python3 -c "import pathlib; t = pathlib.Path('kokoro-small-summary.txt').read_text()[:5500]; print('::error title=Kokoro small spike failure::' + t.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A'))"
           fi
 
       - name: Upload sample audio
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: kitten-sample
-          path: ~/kitten-spike/sample.wav
+          name: kokoro-small-sample
+          path: ~/kokoro-small-spike/sample.wav
           if-no-files-found: error
 
       - name: Upload spike log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: kitten-spike-log
-          path: kitten-spike.log
+          name: kokoro-small-spike-log
+          path: kokoro-small-spike.log
           if-no-files-found: warn
 
   supertonic-spike:
     name: Supertonic spike (validates ONNX contract)
     runs-on: macos-latest
     timeout-minutes: 20
-    # Informative and non-blocking by design (matches kitten-spike; the phone
+    # Informative and non-blocking by design (matches kokoro-small-spike; the phone
     # is the real bench) — but read this job's results via the API before
     # trusting the engine. This spike is the RSS gate for the A14 device.
     continue-on-error: true

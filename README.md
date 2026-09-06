@@ -9,8 +9,8 @@ fully offline (airplane-mode tested):
 
 | Engine | Model size | Voices | Notes |
 |---|---|---|---|
+| **Kokoro small** (ONNX, CPU) | ~178 MB | 28 (US/UK, m/f) | Lightweight fp16 tier |
 | **Kokoro** (ONNX, CPU) | ~341 MB | 28 (US/UK, m/f) | Main engine — fp32 quality build |
-| **Kitten** (ONNX, CPU) | ~82 MB | 8 expressive | Experimental pack |
 | **Supertonic** (ONNX, CPU) | ~399 MB | 10 styles × 31 languages | Multilingual — flow-matching TTS |
 | Apple (system) | 0 | all system voices | Fallback while models download |
 
@@ -44,9 +44,9 @@ speech *notes* app and TTS is the mission.
 - The Xcode project is **generated from text** (`project.yml`, via XcodeGen) on CI.
 - `.github/workflows/build.yml` runs on every push to `main`:
   - `logic-tests` — SpeechLogic unit tests (sentence chunker, WAV writer,
-    Kitten tokenizer, markdown stripper).
-  - `kitten-spike` / `supertonic-spike` — non-blocking contract tests that run
-    each ONNX model on the macOS runner and assert audible output.
+    markdown stripper).
+  - `kokoro-small-spike` / `supertonic-spike` — non-blocking contract tests
+    that run each ONNX model on the macOS runner and assert audible output.
   - `build-ipa` — patches any SPM dependency that declares itself dynamic to
     link statically (LiveContainer requirement), archives an unsigned build,
     verifies the binary has no `@rpath` framework references, and packages
@@ -68,8 +68,8 @@ speechnotes-ios/
 │   └── Views/                   # list, editor, picker, settings, mini-player…
 ├── Packages/SpeechLogic/        # pure-logic SPM package (tested on CI)
 │                                #   SentenceChunker, WAVWriter,
-│                                #   KittenTokenizer, MarkdownText
-├── Tests/KittenSpike/           # standalone ONNX contract spike
+│                                #   MarkdownText
+├── Tests/KokoroSmallSpike/      # standalone ONNX contract spike
 ├── Tests/SupertonicSpike/       # standalone ONNX contract spike
 ├── Scripts/                     # package-ipa.sh, watch_ci.sh, make_icon.py
 └── Docs/                        # plan, setup guide, research notes
@@ -90,7 +90,6 @@ inside LiveContainer.
 ## Licenses & credits
 
 - [Kokoro](https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX) — Apache-2.0 (model), voice bank from the KokoroTestApp project
-- [KittenTTS mini 0.8](https://huggingface.co/KittenML/kitten-tts-mini-0.8) — KittenML
 - [supertonic-3](https://huggingface.co/Supertone/supertonic-3) — Supertone; the vendored Swift Helper is MIT
 - ONNX Runtime (MIT), XcodeGen, and Apple's AVFoundation do the heavy lifting.
 

@@ -6,9 +6,10 @@ import OnnxRuntimeBindings
 import SpeechLogic
 
 /// Plan B engine: Kokoro via ONNX Runtime on the CPU — the PocketPal AI
-/// approach. Model (`model_q8f16.onnx`, ~82 MB) + tokenizer.json live in
-/// Documents/KokoroOnnx; voice style vectors are reused from the existing
-/// MLX voices.npz. Inference spec verified against PocketPal's
+/// approach. The instance is pointed at one model file (fp32 `model.onnx`
+/// ~326 MB or the small fp16 tier `model_fp16.onnx` ~163 MB — same graph)
+/// plus the shared tokenizer.json/voices.npz in Documents/KokoroOnnx.
+/// Inference spec verified against PocketPal's
 /// react-native-speech engine: inputs `input_ids` int64 [1, N],
 /// `style` float32 [1, 256] (flat voice array sliced at
 /// clamp(N-2, 0, 509) * 256), `speed` float32 [1]; output `waveform`
@@ -17,16 +18,32 @@ import SpeechLogic
 ///
 /// Streaming architecture (sentence chunks via
 /// SpeechLogic, generation capped a few chunks ahead, played buffers
-/// released, read-along ranges, interruption handling). MLX/Metal is never
-/// touched for inference — this is the escape hatch when Metal memory
-/// pressure kills long notes.
+/// released, interruption handling). MLX/Metal is never touched for
+/// inference — this is the escape hatch when Metal memory pressure kills
+/// long notes.
 final class OnnxKokoroEngine: NSObject, SpeechEngine {
     let name = "Kokoro ONNX (CPU)"
 
     var onStateChanged: ((SpeechState) -> Void)?
     var onProgress: ((Double) -> Void)?
+    /// Play-time position (see SpeechEngine.onPlayedChars).
+    var onPlayedChars: ((Int) -> Void)?
 
     var voice = "am_eric"
+
+    /// Which model file + validator this instance serves — the fp32 tier and
+    /// the small fp16 tier share one engine class.
+    private let modelFileURL: URL
+    private let modelFilesValid: () -> Bool
+
+    init(
+        modelFileURL: URL = ModelManager.onnxModelFileURL,
+        modelFilesValid: @escaping () -> Bool = { ModelManager.onnxFilesAreValid() }
+    ) {
+        self.modelFileURL = modelFileURL
+        self.modelFilesValid = modelFilesValid
+        super.init()
+    }
 
     private static let sampleRate: Double = 24_000
     private static let styleDim = 256
@@ -60,6 +77,11 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
     private var connectedFormat: AVAudioFormat?
 
     private var playbackGeneration = 0
+
+    // Play-time position (see PlayPositionTracker) — read-along highlighting
+    // follows the ACTUAL audio, not the schedule cursor which runs up to
+    // generationAheadLimit chunks ahead (the v0.5 read-along failure).
+    private lazy var playTracker = PlayPositionTracker(playerNode: playerNode)
 
     // Streaming pipeline state — main thread only.
     private var chunks: [Chunk] = []
@@ -127,7 +149,7 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
         guard !modelLoadAttempted else { return }
         modelLoadAttempted = true
 
-        let modelPath = ModelManager.onnxModelFileURL
+        let modelPath = modelFileURL
         let tokenizerPath = ModelManager.onnxTokenizerFileURL
         guard FileManager.default.fileExists(atPath: modelPath.path),
               FileManager.default.fileExists(atPath: tokenizerPath.path) else {
@@ -263,7 +285,7 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
         let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
 
-        guard ModelManager.onnxFilesAreValid() else {
+        guard modelFilesValid() else {
             Log.shared.error("OnnxKokoroEngine asked to speak but no ONNX model is downloaded")
             state = .idle
             return
@@ -286,6 +308,7 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
         scheduledUpTo = -1
         totalChars = max(1, clean.utf16.count)
         speed = Float(min(2.0, max(0.5, rateMultiplier)))
+        playTracker.reset()
 
         engineQueue.async { [weak self] in
             guard let self, self.playbackGeneration == generation else { return }
@@ -376,6 +399,10 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
         let charsDone = chunks.prefix(scheduledUpTo + 1).reduce(0) { $0 + $1.length }
         onProgress?(min(1.0, Double(charsDone) / Double(totalChars)))
 
+        // Sample marker for play-time position tracking.
+        playTracker.onPlayedChars = onPlayedChars
+        playTracker.willSchedule(buffer: buffer, endChar: charsDone, totalChars: totalChars)
+
         playerNode.scheduleBuffer(buffer, at: nil, options: []) { [weak self] in
             DispatchQueue.main.async {
                 guard let self, self.playbackGeneration == generation else { return }
@@ -383,6 +410,7 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
                 if isLast {
                     if self.state == .speaking || self.state == .paused || self.state == .generating {
                         self.onProgress?(1.0)
+                        self.playTracker.finish(totalChars: self.totalChars)
                         self.state = .idle
                     }
                     return
@@ -420,6 +448,7 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
     }
 
     private func teardownPlayback() {
+        playTracker.reset()
         playerNode.stop()
         audioEngine.stop()
         audioEngineRunning = false
@@ -445,7 +474,7 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
             }
             return
         }
-        guard ModelManager.onnxFilesAreValid() else {
+        guard modelFilesValid() else {
             DispatchQueue.main.async {
                 completion(.failure(OnnxEngineError.modelUnavailable))
             }

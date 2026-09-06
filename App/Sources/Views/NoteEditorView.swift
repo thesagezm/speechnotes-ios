@@ -35,6 +35,15 @@ struct NoteEditorView: View {
     /// setting is on; opens in preview (reading) mode, double-tap to edit.
     @State private var showPreview = true
     @AppStorage("renderMarkdown") private var renderMarkdown = false
+    /// Read-along: while THIS note is being spoken, replace the editor with
+    /// the sentence-highlighted reader. Toggleable live from the player bar.
+    @AppStorage("readAlongEnabled") private var readAlongEnabled = true
+
+    private var showsReadAlong: Bool {
+        readAlongEnabled
+            && player.readAlongActive
+            && player.nowPlayingNoteId == noteId
+    }
 
     private var currentNote: Note? {
         notes.notes.first { $0.id == noteId }
@@ -111,7 +120,7 @@ struct NoteEditorView: View {
 
     private var voicePickerScope: VoicePickerSheet.Scope {
         switch player.engineKind {
-        case .kitten: return .kitten
+        case .kokoroSmall: return .kokoroSmall
         case .supertonic: return .supertonic
         default: return .kokoro
         }
@@ -146,7 +155,13 @@ struct NoteEditorView: View {
     var body: some View {
         VStack(spacing: 0) {
             titleField
-            if renderMarkdown && showPreview {
+            if showsReadAlong {
+                ReadAlongView(
+                    text: player.activeSpeechText ?? "",
+                    activeRange: player.readAlongRange,
+                    textScale: theme.previewTextScale
+                )
+            } else if renderMarkdown && showPreview {
                 markdownPreview
             } else {
                 editBody

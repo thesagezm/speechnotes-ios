@@ -1,4 +1,5 @@
 import Foundation
+import SpeechLogic
 
 /// UI-facing wrapper around the active speech engine. Engines are swappable at
 /// runtime from Settings: Apple's system voice, or Kokoro once its model is
@@ -7,7 +8,7 @@ import Foundation
 final class SpeechPlayer: ObservableObject {
     enum EngineKind: String, CaseIterable, Identifiable {
         // Declaration order = picker order, worst quality first (user-set).
-        case kitten
+        case kokoroSmall
         case system
         case kokoroOnnx
         case supertonic
@@ -16,7 +17,7 @@ final class SpeechPlayer: ObservableObject {
 
         var label: String {
             switch self {
-            case .kitten: return "Kitten — tiny, lowest quality"
+            case .kokoroSmall: return "Kokoro — small · fp16 (~163 MB)"
             case .system: return "Apple system voice"
             case .kokoroOnnx: return "Kokoro — on-device neural, 28 voices"
             case .supertonic: return "Supertonic — best quality, multilingual"
@@ -52,13 +53,6 @@ final class SpeechPlayer: ObservableObject {
         didSet {
             UserDefaults.standard.set(voice, forKey: "voice")
             onnxEngine?.voice = voice
-        }
-    }
-    /// Kitten voices live in a separate namespace from Kokoro voices.
-    @Published var kittenVoice: String {
-        didSet {
-            UserDefaults.standard.set(kittenVoice, forKey: "kittenVoice")
-            kittenEngine?.voice = kittenVoice
         }
     }
     /// Supertonic voice style ("M1"…"F5") and language (ISO code).
@@ -111,9 +105,64 @@ final class SpeechPlayer: ObservableObject {
     @Published private(set) var nowPlayingNoteId: UUID?
     /// Codename of the voice an in-picker audition is sampling, if any.
     @Published private(set) var auditioningVoice: String?
+
+    // MARK: - Read-along (live sentence highlight)
+
+    /// The exact text handed to the engine for the current playback (the
+    /// note's speech text). ReadAlongView renders THIS string, so highlight
+    /// coordinates can never drift — the v0.5 read-along failed partly by
+    /// mapping engine ranges onto a differently-transformed editor text.
+    @Published private(set) var activeSpeechText: String?
+    /// UTF-16 range in `activeSpeechText` of the sentence currently sounding.
+    @Published private(set) var readAlongRange: Range<Int>?
+    /// Sentence-aligned pieces of activeSpeechText (SentenceChunker rules).
+    private var readAlongPieces: [Chunk] = []
+    /// UTF-16 offset of the trimmed string the engine received within
+    /// activeSpeechText (engines trim; a resume adds the bookmark offset).
+    private var engineSpeechOffset: Int = 0
+
+    /// True while a read-along surface makes sense for the current playback.
+    var readAlongActive: Bool {
+        activeSpeechText != nil
+            && (state == .speaking || state == .paused || state == .generating)
+    }
+
+    private func beginReadAlong(fullText: String) {
+        activeSpeechText = fullText
+        readAlongRange = nil
+        readAlongPieces = SentenceChunker.chunks(for: fullText, firstMaxChars: .max, batchMaxChars: .max)
+    }
+
+    private static func leadingWhitespaceUTF16(_ s: String) -> Int {
+        var count = 0
+        for ch in s {
+            guard ch.isWhitespace else { break }
+            count += String(ch).utf16.count
+        }
+        return count
+    }
+
+    private func updateReadAlong(engineCharsDone: Int) {
+        guard activeSpeechText != nil, !readAlongPieces.isEmpty else { return }
+        updateReadAlongRange(fullChar: engineSpeechOffset + engineCharsDone)
+    }
+
+    private func updateReadAlongRange(fullChar: Int) {
+        guard let piece = readAlongPieces.last(where: { fullChar >= $0.offset }) else {
+            readAlongRange = readAlongPieces.first.map { $0.offset..<$0.endOffset }
+            return
+        }
+        readAlongRange = piece.offset..<piece.endOffset
+    }
+
+    private func endReadAlong() {
+        activeSpeechText = nil
+        readAlongRange = nil
+        readAlongPieces = []
+    }
     /// Engine/voice to restore when the running audition finishes; nil once
     /// the user makes an explicit selection mid-audition.
-    private var preAuditionState: (kind: EngineKind, voice: String, kittenVoice: String, supertonicVoice: String)?
+    private var preAuditionState: (kind: EngineKind, voice: String, supertonicVoice: String)?
 
     // MARK: - Playback resume bookmark
 
@@ -146,20 +195,13 @@ final class SpeechPlayer: ObservableObject {
     }
 
     /// UTF-16 offset of the last sentence boundary at-or-before charsDone —
-    /// resume re-speaks the interrupted sentence from its start.
+    /// resume re-speaks the interrupted sentence from its start. Delegates to
+    /// SentenceChunker so the rules match the chunking the engines use
+    /// (whitespace-after-`.` requirement, decimal guard, CJK terminators,
+    /// all line-break variants) instead of a looser byte scan.
     nonisolated static func resumeOffset(in text: String, charsDone: Int) -> Int {
-        let units = Array(text.utf16)
-        guard charsDone > 0, charsDone < units.count else { return -1 }
-        let terminators: Set<UTF16.CodeUnit> = [
-            0x2E, 0x21, 0x3F,
-            0x0A, 0x2026, 0x3002, 0xFF01, 0xFF1F, // … 。 ！ ？
-        ]
-        var i = min(charsDone, units.count - 1)
-        while i > 0 {
-            if terminators.contains(units[i]) { return i + 1 }
-            i -= 1
-        }
-        return 0
+        guard charsDone > 0 else { return -1 }
+        return SentenceChunker.resumeOffset(in: text, charsDone: charsDone)
     }
 
     /// Loads the stored bookmark if it's for this note, this exact text,
@@ -254,6 +296,8 @@ final class SpeechPlayer: ObservableObject {
         nowPlayingNoteId = note?.id
         resumeBaseFraction = 0
         lastRawProgress = 0
+        beginReadAlong(fullText: text)
+        engineSpeechOffset = Self.leadingWhitespaceUTF16(text)
         if let note { primeBookmark(noteId: note.id, fullText: text) }
         engine?.speak(text, rateMultiplier: rateMultiplier)
     }
@@ -307,10 +351,11 @@ final class SpeechPlayer: ObservableObject {
             return usingSystemFallback
                 ? "Apple voice (model missing)"
                 : VoiceCatalog.subtitle(for: voice, kind: .kokoroOnnx)
-        case .kitten:
+        case .kokoroSmall:
+            // The small tier shares the fp32 set's 28-voice catalog.
             return usingSystemFallback
                 ? "Apple voice (model missing)"
-                : VoiceCatalog.subtitle(for: kittenVoice, kind: .kitten)
+                : VoiceCatalog.subtitle(for: voice, kind: .kokoroOnnx)
         case .supertonic:
             return usingSystemFallback
                 ? "Apple voice (model missing)"
@@ -320,7 +365,6 @@ final class SpeechPlayer: ObservableObject {
 
     private var engine: (any SpeechEngine)?
     private var onnxEngine: OnnxKokoroEngine?
-    private var kittenEngine: KittenEngine?
     private var supertonicEngine: SupertonicEngine?
     private var systemEngine: SystemEngine?
 
@@ -329,15 +373,22 @@ final class SpeechPlayer: ObservableObject {
         rateMultiplier = defaults.object(forKey: "rateMultiplier") as? Double ?? 1.0
         // v0.6 and earlier also shipped a Metal Kokoro engine ("kokoro");
         // it was removed in v0.7 — carry that preference over to the ONNX engine.
+        // v1.3 shipped a Kitten engine ("kitten"), removed in this round —
+        // its slot in the picker is now the small Kokoro tier, so carry that
+        // preference over too.
         let storedEngine = defaults.string(forKey: "engineKind")
         if storedEngine == "kokoro" {
             defaults.set(EngineKind.kokoroOnnx.rawValue, forKey: "engineKind")
             engineKind = .kokoroOnnx
+        } else if storedEngine == "kitten" {
+            defaults.set(EngineKind.kokoroSmall.rawValue, forKey: "engineKind")
+            defaults.removeObject(forKey: "kittenVoice")
+            defaults.removeObject(forKey: "recentKittenVoices")
+            engineKind = .kokoroSmall
         } else {
             engineKind = EngineKind(rawValue: storedEngine ?? "") ?? .system
         }
         voice = defaults.string(forKey: "voice") ?? "am_eric"
-        kittenVoice = defaults.string(forKey: "kittenVoice") ?? KittenEngine.defaultVoice
         supertonicVoice = defaults.string(forKey: "supertonicVoice") ?? "M1"
         supertonicLang = defaults.string(forKey: "supertonicLang") ?? "en"
         systemVoiceIdentifier = defaults.string(forKey: "systemVoiceIdentifier")
@@ -357,7 +408,7 @@ final class SpeechPlayer: ObservableObject {
         ModelManager.shared.onReady = { [weak self] in
             self?.rebuildEngine()
         }
-        Log.shared.info("SpeechPlayer wired (engine=\(engineKind.rawValue), voice=\(voice), kittenVoice=\(kittenVoice), supertonic=\(supertonicVoice)@\(supertonicLang))")
+        Log.shared.info("SpeechPlayer wired (engine=\(engineKind.rawValue), voice=\(voice), supertonic=\(supertonicVoice)@\(supertonicLang))")
     }
 
     /// Lock screen / Control Center / headset buttons are wired lazily on
@@ -392,6 +443,30 @@ final class SpeechPlayer: ObservableObject {
         engine?.name ?? "none"
     }
 
+    /// Which model file the cached OnnxKokoroEngine instance points at —
+    /// the fp32 and fp16 tiers share one slot, so a tier switch must
+    /// rebuild it rather than reuse the other tier's session.
+    private var onnxEngineFileIsBig = true
+
+    private func rebuildOnnxEngine(big: Bool) {
+        if onnxEngine == nil || onnxEngineFileIsBig != big {
+            let onnx = big
+                ? OnnxKokoroEngine(
+                    modelFileURL: ModelManager.onnxModelFileURL,
+                    modelFilesValid: { ModelManager.onnxFilesAreValid() }
+                )
+                : OnnxKokoroEngine(
+                    modelFileURL: ModelManager.smallModelFileURL,
+                    modelFilesValid: { ModelManager.smallFilesAreValid() }
+                )
+            onnx.voice = voice
+            onnxEngine = onnx
+            onnxEngineFileIsBig = big
+        } else {
+            onnxEngine?.voice = voice
+        }
+    }
+
     private func rebuildEngine() {
         engine?.stop()
 
@@ -413,21 +488,13 @@ final class SpeechPlayer: ObservableObject {
             engine = supertonicEngine
             usingSystemFallback = false
             Log.shared.info("SpeechPlayer: engine → Supertonic (\(supertonicVoice), \(supertonicLang))")
-        } else if engineKind == .kitten, ModelManager.shared.kittenIsReady {
-            if kittenEngine == nil {
-                let kitten = KittenEngine()
-                kitten.voice = kittenVoice
-                kittenEngine = kitten
-            }
-            engine = kittenEngine
+        } else if engineKind == .kokoroSmall, ModelManager.shared.smallIsReady {
+            rebuildOnnxEngine(big: false)
+            engine = onnxEngine
             usingSystemFallback = false
-            Log.shared.info("SpeechPlayer: engine → Kitten (\(kittenVoice))")
+            Log.shared.info("SpeechPlayer: engine → Kokoro small fp16 (\(voice))")
         } else if engineKind == .kokoroOnnx, ModelManager.shared.isReady {
-            if onnxEngine == nil {
-                let onnx = OnnxKokoroEngine()
-                onnx.voice = voice
-                onnxEngine = onnx
-            }
+            rebuildOnnxEngine(big: true)
             engine = onnxEngine
             usingSystemFallback = false
             Log.shared.info("SpeechPlayer: engine → Kokoro ONNX (\(voice))")
@@ -437,7 +504,7 @@ final class SpeechPlayer: ObservableObject {
             }
             systemEngine?.voiceIdentifier = systemVoiceIdentifier
             engine = systemEngine
-            usingSystemFallback = (engineKind == .kokoroOnnx || engineKind == .supertonic)
+            usingSystemFallback = (engineKind == .kokoroOnnx || engineKind == .kokoroSmall || engineKind == .supertonic)
             if usingSystemFallback {
                 Log.shared.info("SpeechPlayer: neural engine selected but model missing — system voice in use")
             }
@@ -464,6 +531,7 @@ final class SpeechPlayer: ObservableObject {
                     self.nowPlayingTitle = nil
                     self.nowPlayingNoteId = nil
                     self.finishAuditionIfActive()
+                    self.endReadAlong()
                     NowPlayingCenter.shared.clear()
                 } else {
                     NowPlayingCenter.shared.publish(
@@ -493,6 +561,16 @@ final class SpeechPlayer: ObservableObject {
                 )
             }
         }
+        // Play-time character position — the read-along highlight's source of
+        // truth (never schedule-ahead).
+        activeEngine?.onPlayedChars = { [weak self] engineCharsDone in
+            Task { @MainActor in
+                guard let self,
+                      let activeEngine = activeEngine,
+                      activeEngine === self.engine else { return }
+                self.updateReadAlong(engineCharsDone: engineCharsDone)
+            }
+        }
     }
 
     /// Play/pause/stop the note's text. `note` feeds the mini-player's title
@@ -517,15 +595,18 @@ final class SpeechPlayer: ObservableObject {
             nowPlayingNoteId = note?.id
             resumeBaseFraction = 0
             lastRawProgress = 0
+            beginReadAlong(fullText: text)
             if let note {
                 primeBookmark(noteId: note.id, fullText: text)
                 if let plan = resumePlan(for: note.id, fullText: text) {
                     resumeBaseFraction = Double(plan.offset) / Double(max(1, text.utf16.count))
+                    engineSpeechOffset = plan.offset + Self.leadingWhitespaceUTF16(plan.suffix)
                     Log.shared.info("SpeechPlayer: resuming note at char \(plan.offset)/\(text.utf16.count)")
                     engine?.speak(plan.suffix, rateMultiplier: rateMultiplier)
                     return
                 }
             }
+            engineSpeechOffset = Self.leadingWhitespaceUTF16(text)
             engine?.speak(text, rateMultiplier: rateMultiplier)
         }
     }
@@ -550,16 +631,19 @@ final class SpeechPlayer: ObservableObject {
             stop()
             return
         }
+        // Audition samples are not read-along content — make sure a stale
+        // speech text from a previous note can't be highlighted.
+        endReadAlong()
 
-        // Resolve the codename to its engine kind — auditioning a Kitten voice
-        // with Kokoro active would play through the wrong engine.
+        // Resolve the codename to its engine kind — a Supertonic style code
+        // auditioned while Kokoro is active would play through the wrong
+        // engine. Kokoro codenames keep the CURRENT Kokoro tier (small or
+        // fp32) instead of always jumping to the big model.
         let targetKind: EngineKind
-        if KittenEngine.friendlyNames.keys.contains(codename) {
-            targetKind = .kitten
-        } else if ModelManager.supertonicVoices.contains(codename) {
+        if ModelManager.supertonicVoices.contains(codename) {
             targetKind = .supertonic
         } else if ModelManager.knownVoices.contains(codename) {
-            targetKind = .kokoroOnnx
+            targetKind = engineKind == .kokoroSmall ? .kokoroSmall : .kokoroOnnx
         } else {
             return
         }
@@ -572,7 +656,7 @@ final class SpeechPlayer: ObservableObject {
 
         let modelReady: Bool
         switch targetKind {
-        case .kitten: modelReady = ModelManager.shared.kittenIsReady
+        case .kokoroSmall: modelReady = ModelManager.shared.smallIsReady
         case .supertonic: modelReady = ModelManager.shared.supertonicIsReady
         case .kokoroOnnx: modelReady = ModelManager.shared.isReady
         case .system: modelReady = false
@@ -580,12 +664,11 @@ final class SpeechPlayer: ObservableObject {
         guard modelReady else { return }
 
         if preAuditionState == nil {
-            preAuditionState = (engineKind, voice, kittenVoice, supertonicVoice)
+            preAuditionState = (engineKind, voice, supertonicVoice)
         }
         switch targetKind {
-        case .kitten: kittenVoice = codename
         case .supertonic: supertonicVoice = codename
-        case .kokoroOnnx: voice = codename
+        case .kokoroOnnx, .kokoroSmall: voice = codename
         case .system: break
         }
         auditioningVoice = codename
@@ -608,7 +691,6 @@ final class SpeechPlayer: ObservableObject {
             preAuditionState = nil
             auditioningVoice = nil
             voice = saved.voice
-            kittenVoice = saved.kittenVoice
             supertonicVoice = saved.supertonicVoice
             engineKind = saved.kind
         } else {
@@ -656,8 +738,6 @@ final class SpeechPlayer: ObservableObject {
 
         if engineKind == .supertonic, let supertonicEngine {
             supertonicEngine.renderWAV(text: text, onChunkProgress: progress, completion: finish)
-        } else if engineKind == .kitten, let kittenEngine {
-            kittenEngine.renderWAV(text: text, onChunkProgress: progress, completion: finish)
         } else if let onnxEngine {
             onnxEngine.renderWAV(text: text, onChunkProgress: progress, completion: finish)
         } else {

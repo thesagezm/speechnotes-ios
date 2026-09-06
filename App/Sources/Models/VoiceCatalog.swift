@@ -45,17 +45,6 @@ enum VoiceCatalog {
         )
     }
 
-    /// The Kitten pack (8 expressive voices, friendly names come from the
-    /// engine itself).
-    static let kitten: [VoiceDescriptor] = KittenEngine.voiceNames.map { codename in
-        VoiceDescriptor(
-            id: codename,
-            displayName: KittenEngine.friendlyNames[codename] ?? codename,
-            accent: nil,
-            gender: codename.hasSuffix("-f") ? "Female" : "Male"
-        )
-    }
-
     /// The Supertonic pack — 10 voice styles (M1–M5 male, F1–F5 female),
     /// every one of them speaks all 31 languages.
     static let supertonic: [VoiceDescriptor] = ModelManager.supertonicVoices.map { id in
@@ -82,7 +71,6 @@ enum VoiceCatalog {
 
     static func descriptors(for kind: SpeechPlayer.EngineKind) -> [VoiceDescriptor] {
         switch kind {
-        case .kitten: return kitten
         case .supertonic: return supertonic
         default: return kokoro
         }
