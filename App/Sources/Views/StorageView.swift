@@ -270,6 +270,13 @@ struct StorageView: View {
         }
     }
 
+    @State private var showingAllExports = false
+    private let exportPreviewLimit = 5
+
+    private var visibleExports: [ExportedAudio] {
+        showingAllExports ? exports.exports : Array(exports.exports.prefix(exportPreviewLimit))
+    }
+
     private func exportRow(_ item: ExportedAudio) -> some View {
         Button {
             Haptics.tap()

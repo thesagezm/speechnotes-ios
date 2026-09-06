@@ -36,11 +36,49 @@ final class NotesStore: ObservableObject {
     }
 
     @discardableResult
-    func createNote() -> Note {
-        let note = Note()
+    func createNote(notebookId: UUID? = nil) -> Note {
+        var note = Note()
+        note.notebookId = notebookId
         allNotes.insert(note, at: 0)
         save()
         return note
+    }
+
+    /// Pin / favorite toggles (v1.4 organization).
+    func setPinned(_ pinned: Bool, noteId: UUID) {
+        guard let index = allNotes.firstIndex(where: { $0.id == noteId }) else { return }
+        allNotes[index].isPinned = pinned
+        save()
+    }
+
+    func setFavorite(_ favorite: Bool, noteId: UUID) {
+        guard let index = allNotes.firstIndex(where: { $0.id == noteId }) else { return }
+        allNotes[index].isFavorite = favorite
+        save()
+    }
+
+    /// Files a note into a notebook (nil = Unfiled).
+    func move(noteId: UUID, to notebookId: UUID?) {
+        guard let index = allNotes.firstIndex(where: { $0.id == noteId }) else { return }
+        guard allNotes[index].notebookId != notebookId else { return }
+        allNotes[index].notebookId = notebookId
+        allNotes[index].updatedAt = Date()
+        save()
+    }
+
+    /// After a notebook is deleted: its notes fall back to Unfiled.
+    func clearNotebook(_ notebookId: UUID) {
+        var changed = false
+        for index in allNotes.indices where allNotes[index].notebookId == notebookId {
+            allNotes[index].notebookId = nil
+            changed = true
+        }
+        if changed { save() }
+    }
+
+    /// Active notes in a notebook scope (nil id = Unfiled).
+    func notes(inNotebook notebookId: UUID?) -> [Note] {
+        notes.filter { $0.notebookId == notebookId }
     }
 
     func update(_ note: Note) {

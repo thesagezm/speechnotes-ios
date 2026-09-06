@@ -9,6 +9,7 @@ struct MiniPlayerBar: View {
     var onTap: (() -> Void)?
 
     @EnvironmentObject private var player: SpeechPlayer
+    @AppStorage("miniPlayerCollapsed") private var miniPlayerCollapsed = false
 
     private var playIcon: String {
         switch player.state {
@@ -157,7 +158,7 @@ struct MiniPlayerBubble: View {
                 } else {
                     Image(systemName: player.state == .speaking ? "pause.fill" : "play.fill")
                         .font(.system(size: 18, weight: .bold))
-                        .foregroundStyle(.accentColor)
+                        .foregroundStyle(Color.accentColor)
                 }
             }
             .frame(width: 58, height: 58)

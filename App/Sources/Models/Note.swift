@@ -12,18 +12,26 @@ struct Note: Identifiable, Codable, Equatable {
     /// stamped with the moment it was binned. nil for every note decoded
     /// from pre-v1.3 JSON.
     var deletedAt: Date?
+    /// Notebook this note is filed into (Joplin-style grouping). nil =
+    /// Unfiled — the state of every pre-v1.4 note.
+    var notebookId: UUID?
+    /// Pinned notes sort to a "Pinned" section at the top of the list.
+    var isPinned: Bool = false
+    /// Starred notes (filterable; glyph in the row).
+    var isFavorite: Bool = false
 
     /// How long binned notes are kept before automatic purge (iOS Notes parity).
     static let recycleRetentionDays = 30
 
     enum CodingKeys: String, CodingKey {
         case id, explicitTitle, text, createdAt, updatedAt, deletedAt
+        case notebookId, isPinned, isFavorite
     }
 
     init() {}
 
     /// Decodes notes.json written by older versions (no explicitTitle /
-    /// deletedAt keys) and tolerates missing fields entirely.
+    /// deletedAt / notebook keys) and tolerates missing fields entirely.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
@@ -32,6 +40,9 @@ struct Note: Identifiable, Codable, Equatable {
         createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
         updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
         deletedAt = try c.decodeIfPresent(Date.self, forKey: .deletedAt)
+        notebookId = try c.decodeIfPresent(UUID.self, forKey: .notebookId)
+        isPinned = try c.decodeIfPresent(Bool.self, forKey: .isPinned) ?? false
+        isFavorite = try c.decodeIfPresent(Bool.self, forKey: .isFavorite) ?? false
     }
 
     var title: String {

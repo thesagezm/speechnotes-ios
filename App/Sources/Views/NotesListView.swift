@@ -3,6 +3,7 @@ import SwiftUI
 struct NotesListView: View {
     @EnvironmentObject private var notes: NotesStore
     @EnvironmentObject private var player: SpeechPlayer
+    @ObservedObject private var notebooks = NotebooksStore.shared
     @State private var path: [UUID] = []
     @State private var showingImporter = false
     @State private var importErrorMessage: String?
@@ -11,6 +12,32 @@ struct NotesListView: View {
     /// Note whose text the share sheet is presenting (leading swipe → Share).
     @State private var sharingNote: Note?
     @State private var showingRecycleBin = false
+    @State private var showingNotebookManager = false
+
+    /// Which notebook the list is scoped to. Persisted as a string
+    /// ("all" / "unfiled" / "nb-<uuid>") so relaunching restores the view.
+    private enum Scope: Hashable {
+        case all, unfiled, notebook(UUID)
+    }
+
+    @AppStorage("activeNotebookScope") private var activeScopeRaw = "all"
+
+    private var scope: Scope {
+        if activeScopeRaw == "unfiled" { return .unfiled }
+        if activeScopeRaw.hasPrefix("nb-"),
+           let id = UUID(uuidString: String(activeScopeRaw.dropFirst(3))) {
+            return .notebook(id)
+        }
+        return .all
+    }
+
+    private func select(_ newScope: Scope) {
+        switch newScope {
+        case .all: activeScopeRaw = "all"
+        case .unfiled: activeScopeRaw = "unfiled"
+        case .notebook(let id): activeScopeRaw = "nb-\(id.uuidString)"
+        }
+    }
 
     enum SortOrder: String, CaseIterable, Identifiable {
         case edited, created, title
@@ -45,6 +72,12 @@ struct NotesListView: View {
 
     private var visibleNotes: [Note] {
         var list = notes.notes
+        // Notebook scope first (v1.4 grouping).
+        switch scope {
+        case .all: break
+        case .unfiled: list = list.filter { $0.notebookId == nil }
+        case .notebook(let id): list = list.filter { $0.notebookId == id }
+        }
         if !searchText.isEmpty {
             let needle = searchText.lowercased()
             list = list.filter {
@@ -60,17 +93,26 @@ struct NotesListView: View {
     }
 
     /// Date-era sections (Today / Yesterday / …) when sorted by edit date —
-    /// a single anonymous section otherwise.
+    /// a single anonymous section otherwise. Pinned notes (v1.4) float to
+    /// their own "Pinned" section on top.
     private var sectionedNotes: [(title: String?, notes: [Note])] {
-        guard sort == .edited else { return [(nil, visibleNotes)] }
-        var order: [String] = []
-        var groups: [String: [Note]] = [:]
-        for note in visibleNotes {
-            let key = era(for: note.updatedAt)
-            if groups[key] == nil { order.append(key) }
-            groups[key, default: []].append(note)
+        var sections: [(title: String?, notes: [Note])] = []
+        let pinned = visibleNotes.filter { $0.isPinned }
+        let rest = visibleNotes.filter { !$0.isPinned }
+        if !pinned.isEmpty { sections.append(("Pinned", pinned)) }
+        if sort == .edited {
+            var order: [String] = []
+            var groups: [String: [Note]] = [:]
+            for note in rest {
+                let key = era(for: note.updatedAt)
+                if groups[key] == nil { order.append(key) }
+                groups[key, default: []].append(note)
+            }
+            sections.append(contentsOf: order.map { ($0, groups[$0]!) })
+        } else if !rest.isEmpty {
+            sections.append((nil, rest))
         }
-        return order.map { ($0, groups[$0]!) }
+        return sections
     }
 
     var body: some View {
@@ -78,8 +120,10 @@ struct NotesListView: View {
             Group {
                 if notes.notes.isEmpty {
                     emptyState
-                } else if visibleNotes.isEmpty {
+                } else if visibleNotes.isEmpty && !searchText.isEmpty {
                     ContentUnavailableView.search(text: searchText)
+                } else if visibleNotes.isEmpty {
+                    scopeEmptyState
                 } else {
                     notesList
                 }
@@ -98,7 +142,7 @@ struct NotesListView: View {
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
-                        let note = notes.createNote()
+                        let note = notes.createNote(notebookId: scopeNotebookId)
                         path.append(note.id)
                     } label: {
                         Image(systemName: "plus")
@@ -140,6 +184,9 @@ struct NotesListView: View {
                     ShareSheet(items: [url])
                 }
             }
+            .sheet(isPresented: $showingNotebookManager) {
+                NotebookListView(notebooks: notebooks, notes: notes)
+            }
             .alert(
                 "Import failed",
                 isPresented: Binding(
@@ -162,13 +209,105 @@ struct NotesListView: View {
 
     // MARK: - List
 
+    /// Notebook chips (Joplin-style scoping): All / notebooks / Unfiled,
+    /// plus the manage entry. Rendered as the list's first section.
+    private var notebookChipRow: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                scopeChip(title: "All notes", count: notes.notes.count, isActive: scope == .all) {
+                    select(.all)
+                }
+                ForEach(notebooks.notebooks) { notebook in
+                    scopeChip(
+                        title: notebook.name,
+                        count: notes.notes(inNotebook: notebook.id).count,
+                        isActive: scope == .notebook(notebook.id)
+                    ) {
+                        select(.notebook(notebook.id))
+                    }
+                }
+                scopeChip(
+                    title: "Unfiled",
+                    count: notes.notes(inNotebook: nil).count,
+                    isActive: scope == .unfiled
+                ) {
+                    select(.unfiled)
+                }
+                Button {
+                    Haptics.tap()
+                    showingNotebookManager = true
+                } label: {
+                    Image(systemName: "folder.badge.gearshape")
+                        .font(.caption)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(Capsule().fill(Color.secondary.opacity(0.12)))
+                }
+                .accessibilityLabel("Manage notebooks")
+            }
+            .padding(.horizontal, 4)
+        }
+    }
+
+    private func scopeChip(title: String, count: Int, isActive: Bool, action: @escaping () -> Void) -> some View {
+        Button {
+            Haptics.tap()
+            action()
+        } label: {
+            HStack(spacing: 5) {
+                Text(title)
+                    .font(.caption.weight(isActive ? .semibold : .regular))
+                Text("\(count)")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(isActive ? Color.white.opacity(0.8) : Color.secondary)
+            }
+            .padding(.horizontal, 11)
+            .padding(.vertical, 6)
+            .background(
+                Capsule().fill(isActive ? Color.accentColor : Color.secondary.opacity(0.12))
+            )
+            .foregroundStyle(isActive ? Color.white : Color.primary)
+        }
+        .buttonStyle(.plain)
+    }
+
     private var notesList: some View {
         List {
+            Section {
+                notebookChipRow
+                    .listRowInsets(EdgeInsets(top: 8, leading: 12, bottom: 2, trailing: 12))
+                    .listRowBackground(Color.clear)
+            }
+
             ForEach(sectionedNotes, id: \.title) { section in
                 Section {
                     ForEach(section.notes) { note in
                         NavigationLink(value: note.id) {
                             NoteRowView(note: note, preview: notes.preview(for: note))
+                        }
+                        .contextMenu {
+                            Button {
+                                notes.setPinned(!note.isPinned, noteId: note.id)
+                            } label: {
+                                Label(note.isPinned ? "Unpin" : "Pin", systemImage: note.isPinned ? "pin.slash" : "pin")
+                            }
+                            Button {
+                                notes.setFavorite(!note.isFavorite, noteId: note.id)
+                            } label: {
+                                Label(note.isFavorite ? "Unfavorite" : "Favorite", systemImage: note.isFavorite ? "star.slash" : "star")
+                            }
+                            Menu {
+                                Button("Unfiled") {
+                                    notes.move(noteId: note.id, to: nil)
+                                }
+                                ForEach(notebooks.notebooks) { notebook in
+                                    Button(notebook.name) {
+                                        notes.move(noteId: note.id, to: notebook.id)
+                                    }
+                                }
+                            } label: {
+                                Label("Move to notebook", systemImage: "folder")
+                            }
                         }
                         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                             Button(role: .destructive) {
@@ -178,6 +317,12 @@ struct NotesListView: View {
                             }
                         }
                         .swipeActions(edge: .leading, allowsFullSwipe: false) {
+                            Button {
+                                notes.setPinned(!note.isPinned, noteId: note.id)
+                            } label: {
+                                Label(note.isPinned ? "Unpin" : "Pin", systemImage: note.isPinned ? "pin.slash" : "pin")
+                            }
+                            .tint(.orange)
                             Button {
                                 sharingNote = note
                             } label: {
@@ -223,6 +368,31 @@ struct NotesListView: View {
         return "Older"
     }
 
+    /// Notebook id for the active scope — nil for All/Unfiled.
+    private var scopeNotebookId: UUID? {
+        if case .notebook(let id) = scope { return id }
+        return nil
+    }
+
+    private var scopeEmptyState: some View {
+        ContentUnavailableView {
+            Label(
+                scope == .unfiled ? "No unfiled notes" : "No notes in this notebook",
+                systemImage: "tray"
+            )
+        } description: {
+            Text("New notes created here land in this scope.")
+        } actions: {
+            Button {
+                let note = notes.createNote(notebookId: scopeNotebookId)
+                path.append(note.id)
+            } label: {
+                Label("New note", systemImage: "square.and.pencil")
+            }
+            .buttonStyle(.borderedProminent)
+        }
+    }
+
     private var emptyState: some View {
         ContentUnavailableView {
             Label("No notes yet", systemImage: "waveform")
@@ -231,7 +401,7 @@ struct NotesListView: View {
         } actions: {
             HStack(spacing: 12) {
                 Button {
-                    let note = notes.createNote()
+                    let note = notes.createNote(notebookId: scopeNotebookId)
                     path.append(note.id)
                 } label: {
                     Label("New note", systemImage: "square.and.pencil")
@@ -351,7 +521,7 @@ struct NotesListView: View {
     /// Imported text lands verbatim; the note's title derives from its first
     /// line like every other note.
     private func addNote(text: String) {
-        let note = notes.createNote()
+        let note = notes.createNote(notebookId: scopeNotebookId)
         var updated = note
         updated.text = text
         notes.update(updated)

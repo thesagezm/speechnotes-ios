@@ -20,6 +20,14 @@ struct NoteRowView: View {
                     .lineLimit(2)
             }
             HStack(spacing: 4) {
+                if note.isPinned {
+                    Image(systemName: "pin.fill")
+                        .foregroundStyle(.orange)
+                }
+                if note.isFavorite {
+                    Image(systemName: "star.fill")
+                        .foregroundStyle(.yellow)
+                }
                 Text(note.updatedAt, format: .relative(presentation: .named))
                 Text("·").foregroundStyle(.tertiary)
                 Text("\(note.wordCount) words")

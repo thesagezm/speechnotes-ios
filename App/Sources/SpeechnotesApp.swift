@@ -14,6 +14,9 @@ struct SpeechnotesApp: App {
         case notes, storage, settings
     }
 
+    /// Onboarding gate — true after the first-run flow finishes or is skipped.
+    @AppStorage("hasOnboarded") private var hasOnboarded = false
+
     var body: some Scene {
         WindowGroup {
             TabView(selection: $selectedTab) {
@@ -75,6 +78,15 @@ struct SpeechnotesApp: App {
             .environmentObject(notes)
             .environmentObject(player)
             .environmentObject(theme)
+            // First launch only — self-contained, no eager work (LiveContainer
+            // launch hygiene).
+            .fullScreenCover(isPresented: Binding(
+                get: { !hasOnboarded },
+                set: { if !$0 { hasOnboarded = true } }
+            )) {
+                OnboardingView { hasOnboarded = true }
+                    .interactiveDismissDisabled()
+            }
         }
     }
 }
