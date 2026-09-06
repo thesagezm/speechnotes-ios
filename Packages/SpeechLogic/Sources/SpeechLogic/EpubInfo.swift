@@ -45,7 +45,7 @@ public enum EpubParser {
         let containerData: Data
         do {
             containerData = try ZipReader.readEntry("META-INF/container.xml", in: archive)
-        } catch ZipReader.ZipError.entryNotFound {
+        } catch ZipReader.ZipError.entryNotFound, ZipReader.ZipError.notAZipFile {
             throw EpubError.missingContainer
         }
         let opfPath = ContainerDelegate.run(containerData)
@@ -128,18 +128,26 @@ public enum EpubParser {
         return String(path[path.startIndex..<idx])
     }
 
-    /// Resolves an OPF/NCX href to a zip entry path (fragment stripped,
-    /// `..` collapsed). Falls back to percent-encoding because sloppy books
-    /// ship unencoded spaces; a resolution failure degrades to the raw href.
+    /// Resolves an OPF/NCX href to a zip entry path: fragment stripped,
+    /// `.` and `..` collapsed, then percent-decoded (zip entry names are raw
+    /// while spec-compliant OPFs encode spaces etc.). PURELY lexical — a
+    /// relative `URL(fileURLWithPath:)` would anchor to the process CWD and
+    /// silently leak it into every resolved path (CI-caught exactly that).
     static func resolve(_ href: String, relativeTo baseDir: String) -> String {
         let clean = href.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? href
         guard !clean.isEmpty else { return clean }
-        let base = URL(fileURLWithPath: baseDir.isEmpty ? "/" : baseDir, isDirectory: true)
-        let encoded = clean.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? clean
-        guard let url = URL(string: encoded, relativeTo: base) else { return clean }
-        var path = url.standardizedFileURL.path
-        if path.hasPrefix("/") { path.removeFirst() }
-        return path
+        var stack = baseDir.split(separator: "/")
+        for part in clean.split(separator: "/") {
+            switch part {
+            case ".", "": continue
+            case "..":
+                if !stack.isEmpty { stack.removeLast() }
+            default:
+                stack.append(part)
+            }
+        }
+        let joined = stack.joined(separator: "/")
+        return joined.removingPercentEncoding ?? joined
     }
 
     // MARK: - container.xml

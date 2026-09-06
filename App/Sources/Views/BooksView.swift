@@ -56,22 +56,20 @@ struct BooksView: View {
                 Text(store.importError ?? "Unknown error.")
             }
             .alert(
-                "Delete \"\(bookToDelete?.title ?? "book")\"?",
+                "Delete book?",
                 isPresented: Binding(
                     get: { bookToDelete != nil },
                     set: { if !$0 { bookToDelete = nil } }
                 ),
-                titleVisibility: .visible
-            ) {
-                Button("Delete book", role: .destructive) {
-                    if let book = bookToDelete {
-                        Haptics.press()
-                        store.delete(book)
-                    }
+                presenting: bookToDelete
+            ) { book in
+                Button("Delete", role: .destructive) {
+                    Haptics.press()
+                    store.delete(book)
                     bookToDelete = nil
                 }
-            } message: {
-                Text("The book file and its reading position are removed. Notes are not affected.")
+            } message: { book in
+                Text("Delete \"\(book.title)\"? The book file and its reading position are removed. Notes are not affected.")
             }
         }
     }
