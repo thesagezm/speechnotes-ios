@@ -3,24 +3,21 @@ import MisakiSwift
 import MLX
 import MLXUtilsLibrary
 import OnnxRuntimeBindings
-import SpeechLogic
 
-/// Plan B engine: Kokoro via ONNX Runtime on the CPU — the PocketPal AI
-/// approach. The instance is pointed at one model file (fp32 `model.onnx`
-/// ~326 MB or the small uint8 tier `model_uint8.onnx` ~177 MB — same graph)
-/// plus the shared tokenizer.json/voices.npz in Documents/KokoroOnnx.
-/// Inference spec verified against PocketPal's
-/// react-native-speech engine: inputs `input_ids` int64 [1, N],
-/// `style` float32 [1, 256] (flat voice array sliced at
-/// clamp(N-2, 0, 509) * 256), `speed` float32 [1]; output `waveform`
-/// float32 @ 24 kHz. The model takes speed natively, so playback is a plain
-/// player node — no time-pitch gymnastics.
+/// Kokoro via ONNX Runtime on the CPU — fp32 `model.onnx` (~326 MB) or the
+/// small uint8 tier `model_uint8.onnx` (~177 MB — same graph), plus the
+/// shared tokenizer.json/voices.npz in Documents/KokoroOnnx. Inference spec
+/// (verified against PocketPal's react-native-speech engine): inputs
+/// `input_ids` int64 [1, N], `style` float32 [1, 256] (flat voice array
+/// sliced at clamp(N-2, 0, 509) * 256), `speed` float32 [1]; output
+/// `waveform` float32 @ 24 kHz. The model takes speed natively, so playback
+/// is a plain player node — no time-pitch gymnastics.
 ///
-/// Streaming architecture (sentence chunks via
-/// SpeechLogic, generation capped a few chunks ahead, played buffers
-/// released, interruption handling). MLX/Metal is never touched for
-/// inference — this is the escape hatch when Metal memory pressure kills
-/// long notes.
+/// All pipeline machinery (chunking, bounded generation-ahead pacing,
+/// scheduling, play-time position tracking, retries, WAV export, audio
+/// session + interruption handling) lives in StreamingTTSPlaybackCore; this
+/// class contributes model loading and synthesis, confined to the core's
+/// generateQueue.
 final class OnnxKokoroEngine: NSObject, SpeechEngine {
     let name = "Kokoro ONNX (CPU)"
 
@@ -36,59 +33,13 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
     private let modelFileURL: URL
     private let modelFilesValid: () -> Bool
 
-    init(
-        modelFileURL: URL = ModelManager.onnxModelFileURL,
-        modelFilesValid: @escaping () -> Bool = { ModelManager.onnxFilesAreValid() }
-    ) {
-        self.modelFileURL = modelFileURL
-        self.modelFilesValid = modelFilesValid
-        super.init()
-        setupAudioSession()
-    }
+    private let core: StreamingTTSPlaybackCore
 
-    private func setupAudioSession() {
-        do {
-            try AVAudioSession.sharedInstance().setCategory(
-                .playback,
-                mode: .spokenAudio,
-                options: [.duckOthers, .allowBluetooth, .allowBluetoothA2DP]
-            )
-        } catch {
-            Log.shared.error("OnnxKokoroEngine audio session setup failed: \(error)")
-        }
-        interruptionObserver = NotificationCenter.default.addObserver(
-            forName: AVAudioSession.interruptionNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] note in
-            self?.handleInterruption(note)
-        }
-        Log.shared.info("OnnxKokoroEngine created")
-    }
-
-    deinit {
-        // Tier switches rebuild this engine (fp32 ⇄ uint8 share one slot) —
-        // without this, every rebuild leaked a live interruption observer
-        // onto the dead instance (SupertonicEngine always had the twin).
-        if let interruptionObserver {
-            NotificationCenter.default.removeObserver(interruptionObserver)
-        }
-    }
-
-    private static let sampleRate: Double = 24_000
     private static let styleDim = 256
     private static let maxTokens = 510
-
-    /// How many chunks beyond the playback cursor the producer may generate
-    /// ahead — keeps queued audio bounded on long notes.
-    private static let generationAheadLimit = 3
-
-    /// Maximum characters (~30 words) per synthesis call.
     private static let chunkMaxChars = 160
 
-    private let engineQueue = DispatchQueue(label: "com.speechnotes.onnxkokoro", qos: .userInitiated)
-
-    // Model state — engineQueue only.
+    // Model state — the core's generateQueue only.
     private var ortEnv: ORTEnv?
     private var ortSession: ORTSession?
     /// Model output tensor name — "waveform" on most exports, but some name
@@ -100,53 +51,52 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
     private var g2pBritish: EnglishG2P?
     private var modelLoadAttempted = false
 
-    private let audioEngine = AVAudioEngine()
-    private let playerNode = AVAudioPlayerNode()
-    private var audioNodesAttached = false
-    private var audioEngineRunning = false
-    private var connectedFormat: AVAudioFormat?
+    init(
+        modelFileURL: URL = ModelManager.onnxModelFileURL,
+        modelFilesValid: @escaping () -> Bool = { ModelManager.onnxFilesAreValid() }
+    ) {
+        self.modelFileURL = modelFileURL
+        self.modelFilesValid = modelFilesValid
+        self.core = StreamingTTSPlaybackCore(config: .init(
+            sampleRate: 24_000,
+            chunkMaxChars: Self.chunkMaxChars,
+            generationAheadLimit: 3,
+            exportInterChunkSilence: 0,
+            logPrefix: "OnnxKokoroEngine"
+        ))
+        super.init()
 
-    private var playbackGeneration = 0
-
-    // Play-time position (see PlayPositionTracker) — read-along highlighting
-    // follows the ACTUAL audio, not the schedule cursor which runs up to
-    // generationAheadLimit chunks ahead (the v0.5 read-along failure).
-    private lazy var playTracker = PlayPositionTracker(playerNode: playerNode)
-
-    // Streaming pipeline state — main thread only.
-    private var chunks: [Chunk] = []
-    private var generatedBuffers: [Int: AVAudioPCMBuffer] = [:]
-    private var scheduledUpTo = -1
-    private var totalChars = 1
-    private var speed: Float = 1.0
-
-    private var interruptionObserver: NSObjectProtocol?
-
-    private var state: SpeechState = .idle {
-        didSet {
-            if state != oldValue {
-                Log.shared.info("OnnxKokoroEngine state: \(oldValue) → \(state)")
-                if state == .idle {
-                    teardownPlayback()
-                    onProgress?(0)
-                }
-                onStateChanged?(state)
-            }
+        core.isModelReady = { [weak self] in
+            guard let self else { return false }
+            self.loadModelIfNeeded()
+            return self.ortSession != nil
         }
+        core.generateChunk = { [weak self] text in
+            guard let self else { throw StreamingCoreError.notConfigured }
+            return try self.generateChunk(text)
+        }
+        core.onStateChanged = { [weak self] state in self?.onStateChanged?(state) }
+        core.onProgress = { [weak self] progress in self?.onProgress?(progress) }
+        core.onPlayedChars = { [weak self] chars in self?.onPlayedChars?(chars) }
     }
 
-    private func handleInterruption(_ notification: Notification) {
-        let typeRaw = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
-        let optionsRaw = notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
-        if typeRaw == AVAudioSession.InterruptionType.began.rawValue {
-            if state == .speaking { pause() }
-        } else if typeRaw == AVAudioSession.InterruptionType.ended.rawValue,
-                  optionsRaw & AVAudioSession.InterruptionOptions.shouldResume.rawValue != 0 {
-            if state == .paused { resume() }
+    // MARK: - SpeechEngine
+
+    func speak(_ text: String, rateMultiplier: Double) {
+        let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return }
+        guard modelFilesValid() else {
+            Log.shared.error("OnnxKokoroEngine asked to speak but no ONNX model is downloaded")
+            return
         }
+        core.speak(text, rateMultiplier: rateMultiplier)
     }
 
-    // MARK: - Model loading (engineQueue)
+    func pause() { core.pause() }
+    func resume() { core.resume() }
+    func stop() { core.stop() }
+
+    // MARK: - Model loading (generateQueue)
 
     private func loadModelIfNeeded() {
         guard !modelLoadAttempted else { return }
@@ -197,7 +147,9 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
         }
     }
 
-    /// engineQueue only — phonemize with Misaki (same G2P the MLX engine uses).
+    // MARK: - Synthesis (generateQueue)
+
+    /// Phonemize with Misaki (same G2P the MLX engine lineage uses).
     private func phonemize(_ text: String) -> String? {
         let british = voice.hasPrefix("b")
         let g2p: EnglishG2P?
@@ -212,13 +164,13 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
         return try? g2p.phonemize(text: text).0
     }
 
-    /// engineQueue only — phonemes → token IDs (per-character vocab lookup,
-    /// matching the reference tokenizer for this model).
+    /// Phonemes → token IDs (per-character vocab lookup, matching the
+    /// reference tokenizer for this model).
     private func tokenize(_ phonemes: String) -> [Int] {
         phonemes.map { vocab[String($0)] }.compactMap { $0 }
     }
 
-    /// engineQueue only — the core ONNX inference call.
+    /// The core ONNX inference call.
     private func synthesize(tokens: [Int], voiceFlat: [Float]) throws -> [Float] {
         guard let session = ortSession else {
             throw OnnxEngineError.modelUnavailable
@@ -241,7 +193,7 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
             bytes: tokens64,
             length: tokens64.count * MemoryLayout<Int64>.size
         )
-        var speedValue = speed
+        var speedValue = core.speed
         let speedData = NSMutableData(
             bytes: &speedValue,
             length: MemoryLayout<Float>.size
@@ -282,73 +234,8 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
         }
     }
 
-    // MARK: - SpeechEngine
-
-    func speak(_ text: String, rateMultiplier: Double) {
-        let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !clean.isEmpty else { return }
-
-        guard modelFilesValid() else {
-            Log.shared.error("OnnxKokoroEngine asked to speak but no ONNX model is downloaded")
-            state = .idle
-            return
-        }
-
-        let allChunks = SentenceChunker.chunks(
-            for: clean,
-            firstMaxChars: Self.chunkMaxChars,
-            batchMaxChars: Self.chunkMaxChars
-        )
-        guard !allChunks.isEmpty else { return }
-
-        DispatchQueue.main.async { self.state = .generating }
-
-        let generation = playbackGeneration + 1
-        playbackGeneration = generation
-
-        chunks = allChunks
-        generatedBuffers = [:]
-        scheduledUpTo = -1
-        totalChars = max(1, clean.utf16.count)
-        speed = Float(min(2.0, max(0.5, rateMultiplier)))
-        playTracker.reset()
-
-        engineQueue.async { [weak self] in
-            guard let self, self.playbackGeneration == generation else { return }
-            self.loadModelIfNeeded()
-            guard self.ortSession != nil else {
-                DispatchQueue.main.async {
-                    if self.playbackGeneration == generation { self.state = .idle }
-                }
-                return
-            }
-
-            for (index, chunk) in allChunks.enumerated() {
-                while self.playbackGeneration == generation,
-                      index > self.scheduledUpTo + Self.generationAheadLimit {
-                    Thread.sleep(forTimeInterval: 0.05)
-                }
-                guard self.playbackGeneration == generation else { return }
-                // Same resilience rule as Supertonic: retry, then skip with
-                // silence — one bad chunk never ends the reading.
-                let samples: [Float]
-                do {
-                    samples = try Self.generateWithRetry(self, chunk.text, attempts: 3)
-                } catch {
-                    Log.shared.error("OnnxKokoroEngine chunk \(index + 1) failed after retries (\(error)): «\(chunk.text.prefix(60))» — inserting 0.5s silence")
-                    samples = Array(repeating: Float(0), count: Int(Self.sampleRate) / 2)
-                }
-                let nsBuffer = Self.makeMonoBuffer(samples: samples)
-                DispatchQueue.main.async {
-                    guard self.playbackGeneration == generation else { return }
-                    self.generatedBuffers[index] = nsBuffer
-                    self.scheduleReadyChunks(generation: generation)
-                }
-            }
-        }
-    }
-
-    /// engineQueue only — text → phonemes → tokens → samples.
+    /// Text → phonemes → tokens → samples. The live speed is read per chunk
+    /// from the core, so slider changes apply from the next sentence.
     private func generateChunk(_ text: String) throws -> [Float] {
         let voiceKey = voicesFlat[voice + ".npy"] != nil
             ? voice + ".npy"
@@ -362,124 +249,9 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
         let tokens = tokenize(phonemes)
         let started = Date()
         let samples = try synthesize(tokens: tokens, voiceFlat: voiceFlat)
-        let duration = Double(samples.count) / Self.sampleRate
+        let duration = Double(samples.count) / core.sampleRate
         Log.shared.info("OnnxKokoroEngine: \(tokens.count) tokens → \(String(format: "%.1f", duration))s audio in \(String(format: "%.2f", Date().timeIntervalSince(started)))s")
         return samples
-    }
-
-    /// Retries `generateChunk` — transient inference flakes (empty output,
-    /// tokenizer edge cases) usually succeed on a second attempt.
-    nonisolated private static func generateWithRetry(
-        _ engine: OnnxKokoroEngine,
-        _ text: String,
-        attempts: Int
-    ) throws -> [Float] {
-        var lastError: Error?
-        for attempt in 1...attempts {
-            do { return try engine.generateChunk(text) }
-            catch {
-                lastError = error
-                Log.shared.info("OnnxKokoroEngine: chunk attempt \(attempt)/\(attempts) failed (\(error)) — «\(text.prefix(60))»")
-                Thread.sleep(forTimeInterval: 0.15 * Double(attempt))
-            }
-        }
-        throw lastError ?? OnnxEngineError.noOutput
-    }
-
-    func pause() {
-        guard audioEngineRunning, playerNode.isPlaying else { return }
-        playerNode.pause()
-        state = .paused
-    }
-
-    func resume() {
-        guard audioEngineRunning, !playerNode.isPlaying, state == .paused else { return }
-        playerNode.play()
-        state = .speaking
-    }
-
-    func stop() {
-        playbackGeneration += 1
-        state = .idle
-    }
-
-    // MARK: - Streaming playback (main thread)
-
-    private func scheduleReadyChunks(generation: Int) {
-        guard playbackGeneration == generation else { return }
-        while true {
-            let next = scheduledUpTo + 1
-            guard next < chunks.count, let buffer = generatedBuffers[next] else { return }
-            scheduledUpTo = next
-            schedule(buffer: buffer, index: next, isLast: next == chunks.count - 1, generation: generation)
-        }
-    }
-
-    private func schedule(buffer: AVAudioPCMBuffer, index: Int, isLast: Bool, generation: Int) {
-        ensureAudioEngineRunning(format: buffer.format)
-
-        let charsDone = chunks.prefix(scheduledUpTo + 1).reduce(0) { $0 + $1.length }
-        onProgress?(min(1.0, Double(charsDone) / Double(totalChars)))
-
-        // Sample marker for play-time position tracking.
-        playTracker.onPlayedChars = onPlayedChars
-        playTracker.willSchedule(buffer: buffer, endChar: charsDone, totalChars: totalChars)
-
-        playerNode.scheduleBuffer(buffer, at: nil, options: []) { [weak self] in
-            DispatchQueue.main.async {
-                guard let self, self.playbackGeneration == generation else { return }
-                self.generatedBuffers[index] = nil
-                if isLast {
-                    if self.state == .speaking || self.state == .paused || self.state == .generating {
-                        self.onProgress?(1.0)
-                        self.playTracker.finish(totalChars: self.totalChars)
-                        self.state = .idle
-                    }
-                    return
-                }
-                self.scheduleReadyChunks(generation: generation)
-            }
-        }
-
-        if state == .generating {
-            state = .speaking
-            playerNode.play()
-        } else if state == .speaking, !playerNode.isPlaying {
-            playerNode.play()
-        }
-    }
-
-    private func ensureAudioEngineRunning(format: AVAudioFormat) {
-        if !audioNodesAttached {
-            audioEngine.attach(playerNode)
-            audioNodesAttached = true
-        }
-        if connectedFormat != format {
-            audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: format)
-            connectedFormat = format
-        }
-        if !audioEngine.isRunning {
-            do {
-                try audioEngine.start()
-                audioEngineRunning = true
-            } catch {
-                Log.shared.error("OnnxKokoroEngine: audio engine failed to start: \(error)")
-                state = .idle
-            }
-        }
-    }
-
-    private func teardownPlayback() {
-        playTracker.reset()
-        playerNode.stop()
-        audioEngine.stop()
-        audioEngineRunning = false
-        try? AVAudioSession.sharedInstance().setActive(
-            false,
-            options: .notifyOthersOnDeactivation
-        )
-        generatedBuffers = [:]
-        scheduledUpTo = -1
     }
 
     // MARK: - WAV export
@@ -489,83 +261,11 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
         onChunkProgress: ((Double) -> Void)? = nil,
         completion: @escaping (Result<URL, Error>) -> Void
     ) {
-        let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !clean.isEmpty else {
-            DispatchQueue.main.async {
-                completion(.failure(OnnxEngineError.emptyText))
-            }
-            return
-        }
         guard modelFilesValid() else {
-            DispatchQueue.main.async {
-                completion(.failure(OnnxEngineError.modelUnavailable))
-            }
+            completion(.failure(OnnxEngineError.modelUnavailable))
             return
         }
-
-        playbackGeneration += 1
-        DispatchQueue.main.async { self.state = .idle }
-
-        let renderChunks = SentenceChunker.chunks(
-            for: clean,
-            firstMaxChars: Self.chunkMaxChars,
-            batchMaxChars: Self.chunkMaxChars
-        )
-        let total = max(1, clean.utf16.count)
-
-        engineQueue.async { [weak self] in
-            guard let self else { return }
-            self.loadModelIfNeeded()
-            guard self.ortSession != nil else {
-                DispatchQueue.main.async {
-                    completion(.failure(OnnxEngineError.modelUnavailable))
-                }
-                return
-            }
-
-            var samples: [Float] = []
-            do {
-                for (index, chunk) in renderChunks.enumerated() {
-                    do {
-                        samples.append(contentsOf: try Self.generateWithRetry(self, chunk.text, attempts: 3))
-                    } catch {
-                        Log.shared.error("OnnxKokoroEngine export chunk failed after retries (\(error)): «\(chunk.text.prefix(60))» — silence inserted")
-                        samples.append(contentsOf: Array(repeating: Float(0), count: Int(Self.sampleRate) / 2))
-                    }
-                    let charsDone = renderChunks.prefix(index + 1).reduce(0) { $0 + $1.length }
-                    let progress = min(1.0, Double(charsDone) / Double(total))
-                    DispatchQueue.main.async { onChunkProgress?(progress) }
-                }
-
-                let formatter = DateFormatter()
-                formatter.dateFormat = "yyyy-MM-dd-HHmmss"
-                let exportsDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-                    .appendingPathComponent("Exports")
-                try FileManager.default.createDirectory(at: exportsDir, withIntermediateDirectories: true)
-                let url = exportsDir.appendingPathComponent("Note-\(formatter.string(from: Date())).wav")
-                try WAVWriter.write(samples: samples, sampleRate: 24_000, to: url)
-                let seconds = Double(samples.count) / Self.sampleRate
-                Log.shared.info("OnnxKokoroEngine: exported \(String(format: "%.1f", seconds))s of audio to \(url.lastPathComponent)")
-                DispatchQueue.main.async { completion(.success(url)) }
-            } catch {
-                Log.shared.error("OnnxKokoroEngine export failed: \(error)")
-                DispatchQueue.main.async { completion(.failure(error)) }
-            }
-        }
-    }
-
-    // MARK: - Buffers
-
-    private static func makeMonoBuffer(samples: [Float]) -> AVAudioPCMBuffer {
-        let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1)!
-        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(samples.count))!
-        buffer.frameLength = buffer.frameCapacity
-
-        let destination = buffer.floatChannelData![0]
-        samples.withUnsafeBufferPointer { source in
-            memcpy(destination, source.baseAddress!, samples.count * MemoryLayout<Float>.size)
-        }
-        return buffer
+        core.renderWAV(text: text, onChunkProgress: onChunkProgress, completion: completion)
     }
 }
 

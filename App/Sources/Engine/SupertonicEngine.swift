@@ -1,6 +1,5 @@
 import AVFoundation
 import OnnxRuntimeBindings
-import SpeechLogic
 
 /// Supertonic engine (Supertone supertonic-3): flow-matching TTS over 4 ONNX
 /// sessions, CPU-only, driven entirely by the vendored upstream Helper.swift
@@ -9,12 +8,10 @@ import SpeechLogic
 /// 10 voice styles (M1–M5 male, F1–F5 female), native speed control through
 /// the duration predictor.
 ///
-/// Streaming architecture mirrors OnnxKokoroEngine: sentence chunks from
-/// SpeechLogic, generation capped a couple of chunks ahead (each vector-
-/// estimator pass is far heavier than Kokoro's single-session call), played
-/// buffers released, chunk-granular read-along ranges, interruption handling.
-/// The sample rate comes from tts.json at load — everything downstream
-/// (AVAudioFormat, WAV export) uses the discovered value.
+/// All pipeline machinery lives in StreamingTTSPlaybackCore (shared with
+/// OnnxKokoroEngine); this class contributes model loading + synthesis,
+/// confined to the core's generateQueue. The sample rate comes from tts.json
+/// at load and is published to the core before the first buffer is built.
 final class SupertonicEngine: NSObject, SpeechEngine {
     let name = "Supertonic (CPU)"
 
@@ -30,96 +27,43 @@ final class SupertonicEngine: NSObject, SpeechEngine {
 
     /// Upstream ExampleONNX default — 8 denoising steps.
     private static let totalStep = 8
-    /// The vector estimator dominates each chunk's cost; keep the production
-    /// pipeline shallow so the first sentence starts fast.
-    private static let generationAheadLimit = 2
     /// Supertonic's own chunker accepts up to 300 chars for non-CJK; our
     /// sentence chunks stay a bit tighter for responsiveness.
     private static let chunkMaxChars = 200
 
-    private let engineQueue = DispatchQueue(label: "com.speechnotes.supertonic", qos: .userInitiated)
+    private let core: StreamingTTSPlaybackCore
 
-    // Model state — engineQueue only.
+    // Model state — the core's generateQueue only.
     private var ortEnv: ORTEnv?
     private var tts: TextToSpeech?
     private var styles: [String: Style] = [:]
     private var modelLoadAttempted = false
-    /// Discovered from tts.json at load (ae.sample_rate).
-    private(set) var sampleRate: Double = 24_000
-
-    private let audioEngine = AVAudioEngine()
-    private let playerNode = AVAudioPlayerNode()
-    private var audioNodesAttached = false
-    private var audioEngineRunning = false
-    private var connectedFormat: AVAudioFormat?
-
-    private var playbackGeneration = 0
-
-    // Play-time position (see PlayPositionTracker) — read-along highlighting
-    // follows the ACTUAL audio, not the schedule cursor.
-    private lazy var playTracker = PlayPositionTracker(playerNode: playerNode)
-
-    // Streaming pipeline state — main thread only.
-    private var chunks: [Chunk] = []
-    private var generatedBuffers: [Int: AVAudioPCMBuffer] = [:]
-    private var scheduledUpTo = -1
-    private var totalChars = 1
-    private var speed: Float = 1.05
-
-    private var interruptionObserver: NSObjectProtocol?
-
-    private var state: SpeechState = .idle {
-        didSet {
-            if state != oldValue {
-                Log.shared.info("SupertonicEngine state: \(oldValue) → \(state)")
-                if state == .idle {
-                    teardownPlayback()
-                    onProgress?(0)
-                }
-                onStateChanged?(state)
-            }
-        }
-    }
 
     override init() {
+        self.core = StreamingTTSPlaybackCore(config: .init(
+            sampleRate: 24_000, // provisional; tts.json's value is published at load
+            chunkMaxChars: Self.chunkMaxChars,
+            generationAheadLimit: 2,
+            exportInterChunkSilence: 0.05,
+            logPrefix: "SupertonicEngine"
+        ))
         super.init()
-        do {
-            try AVAudioSession.sharedInstance().setCategory(
-                .playback,
-                mode: .spokenAudio,
-                options: [.duckOthers, .allowBluetooth, .allowBluetoothA2DP]
-            )
-        } catch {
-            Log.shared.error("SupertonicEngine audio session setup failed: \(error)")
+
+        core.isModelReady = { [weak self] in
+            guard let self else { return false }
+            self.loadModelIfNeeded()
+            return self.tts != nil
         }
-        interruptionObserver = NotificationCenter.default.addObserver(
-            forName: AVAudioSession.interruptionNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] notification in
-            self?.handleInterruption(notification)
+        core.generateChunk = { [weak self] text in
+            guard let self else { throw StreamingCoreError.notConfigured }
+            return try self.generateChunk(text)
         }
-        Log.shared.info("SupertonicEngine created")
+        core.onStateChanged = { [weak self] state in self?.onStateChanged?(state) }
+        core.onProgress = { [weak self] progress in self?.onProgress?(progress) }
+        core.onPlayedChars = { [weak self] chars in self?.onPlayedChars?(chars) }
     }
 
-    deinit {
-        if let interruptionObserver {
-            NotificationCenter.default.removeObserver(interruptionObserver)
-        }
-    }
-
-    private func handleInterruption(_ notification: Notification) {
-        let typeRaw = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
-        let optionsRaw = notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
-        if typeRaw == AVAudioSession.InterruptionType.began.rawValue {
-            if state == .speaking { pause() }
-        } else if typeRaw == AVAudioSession.InterruptionType.ended.rawValue,
-                  optionsRaw & AVAudioSession.InterruptionOptions.shouldResume.rawValue != 0 {
-            if state == .paused { resume() }
-        }
-    }
-
-    // MARK: - Model loading (engineQueue)
+    // MARK: - Model loading (generateQueue)
 
     private func loadModelIfNeeded() {
         guard !modelLoadAttempted else { return }
@@ -136,7 +80,7 @@ final class SupertonicEngine: NSObject, SpeechEngine {
             let textToSpeech = try loadTextToSpeech(ModelManager.supertonicOnnxDirectory.path, false, env)
             ortEnv = env
             tts = textToSpeech
-            sampleRate = Double(textToSpeech.sampleRate)
+            core.setSampleRate(Double(textToSpeech.sampleRate))
 
             // Each style must carry batch dim 1 (loadVoiceStyle sizes the
             // tensors to the number of paths it's given), so one call per voice.
@@ -144,7 +88,7 @@ final class SupertonicEngine: NSObject, SpeechEngine {
                 let path = ModelManager.supertonicStyleFileURL(voice: voice).path
                 styles[voice] = try loadVoiceStyle([path], verbose: false)
             }
-            Log.shared.info("SupertonicEngine: 4 sessions + \(styles.count) styles loaded in \(String(format: "%.1f", Date().timeIntervalSince(started)))s (\(Int(sampleRate)) Hz)")
+            Log.shared.info("SupertonicEngine: 4 sessions + \(styles.count) styles loaded in \(String(format: "%.1f", Date().timeIntervalSince(started)))s (\(textToSpeech.sampleRate) Hz)")
         } catch {
             tts = nil
             styles = [:]
@@ -157,205 +101,42 @@ final class SupertonicEngine: NSObject, SpeechEngine {
     func speak(_ text: String, rateMultiplier: Double) {
         let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
-
         guard ModelManager.supertonicFilesAreValid() else {
             Log.shared.error("SupertonicEngine asked to speak but its model isn't downloaded")
-            state = .idle
             return
         }
         guard isValidLang(lang) else {
             Log.shared.error("SupertonicEngine: unsupported language \(lang)")
-            state = .idle
             return
         }
-
-        let allChunks = SentenceChunker.chunks(
-            for: clean,
-            firstMaxChars: Self.chunkMaxChars,
-            batchMaxChars: Self.chunkMaxChars
-        )
-        guard !allChunks.isEmpty else { return }
-
-        DispatchQueue.main.async { self.state = .generating }
-
-        let generation = playbackGeneration + 1
-        playbackGeneration = generation
-
-        chunks = allChunks
-        generatedBuffers = [:]
-        scheduledUpTo = -1
-        totalChars = max(1, clean.utf16.count)
-        speed = Float(min(2.0, max(0.5, rateMultiplier)))
-
-        engineQueue.async { [weak self] in
-            guard let self, self.playbackGeneration == generation else { return }
-            self.loadModelIfNeeded()
-            guard self.tts != nil else {
-                DispatchQueue.main.async {
-                    if self.playbackGeneration == generation { self.state = .idle }
-                }
-                return
-            }
-
-            for (index, chunk) in allChunks.enumerated() {
-                while self.playbackGeneration == generation,
-                      index > self.scheduledUpTo + Self.generationAheadLimit {
-                    Thread.sleep(forTimeInterval: 0.05)
-                }
-                guard self.playbackGeneration == generation else { return }
-                // One flaky chunk must not kill a long reading session:
-                // retry (the duration model intermittently predicts a
-                // zero-length result that succeeds on a second call), then
-                // fall back to a short silence and keep speaking.
-                let samples: [Float]
-                do {
-                    samples = try Self.generateWithRetry(self, chunk.text, attempts: 3)
-                } catch {
-                    Log.shared.error("SupertonicEngine chunk \(index + 1) failed after retries (\(error)): «\(chunk.text.prefix(60))» — inserting 0.5s silence")
-                    samples = Array(repeating: Float(0), count: Int(self.sampleRate) / 2)
-                }
-                let nsBuffer = Self.makeMonoBuffer(samples: samples, sampleRate: self.sampleRate)
-                DispatchQueue.main.async {
-                    guard self.playbackGeneration == generation else { return }
-                    self.generatedBuffers[index] = nsBuffer
-                    self.scheduleReadyChunks(generation: generation)
-                }
-            }
-        }
+        core.speak(text, rateMultiplier: rateMultiplier)
     }
 
-    /// engineQueue only — one Helper `call` per sentence chunk. `call`'s own
-    /// internal chunker sees a short string and runs a single inference; the
-    /// returned wav is padded, so it's trimmed to the predicted duration.
+    func pause() { core.pause() }
+    func resume() { core.resume() }
+    func stop() { core.stop() }
+
+    // MARK: - Synthesis (generateQueue)
+
+    /// One Helper `call` per sentence chunk. `call`'s own internal chunker
+    /// sees a short string and runs a single inference; the returned wav is
+    /// padded, so it's trimmed to the predicted duration. The live speed is
+    /// read per chunk from the core, so slider changes apply from the next
+    /// sentence.
     private func generateChunk(_ text: String) throws -> [Float] {
         guard let tts else { throw SupertonicEngineError.modelUnavailable }
         guard let style = styles[voice] ?? styles.values.first else {
             throw SupertonicEngineError.noVoices
         }
         let started = Date()
-        let result = try tts.call(text, lang, style, Self.totalStep, speed: speed, silenceDuration: 0.05)
+        let result = try tts.call(text, lang, style, Self.totalStep, speed: core.speed, silenceDuration: 0.05)
         let actualLen = Int(Float(tts.sampleRate) * result.duration)
         guard actualLen > 0, result.wav.count >= actualLen else {
             throw SupertonicEngineError.noOutput
         }
-        let duration = Double(actualLen) / sampleRate
+        let duration = Double(actualLen) / core.sampleRate
         Log.shared.info("SupertonicEngine: \(String(format: "%.1f", duration))s audio in \(String(format: "%.2f", Date().timeIntervalSince(started)))s (\(voice), \(lang))")
         return Array(result.wav.prefix(actualLen))
-    }
-
-    /// Retries `generateChunk` — the duration model occasionally returns a
-    /// zero-length prediction (noOutput) that succeeds on a second call.
-    nonisolated private static func generateWithRetry(
-        _ engine: SupertonicEngine,
-        _ text: String,
-        attempts: Int
-    ) throws -> [Float] {
-        var lastError: Error?
-        for attempt in 1...attempts {
-            do { return try engine.generateChunk(text) }
-            catch {
-                lastError = error
-                Log.shared.info("SupertonicEngine: chunk attempt \(attempt)/\(attempts) failed (\(error)) — «\(text.prefix(60))»")
-                Thread.sleep(forTimeInterval: 0.15 * Double(attempt))
-            }
-        }
-        throw lastError ?? SupertonicEngineError.noOutput
-    }
-
-    func pause() {
-        guard audioEngineRunning, playerNode.isPlaying else { return }
-        playerNode.pause()
-        state = .paused
-    }
-
-    func resume() {
-        guard audioEngineRunning, !playerNode.isPlaying, state == .paused else { return }
-        playerNode.play()
-        state = .speaking
-    }
-
-    func stop() {
-        playbackGeneration += 1
-        state = .idle
-    }
-
-    // MARK: - Streaming playback (main thread)
-
-    private func scheduleReadyChunks(generation: Int) {
-        guard playbackGeneration == generation else { return }
-        while true {
-            let next = scheduledUpTo + 1
-            guard next < chunks.count, let buffer = generatedBuffers[next] else { return }
-            scheduledUpTo = next
-            schedule(buffer: buffer, index: next, isLast: next == chunks.count - 1, generation: generation)
-        }
-    }
-
-    private func schedule(buffer: AVAudioPCMBuffer, index: Int, isLast: Bool, generation: Int) {
-        ensureAudioEngineRunning(format: buffer.format)
-
-        let charsDone = chunks.prefix(scheduledUpTo + 1).reduce(0) { $0 + $1.length }
-        onProgress?(min(1.0, Double(charsDone) / Double(totalChars)))
-
-        // Sample marker for play-time position tracking.
-        playTracker.onPlayedChars = onPlayedChars
-        playTracker.willSchedule(buffer: buffer, endChar: charsDone, totalChars: totalChars)
-
-        playerNode.scheduleBuffer(buffer, at: nil, options: []) { [weak self] in
-            DispatchQueue.main.async {
-                guard let self, self.playbackGeneration == generation else { return }
-                self.generatedBuffers[index] = nil
-                if isLast {
-                    if self.state == .speaking || self.state == .paused || self.state == .generating {
-                        self.onProgress?(1.0)
-                        self.playTracker.finish(totalChars: self.totalChars)
-                        self.state = .idle
-                    }
-                    return
-                }
-                self.scheduleReadyChunks(generation: generation)
-            }
-        }
-
-        if state == .generating {
-            state = .speaking
-            playerNode.play()
-        } else if state == .speaking, !playerNode.isPlaying {
-            playerNode.play()
-        }
-    }
-
-    private func ensureAudioEngineRunning(format: AVAudioFormat) {
-        if !audioNodesAttached {
-            audioEngine.attach(playerNode)
-            audioNodesAttached = true
-        }
-        if connectedFormat != format {
-            audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: format)
-            connectedFormat = format
-        }
-        if !audioEngine.isRunning {
-            do {
-                try audioEngine.start()
-                audioEngineRunning = true
-            } catch {
-                Log.shared.error("SupertonicEngine: audio engine failed to start: \(error)")
-                state = .idle
-            }
-        }
-    }
-
-    private func teardownPlayback() {
-        playTracker.reset()
-        playerNode.stop()
-        audioEngine.stop()
-        audioEngineRunning = false
-        try? AVAudioSession.sharedInstance().setActive(
-            false,
-            options: .notifyOthersOnDeactivation
-        )
-        generatedBuffers = [:]
-        scheduledUpTo = -1
     }
 
     // MARK: - WAV export
@@ -365,90 +146,11 @@ final class SupertonicEngine: NSObject, SpeechEngine {
         onChunkProgress: ((Double) -> Void)? = nil,
         completion: @escaping (Result<URL, Error>) -> Void
     ) {
-        let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !clean.isEmpty else {
-            DispatchQueue.main.async {
-                completion(.failure(SupertonicEngineError.emptyText))
-            }
-            return
-        }
         guard ModelManager.supertonicFilesAreValid(), isValidLang(lang) else {
-            DispatchQueue.main.async {
-                completion(.failure(SupertonicEngineError.modelUnavailable))
-            }
+            completion(.failure(SupertonicEngineError.modelUnavailable))
             return
         }
-
-        playbackGeneration += 1
-        DispatchQueue.main.async { self.state = .idle }
-
-        let renderChunks = SentenceChunker.chunks(
-            for: clean,
-            firstMaxChars: Self.chunkMaxChars,
-            batchMaxChars: Self.chunkMaxChars
-        )
-        let total = max(1, clean.utf16.count)
-
-        engineQueue.async { [weak self] in
-            guard let self else { return }
-            self.loadModelIfNeeded()
-            guard let tts = self.tts else {
-                DispatchQueue.main.async {
-                    completion(.failure(SupertonicEngineError.modelUnavailable))
-                }
-                return
-            }
-
-            var samples: [Float] = []
-            do {
-                for (index, chunk) in renderChunks.enumerated() {
-                    // Chunk gap mirrors playback pacing (call's silenceDuration).
-                    if index > 0 {
-                        samples.append(contentsOf: [Float](repeating: 0, count: Int(0.05 * Double(tts.sampleRate))))
-                    }
-                    // Export parity with playback: retry, then silence — a
-                    // single flaky chunk must not abort a whole export.
-                    do {
-                        samples.append(contentsOf: try Self.generateWithRetry(self, chunk.text, attempts: 3))
-                    } catch {
-                        Log.shared.error("SupertonicEngine export chunk failed after retries (\(error)): «\(chunk.text.prefix(60))» — silence inserted")
-                        samples.append(contentsOf: Array(repeating: Float(0), count: Int(self.sampleRate) / 2))
-                    }
-                    let charsDone = renderChunks.prefix(index + 1).reduce(0) { $0 + $1.length }
-                    let progress = min(1.0, Double(charsDone) / Double(total))
-                    DispatchQueue.main.async { onChunkProgress?(progress) }
-                }
-
-                let formatter = DateFormatter()
-                formatter.dateFormat = "yyyy-MM-dd-HHmmss"
-                let exportsDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-                    .appendingPathComponent("Exports")
-                try FileManager.default.createDirectory(at: exportsDir, withIntermediateDirectories: true)
-                let url = exportsDir.appendingPathComponent("Note-\(formatter.string(from: Date())).wav")
-                try WAVWriter.write(samples: samples, sampleRate: Int(tts.sampleRate), to: url)
-                let seconds = Double(samples.count) / Double(tts.sampleRate)
-                Log.shared.info("SupertonicEngine: exported \(String(format: "%.1f", seconds))s of audio to \(url.lastPathComponent)")
-                DispatchQueue.main.async { completion(.success(url)) }
-            } catch {
-                Log.shared.error("SupertonicEngine export failed: \(error)")
-                DispatchQueue.main.async { completion(.failure(error)) }
-            }
-        }
-    }
-
-    // MARK: - Buffers
-
-    private static func makeMonoBuffer(samples: [Float], sampleRate: Double) -> AVAudioPCMBuffer {
-        let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1)!
-        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(samples.count))!
-        buffer.frameLength = buffer.frameCapacity
-
-        let destination = buffer.floatChannelData![0]
-        samples.withUnsafeBufferPointer { source in
-            guard let base = source.baseAddress else { return }
-            memcpy(destination, base, samples.count * MemoryLayout<Float>.size)
-        }
-        return buffer
+        core.renderWAV(text: text, onChunkProgress: onChunkProgress, completion: completion)
     }
 }
 
