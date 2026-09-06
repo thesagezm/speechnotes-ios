@@ -77,7 +77,7 @@ final class NotebooksStore: ObservableObject {
     private func save() {
         do {
             let data = try JSONEncoder().encode(notebooks)
-            try data.write(to: fileURL, options: .atomic)
+            try data.write(to: Self.fileURL, options: .atomic)
         } catch {
             Log.shared.error("Failed to save notebooks: \(error)")
         }
