@@ -76,7 +76,7 @@ final class EpubInfoTests: XCTestCase {
     // MARK: EPUB 2 conventions (meta name="cover", NCX TOC)
 
     func testParsesEPUB2Fixture() throws {
-        let info = try EpubInfo.parse(archive: fixture("sample"))
+        let info = try EpubParser.parse(archive: fixture("sample"))
         XCTAssertEqual(info.title, "The Test Book")
         XCTAssertEqual(info.creator, "Fixture Author")
         XCTAssertEqual(info.language, "en")
@@ -93,7 +93,7 @@ final class EpubInfoTests: XCTestCase {
     // MARK: EPUB 3 conventions (properties="cover-image"/"nav", subdirectories)
 
     func testParsesEPUB3Fixture() throws {
-        let info = try EpubInfo.parse(archive: fixture("sample-epub3"))
+        let info = try EpubParser.parse(archive: fixture("sample-epub3"))
         XCTAssertEqual(info.title, "A Modern Fixture")
         XCTAssertEqual(info.creator, "EPUB Three")
         XCTAssertEqual(info.language, "en-GB")
@@ -113,29 +113,29 @@ final class EpubInfoTests: XCTestCase {
     // MARK: Path resolution
 
     func testDirectoryOfPath() {
-        XCTAssertEqual(EpubInfo.directory(of: "OEBPS/content.opf"), "OEBPS")
-        XCTAssertEqual(EpubInfo.directory(of: "mimetype"), "")
-        XCTAssertEqual(EpubInfo.directory(of: "a/b/c.opf"), "a/b")
+        XCTAssertEqual(EpubParser.directory(of: "OEBPS/content.opf"), "OEBPS")
+        XCTAssertEqual(EpubParser.directory(of: "mimetype"), "")
+        XCTAssertEqual(EpubParser.directory(of: "a/b/c.opf"), "a/b")
     }
 
     func testResolveJoinsRelativeToBaseDir() {
-        XCTAssertEqual(EpubInfo.resolve("chap1.xhtml", relativeTo: "OEBPS"), "OEBPS/chap1.xhtml")
-        XCTAssertEqual(EpubInfo.resolve("chap1.xhtml", relativeTo: ""), "chap1.xhtml")
+        XCTAssertEqual(EpubParser.resolve("chap1.xhtml", relativeTo: "OEBPS"), "OEBPS/chap1.xhtml")
+        XCTAssertEqual(EpubParser.resolve("chap1.xhtml", relativeTo: ""), "chap1.xhtml")
     }
 
     func testResolveCollapsesDotDot() {
-        XCTAssertEqual(EpubInfo.resolve("../styles/main.css", relativeTo: "OEBPS/text"), "OEBPS/styles/main.css")
+        XCTAssertEqual(EpubParser.resolve("../styles/main.css", relativeTo: "OEBPS/text"), "OEBPS/styles/main.css")
     }
 
     func testResolveStripsFragment() {
-        XCTAssertEqual(EpubInfo.resolve("chap1.xhtml#section-2", relativeTo: "OEBPS"), "OEBPS/chap1.xhtml")
+        XCTAssertEqual(EpubParser.resolve("chap1.xhtml#section-2", relativeTo: "OEBPS"), "OEBPS/chap1.xhtml")
     }
 
     // MARK: Broken containers
 
     func testGarbageArchiveThrowsMissingContainer() {
-        XCTAssertThrowsError(try EpubInfo.parse(archive: Data("junk".utf8))) { error in
-            XCTAssertEqual(error as? EpubInfo.EpubError, .missingContainer)
+        XCTAssertThrowsError(try EpubParser.parse(archive: Data("junk".utf8))) { error in
+            XCTAssertEqual(error as? EpubParser.EpubError, .missingContainer)
         }
     }
 }

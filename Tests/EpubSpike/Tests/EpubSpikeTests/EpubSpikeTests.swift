@@ -22,7 +22,7 @@ final class EpubSpikeTests: XCTestCase {
         XCTAssertTrue(entries.contains { $0.name == "META-INF/container.xml" }, "container.xml missing")
         XCTAssertTrue(entries.contains { $0.name == "mimetype" }, "mimetype missing")
 
-        let info = try EpubInfo.parse(archive: data)
+        let info = try EpubParser.parse(archive: data)
         print("EPUB-SPIKE \(label): title=\(info.title ?? "?") creator=\(info.creator ?? "?") spine=\(info.spine.count) toc=\(info.toc.count) cover=\(info.coverPath ?? "none")")
 
         XCTAssertNotNil(info.title)

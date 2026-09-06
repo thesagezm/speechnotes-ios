@@ -142,7 +142,7 @@ final class BooksStore: ObservableObject {
         switch format {
         case .epub:
             guard let data = try? Data(contentsOf: directory.appendingPathComponent("original.epub"), options: .mappedIfSafe),
-                  let info = try? EpubInfo.parse(archive: data) else {
+                  let info = try? EpubParser.parse(archive: data) else {
                 return book
             }
             book.title = info.title?.isEmpty == false ? info.title! : fallbackTitle

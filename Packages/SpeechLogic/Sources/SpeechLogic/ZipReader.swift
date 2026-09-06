@@ -133,12 +133,19 @@ public enum ZipReader {
 
     private static func inflate(_ payload: Data, expectedSize: Int, entry: String) throws -> Data {
         guard expectedSize > 0 else { return Data() }
+        guard !payload.isEmpty else {
+            throw ZipError.corrupt(reason: "empty deflate payload for \(entry)")
+        }
         var output = Data(count: expectedSize)
-        let decoded = payload.withUnsafeBytes { (src: UnsafeRawBufferPointer) -> Int in
-            output.withUnsafeMutableBytes { (dst: UnsafeMutableRawBufferPointer) -> Int in
+        // compression_decode_buffer takes raw pointers, so bind the buffer
+        // base addresses; both buffers are non-empty (guards above).
+        let decoded = output.withUnsafeMutableBytes { (dst: UnsafeMutableRawBufferPointer) -> Int in
+            payload.withUnsafeBytes { (src: UnsafeRawBufferPointer) -> Int in
                 compression_decode_buffer(
-                    dst.bindMemory(to: UInt8.self), dst.count,
-                    src.bindMemory(to: UInt8.self), src.count,
+                    dst.baseAddress!.assumingMemoryBound(to: UInt8.self),
+                    dst.count,
+                    src.baseAddress!.assumingMemoryBound(to: UInt8.self),
+                    src.count,
                     nil,
                     COMPRESSION_ZLIB
                 )

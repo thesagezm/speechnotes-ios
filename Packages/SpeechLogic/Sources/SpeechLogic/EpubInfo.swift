@@ -25,7 +25,9 @@ public struct EpubInfo: Equatable {
     public let coverPath: String?
 }
 
-public enum EpubInfo {
+/// Parsing entry point + XML delegates. (`EpubInfo` above is the parsed
+/// RESULT type; this enum is the operations namespace.)
+public enum EpubParser {
 
     public enum EpubError: Error, Equatable {
         /// META-INF/container.xml missing or has no rootfile.
