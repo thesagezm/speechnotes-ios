@@ -533,3 +533,90 @@ bisect-g line). Tagged `v1.4.2`, GitHub Release live with the IPA attached
 (artifact `SpeechnotesIOS` of green run 34048892296; CI's Verify-embedded-
 version step confirmed the IPA reports 1.4.2). STATE: main = books-v1.4.2 =
 fbfb854 = **v1.4.2/29**, everything device-verified.
+
+## 2026-09-06 addendum #10 — v1.5 "Books, complete": Phases 1–5 on `v15-books-complete`, CI green, DEVICE ROUND PENDING. **NO RELEASE WITHOUT THE USER'S SAY-SO.**
+
+User directive after v1.4.2: stop shipping with known-deferred features; v1.5
+must land EVERYTHING (esp. PDF TTS with real chapters — "don't act like PDFs
+don't have chapters"; pull techniques from open-source readers when tough).
+Executable plan: `Docs/PLAN-V1.5-BOOKS-COMPLETE.md` (scope locked via user's
+four answers: outline→headings→page-ranges fallback; Vision OCR for scans;
+per-chapter WAV export; column-aware extraction).
+
+Branch `v15-books-complete` off main fbfb854. Tip `b530289`, ALL CI jobs green
+(logic tests, three spikes incl. the NEW pdf-spike, unsigned IPA).
+
+### Shipped in Phases 1–5
+
+- **SpeechLogic/PdfText.swift** (pure PDFKit, macOS-tested): `PdfChapter` +
+  `PdfPageOffset`; `resolveChapters` = outline → font-height heading detection
+  (modal line-height, ≥1.25×, page-budget 400) → labeled page ranges
+  ("Pages 1–10"); per-chapter text with per-page UTF-16 offsets; NFKC
+  ligature mapping + de-hyphenation; two-column gutter split (line-geometry
+  scan → selection-probe fallback; reads left→right); `pageHasTextLayer`.
+- **pdf-spike CI job** vs real documents: LFS-BOOK-12.1.pdf (outline → 9
+  chapters, correct labels), ACL P02-1040 (column split engaged 5/6 pages;
+  page 0 is a full-width header page — correctly skipped), arXiv 1706.03762
+  (HAS hyperref bookmarks — the "no bookmarks" assumption was wrong, assertion
+  relaxed; fallback contracts stay covered by fixtures). Unit fixtures:
+  hand-built minimal PDFs via `Scripts/make_pdf_fixtures.py` (outline w/
+  nested-child swallow, headings, two-column, blank).
+- **Manifest**: `Book.pdfChapters` + `pdfChapterSource` (tolerant decode —
+  old manifests load unchanged); resolved at import AND backfilled for
+  pre-v1.5 imports (extended the cover-backfill pass); library grid shows
+  "N chapters".
+- **BookPlaybackController**: format-neutral (epub = spine, pdf = manifest
+  chapters); PDF text via new **PdfSpeechText** (per-page extraction,
+  session NSCache keyed per book+page, **Vision OCR** `.accurate` /
+  language-correction OFF for scanned pages, cached); offsets sidecar
+  `text/NNNN.pages.json`; **per-chapter WAV export** `exportChapter` →
+  `player.export` (export() stops playback first; one chapter, never the
+  book — OOM rule).
+- **BookPDFReaderView**: BookPlayerBar + mini-player suppression (exact
+  editor/epub pattern); play starts at the chapter containing the current
+  page; read-along swaps to ReadAlongView and tracks by PAGE (PDFKit can't
+  highlight mid-page) — on read-along end the reader lands on the sounding
+  page; share sheet + export-failed alert (note-export pattern).
+- **Markdown read-along accuracy** (user's "less so"): speak-time SYNCHRONOUS
+  cache flush at every play entry (keyboard button; PlayerControlsBar via new
+  additive `onBeforeToggle` hook) — the last 300ms of edits are now spoken;
+  unresolved reference links speak their LABEL, not `[label][key]` bracket
+  soup (MarkdownText.speechInline + tests).
+- **BooksView**: Apple-Books-style LazyVGrid cover grid + `.searchable`
+  (title/author) replacing the row list; delete via context menu.
+- **Mini-player book jump**: tap while a book speaks → Books tab AND pushes
+  that book's reader (`.miniPlayerJumpToBook` notification + `SpeechPlayer.
+  pendingBookJumpId` slot — the slot survives the tab-switch race where the
+  notification fires before BooksView installs its listener).
+
+### Honest limitations (NOT silently deferred — user decides if they matter)
+
+1. Outline chapters = TOP-LEVEL nodes only (LFS book → 9 coarse units of
+   ~10–40 pages). Finer granularity = descend nested levels or split >20k-char
+   chapters — needs a user decision, not a bug fix.
+2. Heading fallback is page-granular: a second heading on the same page does
+   not split the unit.
+3. If markdown read-along still feels less accurate after the two fixes, the
+   drift is content-dependent — we need the specific note text + Logs to chase
+   it further.
+
+### Device test checklist (the release gate — §"Device test checklist" in PLAN-V1.5)
+
+1. PDF WITH outline: library "N chapters"; player bar; play from current page's
+   chapter; hands-off auto-advance; resume snap; read-along tracks; reader lands
+   on the sounding page when read-along ends.
+2. PDF WITHOUT outline: heading chapters (or honest "Pages X–Y"); plays.
+3. Two-column paper reads left→right.
+4. Scanned PDF speaks via OCR (first play slower, cached after).
+5. Per-chapter WAV export → share sheet → playable file; playback state recovers.
+6. EPUB regression: everything as v1.4.2.
+7. Markdown read-along: links speak labels; speak right after typing picks up
+   the last edits.
+8. Grid + search; mini-player tap lands in the playing book's reader.
+9. Cold launch in LiveContainer fine.
+
+### Release (ONLY on the user's explicit go-ahead — user-set rule 2026-09-06)
+
+Bump the four version fields → 1.5.0/30, README, fast-forward main, tag v1.5.0,
+attach the IPA from the green run. Until then `v15-books-complete` stays the
+integration branch.
