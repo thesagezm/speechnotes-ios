@@ -3,8 +3,9 @@
 An offline, Speech Note (Linux)-style app for iPhone — built entirely from Linux,
 compiled on GitHub Actions macOS runners, sideloaded via SideStore + LiveContainer.
 
-**Current status: v1.4.1 — three on-device engines, notebooks, read-along,
-polished UI.** Pick an engine in Speech Settings (listed worst → best), download
+**Current status: v1.4.2 — a Books library (EPUB + PDF with full TTS),
+three on-device engines, notebooks, read-along, polished UI.** Pick an
+engine in Speech Settings (listed worst → best), download
 its model once, and notes are spoken fully offline (airplane-mode tested):
 
 | Engine | Model size | Voices | Notes |
@@ -24,6 +25,12 @@ Feature tour:
 - **Notebooks & organization** (Joplin-style) — flat notebooks with a chip
   row for scoping, move notes between them, plus pin (Pinned section on top)
   and favorite (star). Titles auto-derive from the note's first sentence.
+- **Books** (new in v1.4.2) — the Books tab: import EPUB and PDF (Files
+  picker or Open-In). EPUBs render chapter-by-chapter in a real book reader
+  (themes, text size, native table of contents, per-book position); PDFs
+  open in a full-fidelity PDFKit viewer with an outline sidebar. Any book
+  can be spoken: chapter narration with auto-advance, sentence-snapped
+  resume, and the same read-along highlighting as notes.
 - **Streaming playback** — sentence-chunked generation with playback starting
   after the first sentence; pause/resume/stop; speed slider; phone-call
   interruption handling; lock-screen / Control Center controls.
@@ -45,34 +52,12 @@ Feature tour:
   `speechnotes://import?text=…` links, and clipboard; iCloud-aware with
   encoding fallbacks (UTF-8/16/32, latin-1).
 - **Export** — WAV audio of any note via the Share Sheet; share note text too.
-- **Storage** — browsable gallery of every cached image (attached AND
-  web-downloaded, tap to zoom, share/delete), exported audio list, and a
-  usage breakdown.
+- **Storage** (Settings → Storage) — browsable gallery of every cached image
+  (attached AND web-downloaded, tap to zoom, share/delete), exported audio
+  list, and a usage breakdown.
 - **Onboarding** — a three-page first-launch tour.
 - **Logs** (Settings → About) — crash-persistent on-device logs, shareable
   for debugging.
-
-Feature tour:
-
-- **Notes** — create/edit/delete, autosave (debounced, flushed on exit and
-  backgrounding), search, sort (edited/created/title), date sections, swipe
-  actions (delete / share text / export audio), drag & drop.
-- **Streaming playback** — sentence-chunked generation with playback starting
-  after the first sentence; pause/resume/stop; speed slider; phone-call
-  interruption handling; mini-player bar while you browse.
-- **Read-along highlighting** — spoken text is highlighted and auto-scrolled;
-  works with every engine.
-- **Voice picker** — searchable, grouped, recent voices, tap-to-audition
-  (hear a voice before committing). Supertonic adds a language selector
-  (English, Korean, Japanese, German, French, +26 more).
-- **Markdown option** (Settings → Notes) — preview rendered markdown in the
-  editor (eye/pencil toggle), and speech reads the plain text without
-  markdown symbols.
-- **Import** — .txt / .md / .pdf via the Files picker, drag & drop,
-  `speechnotes://import?text=…` links, and clipboard; iCloud-aware with
-  encoding fallbacks (UTF-8/16/32, latin-1).
-- **Export** — WAV audio of any note via the Share Sheet; share note text too.
-- **Logs tab** — crash-persistent on-device logs, shareable for debugging.
 
 Speech-to-text and translation were on the roadmap once — dropped; this is a
 speech *notes* app and TTS is the mission.
@@ -83,8 +68,9 @@ speech *notes* app and TTS is the mission.
 - `.github/workflows/build.yml` runs on every push to `main`:
   - `logic-tests` — SpeechLogic unit tests (sentence chunker, WAV writer,
     markdown stripper).
-  - `kokoro-small-spike` / `supertonic-spike` — non-blocking contract tests
-    that run each ONNX model on the macOS runner and assert audible output.
+  - `kokoro-small-spike` / `supertonic-spike` / `epub-spike` — non-blocking
+    contract tests that run each ONNX model (or the EPUB parser against real
+    Gutenberg books) on the macOS runner and assert valid output.
   - `build-ipa` — patches any SPM dependency that declares itself dynamic to
     link statically (LiveContainer requirement), archives an unsigned build,
     verifies the binary has no `@rpath` framework references, and packages
@@ -101,17 +87,21 @@ speechnotes-ios/
 │   ├── Engine/                  # SpeechEngine protocol + 3 engines
 │   │   │                        #   + PlayPositionTracker (read-along sync)
 │   │   └── Supertonic/Helper.swift  # vendored upstream runner (MIT)
-│   ├── Services/                # NotesStore, NotebooksStore, SpeechPlayer,
+│   ├── Services/                # NotesStore, NotebooksStore, BooksStore,
+│   │                            # BookPlaybackController, SpeechPlayer,
 │   │                            # ModelManager, RemoteImageStore, ImportService,
 │   │                            # LogStore, Haptics
-│   ├── Models/                  # Note, Notebook, VoiceCatalog
-│   └── Views/                   # list, editor, read-along, notebooks,
-│                                #   picker, settings, mini-player, onboarding…
+│   ├── Models/                  # Note, Notebook, Book, VoiceCatalog
+│   └── Views/                   # list, editor, read-along, books library,
+│                                #   epub/pdf readers, notebooks, picker,
+│                                #   settings, mini-player, onboarding…
+├── App/Resources/epubjs/        # vendored epub.js + JSZip (offline EPUB reader)
 ├── Packages/SpeechLogic/        # pure-logic SPM package (tested on CI)
-│                                #   SentenceChunker, WAVWriter,
-│                                #   MarkdownText
+│                                #   SentenceChunker, WAVWriter, MarkdownText,
+│                                #   ZipReader, EpubInfo, XhtmlText
 ├── Tests/KokoroSmallSpike/      # standalone ONNX contract spike
 ├── Tests/SupertonicSpike/       # standalone ONNX contract spike
+├── Tests/EpubSpike/             # EPUB parser contract spike (real books)
 ├── Scripts/                     # package-ipa.sh, watch_ci.sh, make_icon.py
 └── Docs/                        # plan, setup guide, research notes
 ```

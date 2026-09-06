@@ -503,3 +503,30 @@ round on these two fixes, THEN the release commit (bump 4 version fields →
 1.4.2/29, README + this HANDOVER, PLAN §5 checklist, fast-forward main,
 tag v1.4.2, attach IPA). Backlog unchanged (PDF TTS, mini-player → Books
 jump, WAV export stays note-only).
+
+## 2026-09-06 addendum #9 — DEVICE ROUND PASSED; this commit is the v1.4.2 release (1.4.2/29)
+
+User device report on `0c3256f`: (1) read-along highlight in notes "much
+much more accurate (not perfect)" — markdown notes less so, that accuracy
+nuance is a known follow-up, NOT a regression (mapping engine chars onto
+markdown-derived speech text); (2) TTS (esp. Supertonic) noticeably more
+responsive — consistent with BUG A's render-cost diagnosis: the row
+memoization freed the main thread the playback callbacks hop through;
+(3) chapter % works fine. With that, the PLAN-V1.4.2-EBOOKS.md §5 gate is
+satisfied minus the deferred PDF TTS item (backlog).
+
+This commit (release commit):
+- Version fields bumped 1.4.1/28 → **1.4.2/29** (all FOUR: info.properties
+  CFBundleShortVersionString/CFBundleVersion + MARKETING_VERSION/
+  CURRENT_PROJECT_VERSION in project.yml).
+- README: v1.4.2 status, Books bullet, Storage moved to Settings → Storage,
+  stale duplicate feature-tour removed, epub-spike in the CI list, layout
+  updated (BooksStore/BookPlaybackController/Book, ZipReader/EpubInfo/
+  XhtmlText, epubjs resources, EpubSpike).
+- Descoped polish, kept for the backlog: library cover GRID + search field
+  (library ships as the row list from Phase 1 — what was device-tested).
+
+Immediately after this commit's CI run goes green: fast-forward main to it
+(`git checkout main && git merge --ff-only books-v1.4.2 && git push origin
+main`), tag `v1.4.2`, `gh release create` with the IPA from the green run's
+`SpeechnotesIOS` artifact (CI's "Verify embedded version" step proves 1.4.2/29).
