@@ -2,7 +2,7 @@ name: Build IPA
 
 on:
   push:
-    branches: [main, bisect-g, books-v1.4.2]
+    branches: [main, bisect-g, books-v1.4.2, v15-books-complete]
   workflow_dispatch:
 
 jobs:
@@ -244,6 +244,64 @@ jobs:
         with:
           name: epub-spike-log
           path: epub-spike.log
+          if-no-files-found: warn
+
+  pdf-spike:
+    name: PDF spike (PdfText vs real documents)
+    runs-on: macos-latest
+    timeout-minutes: 15
+    # Informative and non-blocking by design (matches the other spikes; the
+    # phone is the real bench) — but a red run here means real-world PDFs
+    # break chapter resolution, so read it before trusting PDF TTS.
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # curl -I verified 2026-09-06: all three return 200 application/pdf.
+      # LFS book = real outline (dblatex bookmarks); ACL P02-1040 = canonical
+      # two-column paper; the arXiv Transformer paper = no-bookmarks fallback.
+      - name: Download real PDFs
+        run: |
+          mkdir -p ~/pdf-spike
+          curl -L --retry 3 --progress-bar \
+            -o ~/pdf-spike/LFS-BOOK-12.1.pdf \
+            "https://www.linuxfromscratch.org/lfs/downloads/12.1/LFS-BOOK-12.1.pdf"
+          curl -L --retry 3 --progress-bar \
+            -o ~/pdf-spike/P02-1040.pdf \
+            "https://aclanthology.org/P02-1040.pdf"
+          curl -L --retry 3 --progress-bar \
+            -o ~/pdf-spike/arxiv-1706.03762.pdf \
+            "https://arxiv.org/pdf/1706.03762"
+          ls -lh ~/pdf-spike
+
+      - name: Run PDF spike test
+        id: test
+        run: |
+          set -o pipefail
+          cd Tests/PdfSpike
+          swift test 2>&1 | tee ../../pdf-spike.log
+
+      - name: Show failure summary
+        if: always()
+        run: |
+          grep -E "PDF-SPIKE|error:|failed|Fatal|Crash|unexpected exit|Executed" pdf-spike.log \
+            | grep -vE "warning:" \
+            | tail -n 40 > pdf-spike-summary.txt || true
+          echo "----- PDF SPIKE SUMMARY -----"
+          cat pdf-spike-summary.txt
+          echo "-----------------------------"
+          # Only annotate on real failures — see the Kokoro job's note.
+          if [ -s pdf-spike-summary.txt ] && [ "${{ steps.test.outcome }}" = "failure" ]; then
+            python3 -c "import pathlib; t = pathlib.Path('pdf-spike-summary.txt').read_text()[:5500]; print('::error title=PDF spike failure::' + t.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A'))"
+          fi
+
+      - name: Upload spike log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf-spike-log
+          path: pdf-spike.log
           if-no-files-found: warn
 
   build-ipa:

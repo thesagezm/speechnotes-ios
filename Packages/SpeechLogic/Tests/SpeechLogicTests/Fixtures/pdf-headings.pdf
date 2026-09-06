@@ -1,0 +1,63 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [4 0 R 6 0 R 8 0 R] /Count 3 >>
+endobj
+3 0 obj
+<< /Length 231 >>
+stream
+BT /F1 20 Tf 1 0 0 1 72 720 Tm (First Chapter) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 650 Tm (Body one point one.) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 634 Tm (Body one point two.) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 618 Tm (Body one point three.) Tj ET
+endstream
+endobj
+4 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 1 0 R >> >> /Contents 3 0 R >>
+endobj
+5 0 obj
+<< /Length 232 >>
+stream
+BT /F1 20 Tf 1 0 0 1 72 720 Tm (Second Chapter) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 650 Tm (Body two point one.) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 634 Tm (Body two point two.) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 618 Tm (Body two point three.) Tj ET
+endstream
+endobj
+6 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 1 0 R >> >> /Contents 5 0 R >>
+endobj
+7 0 obj
+<< /Length 190 >>
+stream
+BT /F1 11 Tf 1 0 0 1 72 720 Tm (Continuation body alpha.) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 704 Tm (Continuation body beta.) Tj ET
+BT /F1 11 Tf 1 0 0 1 72 688 Tm (Continuation body gamma.) Tj ET
+endstream
+endobj
+8 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 1 0 R >> >> /Contents 7 0 R >>
+endobj
+9 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+xref
+0 10
+0000000000 65535 f 
+0000000015 00000 n 
+0000000085 00000 n 
+0000000154 00000 n 
+0000000436 00000 n 
+0000000562 00000 n 
+0000000845 00000 n 
+0000000971 00000 n 
+0000001212 00000 n 
+0000001338 00000 n 
+trailer
+<< /Size 10 /Root 9 0 R >>
+startxref
+1387
+%%EOF
