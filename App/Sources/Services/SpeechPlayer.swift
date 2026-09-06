@@ -223,16 +223,15 @@ final class SpeechPlayer: ObservableObject {
         }
     }
 
-    private func storedBookmark() -> PlaybackBookmark? {
-        guard let data = UserDefaults.standard.data(forKey: Self.bookmarkKey),
-              let mark = try? JSONDecoder().decode(PlaybackBookmark.self, from: data)
-        else { return nil }
-        return mark
-    }
+    /// Per-item bookmark persistence (Documents/bookmarks.json, one slot
+    /// per note / book-chapter, legacy single slot migrated on first read).
+    private let bookmarkStore = BookmarkStore.shared
 
-    private static let bookmarkKey = "playbackBookmark"
-    /// Set at speak start when a real note is playing; updated per tick.
+    /// Key of the item the in-flight bookmark belongs to — the BookmarkStore
+    /// slot written on every tick. Replaces the old single UserDefaults slot
+    /// (which let book B destroy note A's resume position).
     private var inFlightBookmark: PlaybackBookmark?
+    private var inFlightBookmarkKey: String?
     /// Raw engine progress of the CURRENT speak call (0…1 over the text that
     /// was actually passed to the engine, which on a resume is the suffix).
     private var lastRawProgress: Double = 0
@@ -241,13 +240,10 @@ final class SpeechPlayer: ObservableObject {
     private var resumeBaseFraction: Double = 0
 
     /// Stable (process-independent) hash — String.hashValue is seeded per
-    /// launch and would invalidate bookmarks across restarts.
+    /// launch and would invalidate bookmarks across restarts. Implementation
+    /// lives in SpeechLogic (TextHash) so CI tests pin it.
     nonisolated static func stableHash(_ s: String) -> Int64 {
-        var h: Int64 = 5381
-        for scalar in s.unicodeScalars {
-            h = (h &* 33 &+ Int64(scalar.value)) & 0x7FFF_FFFF_FFFF_FFFF
-        }
-        return h
+        TextHash.stableHash(s)
     }
 
     /// UTF-16 offset of the last sentence boundary at-or-before charsDone —
@@ -263,7 +259,7 @@ final class SpeechPlayer: ObservableObject {
     /// Loads the stored bookmark if it's for this note, this exact text,
     /// recent (<30 days), and at a meaningful position.
     private func resumePlan(for noteId: UUID, fullText: String) -> (offset: Int, suffix: String)? {
-        guard let mark = storedBookmark() else { return nil }
+        guard let mark = bookmarkStore.get(BookmarkStore.noteKey(noteId)) else { return nil }
         let length = fullText.utf16.count
         guard mark.noteId == noteId,
               mark.textLength == length,
@@ -277,7 +273,7 @@ final class SpeechPlayer: ObservableObject {
 
     /// Book variant: the bookmark must match this book AND chapter.
     private func resumeBookPlan(bookId: String, chapterIndex: Int, fullText: String) -> (offset: Int, suffix: String)? {
-        guard let mark = storedBookmark() else { return nil }
+        guard let mark = bookmarkStore.get(BookmarkStore.bookKey(bookId, chapter: chapterIndex)) else { return nil }
         let length = fullText.utf16.count
         guard mark.bookId == bookId,
               mark.chapterIndex == chapterIndex,
@@ -310,15 +306,17 @@ final class SpeechPlayer: ObservableObject {
     /// Call on background/suspension — wired into SpeechnotesApp's
     /// scenePhase hook.
     func persistPlaybackBookmark() {
-        guard let mark = inFlightBookmark else { return }
-        if let data = try? JSONEncoder().encode(mark) {
-            UserDefaults.standard.set(data, forKey: Self.bookmarkKey)
-        }
+        guard let mark = inFlightBookmark, let key = inFlightBookmarkKey else { return }
+        bookmarkStore.set(key, mark)
+        bookmarkStore.persistNow()
     }
 
     private func clearBookmark() {
+        if let key = inFlightBookmarkKey {
+            bookmarkStore.remove(key)
+        }
         inFlightBookmark = nil
-        UserDefaults.standard.removeObject(forKey: Self.bookmarkKey)
+        inFlightBookmarkKey = nil
     }
 
     /// Set by SpeechnotesApp so the player can resolve a saved bookmark's
@@ -341,24 +339,16 @@ final class SpeechPlayer: ObservableObject {
             return
         }
         guard state == .idle, auditioningVoice == nil else { return }
-        guard let mark = storedBookmark() else { return }
         // BOOK bookmarks resume from the reader's play button (their 30-day
-        // validity lives in resumeBookPlan) — they must NOT be auto-replayed
-        // here and must NOT be deleted by this note-oriented staleness sweep.
-        guard mark.noteId != nil else { return }
-        // Only auto-resume something recorded very recently — a bookmark left
-        // over from days ago is almost certainly stale context, not intent.
-        // The 30-day cap in resumePlan() still governs the explicit
-        // "Resume / restart" affordance in the editor.
-        guard Date().timeIntervalSince(mark.savedAt) < 5 * 60 else {
-            UserDefaults.standard.removeObject(forKey: Self.bookmarkKey)
-            inFlightBookmark = nil
-            return
-        }
+        // validity lives in resumeBookPlan) — they are never auto-replayed
+        // here. Among NOTE bookmarks, only one recorded very recently is
+        // intent (a leftover from days ago is stale context); the 30-day cap
+        // in resumePlan() still governs the explicit "Restart from
+        // beginning" affordance in the editor.
+        guard let (key, mark) = bookmarkStore.mostRecentNoteBookmark(within: 5 * 60) else { return }
         guard let noteId = mark.noteId, let note = notesProvider?(noteId) else {
-            // Note was deleted — drop the stale bookmark so we stop asking.
-            UserDefaults.standard.removeObject(forKey: Self.bookmarkKey)
-            inFlightBookmark = nil
+            // Note was deleted — drop its slot so we stop seeing it.
+            bookmarkStore.remove(key)
             return
         }
         Log.shared.info("SpeechPlayer: resuming bookmarked note after suspension")
@@ -381,6 +371,8 @@ final class SpeechPlayer: ObservableObject {
     }
 
     private func primeBookmark(noteId: UUID, fullText: String) {
+        let key = BookmarkStore.noteKey(noteId)
+        inFlightBookmarkKey = key
         inFlightBookmark = PlaybackBookmark(
             noteId: noteId,
             charsDone: 0,
@@ -388,9 +380,12 @@ final class SpeechPlayer: ObservableObject {
             textHash: Self.stableHash(fullText),
             savedAt: Date()
         )
+        bookmarkStore.set(key, inFlightBookmark!)
     }
 
     private func primeBookBookmark(bookId: String, chapterIndex: Int, fullText: String) {
+        let key = BookmarkStore.bookKey(bookId, chapter: chapterIndex)
+        inFlightBookmarkKey = key
         inFlightBookmark = PlaybackBookmark(
             bookId: bookId,
             chapterIndex: chapterIndex,
@@ -399,10 +394,12 @@ final class SpeechPlayer: ObservableObject {
             textHash: Self.stableHash(fullText),
             savedAt: Date()
         )
+        bookmarkStore.set(key, inFlightBookmark!)
     }
 
     /// Raw engine progress maps back to absolute chars: on a resume the
-    /// engine only ever saw the suffix.
+    /// engine only ever saw the suffix. Written through to the item's own
+    /// slot (BookmarkStore coalesces the disk write).
     private func updateBookmarkChars(rawProgress: Double) {
         guard let mark = inFlightBookmark else { return }
         let base = resumeBaseFraction * Double(mark.textLength)
@@ -417,6 +414,9 @@ final class SpeechPlayer: ObservableObject {
             textHash: mark.textHash,
             savedAt: Date()
         )
+        if let key = inFlightBookmarkKey {
+            bookmarkStore.set(key, inFlightBookmark!)
+        }
     }
 
     /// True while an audition sample is sounding.
@@ -513,8 +513,11 @@ final class SpeechPlayer: ObservableObject {
             queue: .main
         ) { [weak self] notification in
             guard let self,
-                  let deletedId = notification.object as? UUID,
-                  self.nowPlayingNoteId == deletedId else { return }
+                  let deletedId = notification.object as? UUID else { return }
+            // Its saved playback slot goes with the note (the bin's
+            // purge paths never reach clearBookmark).
+            BookmarkStore.shared.removeAll(forNote: deletedId)
+            guard self.nowPlayingNoteId == deletedId else { return }
             Log.shared.info("SpeechPlayer: deleted note was playing — stopping")
             self.stop()
         }
