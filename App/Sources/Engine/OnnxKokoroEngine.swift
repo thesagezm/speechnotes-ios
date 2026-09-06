@@ -126,6 +126,16 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
         }
     }
 
+    private func handleInterruption(_ notification: Notification) {
+        let typeRaw = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
+        let optionsRaw = notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
+        if typeRaw == AVAudioSession.InterruptionType.began.rawValue {
+            if state == .speaking { pause() }
+        } else if typeRaw == AVAudioSession.InterruptionType.ended.rawValue,
+                  optionsRaw & AVAudioSession.InterruptionOptions.shouldResume.rawValue != 0 {
+            if state == .paused { resume() }
+        }
+    }
 
     // MARK: - Model loading (engineQueue)
 
