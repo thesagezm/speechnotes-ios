@@ -320,20 +320,20 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
                     Thread.sleep(forTimeInterval: 0.05)
                 }
                 guard self.playbackGeneration == generation else { return }
+                // Same resilience rule as Supertonic: retry, then skip with
+                // silence — one bad chunk never ends the reading.
+                let samples: [Float]
                 do {
-                    let buffer = try self.generateChunk(chunk.text)
-                    let nsBuffer = Self.makeMonoBuffer(samples: buffer)
-                    DispatchQueue.main.async {
-                        guard self.playbackGeneration == generation else { return }
-                        self.generatedBuffers[index] = nsBuffer
-                        self.scheduleReadyChunks(generation: generation)
-                    }
+                    samples = try Self.generateWithRetry(self, chunk.text, attempts: 3)
                 } catch {
-                    Log.shared.error("OnnxKokoroEngine chunk \(index + 1) failed: \(error)")
-                    DispatchQueue.main.async {
-                        if self.playbackGeneration == generation { self.state = .idle }
-                    }
-                    return
+                    Log.shared.error("OnnxKokoroEngine chunk \(index + 1) failed after retries (\(error)): «\(chunk.text.prefix(60))» — inserting 0.5s silence")
+                    samples = Array(repeating: Float(0), count: Int(Self.sampleRate) / 2)
+                }
+                let nsBuffer = Self.makeMonoBuffer(samples: samples)
+                DispatchQueue.main.async {
+                    guard self.playbackGeneration == generation else { return }
+                    self.generatedBuffers[index] = nsBuffer
+                    self.scheduleReadyChunks(generation: generation)
                 }
             }
         }
@@ -356,6 +356,25 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
         let duration = Double(samples.count) / Self.sampleRate
         Log.shared.info("OnnxKokoroEngine: \(tokens.count) tokens → \(String(format: "%.1f", duration))s audio in \(String(format: "%.2f", Date().timeIntervalSince(started)))s")
         return samples
+    }
+
+    /// Retries `generateChunk` — transient inference flakes (empty output,
+    /// tokenizer edge cases) usually succeed on a second attempt.
+    nonisolated private static func generateWithRetry(
+        _ engine: OnnxKokoroEngine,
+        _ text: String,
+        attempts: Int
+    ) throws -> [Float] {
+        var lastError: Error?
+        for attempt in 1...attempts {
+            do { return try engine.generateChunk(text) }
+            catch {
+                lastError = error
+                Log.shared.info("OnnxKokoroEngine: chunk attempt \(attempt)/\(attempts) failed (\(error)) — «\(text.prefix(60))»")
+                Thread.sleep(forTimeInterval: 0.15 * Double(attempt))
+            }
+        }
+        throw lastError ?? OnnxEngineError.noOutput
     }
 
     func pause() {
@@ -498,7 +517,12 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
             var samples: [Float] = []
             do {
                 for (index, chunk) in renderChunks.enumerated() {
-                    samples.append(contentsOf: try self.generateChunk(chunk.text))
+                    do {
+                        samples.append(contentsOf: try Self.generateWithRetry(self, chunk.text, attempts: 3))
+                    } catch {
+                        Log.shared.error("OnnxKokoroEngine export chunk failed after retries (\(error)): «\(chunk.text.prefix(60))» — silence inserted")
+                        samples.append(contentsOf: Array(repeating: Float(0), count: Int(Self.sampleRate) / 2))
+                    }
                     let charsDone = renderChunks.prefix(index + 1).reduce(0) { $0 + $1.length }
                     let progress = min(1.0, Double(charsDone) / Double(total))
                     DispatchQueue.main.async { onChunkProgress?(progress) }

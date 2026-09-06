@@ -203,20 +203,22 @@ final class SupertonicEngine: NSObject, SpeechEngine {
                     Thread.sleep(forTimeInterval: 0.05)
                 }
                 guard self.playbackGeneration == generation else { return }
+                // One flaky chunk must not kill a long reading session:
+                // retry (the duration model intermittently predicts a
+                // zero-length result that succeeds on a second call), then
+                // fall back to a short silence and keep speaking.
+                let samples: [Float]
                 do {
-                    let buffer = try self.generateChunk(chunk.text)
-                    let nsBuffer = Self.makeMonoBuffer(samples: buffer, sampleRate: self.sampleRate)
-                    DispatchQueue.main.async {
-                        guard self.playbackGeneration == generation else { return }
-                        self.generatedBuffers[index] = nsBuffer
-                        self.scheduleReadyChunks(generation: generation)
-                    }
+                    samples = try Self.generateWithRetry(self, chunk.text, attempts: 3)
                 } catch {
-                    Log.shared.error("SupertonicEngine chunk \(index + 1) failed: \(error)")
-                    DispatchQueue.main.async {
-                        if self.playbackGeneration == generation { self.state = .idle }
-                    }
-                    return
+                    Log.shared.error("SupertonicEngine chunk \(index + 1) failed after retries (\(error)): «\(chunk.text.prefix(60))» — inserting 0.5s silence")
+                    samples = Array(repeating: Float(0), count: Int(self.sampleRate) / 2)
+                }
+                let nsBuffer = Self.makeMonoBuffer(samples: samples, sampleRate: self.sampleRate)
+                DispatchQueue.main.async {
+                    guard self.playbackGeneration == generation else { return }
+                    self.generatedBuffers[index] = nsBuffer
+                    self.scheduleReadyChunks(generation: generation)
                 }
             }
         }
@@ -239,6 +241,25 @@ final class SupertonicEngine: NSObject, SpeechEngine {
         let duration = Double(actualLen) / sampleRate
         Log.shared.info("SupertonicEngine: \(String(format: "%.1f", duration))s audio in \(String(format: "%.2f", Date().timeIntervalSince(started)))s (\(voice), \(lang))")
         return Array(result.wav.prefix(actualLen))
+    }
+
+    /// Retries `generateChunk` — the duration model occasionally returns a
+    /// zero-length prediction (noOutput) that succeeds on a second call.
+    nonisolated private static func generateWithRetry(
+        _ engine: SupertonicEngine,
+        _ text: String,
+        attempts: Int
+    ) throws -> [Float] {
+        var lastError: Error?
+        for attempt in 1...attempts {
+            do { return try engine.generateChunk(text) }
+            catch {
+                lastError = error
+                Log.shared.info("SupertonicEngine: chunk attempt \(attempt)/\(attempts) failed (\(error)) — «\(text.prefix(60))»")
+                Thread.sleep(forTimeInterval: 0.15 * Double(attempt))
+            }
+        }
+        throw lastError ?? SupertonicEngineError.noOutput
     }
 
     func pause() {
@@ -385,7 +406,14 @@ final class SupertonicEngine: NSObject, SpeechEngine {
                     if index > 0 {
                         samples.append(contentsOf: [Float](repeating: 0, count: Int(0.05 * Double(tts.sampleRate))))
                     }
-                    samples.append(contentsOf: try self.generateChunk(chunk.text))
+                    // Export parity with playback: retry, then silence — a
+                    // single flaky chunk must not abort a whole export.
+                    do {
+                        samples.append(contentsOf: try Self.generateWithRetry(self, chunk.text, attempts: 3))
+                    } catch {
+                        Log.shared.error("SupertonicEngine export chunk failed after retries (\(error)): «\(chunk.text.prefix(60))» — silence inserted")
+                        samples.append(contentsOf: Array(repeating: Float(0), count: Int(self.sampleRate) / 2))
+                    }
                     let charsDone = renderChunks.prefix(index + 1).reduce(0) { $0 + $1.length }
                     let progress = min(1.0, Double(charsDone) / Double(total))
                     DispatchQueue.main.async { onChunkProgress?(progress) }
