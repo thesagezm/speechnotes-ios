@@ -159,6 +159,19 @@ final class BookPlaybackController {
         return text
     }
 
+    /// Renders ONE chapter to a WAV and hands the file to the share sheet
+    /// (player.shareURL). `player.export` stops playback first — the single
+    /// engine slot belongs to the exporter while it runs — and memory stays
+    /// bounded: one chapter, never the whole book (the OOM rule).
+    func exportChapter(book: Book, chapterIndex: Int) async {
+        guard let player else { return }
+        guard let text = await chapterText(for: book, chapterIndex: chapterIndex) else {
+            Log.shared.info("BookPlayback: export — ch\(chapterIndex) of \(book.title) has no speech text")
+            return
+        }
+        player.export(text)
+    }
+
     /// Warm the next chapter's cache while the current one plays so the
     /// chapter boundary in auto-advance is seamless.
     private func prefetchNextChapter(of book: Book, after chapterIndex: Int) {

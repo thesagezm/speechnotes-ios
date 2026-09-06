@@ -177,7 +177,11 @@ struct NoteEditorView: View {
             } else {
                 editBody
             }
-            PlayerControlsBar(speechText: speechText, note: currentNote)
+            PlayerControlsBar(
+                speechText: speechText,
+                note: currentNote,
+                onBeforeToggle: { updateSpeechCaches() }
+            )
         }
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
@@ -460,8 +464,12 @@ struct NoteEditorView: View {
         ToolbarItemGroup(placement: .keyboard) {
             Button {
                 Haptics.tap()
-                // Snapshot first; the cached copy can lag by one edit cycle.
-                scheduleSpeechCacheUpdate()
+                // Speak-time flush: recompute synchronously so the text the
+                // engine hears includes edits made in the last 300ms (the
+                // debounce exists for per-keystroke cost, not for an explicit
+                // user action — one plainText walk at tap time is the same
+                // work the scheduled pass would do anyway).
+                updateSpeechCaches()
                 player.togglePlay(speechText, note: currentNote)
             } label: {
                 Label(
@@ -484,7 +492,11 @@ struct NoteEditorView: View {
     /// Controls are rendered by PlayerControlsBar — extracted so player
     /// state changes don't re-evaluate the title field, editor, or sheets.
     private var controlsBar: some View {
-        PlayerControlsBar(speechText: speechText, note: currentNote)
+        PlayerControlsBar(
+            speechText: speechText,
+            note: currentNote,
+            onBeforeToggle: { updateSpeechCaches() }
+        )
     }
 
     private func saveDraft() {

@@ -133,6 +133,18 @@ final class MarkdownTextTests: XCTestCase {
         ])
     }
 
+    /// Unresolved reference links speak their LABEL — the raw
+    /// `[label][missing-key]` form was spoken as bracket soup and made the
+    /// read-along text read wrong (v1.5 speakability fix). Bare `[word]`
+    /// with no key stays literal (CommonMark: unresolved shortcut refs are
+    /// plain text, and stripping every bracket would eat deliberate ones).
+    func testUnresolvedReferenceLinksSpeakLabelOnly() {
+        XCTAssertEqual(
+            MarkdownText.plainText("Broken [link text][missing] stays readable."),
+            "Broken link text stays readable."
+        )
+    }
+
     func testAutolinksBecomeLinkRuns() {
         let runs = MarkdownText.inlineRuns("go to <https://example.com> now")
         XCTAssertEqual(runs, [

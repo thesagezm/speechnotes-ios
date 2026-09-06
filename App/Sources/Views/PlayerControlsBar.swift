@@ -7,6 +7,11 @@ import SwiftUI
 struct PlayerControlsBar: View {
     let speechText: String
     let note: Note?
+    /// Called at the top of every play/pause tap, BEFORE speechText is read —
+    /// the editor flushes its (debounced) speech-text cache here so the
+    /// engine hears edits made in the last 300ms. Additive optional so other
+    /// call sites (if any ever appear) keep working.
+    var onBeforeToggle: (() -> Void)? = nil
 
     @EnvironmentObject private var player: SpeechPlayer
     /// Mirrors NoteEditorView's read-along switch — shared via AppStorage.
@@ -42,6 +47,7 @@ struct PlayerControlsBar: View {
         HStack(spacing: 12) {
             Button {
                 Haptics.tap()
+                onBeforeToggle?()
                 player.togglePlay(speechText, note: note)
             } label: {
                 Image(systemName: playIcon)
@@ -112,6 +118,7 @@ struct PlayerControlsBar: View {
             HStack(spacing: 14) {
                 Button {
                     Haptics.tap()
+                    onBeforeToggle?()
                     player.togglePlay(speechText, note: note)
                 } label: {
                     ZStack {

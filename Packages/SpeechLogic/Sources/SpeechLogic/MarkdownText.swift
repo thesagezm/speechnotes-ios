@@ -170,16 +170,12 @@ public enum MarkdownText {
             ns.substring(with: m.range(at: 1))
         }
 
-        // 4. Links → label (inline and reference forms).
+        // 4. Links → label (inline and reference forms). An UNRESOLVED
+        // reference link also speaks its label — the raw `[label][key]`
+        // form reads as bracket soup and made the spoken text drift from
+        // what a reader expects (v1.5 speakability fix).
         line = replaceMatches(in: line, pattern: #"(?<!!)\[([^\]]+)\](?:\([^)]*\)|\[([^\]]*)\])"#) { m, ns in
-            let label = ns.substring(with: m.range(at: 1))
-            let ref = m.range(at: 2)
-            if ref.location != NSNotFound {
-                let key = ns.substring(with: ref)
-                let resolved = references[(key.isEmpty ? label : key).lowercased()] != nil
-                return resolved ? label : ns.substring(with: m.range)
-            }
-            return label
+            ns.substring(with: m.range(at: 1))
         }
 
         // 5. Autolinks → bare URL.

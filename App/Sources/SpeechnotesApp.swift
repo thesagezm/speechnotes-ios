@@ -58,6 +58,11 @@ struct SpeechnotesApp: App {
             .onReceive(NotificationCenter.default.publisher(for: .miniPlayerJumpToNote)) { _ in
                 selectedTab = .notes
             }
+            .onReceive(NotificationCenter.default.publisher(for: .miniPlayerJumpToBook)) { _ in
+                // BooksView listens for the same notification and pushes the
+                // playing book's reader.
+                selectedTab = .books
+            }
             // Saves are coalesced in NotesStore; the second the app could be
             // suspended is the one moment a pending write must not be lost.
             .onChange(of: scenePhase) { phase in

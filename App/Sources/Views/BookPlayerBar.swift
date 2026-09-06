@@ -12,6 +12,9 @@ struct BookPlayerBar: View {
     @ObservedObject var player: SpeechPlayer
     /// Fires BookPlaybackController.togglePlay for the current chapter.
     let onToggle: () -> Void
+    /// v1.5 per-chapter WAV export (present only when the reader offers it).
+    /// Renders THIS chapter only — the whole book stays off the table.
+    var onExport: (() -> Void)? = nil
 
     @AppStorage("readAlongEnabled") private var readAlongEnabled = true
 
@@ -49,6 +52,23 @@ struct BookPlayerBar: View {
                         .font(.system(size: 22))
                 }
                 .buttonStyle(.plain)
+
+                if let onExport {
+                    Button {
+                        Haptics.tap()
+                        onExport()
+                    } label: {
+                        if player.isExporting {
+                            ProgressView()
+                                .frame(width: 22, height: 22)
+                        } else {
+                            Image(systemName: "square.and.arrow.up")
+                                .font(.system(size: 19))
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(player.isExporting)
+                }
 
                 Text(progressLabel)
                     .font(.caption.monospacedDigit())

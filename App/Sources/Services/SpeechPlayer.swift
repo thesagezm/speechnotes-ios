@@ -425,6 +425,12 @@ final class SpeechPlayer: ObservableObject {
     /// the same note that is speaking — the global mini-player then yields
     /// so two control bars never stack at the bottom of the screen.
     @Published var miniPlayerSuppressed = false
+    /// Mini-player tap while a BOOK speaks: the book to jump to. The overlay
+    /// posts the tab-switch notification AND stores the id here, because the
+    /// notification can fire before the Books tab has installed its listener;
+    /// BooksView consumes the slot in onAppear. Plain var — no publication
+    /// needed, the consumer reads it once.
+    var pendingBookJumpId: String?
     /// The compact player bar is shown while real speech is active (never
     /// for picker auditions, and never while the editor's own controls for
     /// the same note are on screen).

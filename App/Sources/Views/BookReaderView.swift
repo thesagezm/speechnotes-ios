@@ -81,6 +81,25 @@ struct BookReaderView: View {
         .sheet(isPresented: $showingAppearance) {
             appearanceSheet
         }
+        .sheet(isPresented: exportShareBinding) {
+            if let url = player.shareURL {
+                ShareSheet(items: [url])
+            }
+        }
+        .alert(
+            "Export failed",
+            isPresented: Binding(
+                get: {
+                    if case .failed = player.exportState { return true }
+                    return false
+                },
+                set: { if !$0 { player.dismissExportError() } }
+            )
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(exportErrorMessage ?? "")
+        }
         .alert(
             "Couldn't open book",
             isPresented: Binding(
@@ -176,8 +195,30 @@ struct BookReaderView: View {
                         chapterIndex: chapterIndex
                     )
                 }
+            },
+            onExport: {
+                Task {
+                    await BookPlaybackController.shared.exportChapter(
+                        book: book,
+                        chapterIndex: chapterIndex
+                    )
+                }
             }
         )
+    }
+
+    /// Per-chapter WAV export lands in player.shareURL; the sheet shows the
+    /// system share panel once it's there (note-export pattern).
+    private var exportShareBinding: Binding<Bool> {
+        Binding(
+            get: { player.shareURL != nil },
+            set: { if !$0 { player.shareURL = nil } }
+        )
+    }
+
+    private var exportErrorMessage: String? {
+        if case .failed(let message) = player.exportState { return message }
+        return nil
     }
 
     // MARK: - Chapter bar

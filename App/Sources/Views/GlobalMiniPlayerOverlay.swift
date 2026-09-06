@@ -9,8 +9,10 @@ import SwiftUI
 /// the screen and left it stranded mid-screen). A fixed tab-bar inset
 /// (49pt standard + safe-area bottom) lifts the bar just above the tabs.
 ///
-/// Tapping the bar posts `.miniPlayerJumpToNote`: `SpeechnotesApp` switches
-/// to the Notes tab and `NotesListView` pushes the speaking note.
+/// Tapping the bar jumps to the speaking content: a playing BOOK routes to
+/// the Books tab (`.miniPlayerJumpToBook`, pushing the book's reader), a
+/// playing note routes to the Notes tab (`.miniPlayerJumpToNote`, where
+/// NotesListView pushes the note).
 struct GlobalMiniPlayerOverlay: ViewModifier {
     @EnvironmentObject private var player: SpeechPlayer
     @AppStorage("miniPlayerCollapsed") private var miniPlayerCollapsed = false
@@ -34,21 +36,30 @@ struct GlobalMiniPlayerOverlay: ViewModifier {
                             .zIndex(1)
                     } else {
                         MiniPlayerBar {
-                            NotificationCenter.default.post(
-                                name: .miniPlayerJumpToNote,
-                                object: nil
-                            )
+                            jumpToPlayingContent()
                         }
                         // Standard tab bar (49pt) + safe-area bottom inset = lift
-                        // the mini player just above the Notes/Storage/Settings tabs.
+                        // the mini player just above the Notes/Books/Settings tabs.
                         .padding(.bottom, 49 + 34)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                        .transition(.move(edge: .bottom).combined(with .opacity))
                         .zIndex(1)
                     }
                 }
             }
             .animation(.easeInOut(duration: 0.2), value: player.showMiniPlayer)
             .animation(.easeInOut(duration: 0.2), value: miniPlayerCollapsed)
+        }
+    }
+
+    private func jumpToPlayingContent() {
+        if let bookId = player.nowPlayingBookId {
+            // The pending slot makes the jump survive the tab-switch race:
+            // the notification fires before BooksView installs its listener,
+            // so the view also consumes the slot in onAppear.
+            player.pendingBookJumpId = bookId
+            NotificationCenter.default.post(name: .miniPlayerJumpToBook, object: bookId)
+        } else {
+            NotificationCenter.default.post(name: .miniPlayerJumpToNote, object: nil)
         }
     }
 }
@@ -63,4 +74,6 @@ extension View {
 extension Notification.Name {
     /// Posted by the global mini-player when the user taps the bar body.
     static let miniPlayerJumpToNote = Notification.Name("MiniPlayerBar.jumpToNote")
+    /// v1.5: same tap while a BOOK speaks — object carries the book UUID string.
+    static let miniPlayerJumpToBook = Notification.Name("MiniPlayerBar.jumpToBook")
 }
