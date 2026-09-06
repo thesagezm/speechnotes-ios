@@ -87,6 +87,7 @@ jobs:
           ls -lh ~/kokoro-small-spike
 
       - name: Run Kokoro small spike test
+        id: test
         run: |
           set -o pipefail
           cd Tests/KokoroSmallSpike
@@ -101,7 +102,11 @@ jobs:
           echo "----- KOKORO SMALL SPIKE SUMMARY -----"
           cat kokoro-small-summary.txt
           echo "--------------------------------------"
-          if [ -s kokoro-small-summary.txt ]; then
+          # The grep matches the xctest success summary too ("Executed 1
+          # test, with 0 failures") — only raise an annotation when the test
+          # step ACTUALLY failed, otherwise every green run posts scary
+          # "failure" annotations on the commit.
+          if [ -s kokoro-small-summary.txt ] && [ "${{ steps.test.outcome }}" = "failure" ]; then
             python3 -c "import pathlib; t = pathlib.Path('kokoro-small-summary.txt').read_text()[:5500]; print('::error title=Kokoro small spike failure::' + t.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A'))"
           fi
 
@@ -152,6 +157,7 @@ jobs:
           echo "Spike compiles the exact vendored file the app ships ($(wc -l < Tests/SupertonicSpike/Tests/SupertonicSpikeTests/Helper.swift) lines)"
 
       - name: Run Supertonic spike test
+        id: test
         run: |
           set -o pipefail
           cd Tests/SupertonicSpike
@@ -166,7 +172,8 @@ jobs:
           echo "----- SUPERTONIC SPIKE SUMMARY -----"
           cat supertonic-summary.txt
           echo "------------------------------------"
-          if [ -s supertonic-summary.txt ]; then
+          # Only annotate on real failures — see the Kokoro job's note.
+          if [ -s supertonic-summary.txt ] && [ "${{ steps.test.outcome }}" = "failure" ]; then
             python3 -c "import pathlib; t = pathlib.Path('supertonic-summary.txt').read_text()[:5500]; print('::error title=Supertonic spike failure::' + t.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A'))"
           fi
 
@@ -211,6 +218,7 @@ jobs:
           ls -lh ~/epub-spike
 
       - name: Run EPUB spike test
+        id: test
         run: |
           set -o pipefail
           cd Tests/EpubSpike
@@ -225,7 +233,8 @@ jobs:
           echo "----- EPUB SPIKE SUMMARY -----"
           cat epub-spike-summary.txt
           echo "------------------------------"
-          if [ -s epub-spike-summary.txt ]; then
+          # Only annotate on real failures — see the Kokoro job's note.
+          if [ -s epub-spike-summary.txt ] && [ "${{ steps.test.outcome }}" = "failure" ]; then
             python3 -c "import pathlib; t = pathlib.Path('epub-spike-summary.txt').read_text()[:5500]; print('::error title=EPUB spike failure::' + t.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A'))"
           fi
 

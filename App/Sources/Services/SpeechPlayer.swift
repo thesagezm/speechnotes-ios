@@ -105,6 +105,8 @@ final class SpeechPlayer: ObservableObject {
     /// Identity of the note currently being spoken — mini-player taps
     /// navigate to it.
     @Published private(set) var nowPlayingNoteId: UUID?
+    /// Books: id of the book being spoken (mini-player + reader suppression).
+    @Published private(set) var nowPlayingBookId: String?
     /// Codename of the voice an in-picker audition is sampling, if any.
     @Published private(set) var auditioningVoice: String?
 
@@ -180,11 +182,52 @@ final class SpeechPlayer: ObservableObject {
     // MARK: - Playback resume bookmark
 
     struct PlaybackBookmark: Codable {
-        let noteId: UUID
+        // Notes carry noteId; books carry bookId + chapterIndex instead.
+        // Optional + tolerant decode so older payloads (noteId-only) and
+        // note payloads (no book fields) both keep decoding.
+        var noteId: UUID?
+        var bookId: String?
+        var chapterIndex: Int?
         let charsDone: Int
         let textLength: Int
         let textHash: Int64
         let savedAt: Date
+
+        init(
+            noteId: UUID? = nil,
+            bookId: String? = nil,
+            chapterIndex: Int? = nil,
+            charsDone: Int,
+            textLength: Int,
+            textHash: Int64,
+            savedAt: Date
+        ) {
+            self.noteId = noteId
+            self.bookId = bookId
+            self.chapterIndex = chapterIndex
+            self.charsDone = charsDone
+            self.textLength = textLength
+            self.textHash = textHash
+            self.savedAt = savedAt
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            noteId = try c.decodeIfPresent(UUID.self, forKey: .noteId)
+            bookId = try c.decodeIfPresent(String.self, forKey: .bookId)
+            chapterIndex = try c.decodeIfPresent(Int.self, forKey: .chapterIndex)
+            charsDone = try c.decode(Int.self, forKey: .charsDone)
+            textLength = try c.decode(Int.self, forKey: .textLength)
+            textHash = try c.decode(Int64.self, forKey: .textHash)
+            savedAt = try c.decode(Date.self, forKey: .savedAt)
+        }
+    }
+
+    private func storedBookmark() -> PlaybackBookmark? {
+        guard let data = UserDefaults.standard.data(forKey: Self.bookmarkKey),
+              let mark = try? JSONDecoder().decode(PlaybackBookmark.self, from: data)
+        else { return nil }
+        return mark
     }
 
     private static let bookmarkKey = "playbackBookmark"
@@ -220,9 +263,7 @@ final class SpeechPlayer: ObservableObject {
     /// Loads the stored bookmark if it's for this note, this exact text,
     /// recent (<30 days), and at a meaningful position.
     private func resumePlan(for noteId: UUID, fullText: String) -> (offset: Int, suffix: String)? {
-        guard let data = UserDefaults.standard.data(forKey: Self.bookmarkKey),
-              let mark = try? JSONDecoder().decode(PlaybackBookmark.self, from: data)
-        else { return nil }
+        guard let mark = storedBookmark() else { return nil }
         let length = fullText.utf16.count
         guard mark.noteId == noteId,
               mark.textLength == length,
@@ -231,6 +272,28 @@ final class SpeechPlayer: ObservableObject {
               mark.charsDone >= 40,
               mark.charsDone < length
         else { return nil }
+        return Self.snapResume(mark: mark, fullText: fullText)
+    }
+
+    /// Book variant: the bookmark must match this book AND chapter.
+    private func resumeBookPlan(bookId: String, chapterIndex: Int, fullText: String) -> (offset: Int, suffix: String)? {
+        guard let mark = storedBookmark() else { return nil }
+        let length = fullText.utf16.count
+        guard mark.bookId == bookId,
+              mark.chapterIndex == chapterIndex,
+              mark.textLength == length,
+              mark.textHash == Self.stableHash(fullText),
+              Date().timeIntervalSince(mark.savedAt) < 30 * 24 * 3600,
+              mark.charsDone >= 40,
+              mark.charsDone < length
+        else { return nil }
+        return Self.snapResume(mark: mark, fullText: fullText)
+    }
+
+    /// Shared resume math: snap to a sentence boundary and return the suffix
+    /// the engine should speak.
+    private static func snapResume(mark: PlaybackBookmark, fullText: String) -> (offset: Int, suffix: String)? {
+        let length = fullText.utf16.count
         let offset = Self.resumeOffset(in: fullText, charsDone: mark.charsDone)
         guard offset > 0, offset < length else { return nil }
         let units = Array(fullText.utf16)
@@ -278,9 +341,11 @@ final class SpeechPlayer: ObservableObject {
             return
         }
         guard state == .idle, auditioningVoice == nil else { return }
-        guard let data = UserDefaults.standard.data(forKey: Self.bookmarkKey),
-              let mark = try? JSONDecoder().decode(PlaybackBookmark.self, from: data)
-        else { return }
+        guard let mark = storedBookmark() else { return }
+        // BOOK bookmarks resume from the reader's play button (their 30-day
+        // validity lives in resumeBookPlan) — they must NOT be auto-replayed
+        // here and must NOT be deleted by this note-oriented staleness sweep.
+        guard mark.noteId != nil else { return }
         // Only auto-resume something recorded very recently — a bookmark left
         // over from days ago is almost certainly stale context, not intent.
         // The 30-day cap in resumePlan() still governs the explicit
@@ -290,7 +355,7 @@ final class SpeechPlayer: ObservableObject {
             inFlightBookmark = nil
             return
         }
-        guard let note = notesProvider?(mark.noteId) else {
+        guard let noteId = mark.noteId, let note = notesProvider?(noteId) else {
             // Note was deleted — drop the stale bookmark so we stop asking.
             UserDefaults.standard.removeObject(forKey: Self.bookmarkKey)
             inFlightBookmark = nil
@@ -325,6 +390,17 @@ final class SpeechPlayer: ObservableObject {
         )
     }
 
+    private func primeBookBookmark(bookId: String, chapterIndex: Int, fullText: String) {
+        inFlightBookmark = PlaybackBookmark(
+            bookId: bookId,
+            chapterIndex: chapterIndex,
+            charsDone: 0,
+            textLength: fullText.utf16.count,
+            textHash: Self.stableHash(fullText),
+            savedAt: Date()
+        )
+    }
+
     /// Raw engine progress maps back to absolute chars: on a resume the
     /// engine only ever saw the suffix.
     private func updateBookmarkChars(rawProgress: Double) {
@@ -334,6 +410,8 @@ final class SpeechPlayer: ObservableObject {
         let chars = min(mark.textLength - 1, Int(base + rawProgress * suffixLength))
         inFlightBookmark = PlaybackBookmark(
             noteId: mark.noteId,
+            bookId: mark.bookId,
+            chapterIndex: mark.chapterIndex,
             charsDone: chars,
             textLength: mark.textLength,
             textHash: mark.textHash,
@@ -536,6 +614,7 @@ final class SpeechPlayer: ObservableObject {
                 if newState == .idle {
                     if self.lastRawProgress >= 0.98 {
                         self.clearBookmark()            // finished naturally
+                        self.onNaturalFinish?()         // books: advance to the next chapter
                     } else if self.inFlightBookmark != nil {
                         self.persistPlaybackBookmark()  // stopped part-way
                     }
@@ -543,6 +622,7 @@ final class SpeechPlayer: ObservableObject {
                     self.resumeBaseFraction = 0
                     self.nowPlayingTitle = nil
                     self.nowPlayingNoteId = nil
+                    self.nowPlayingBookId = nil
                     self.finishAuditionIfActive()
                     self.endReadAlong()
                     NowPlayingCenter.shared.clear()
@@ -588,11 +668,31 @@ final class SpeechPlayer: ObservableObject {
 
     /// Play/pause/stop the note's text. `note` feeds the mini-player's title
     /// and jump-to-note tap; omitting it plays anonymous text.
-    func togglePlay(_ text: String, note: Note? = nil) {
+    ///
+    /// Books pass `book` instead (BookPlaybackRef): the bookmark then keys on
+    /// bookId + chapterIndex, and when playback finishes NATURALLY the
+    /// `onNaturalFinish` hook fires so BookPlaybackController can advance to
+    /// the next chapter.
+    struct BookPlaybackRef {
+        let id: String
+        let title: String
+        let chapterIndex: Int
+    }
+
+    /// Set while a BOOK is playing; fired once on natural completion of the
+    /// current chapter. A note taking over, an explicit stop, or an audition
+    /// clears it.
+    var onNaturalFinish: (() -> Void)?
+
+    func togglePlay(_ text: String, note: Note? = nil, book: BookPlaybackRef? = nil) {
         if isAuditioning {
             // A note taking control mid-audition ends the sample first.
             stop()
             return
+        }
+        // Anything that isn't a book speak ends book auto-advance.
+        if book == nil {
+            onNaturalFinish = nil
         }
         switch state {
         case .generating:
@@ -604,8 +704,9 @@ final class SpeechPlayer: ObservableObject {
             engine?.resume()
         case .idle:
             ensureNowPlayingWired()
-            nowPlayingTitle = note?.title
+            nowPlayingTitle = note?.title ?? book?.title
             nowPlayingNoteId = note?.id
+            nowPlayingBookId = book?.id
             resumeBaseFraction = 0
             lastRawProgress = 0
             beginReadAlong(fullText: text)
@@ -618,6 +719,15 @@ final class SpeechPlayer: ObservableObject {
                     engine?.speak(plan.suffix, rateMultiplier: rateMultiplier)
                     return
                 }
+            } else if let book {
+                primeBookBookmark(bookId: book.id, chapterIndex: book.chapterIndex, fullText: text)
+                if let plan = resumeBookPlan(bookId: book.id, chapterIndex: book.chapterIndex, fullText: text) {
+                    resumeBaseFraction = Double(plan.offset) / Double(max(1, text.utf16.count))
+                    engineSpeechOffset = plan.offset + Self.leadingWhitespaceUTF16(plan.suffix)
+                    Log.shared.info("SpeechPlayer: resuming book \(book.id) ch\(book.chapterIndex) at char \(plan.offset)/\(text.utf16.count)")
+                    engine?.speak(plan.suffix, rateMultiplier: rateMultiplier)
+                    return
+                }
             }
             engineSpeechOffset = Self.leadingWhitespaceUTF16(text)
             engine?.speak(text, rateMultiplier: rateMultiplier)
@@ -627,8 +737,9 @@ final class SpeechPlayer: ObservableObject {
     func stop() {
         // An explicit stop is a deliberate end — do NOT let the idle callback
         // persist a bookmark (which resumeIfBookmarkPending would replay on
-        // the next foreground).
+        // the next foreground), and do NOT auto-advance the book session.
         clearBookmark()
+        onNaturalFinish = nil
         engine?.stop()
     }
 

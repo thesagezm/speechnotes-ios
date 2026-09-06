@@ -9,6 +9,8 @@ import WebKit
 struct BookReaderView: View {
     let book: Book
     let store: BooksStore
+    @EnvironmentObject private var player: SpeechPlayer
+    @EnvironmentObject private var theme: AppTheme
 
     @Environment(\.dismiss) private var dismiss
     @State private var webView: WKWebView?
@@ -24,6 +26,15 @@ struct BookReaderView: View {
     @State private var bookLoaded = false
     @AppStorage("bookReaderTheme") private var theme = "light"
     @AppStorage("bookReaderFontSize") private var fontSize = 100.0
+    @AppStorage("readAlongEnabled") private var readAlongEnabled = true
+    /// While THIS book speaks (and read-along is on) the webview surface
+    /// swaps to the native ReadAlongView — the exact pattern the note editor
+    /// uses, driven by the same SpeechPlayer signals.
+    private var showsReadAlong: Bool {
+        readAlongEnabled
+            && player.readAlongActive
+            && player.nowPlayingBookId == book.id.uuidString
+    }
     /// The chapter whose position was last written to the manifest —
     /// relocated fires on every scroll tick; only chapter changes persist.
     @State private var persistedChapter: Int
@@ -40,29 +51,50 @@ struct BookReaderView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            BookWebView(
-                book: book,
-                startChapter: chapterIndex,
-                startTheme: theme,
-                startFontSize: Int(fontSize),
-                onRelocated: handleRelocated,
-                onTOC: { toc = $0 },
-                onError: { errorMessage = $0 },
-                onWebViewReady: { webView = $0 }
-            )
-            .overlay {
-                if !bookLoaded {
-                    VStack(spacing: 10) {
-                        ProgressView()
-                        Text("Opening book…")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
+            if showsReadAlong {
+                ReadAlongView(
+                    text: player.activeSpeechText ?? "",
+                    activeRange: player.readAlongRange,
+                    textScale: theme.previewTextScale
+                )
+            } else {
+                BookWebView(
+                    book: book,
+                    startChapter: chapterIndex,
+                    startTheme: theme,
+                    startFontSize: Int(fontSize),
+                    onRelocated: handleRelocated,
+                    onTOC: { toc = $0 },
+                    onError: { errorMessage = $0 },
+                    onWebViewReady: { webView = $0 }
+                )
+                .overlay {
+                    if !bookLoaded {
+                        VStack(spacing: 10) {
+                            ProgressView()
+                            Text("Opening book…")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(theme == "dark" ? Color.black : (theme == "sepia" ? Color(red: 0.96, green: 0.94, blue: 0.89) : Color(.systemBackground)))
                     }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(theme == "dark" ? Color.black : (theme == "sepia" ? Color(red: 0.96, green: 0.94, blue: 0.89) : Color(.systemBackground)))
                 }
             }
             chapterBar
+            BookPlayerBar(
+                book: book,
+                chapterIndex: chapterIndex,
+                player: player,
+                onToggle: {
+                    Task {
+                        await BookPlaybackController.shared.togglePlay(
+                            book: book,
+                            chapterIndex: chapterIndex
+                        )
+                    }
+                }
+            )
         }
         .navigationTitle(book.title)
         .navigationBarTitleDisplayMode(.inline)
@@ -101,7 +133,17 @@ struct BookReaderView: View {
         } message: {
             Text(errorMessage ?? "Unknown error.")
         }
+        .onAppear {
+            store.markOpened(book)
+            // The reader shows its own player bar — the global mini-player
+            // yields while THIS book is the one speaking (editor pattern).
+            player.miniPlayerSuppressed = player.nowPlayingBookId == book.id.uuidString
+        }
+        .onChange(of: player.nowPlayingBookId) { _ in
+            player.miniPlayerSuppressed = player.nowPlayingBookId == book.id.uuidString
+        }
         .onDisappear {
+            player.miniPlayerSuppressed = false
             persistPosition()
             // Tear the web book down so its parsed spine doesn't linger.
             webView?.evaluateJavaScript("readerDestroy()", completionHandler: nil)

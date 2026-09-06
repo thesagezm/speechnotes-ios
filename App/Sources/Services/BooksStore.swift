@@ -79,25 +79,43 @@ final class BooksStore: ObservableObject {
     }
 
     /// PDFs imported before covers existed (or whose render failed at import)
-    /// get their page-1 cover generated lazily here — one detached render per
-    /// book, then the manifest updates and the shelf refreshes to show them.
-    /// One-shot per session: a book that keeps failing must not loop.
-    private var didBackfillPDFCovers = false
+    /// get their page-1 cover generated lazily here; epubs imported before the
+    /// TTS phase lack their spine list and get it re-parsed. One detached pass
+    /// per book, then the manifest updates and the shelf refreshes. One-shot
+    /// per session: a book that keeps failing must not loop.
+    private var didBackfillLegacyBooks = false
 
     private func backfillMissingPDFCovers() {
-        guard !didBackfillPDFCovers else { return }
-        let pending = books.filter { $0.format == .pdf && !$0.hasCover }
+        guard !didBackfillLegacyBooks else { return }
+        let pending = books.filter { book in
+            (book.format == .pdf && !book.hasCover) || (book.format == .epub && book.spine == nil)
+        }
         guard !pending.isEmpty else { return }
-        didBackfillPDFCovers = true
+        didBackfillLegacyBooks = true
         Task.detached(priority: .utility) { [weak self] in
             for var book in pending {
                 let dir = BooksStore.bookDirectory(book.id)
-                guard let document = PDFDocument(url: dir.appendingPathComponent("original.pdf")),
-                      document.pageCount > 0,
-                      let page = document.page(at: 0),
-                      let data = Self.renderPDFCover(page: page) else { continue }
-                try? data.write(to: dir.appendingPathComponent("cover.jpg"), options: .atomic)
-                book.hasCover = true
+                switch book.format {
+                case .pdf:
+                    guard let document = PDFDocument(url: dir.appendingPathComponent("original.pdf")),
+                          document.pageCount > 0,
+                          let page = document.page(at: 0),
+                          let data = Self.renderPDFCover(page: page) else { continue }
+                    try? data.write(to: dir.appendingPathComponent("cover.jpg"), options: .atomic)
+                    book.hasCover = true
+                case .epub:
+                    guard let data = try? Data(contentsOf: dir.appendingPathComponent("original.epub"), options: .mappedIfSafe),
+                          let info = try? EpubParser.parse(archive: data), !info.spine.isEmpty else { continue }
+                    book.spine = info.spine
+                    book.spineCount = info.spine.count
+                    if book.toc == nil, !info.toc.isEmpty {
+                        let indexByHref = Dictionary(info.spine.enumerated().map { ($1, $0) },
+                                                     uniquingKeysWith: { first, _ in first })
+                        book.toc = info.toc.map { entry in
+                            BookTocEntry(label: entry.label, href: entry.href, spineIndex: indexByHref[entry.href])
+                        }
+                    }
+                }
                 if let manifest = try? JSONEncoder().encode(book) {
                     try? manifest.write(to: BooksStore.manifestURL(book.id), options: .atomic)
                 }
@@ -180,6 +198,9 @@ final class BooksStore: ObservableObject {
             book.title = info.title?.isEmpty == false ? info.title! : fallbackTitle
             book.author = info.creator?.isEmpty == false ? info.creator : nil
             book.spineCount = info.spine.isEmpty ? nil : info.spine.count
+            // The TTS pipeline reads chapters straight from the archive with
+            // these paths — no webview needed for speech.
+            book.spine = info.spine.isEmpty ? nil : info.spine
             if let coverPath = info.coverPath,
                let coverData = try? ZipReader.readEntry(coverPath, in: data),
                !coverData.isEmpty {

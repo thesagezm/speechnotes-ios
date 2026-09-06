@@ -41,6 +41,7 @@ struct SpeechnotesApp: App {
                 player.notesProvider = { [notes] id in
                     notes.notes.first(where: { $0.id == id })
                 }
+                BookPlaybackController.shared.bind(to: player)
                 Task { @MainActor in
                     player.wirePlaybackOnce()
                 }

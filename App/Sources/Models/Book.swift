@@ -37,6 +37,11 @@ struct Book: Identifiable, Codable, Equatable, Hashable {
     var lastOpenedAt: Date?
     /// epub: chapter (spine) count.
     var spineCount: Int?
+    /// epub: the spine's zip entry paths in reading order — the TTS chapter
+    /// text pipeline reads chapters straight from the archive with these, no
+    /// webview needed. Books imported before v1.4.2-P3 lack it; the Books
+    /// store backfills lazily.
+    var spine: [String]?
     /// pdf: page count.
     var pageCount: Int?
     var hasCover: Bool
@@ -52,6 +57,7 @@ struct Book: Identifiable, Codable, Equatable, Hashable {
         addedAt: Date = Date(),
         lastOpenedAt: Date? = nil,
         spineCount: Int? = nil,
+        spine: [String]? = nil,
         pageCount: Int? = nil,
         hasCover: Bool = false,
         toc: [BookTocEntry]? = nil,
@@ -65,6 +71,7 @@ struct Book: Identifiable, Codable, Equatable, Hashable {
         self.addedAt = addedAt
         self.lastOpenedAt = lastOpenedAt
         self.spineCount = spineCount
+        self.spine = spine
         self.pageCount = pageCount
         self.hasCover = hasCover
         self.toc = toc
