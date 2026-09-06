@@ -377,3 +377,102 @@ insert 0.5s silence and CONTINUE. Same for WAV-export loops.
 v1.4.1 UI round (all in this build): Note.title = first sentence (editable);
 editor title lives in the nav bar (.principal) — the title row is gone;
 PlayerControlsBar minimizes to a slim pill (editorBarMinimized).
+
+## 2026-09-06 addendum #7 — v1.4.2 Books: phases 1-3 shipped, two open device bugs
+
+Branch `books-v1.4.2` (NOT yet merged to main; main = bisect-g = 22e5afb = v1.4.1).
+Version fields still 1.4.1/28 — the release commit bumps all FOUR fields
+(CFBundleShortVersionString, CFBundleVersion in info.properties +
+MARKETING_VERSION, CURRENT_PROJECT_VERSION) to 1.4.2/29.
+
+### Shipped on books-v1.4.2 (CI green, executable plan: Docs/PLAN-V1.4.2-EBOOKS.md)
+
+- **Phase 1**: Storage tab content merged into Settings → Storage
+  (StorageView.swift deleted; `URL: Identifiable` conformance +
+  GalleryThumb + NotesStoreSizeReader relocated to StorageSettingsView.swift —
+  NoteEditorView/MarkdownPreviewView depend on that conformance). Storage
+  TAB is now the Books library (Tab.books, SpeechnotesApp only). Import via
+  fileImporter [.epub,.pdf] + Open-In (project.yml gained the EPUB document
+  type — the ONE planned exception to "version line only"). Per-book storage:
+  Documents/Books/<uuid>/{original.epub|pdf, manifest.json, cover.jpg,
+  text/NNNN.txt}. SpeechLogic gained ZipReader (minimal ZIP central-directory
+  reader over Compression, stored+deflate) + EpubParser (container→OPF→
+  title/creator/spine/TOC/cover; EPUB2 meta-name+NCX and EPUB3
+  properties+nav both supported). New non-blocking epub-spike CI job
+  validates against 3 Gutenberg books. BooksStore imports off-main, one
+  manifest.json per book (NEVER notes.json).
+- **Phase 2+4 (readers)**: EPUB = vendored epub.js 0.3.93 + jszip 3.10.1
+  (App/Resources/epubjs/, license notes there) in ONE WKWebView per reader
+  presentation; EVERYTHING served via the custom `bookscheme://` scheme
+  handler — the EPUB must be fetched from the SAME shell origin
+  (bookscheme://shell/book/<uuid>/original.epub, RELATIVE fetch in
+  reader.js): cross-host custom-scheme fetch = opaque-origin CORS block =
+  "TypeError: Load failed" (first device bug, fixed). Chapter-paged scroll
+  flow, native TOC sheet from epub.js navigation, Aa sheet (light/sepia/dark
+  + font size via rendition.themes; initial values passed as QUERY PARAMS —
+  JS-applied settings race rendition creation otherwise). Position persisted
+  per chapter+fraction. PDF = PDFKit PDFView (full fidelity), outline via
+  PDFOutline numberOfChildren/child(at:) (this SDK has NO .children array)
+  and .singlePageContinuous (NOT .continuous). Tap-to-open = NavigationLink
+  (value: Book) — Book/BookPosition/BookTocEntry are Hashable. PDF covers =
+  page-1 render at import + one-shot backfill (backfillLegacyBooks in
+  BooksStore.refresh).
+- **Phase 3 (TTS for books)** — device-confirmed WORKING incl. auto-advance
+  (user reached ch24). Chapter speech text is NATIVE: SpeechLogic.XhtmlText
+  (XMLParser→plain paragraphs; always emit a word boundary around <img> —
+  alt-less images glued words, CI-caught). BookPlaybackController (singleton,
+  bound in SpeechnotesApp.onAppear): cache (text/NNNN.txt) → ZipReader entry
+  → XhtmlText off-main, prefetch next chapter, skip empty spine items.
+  SpeechPlayer ADDITIVE: PlaybackBookmark has optional bookId/chapterIndex
+  (tolerant decode); togglePlay(_ text, note:, book: BookPlaybackRef) primes/
+  matches book bookmarks (30-day, sentence-snapped resume); onNaturalFinish
+  fires on natural completion (stop() and note takeovers clear it);
+  resumeIfBookmarkPending IGNORES and no longer deletes book bookmarks.
+  Reader: BookPlayerBar (play/stop/progress/speed/read-along toggle); while
+  this book speaks + readAlongEnabled, the webview swaps to ReadAlongView;
+  miniPlayerSuppressed while the reader's own bar shows.
+- **CI noise fix**: spike jobs' ::error annotations only fire when the test
+  step actually failed (the grep matched xctest success summaries — every
+  green run used to post fake "failure" annotations).
+
+### OPEN BUG A — read-along highlight can't keep up (notes AND books)
+
+User report, both surfaces. NOT hopeless — it's render cost, not
+architecture. Diagnosis: every sentence change (~1-2×/s) re-evaluates
+ReadAlongView's LazyVStack and rebuilds the AttributedString for every
+VISIBLE paragraph (attributed(paragraph) runs per paragraph per render).
+Fix sketch (next session, small + testable): render ONLY the paragraph
+containing readAlongRange with the highlight and all others as plain
+Text(text) — i.e. pass the active paragraph id down and make
+attributed() a per-paragraph cached AttributedString rebuilt only when
+THAT paragraph's highlighted sub-range changes (track lastRange per
+paragraph id in @State, or split ReadAlongView into a row view that
+Equatable-conforms on (content, isHighlighted, highlightSubrange)).
+Throttling further is secondary; the row-level memoization is the real fix.
+
+### OPEN BUG B — chapter % stuck at 0% in the epub reader
+
+epub.js in `flow: "scrolled"` does not populate location.start.percentage
+without locations.generate() — which we deliberately skip (it renders the
+whole book). The relocated handler forwards percentage verbatim → always 0.
+Fix sketch: in reader.js compute the fraction from the rendered iframe's
+scroll container (rendition.on("rendered", ... → contents doc
+scrollingElement scrollTop/scrollHeight) and post that as `fraction`, OR
+drop the % and show "Chapter X of Y" only. Small change in reader.js +
+nothing native (handleRelocated already takes the fraction).
+
+### Next session work order
+
+1. Fix OPEN BUG A + B above (both contained: ReadAlongView.swift /
+   reader.js + BookReaderView label).
+2. Device-test round on those fixes.
+3. Release: bump 4 version fields → 1.4.2/29, README + this HANDOVER,
+   device checklist in PLAN-V1.4.2-EBOOKS.md §5, fast-forward main,
+   tag v1.4.2, attach IPA from the green run.
+4. Backlog: PDF TTS (page-group "chapters", never whole-document
+   PDFDocument.string), mini-player tap → Books tab jump for books
+   (currently jumps to Notes), WAV export stays note-only (whole-book
+   render is an OOM hazard).
+
+Golden rules unchanged (see §10). Never push red; device-verify before
+promoting; SpeechPlayer changes stay additive; new screens in new files.
