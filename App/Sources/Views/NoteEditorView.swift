@@ -40,6 +40,11 @@ struct NoteEditorView: View {
     /// offsets. The format bar reads `formattingBarSelection` (a bridged
     /// String.Index binding) so it doesn't need to know the editor is UIKit.
     @State private var selectionUTF16: Range<Int>?
+    /// Slash-command menu state: the trigger (the `/` plus typed filter)
+    /// detected at the caret, and the fuzzy-filtered command list. Nil when
+    /// no menu is open.
+    @State private var slashTrigger: MarkdownSlashMenu.Trigger?
+    @State private var slashMatches: [MarkdownSlashMenu.Command] = []
     /// Reading mode's in-app browser for tapped markdown links (the preview
     /// now uses AttributedString links + openURL instead of per-run buttons).
     @State private var safariURL: URL?
@@ -391,30 +396,128 @@ struct NoteEditorView: View {
     /// time out on the long modifier chain.
     @ViewBuilder
     private var editBody: some View {
-        MarkdownEditorView(
-            text: $draft,
-            selection: $selectionUTF16,
-            onCaretMoved: { },
-            textScale: theme.previewTextScale
-        )
-        .font(.body)
-        .padding(.horizontal, 12)
-        .onChange(of: draft) { _ in
-            scheduleDraftSync()
-            scheduleSpeechCacheUpdate()
-        }
-        if renderMarkdown {
-            MarkdownFormattingBar(
-                draft: $draft,
-                selection: formattingBarSelection,
-                insertImage: { showingImageSource = true },
-                insertLink: { label, url in
-                    pendingLinkLabel = label
-                    pendingLinkURL = url
-                    showingLinkPrompt = true
+        VStack(spacing: 0) {
+            ZStack(alignment: .bottom) {
+                MarkdownEditorView(
+                    text: $draft,
+                    selection: $selectionUTF16,
+                    onCaretMoved: { updateSlashMenu() },
+                    textScale: theme.previewTextScale
+                )
+                .font(.body)
+                .padding(.horizontal, 12)
+                .onChange(of: draft) { _ in
+                    scheduleDraftSync()
+                    scheduleSpeechCacheUpdate()
                 }
-            )
+                if slashTrigger != nil, !slashMatches.isEmpty {
+                    slashMenuOverlay
+                }
+            }
+            if renderMarkdown {
+                MarkdownFormattingBar(
+                    draft: $draft,
+                    selection: formattingBarSelection,
+                    insertImage: { showingImageSource = true },
+                    insertLink: { label, url in
+                        pendingLinkLabel = label
+                        pendingLinkURL = url
+                        showingLinkPrompt = true
+                    }
+                )
+            }
         }
+    }
+
+    // MARK: - Slash menu
+
+    /// Re-scan for a slash trigger at the caret. Runs on every caret move
+    /// (cheap: one line-scan + filter over 18 commands); closes the menu the
+    /// moment the caret context stops matching.
+    private func updateSlashMenu() {
+        guard !showsReadAlong else {
+            if slashTrigger != nil { closeSlashMenu() }
+            return
+        }
+        let caret = selectionUTF16?.lowerBound ?? draft.utf16.count
+        guard let trigger = MarkdownSlashMenu.detect(in: draft, caretOffset: caret) else {
+            if slashTrigger != nil { closeSlashMenu() }
+            return
+        }
+        // The typed filter is everything between the "/" and the caret.
+        let prefix = String(draft[trigger.slashIndex..<trigger.cursorIndex].dropFirst())
+        slashMatches = MarkdownSlashMenu.filter(prefix: prefix)
+        slashTrigger = trigger
+    }
+
+    private func closeSlashMenu() {
+        slashTrigger = nil
+        slashMatches = []
+    }
+
+    private func applySlashCommand(_ command: MarkdownSlashMenu.Command) {
+        guard let trigger = slashTrigger else { return }
+        let result = MarkdownSlashMenu.apply(
+            command,
+            in: draft,
+            trigger: trigger,
+            caret: selectionUTF16?.lowerBound,
+            selection: selectionUTF16
+        )
+        draft = result.draft
+        if let selection = result.selectionUtf16 {
+            selectionUTF16 = selection
+        } else {
+            selectionUTF16 = result.caretUtf16..<result.caretUtf16
+        }
+        closeSlashMenu()
+        Haptics.tap()
+        scheduleDraftSync()
+        scheduleSpeechCacheUpdate()
+    }
+
+    /// Floating command list anchored to the editor's bottom edge (just
+    /// above the formatting bar / keyboard).
+    private var slashMenuOverlay: some View {
+        ScrollView {
+            VStack(spacing: 0) {
+                ForEach(Array(slashMatches.prefix(6))) { command in
+                    Button {
+                        applySlashCommand(command)
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: command.symbol)
+                                .frame(width: 22)
+                                .foregroundStyle(Color.accentColor)
+                            Text(command.label)
+                                .font(.subheadline)
+                                .foregroundStyle(.primary)
+                            Spacer()
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 9)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    Divider()
+                        .padding(.leading, 44)
+                }
+            }
+        }
+        .frame(maxHeight: 260)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(.regularMaterial)
+                .shadow(color: .black.opacity(0.18), radius: 12, y: 4)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.08))
+        )
+        .padding(.horizontal, 10)
+        .padding(.bottom, 8)
+        .transition(.opacity.combined(with: .move(edge: .bottom)))
+        .accessibilityLabel("Markdown commands")
     }
 
     /// Toolbar extracted for the same reason as `editBody`.
