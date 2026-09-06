@@ -11,6 +11,8 @@ struct PlayerControlsBar: View {
     @EnvironmentObject private var player: SpeechPlayer
     /// Mirrors NoteEditorView's read-along switch — shared via AppStorage.
     @AppStorage("readAlongEnabled") private var readAlongEnabled = true
+    /// Collapsed to the slim pill — frees editor space while playing.
+    @AppStorage("editorBarMinimized") private var editorBarMinimized = false
 
     private var playIcon: String {
         switch player.state {
@@ -27,6 +29,64 @@ struct PlayerControlsBar: View {
     }
 
     var body: some View {
+        if editorBarMinimized {
+            minimizedPill
+        } else {
+            expandedBar
+        }
+    }
+
+    /// Collapsed editor playback bar: one slim translucent pill — frees the
+    /// lower half of the editor while still showing play state and progress.
+    private var minimizedPill: some View {
+        HStack(spacing: 12) {
+            Button {
+                Haptics.tap()
+                player.togglePlay(speechText, note: note)
+            } label: {
+                Image(systemName: playIcon)
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 28, height: 28)
+                    .background(Circle().fill(Color.accentColor))
+            }
+            .disabled(playButtonDisabled)
+
+            if let progress = player.progress {
+                Text("\(Int((progress * 100).rounded()))%")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            } else if player.state == .generating {
+                ProgressView()
+                    .controlSize(.mini)
+            }
+
+            Spacer(minLength: 0)
+
+            Button {
+                Haptics.tap()
+                editorBarMinimized = false
+            } label: {
+                Image(systemName: "chevron.up")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 28, height: 28)
+                    .background(Circle().fill(Color.secondary.opacity(0.12)))
+            }
+            .accessibilityLabel("Expand playback controls")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .shadow(color: .black.opacity(0.12), radius: 8, y: 2)
+        )
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+    }
+
+    private var expandedBar: some View {
         VStack(spacing: 8) {
             voiceChip
 
@@ -110,6 +170,18 @@ struct PlayerControlsBar: View {
                 Text(String(format: "%.2f×", player.rateMultiplier))
                     .font(.callout.monospacedDigit())
                     .frame(width: 52, alignment: .trailing)
+
+                Button {
+                    Haptics.tap()
+                    editorBarMinimized = true
+                } label: {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 28, height: 28)
+                        .background(Circle().fill(Color.secondary.opacity(0.12)))
+                }
+                .accessibilityLabel("Minimize playback controls")
             }
             .padding(.horizontal)
         }

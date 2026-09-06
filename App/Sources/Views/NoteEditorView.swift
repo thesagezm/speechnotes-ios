@@ -13,6 +13,18 @@ struct NoteEditorView: View {
     @State private var draft: String = ""
     @State private var titleDraft: String = ""
     @State private var didLoad = false
+    /// Nav-bar title binding: while no explicit title is set, the field
+    /// displays the DERIVED first-sentence title (Note.title); the first
+    /// keystroke makes it explicit. Empty input falls back to derived.
+    private var titleBinding: Binding<String> {
+        Binding(
+            get: {
+                if !titleDraft.isEmpty { return titleDraft }
+                return currentNote?.title ?? ""
+            },
+            set: { titleDraft = $0 }
+        )
+    }
     @State private var showingSettings = false
     @State private var showingVoicePicker = false
     @State private var showingDeleteConfirm = false
@@ -154,7 +166,6 @@ struct NoteEditorView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            titleField
             if showsReadAlong {
                 ReadAlongView(
                     text: player.activeSpeechText ?? "",
@@ -170,7 +181,19 @@ struct NoteEditorView: View {
         }
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar { editorToolbar }
+        .toolbar {
+            // The title lives IN the nav bar — centered between the back
+            // button and the ⋯ menu — instead of occupying a content row
+            // (user request: more vertical space for the note itself).
+            ToolbarItem(placement: .principal) {
+                TextField("Title", text: titleBinding)
+                    .font(.headline)
+                    .multilineTextAlignment(.center)
+                    .submitLabel(.done)
+                    .onChange(of: titleDraft) { _ in scheduleDraftSync() }
+            }
+            editorToolbar
+        }
         // While THIS editor is on top and the speaking note is this note,
         // the editor's own PlayerControlsBar is the player UI — suppress the
         // global mini-player so the two never stack at the bottom.
@@ -307,25 +330,6 @@ struct NoteEditorView: View {
 
     /// Editable note title; blank falls back to the first-line-derived title.
     @ViewBuilder
-    private var titleField: some View {
-        Group {
-            if renderMarkdown && showPreview {
-                Text(titleDraft.trimmingCharacters(in: .whitespaces).isEmpty
-                     ? "Untitled note" : titleDraft)
-                    .font(.title2.weight(.semibold))
-                    .foregroundStyle(.primary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            } else {
-                TextField("Title", text: $titleDraft)
-                    .font(.title2.weight(.semibold))
-                    .padding(.horizontal, 4)
-                    .submitLabel(.done)
-                    .onChange(of: titleDraft) { _ in scheduleDraftSync() }
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.top, 8)
-    }
 
     // MARK: - Markdown preview
 

@@ -1,4 +1,5 @@
 import Foundation
+import SpeechLogic
 
 struct Note: Identifiable, Codable, Equatable {
     var id: UUID = UUID()
@@ -50,8 +51,17 @@ struct Note: Identifiable, Codable, Equatable {
             .trimmingCharacters(in: .whitespacesAndNewlines), !explicit.isEmpty {
             return String(explicit.prefix(120))
         }
-        let firstLine = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
-        let trimmed = firstLine.trimmingCharacters(in: .whitespaces)
+        // First SENTENCE of the note (not just the first line) — a one-line
+        // paragraph with three sentences still titles by its opening
+        // sentence. Windowed so list rendering stays cheap.
+        let window = String(text.prefix(300))
+        let firstSentence: String
+        if let piece = SentenceChunker.sentencePieces(in: window).first {
+            firstSentence = String(decoding: window.utf16[piece.offset..<piece.endOffset], as: UTF16.self)
+        } else {
+            firstSentence = window
+        }
+        let trimmed = firstSentence.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? "Untitled note" : String(trimmed.prefix(60))
     }
 
