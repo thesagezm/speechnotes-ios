@@ -22,7 +22,7 @@ struct BookWebView: UIViewRepresentable {
     var onWebViewReady: (WKWebView) -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(self)
+        Coordinator(parent: self)
     }
 
     func makeUIView(context: Context) -> WKWebView {
@@ -71,6 +71,11 @@ struct BookWebView: UIViewRepresentable {
 
     final class Coordinator: NSObject, WKURLSchemeHandler, WKScriptMessageHandler {
         var parent: BookWebView?
+
+        // Classes get no memberwise init — one must be explicit.
+        init(parent: BookWebView?) {
+            self.parent = parent
+        }
 
         // MARK: WKURLSchemeHandler
 

@@ -84,7 +84,9 @@ struct BookPDFReaderView: View {
     }
 
     /// Flattens the PDF outline tree depth-first. Runs once per open; big
-    /// outlines are rare and cheap compared to the document itself.
+    /// outlines are rare and cheap compared to the document itself. Walks
+    /// via numberOfChildren/child(at:) — this SDK's PDFOutline has no
+    /// `children` array (CI-caught).
     private static func flattenOutline(book: Book) -> [OutlineRow] {
         guard let root = PDFDocument(url: BooksStore.originalFileURL(book))?.outlineRoot else { return [] }
         var rows: [OutlineRow] = []
@@ -97,12 +99,16 @@ struct BookPDFReaderView: View {
                     destination: dest
                 ))
             }
-            for child in outline.children.compactMap({ $0 as? PDFOutline }) {
-                walk(child, depth: depth + 1)
+            for index in 0..<outline.numberOfChildren {
+                if let child = outline.child(at: index) {
+                    walk(child, depth: depth + 1)
+                }
             }
         }
-        for child in root.children.compactMap({ $0 as? PDFOutline }) {
-            walk(child, depth: 0)
+        for index in 0..<root.numberOfChildren {
+            if let child = root.child(at: index) {
+                walk(child, depth: 0)
+            }
         }
         return rows
     }
@@ -156,7 +162,7 @@ private struct BookPDFView: UIViewRepresentable {
     func makeUIView(context: Context) -> PDFView {
         let pdfView = PDFView()
         pdfView.autoScales = true
-        pdfView.displayMode = .continuous
+        pdfView.displayMode = .singlePageContinuous
         pdfView.document = PDFDocument(url: url)
         context.coordinator.attach(pdfView)
 
