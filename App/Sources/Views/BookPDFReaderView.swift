@@ -9,29 +9,33 @@ import SpeechLogic
 ///
 /// v1.5: TTS rides on the same machinery as the epub reader — chapters come
 /// from the book's manifest (outline / heading / page-range resolved), play
-/// starts at the chapter containing the current page, and while the book
-/// speaks with read-along on, the PDF surface swaps to the native
-/// ReadAlongView. PDFKit cannot highlight mid-page anyway, so read-along
-/// tracks by PAGE: on return from read-along the reader jumps to the page
-/// that was sounding (via the per-page offsets sidecar the extraction writes).
+/// starts at the chapter containing the current page. While the book speaks
+/// (read-along toggle ON), the PDF view FOLLOWS the reading: as the sounding
+/// sentence crosses into the next page the reader turns to it automatically,
+/// with a brief "Page N" capsule as the turn cue (user request 2026-09-07 —
+/// pages must advance themselves, not wait for a manual swipe). The mapping
+/// comes from the per-page UTF-16 offsets sidecar the extraction writes;
+/// without it the reader still follows at chapter granularity. PDFKit cannot
+/// highlight mid-page, so pages — not words — are the follow unit.
 struct BookPDFReaderView: View {
     let book: Book
     let store: BooksStore
     @EnvironmentObject private var player: SpeechPlayer
-    @EnvironmentObject private var appTheme: AppTheme
 
     @State private var currentPage: Int
     @State private var pageCount: Int
     @State private var pdfView: PDFView?
     @State private var outlineRows: [OutlineRow] = []
     @State private var showingOutline = false
-    /// Page whose text was last sounding during read-along — applied to the
-    /// PDFView when read-along ends (the surface is swapped out while active,
-    /// so there is nothing to scroll under the text).
-    @State private var soundingPage: Int?
     /// Per-page UTF-16 offsets of the PLAYING chapter's speech text, loaded
     /// from the sidecar written at extraction time.
     @State private var playingPageOffsets: [PdfPageOffset] = []
+    /// Last page the follow turned to — guards against re-scrolling to the
+    /// same page on every sentence tick.
+    @State private var lastFollowedPage: Int?
+    /// Brief "Page N" capsule shown when the follow turns the page.
+    @State private var pageCue: Int?
+    @State private var pageCueTask: Task<Void, Never>?
     @AppStorage("readAlongEnabled") private var readAlongEnabled = true
 
     init(book: Book, store: BooksStore) {
@@ -42,10 +46,8 @@ struct BookPDFReaderView: View {
         _pageCount = State(initialValue: book.pageCount ?? 0)
     }
 
-    private var showsReadAlong: Bool {
-        readAlongEnabled
-            && player.readAlongActive
-            && player.nowPlayingBookId == book.id.uuidString
+    private var thisBookIsSpeaking: Bool {
+        player.nowPlayingBookId == book.id.uuidString && player.state != .idle
     }
 
     private var hasChapters: Bool {
@@ -110,26 +112,35 @@ struct BookPDFReaderView: View {
             // The reader has its own player bar — the global mini-player
             // yields while THIS book is the one speaking (editor pattern).
             player.miniPlayerSuppressed = player.nowPlayingBookId == book.id.uuidString
+            // Arriving while the book already speaks (mini-player jump):
+            // pick up the offsets so page-follow engages immediately.
+            if thisBookIsSpeaking {
+                loadPlayingChapterOffsets()
+            }
         }
         .onChange(of: player.nowPlayingBookId) { _ in
             player.miniPlayerSuppressed = player.nowPlayingBookId == book.id.uuidString
         }
-        .onChange(of: showsReadAlong) { active in
-            if active {
+        // Playback starting/stopping while the reader is open — load or drop
+        // the offsets so page-follow tracks the live chapter.
+        .onChange(of: player.state) { _ in
+            if thisBookIsSpeaking {
                 loadPlayingChapterOffsets()
             } else {
-                returnToSoundingPage()
+                playingPageOffsets = []
+                lastFollowedPage = nil
+                pageCue = nil
             }
         }
         // Chapter text changes exactly when auto-advance moves to the next
         // chapter — refresh the offsets for the new unit.
         .onChange(of: player.activeSpeechText) { _ in
-            if showsReadAlong {
+            if thisBookIsSpeaking {
                 loadPlayingChapterOffsets()
             }
         }
         .onChange(of: player.readAlongRange?.lowerBound) { _ in
-            trackSoundingPage()
+            followSoundingPage()
         }
         .onDisappear {
             player.miniPlayerSuppressed = false
@@ -137,23 +148,27 @@ struct BookPDFReaderView: View {
         }
     }
 
-    // MARK: - Reader surface (read-along swap + PDF view)
+    // MARK: - Reader surface (PDF view + page-turn cue)
 
-    @ViewBuilder private var readerSurface: some View {
-        if showsReadAlong {
-            ReadAlongView(
-                text: player.activeSpeechText ?? "",
-                activeRange: player.readAlongRange,
-                textScale: appTheme.previewTextScale
-            )
-        } else {
-            BookPDFView(
-                url: BooksStore.originalFileURL(book),
-                startPageIndex: currentPage,
-                onPageChange: handlePageChange,
-                onReady: { pdfView = $0 }
-            )
+    private var readerSurface: some View {
+        BookPDFView(
+            url: BooksStore.originalFileURL(book),
+            startPageIndex: currentPage,
+            onPageChange: handlePageChange,
+            onReady: { pdfView = $0 }
+        )
+        .overlay(alignment: .top) {
+            if let pageCue {
+                Text("Page \(pageCue + 1)")
+                    .font(.caption.weight(.medium).monospacedDigit())
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(.regularMaterial, in: Capsule())
+                    .padding(.top, 10)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
         }
+        .animation(.easeInOut(duration: 0.25), value: pageCue)
     }
 
     private var playerBar: some View {
@@ -280,10 +295,11 @@ struct BookPDFReaderView: View {
         store.updatePosition(book, chapterIndex: pageIndex, chapterFraction: 0)
     }
 
-    // MARK: - Read-along page tracking
+    // MARK: - Page follow
 
     /// Loads the playing chapter's page-offset sidecar (written when the
-    /// chapter's speech text was first extracted).
+    /// chapter's speech text was first extracted). Idempotent — playback
+    /// start, resume, and chapter auto-advance all call it.
     private func loadPlayingChapterOffsets() {
         let controller = BookPlaybackController.shared
         guard controller.isBookActive(book) else { return }
@@ -294,31 +310,46 @@ struct BookPDFReaderView: View {
                 return (try? JSONDecoder().decode([PdfPageOffset].self, from: data)) ?? []
             }.value
             playingPageOffsets = offsets
+            // The chapter may have STARTED on a page we're not showing (e.g.
+            // the follow engaged mid-chapter after a mini-player jump) — turn
+            // to the chapter's first sounding page right away.
+            if lastFollowedPage == nil, let start = offsets.first {
+                turnToSoundingPage(start.page)
+            }
         }
     }
 
-    /// Records which page the sounding sentence belongs to (no live scroll —
-    /// the PDF view is swapped out while read-along shows the text).
-    private func trackSoundingPage() {
-        guard showsReadAlong, !playingPageOffsets.isEmpty,
+    /// The sounding sentence crossed a page boundary (or follow just
+    /// engaged): turn the PDF view to the sounding page — with the brief
+    /// "Page N" cue — while the read-along toggle is on.
+    private func followSoundingPage() {
+        guard readAlongEnabled, thisBookIsSpeaking, !playingPageOffsets.isEmpty,
               let start = player.readAlongRange?.lowerBound else { return }
-        if let page = playingPageOffsets.last(where: { $0.utf16Offset <= start })?.page {
-            soundingPage = page
+        guard let page = playingPageOffsets.last(where: { $0.utf16Offset <= start })?.page else { return }
+        turnToSoundingPage(page)
+    }
+
+    private func turnToSoundingPage(_ page: Int) {
+        guard page != lastFollowedPage else { return }
+        let turned = page != currentPage
+        lastFollowedPage = page
+        if turned {
+            if let pdfView, let document = pdfView.document, page < document.pageCount,
+               let target = document.page(at: page) {
+                pdfView.go(to: target)
+            }
+            showPageCue(page)
         }
     }
 
-    /// Read-along ended: land the reader on the page that was sounding.
-    private func returnToSoundingPage() {
-        defer {
-            playingPageOffsets = []
-            soundingPage = nil
+    private func showPageCue(_ page: Int) {
+        pageCue = page
+        pageCueTask?.cancel()
+        pageCueTask = Task {
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            guard !Task.isCancelled else { return }
+            pageCue = nil
         }
-        guard let page = soundingPage, page != currentPage else { return }
-        currentPage = page
-        if let pdfView, let document = pdfView.document, let target = document.page(at: page) {
-            pdfView.go(to: target)
-        }
-        store.updatePosition(book, chapterIndex: page, chapterFraction: 0)
     }
 }
 
