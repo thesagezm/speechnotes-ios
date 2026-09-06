@@ -41,7 +41,7 @@ struct GlobalMiniPlayerOverlay: ViewModifier {
                         // Standard tab bar (49pt) + safe-area bottom inset = lift
                         // the mini player just above the Notes/Books/Settings tabs.
                         .padding(.bottom, 49 + 34)
-                        .transition(.move(edge: .bottom).combined(with .opacity))
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
                         .zIndex(1)
                     }
                 }
