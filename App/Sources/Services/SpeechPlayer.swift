@@ -134,11 +134,17 @@ final class SpeechPlayer: ObservableObject {
             && (state == .speaking || state == .paused || state == .generating)
     }
 
-    private func beginReadAlong(fullText: String) {
+    private func beginReadAlong(fullText: String, pieces: [(offset: Int, endOffset: Int)]? = nil) {
         activeSpeechText = fullText
         readAlongRange = nil
         readAlongPieces = []
         readAlongPiecesTask?.cancel()
+        // Pre-computed by snapResume — no scan needed (one pass instead of
+        // three before the first phoneme on resume).
+        if let pieces {
+            readAlongPieces = pieces
+            return
+        }
         readAlongGeneration += 1
         let generation = readAlongGeneration
         // A 200k-char chapter means a full sentence scan + ~1000 tuple
@@ -280,7 +286,7 @@ final class SpeechPlayer: ObservableObject {
 
     /// Loads the stored bookmark if it's for this note, this exact text,
     /// recent (<30 days), and at a meaningful position.
-    private func resumePlan(for noteId: UUID, fullText: String) -> (offset: Int, suffix: String)? {
+    private func resumePlan(for noteId: UUID, fullText: String) -> (offset: Int, suffix: String, pieces: [(offset: Int, endOffset: Int)])? {
         guard let mark = bookmarkStore.get(BookmarkStore.noteKey(noteId)) else { return nil }
         let length = fullText.utf16.count
         guard mark.noteId == noteId,
@@ -294,7 +300,7 @@ final class SpeechPlayer: ObservableObject {
     }
 
     /// Book variant: the bookmark must match this book AND chapter.
-    private func resumeBookPlan(bookId: String, chapterIndex: Int, fullText: String) -> (offset: Int, suffix: String)? {
+    private func resumeBookPlan(bookId: String, chapterIndex: Int, fullText: String) -> (offset: Int, suffix: String, pieces: [(offset: Int, endOffset: Int)])? {
         guard let mark = bookmarkStore.get(BookmarkStore.bookKey(bookId, chapter: chapterIndex)) else { return nil }
         let length = fullText.utf16.count
         guard mark.bookId == bookId,
@@ -309,15 +315,21 @@ final class SpeechPlayer: ObservableObject {
     }
 
     /// Shared resume math: snap to a sentence boundary and return the suffix
-    /// the engine should speak.
-    private static func snapResume(mark: PlaybackBookmark, fullText: String) -> (offset: Int, suffix: String)? {
+    /// the engine should speak PLUS the precomputed sentence pieces for that
+    /// suffix. On resume the engine re-chunks the suffix and beginReadAlong
+    /// re-scans pieces — three full-text passes before the first phoneme.
+    /// Pre-computing pieces here (the boundary is already known) collapses
+    /// that to one pass.
+    private static func snapResume(mark: PlaybackBookmark, fullText: String) -> (offset: Int, suffix: String, pieces: [(offset: Int, endOffset: Int)])? {
         let length = fullText.utf16.count
         let offset = Self.resumeOffset(in: fullText, charsDone: mark.charsDone)
         guard offset > 0, offset < length else { return nil }
         let units = Array(fullText.utf16)
         let suffix = String(decoding: Array(units[offset...]), as: UTF16.self)
         guard !suffix.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-        return (offset, suffix)
+        let pieces = SentenceChunker.sentencePieces(in: suffix)
+            .map { (offset: $0.offset + offset, endOffset: $0.endOffset + offset) }
+        return (offset, suffix, pieces)
     }
 
     /// True when the editor should show "Restart from beginning".
@@ -809,25 +821,27 @@ final class SpeechPlayer: ObservableObject {
             resumeBaseFraction = 0
             lastRawProgress = 0
             beginReadAlong(fullText: text)
-            if let note {
-                primeBookmark(noteId: note.id, fullText: text)
-                if let plan = resumePlan(for: note.id, fullText: text) {
-                    resumeBaseFraction = Double(plan.offset) / Double(max(1, text.utf16.count))
-                    engineSpeechOffset = plan.offset + Self.leadingWhitespaceUTF16(plan.suffix)
-                    Log.shared.info("SpeechPlayer: resuming note at char \(plan.offset)/\(text.utf16.count)")
-                    engine?.speak(plan.suffix, rateMultiplier: rateMultiplier)
-                    return
+                if let note {
+                    primeBookmark(noteId: note.id, fullText: text)
+                    if let plan = resumePlan(for: note.id, fullText: text) {
+                        resumeBaseFraction = Double(plan.offset) / Double(max(1, text.utf16.count))
+                        engineSpeechOffset = plan.offset + Self.leadingWhitespaceUTF16(plan.suffix)
+                        beginReadAlong(fullText: text, pieces: plan.pieces)
+                        Log.shared.info("SpeechPlayer: resuming note at char \(plan.offset)/\(text.utf16.count)")
+                        engine?.speak(plan.suffix, rateMultiplier: rateMultiplier)
+                        return
+                    }
+                } else if let book {
+                    primeBookBookmark(bookId: book.id, chapterIndex: book.chapterIndex, fullText: text)
+                    if let plan = resumeBookPlan(bookId: book.id, chapterIndex: book.chapterIndex, fullText: text) {
+                        resumeBaseFraction = Double(plan.offset) / Double(max(1, text.utf16.count))
+                        engineSpeechOffset = plan.offset + Self.leadingWhitespaceUTF16(plan.suffix)
+                        beginReadAlong(fullText: text, pieces: plan.pieces)
+                        Log.shared.info("SpeechPlayer: resuming book \(book.id) ch\(book.chapterIndex) at char \(plan.offset)/\(text.utf16.count)")
+                        engine?.speak(plan.suffix, rateMultiplier: rateMultiplier)
+                        return
+                    }
                 }
-            } else if let book {
-                primeBookBookmark(bookId: book.id, chapterIndex: book.chapterIndex, fullText: text)
-                if let plan = resumeBookPlan(bookId: book.id, chapterIndex: book.chapterIndex, fullText: text) {
-                    resumeBaseFraction = Double(plan.offset) / Double(max(1, text.utf16.count))
-                    engineSpeechOffset = plan.offset + Self.leadingWhitespaceUTF16(plan.suffix)
-                    Log.shared.info("SpeechPlayer: resuming book \(book.id) ch\(book.chapterIndex) at char \(plan.offset)/\(text.utf16.count)")
-                    engine?.speak(plan.suffix, rateMultiplier: rateMultiplier)
-                    return
-                }
-            }
             engineSpeechOffset = Self.leadingWhitespaceUTF16(text)
             engine?.speak(text, rateMultiplier: rateMultiplier)
         }
