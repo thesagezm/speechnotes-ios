@@ -53,22 +53,22 @@ public enum XhtmlText {
         while i < xhtml.endIndex {
             let c = xhtml[i]
             if c == "&" {
-                // Bounded scan: a name is ≤10 letters/digits before ';'.
+                // Entity-shaped token: a letters/digits run closed by ';'
+                // (cap 32 — real names are far shorter). Known → Unicode;
+                // UNKNOWN → strip the token, because a strict parser treats
+                // ANY undefined entity as fatal and one `&weirdname;` would
+                // otherwise truncate the rest of the chapter.
                 var j = xhtml.index(after: i)
                 var name = ""
                 var closed = false
-                while j < xhtml.endIndex, xhtml.distance(from: i, to: j) <= 10 {
+                while j < xhtml.endIndex, name.count < 32 {
                     let cj = xhtml[j]
                     if cj == ";" { closed = true; break }
-                    if !cj.isLetter && !cj.isNumber { break }
+                    guard cj.isLetter || cj.isNumber else { break }
                     name.append(cj)
                     j = xhtml.index(after: j)
                 }
                 if closed {
-                    // Known → Unicode; UNKNOWN → strip the token. Leaving it
-                    // in place would abort the strict parser anyway (an
-                    // undefined entity is fatal) — losing one glyph beats
-                    // losing the rest of the chapter.
                     out += namedEntities[name] ?? ""
                     i = xhtml.index(after: j)
                     continue
