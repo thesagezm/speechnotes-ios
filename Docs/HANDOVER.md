@@ -690,3 +690,34 @@ needs a product decision first).
 
 Golden rules unchanged. `sage-upgrades` is NOT merged to `v15-books-complete`
 yet — merge after the device round.
+
+## 2026-09-07 addendum #12 — v1.5.0 RELEASED (1.5.0/30)
+
+**User directive 2026-09-07: "release the current/latest version as v1.5.0"
+followed by "push the release and even the upgrades."** That is the explicit
+release go-away the addendum #10 rule required. The sage-upgrades 12-item
+device checklist (addendum #11) was NOT run as a formal round — the user
+elected to release with the batches in; any regression report lands as a
+v1.5.x patch, and the checklist items remain the first thing to verify on
+device.
+
+Release contents (sage-upgrades tip `2711e0b` + release commit):
+- v15-books-complete Phases 1–5 (PDF chapters via outline → font-height
+  headings → page ranges, Vision OCR for scanned pages, column-aware
+  extraction, per-chapter WAV export, cover grid + search, mini-player book
+  jump, markdown read-along accuracy fixes).
+- sage-upgrades B1–B9/P22/onFinished reliability batches (exact chapter
+  completion signal, streamed WAV export, CRC-checked ZipReader, per-item
+  BookmarkStore, StreamingTTSPlaybackCore unification, slash menu, ToastCenter
+  undo, NotesStore quarantine/backup, scheme-handler streaming).
+
+Release mechanics: four version fields bumped to 1.5.0/30 (project.yml only —
+golden rule kept), README refreshed (v1.5.0 status, pdf-spike + PdfSpike in
+CI/layout, small-tier row corrected to uint8 177 MB), CI green on the release
+commit, main fast-forwarded, tag `v1.5.0`, GitHub Release with the IPA from
+the green run.
+
+Post-release: the mage audit (2026-09-07) swept every file in the repo — all
+new findings are folded into `Docs/MASTER-CATALOG.md` (new Tier-0 bug batch +
+tier additions). Upgrade batches land on `sage-upgrades` AFTER this release
+tag, so v1.5.0 remains the clean, known-CI-green baseline.

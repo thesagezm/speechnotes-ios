@@ -3,15 +3,17 @@
 An offline, Speech Note (Linux)-style app for iPhone — built entirely from Linux,
 compiled on GitHub Actions macOS runners, sideloaded via SideStore + LiveContainer.
 
-**Current status: v1.4.2 — a Books library (EPUB + PDF with full TTS),
-three on-device engines, notebooks, read-along, polished UI.** Pick an
+**Current status: v1.5.0 — Books, complete: a Books library (EPUB + PDF with
+full TTS incl. real PDF chapters, Vision OCR for scans, two-column extraction,
+per-chapter export), three on-device engines, notebooks, read-along, slash
+menu, polished UI.** Pick an
 engine in Speech Settings (listed worst → best), download
 its model once, and notes are spoken fully offline (airplane-mode tested):
 
 | Engine | Model size | Voices | Notes |
 |---|---|---|---|
 | Apple (system) | 0 | all system voices | Instant, no download |
-| **Kokoro small** (ONNX, CPU) | ~178 MB | 28 (US/UK, m/f) | Lightweight uint8 tier |
+| **Kokoro small** (ONNX, CPU) | ~177 MB | 28 (US/UK, m/f) | Lightweight uint8 tier |
 | **Kokoro** (ONNX, CPU) | ~341 MB | 28 (US/UK, m/f) | Main engine — fp32 quality build |
 | **Supertonic** (ONNX, CPU) | ~399 MB | 10 styles × 31 languages | Multilingual — flow-matching TTS |
 
@@ -25,12 +27,17 @@ Feature tour:
 - **Notebooks & organization** (Joplin-style) — flat notebooks with a chip
   row for scoping, move notes between them, plus pin (Pinned section on top)
   and favorite (star). Titles auto-derive from the note's first sentence.
-- **Books** (new in v1.4.2) — the Books tab: import EPUB and PDF (Files
-  picker or Open-In). EPUBs render chapter-by-chapter in a real book reader
-  (themes, text size, native table of contents, per-book position); PDFs
-  open in a full-fidelity PDFKit viewer with an outline sidebar. Any book
-  can be spoken: chapter narration with auto-advance, sentence-snapped
-  resume, and the same read-along highlighting as notes.
+- **Books** (complete in v1.5.0) — the Books tab: import EPUB and PDF (Files
+  picker or Open-In) into a cover grid with search. EPUBs render
+  chapter-by-chapter in a real book reader (themes, text size, native table of
+  contents, per-book position); PDFs open in a full-fidelity PDFKit viewer with
+  an outline sidebar. Any book can be spoken: chapter narration with
+  auto-advance (exact audio-completion signal, no stranding at chapter
+  boundaries), sentence-snapped resume, and the same read-along highlighting as
+  notes. PDF chapters come from the document's own outline, with font-size
+  heading detection and honest page ranges as fallbacks; scanned pages speak
+  via Vision OCR, and two-column papers read left→right. Per-chapter WAV
+  export. DRM/locked books explain themselves on the shelf.
 - **Streaming playback** — sentence-chunked generation with playback starting
   after the first sentence; pause/resume/stop; speed slider; phone-call
   interruption handling; lock-screen / Control Center controls.
@@ -67,10 +74,11 @@ speech *notes* app and TTS is the mission.
 - The Xcode project is **generated from text** (`project.yml`, via XcodeGen) on CI.
 - `.github/workflows/build.yml` runs on every push to `main`:
   - `logic-tests` — SpeechLogic unit tests (sentence chunker, WAV writer,
-    markdown stripper).
-  - `kokoro-small-spike` / `supertonic-spike` / `epub-spike` — non-blocking
-    contract tests that run each ONNX model (or the EPUB parser against real
-    Gutenberg books) on the macOS runner and assert valid output.
+    markdown, XHTML, EPUB/ZIP, PDF chapter logic).
+  - `kokoro-small-spike` / `supertonic-spike` / `epub-spike` / `pdf-spike` —
+    non-blocking contract tests that run each ONNX model (or the EPUB parser
+    against real Gutenberg books / the PDF chapter resolver against real
+    documents) on the macOS runner and assert valid output.
   - `build-ipa` — patches any SPM dependency that declares itself dynamic to
     link statically (LiveContainer requirement), archives an unsigned build,
     verifies the binary has no `@rpath` framework references, and packages
@@ -98,11 +106,14 @@ speechnotes-ios/
 ├── App/Resources/epubjs/        # vendored epub.js + JSZip (offline EPUB reader)
 ├── Packages/SpeechLogic/        # pure-logic SPM package (tested on CI)
 │                                #   SentenceChunker, WAVWriter, MarkdownText,
-│                                #   ZipReader, EpubInfo, XhtmlText
+│                                #   MarkdownSlashMenu, ZipReader, EpubInfo,
+│                                #   XhtmlText, PdfText, NoteImageStore
 ├── Tests/KokoroSmallSpike/      # standalone ONNX contract spike
 ├── Tests/SupertonicSpike/       # standalone ONNX contract spike
 ├── Tests/EpubSpike/             # EPUB parser contract spike (real books)
-├── Scripts/                     # package-ipa.sh, watch_ci.sh, make_icon.py
+├── Tests/PdfSpike/              # PDF chapter resolver contract spike
+├── Scripts/                     # package-ipa.sh, watch_ci.sh, make_icon.py,
+│                                #   make_pdf_fixtures.py
 └── Docs/                        # plan, setup guide, research notes
 ```
 
