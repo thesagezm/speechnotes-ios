@@ -214,8 +214,18 @@ final class BooksStore: ObservableObject {
 
         switch format {
         case .epub:
-            guard let data = try? Data(contentsOf: directory.appendingPathComponent("original.epub"), options: .mappedIfSafe),
-                  let info = try? EpubParser.parse(archive: data) else {
+            guard let data = try? Data(contentsOf: directory.appendingPathComponent("original.epub"), options: .mappedIfSafe) else {
+                book.importError = "The EPUB file could not be read."
+                return book
+            }
+            let info: EpubInfo
+            do {
+                info = try EpubParser.parse(archive: data)
+            } catch let ZipReader.ZipError.encryptedEntry(name) {
+                book.importError = "DRM-protected (encrypted \(name)) — can't be read aloud."
+                return book
+            } catch {
+                book.importError = "This EPUB is malformed — chapters and speech may be unavailable."
                 return book
             }
             book.title = info.title?.isEmpty == false ? info.title! : fallbackTitle
@@ -245,6 +255,10 @@ final class BooksStore: ObservableObject {
             // PDF load just to read the title (ImportService's whole-doc
             // string extraction is the pattern we are deliberately avoiding).
             if let document = PDFDocument(url: directory.appendingPathComponent("original.pdf")) {
+                if document.isLocked {
+                    book.importError = "Password-protected PDF — can't be read aloud."
+                    return book
+                }
                 book.pageCount = document.pageCount > 0 ? document.pageCount : nil
                 // documentAttributes bridges as [AnyHashable: Any] — key it
                 // with the full PDFDocumentAttribute spelling.

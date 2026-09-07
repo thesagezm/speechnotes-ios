@@ -145,18 +145,18 @@ public final class StreamingWriter {
 
         var header = Data()
         header.append(contentsOf: Array("RIFF".utf8))
-        appendUInt32(0, to: &header)                     // RIFF size — patched at close
+        WAVWriter.appendUInt32(0, to: &header)                     // RIFF size — patched at close
         header.append(contentsOf: Array("WAVE".utf8))
         header.append(contentsOf: Array("fmt ".utf8))
-        appendUInt32(16, to: &header)
-        appendUInt16(1, to: &header)                     // PCM
-        appendUInt16(1, to: &header)                     // mono
-        appendUInt32(UInt32(sampleRate), to: &header)
-        appendUInt32(UInt32(sampleRate * 2), to: &header)
-        appendUInt16(2, to: &header)
-        appendUInt16(16, to: &header)
+        WAVWriter.appendUInt32(16, to: &header)
+        WAVWriter.appendUInt16(1, to: &header)                     // PCM
+        WAVWriter.appendUInt16(1, to: &header)                     // mono
+        WAVWriter.appendUInt32(UInt32(sampleRate), to: &header)
+        WAVWriter.appendUInt32(UInt32(sampleRate * 2), to: &header)
+        WAVWriter.appendUInt16(2, to: &header)
+        WAVWriter.appendUInt16(16, to: &header)
         header.append(contentsOf: Array("data".utf8))
-        appendUInt32(0, to: &header)                     // data size — patched at close
+        WAVWriter.appendUInt32(0, to: &header)                     // data size — patched at close
         try fileHandle.write(contentsOf: header)
     }
 
@@ -165,7 +165,7 @@ public final class StreamingWriter {
         guard !closed else { throw WAVWriterError.alreadyClosed }
         var bytes = Data(capacity: samples.count * 2)
         for sample in samples {
-            appendUInt16(UInt16(bitPattern: WAVWriter.quantize(sample)), to: &bytes)
+            WAVWriter.appendUInt16(UInt16(bitPattern: WAVWriter.quantize(sample)), to: &bytes)
         }
         sampleCount += samples.count
         try fileHandle.write(contentsOf: bytes)
@@ -179,11 +179,11 @@ public final class StreamingWriter {
         let dataByteCount = sampleCount * 2
         try fileHandle.seek(toOffset: 4)
         var riffSize = Data()
-        appendUInt32(UInt32(36 + dataByteCount), to: &riffSize)
+        WAVWriter.appendUInt32(UInt32(36 + dataByteCount), to: &riffSize)
         try fileHandle.write(contentsOf: riffSize)
         try fileHandle.seek(toOffset: 40)
         var dataSize = Data()
-        appendUInt32(UInt32(dataByteCount), to: &dataSize)
+        WAVWriter.appendUInt32(UInt32(dataByteCount), to: &dataSize)
         try fileHandle.write(contentsOf: dataSize)
         try fileHandle.close()
     }

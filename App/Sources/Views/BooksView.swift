@@ -254,6 +254,10 @@ private struct BookGridCard: View {
     }
 
     private var metaLine: String {
+        // An unreadable book explains itself instead of looking normal.
+        if let error = book.importError {
+            return error
+        }
         var parts = [book.authorOrFormat]
         switch book.format {
         case .epub:

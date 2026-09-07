@@ -25,6 +25,10 @@ public enum ZipReader {
         public let compressedSize: Int
         public let uncompressedSize: Int
         public let localHeaderOffset: Int
+        /// IEEE CRC-32 of the UNCOMPRESSED payload, from the central
+        /// directory — verified after extraction (size alone accepts
+        /// corrupt-deflate garbage of plausible length).
+        public let crc: UInt32
     }
 
     public enum ZipError: Error, Equatable {
@@ -68,6 +72,7 @@ public enum ZipReader {
             let method = u16le(directory, cursor + 10)
             let compressedSize = Int(u32le(directory, cursor + 20))
             let uncompressedSize = Int(u32le(directory, cursor + 24))
+            let crc = u32le(directory, cursor + 16)
             let nameLength = Int(u16le(directory, cursor + 28))
             let extraLength = Int(u16le(directory, cursor + 30))
             let commentLength = Int(u16le(directory, cursor + 32))
@@ -88,7 +93,8 @@ public enum ZipReader {
                 method: method,
                 compressedSize: compressedSize,
                 uncompressedSize: uncompressedSize,
-                localHeaderOffset: localHeaderOffset
+                localHeaderOffset: localHeaderOffset,
+                crc: crc
             ))
             cursor += 46 + nameLength + extraLength + commentLength
         }
@@ -98,9 +104,18 @@ public enum ZipReader {
     /// Reads and (when needed) inflates one entry. Only the entry's own bytes
     /// are touched, so a memory-mapped source never loads the whole book.
     public static func readEntry(_ name: String, in data: Data) throws -> Data {
-        let entry = try entries(in: data).first(where: { $0.name == name })
-        guard let entry else { throw ZipError.entryNotFound(name: name) }
-        return try read(entry, in: data)
+        let all = try entries(in: data)
+        if let entry = all.first(where: { $0.name == name }) {
+            return try read(entry, in: data)
+        }
+        // Some publishers percent-encode entry names or fold case; the OPF
+        // href resolution percent-DECODES, so an encoded archive name never
+        // matches lexically. Resolve leniently before giving up.
+        let fold: (String) -> String = { ($0.removingPercentEncoding ?? $0).lowercased() }
+        if let entry = all.first(where: { fold($0.name) == fold(name) }) {
+            return try read(entry, in: data)
+        }
+        throw ZipError.entryNotFound(name: name)
     }
 
     public static func read(_ entry: Entry, in data: Data) throws -> Data {
@@ -119,14 +134,19 @@ public enum ZipReader {
         }
         let payload = data.subdata(in: dataStart ..< dataEnd)
 
+        let output: Data
         switch entry.method {
         case 0:
-            return payload
+            output = payload
         case 8:
-            return try inflate(payload, expectedSize: entry.uncompressedSize, entry: entry.name)
+            output = try inflate(payload, expectedSize: entry.uncompressedSize, entry: entry.name)
         default:
             throw ZipError.unsupportedCompressionMethod(method: entry.method, entry: entry.name)
         }
+        guard crc32(output) == entry.crc else {
+            throw ZipError.corrupt(reason: "CRC mismatch for \(entry.name) — archive is damaged")
+        }
+        return output
     }
 
     // MARK: - Inflate
@@ -186,6 +206,27 @@ public enum ZipReader {
             directoryOffset: Int(u32le(tail, found + 16)),
             directorySize: Int(u32le(tail, found + 12))
         )
+    }
+
+    // MARK: - CRC-32
+
+    /// IEEE CRC-32 lookup table (the zip standard's polynomial).
+    private static let crcTable: [UInt32] = {
+        (0..<256).map { i -> UInt32 in
+            var c = UInt32(i)
+            for _ in 0..<8 {
+                c = (c & 1) == 1 ? 0xEDB8_8320 ^ (c >> 1) : c >> 1
+            }
+            return c
+        }
+    }()
+
+    private static func crc32(_ data: Data) -> UInt32 {
+        var crc: UInt32 = 0xFFFF_FFFF
+        for byte in data {
+            crc = crcTable[Int((crc ^ UInt32(byte)) & 0xFF)] ^ (crc >> 8)
+        }
+        return crc ^ 0xFFFF_FFFF
     }
 
     // MARK: - Little-endian readers

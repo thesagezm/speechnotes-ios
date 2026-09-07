@@ -109,6 +109,17 @@ public enum XhtmlText {
         plainText(from: Data(replacingNamedEntities(xhtml).utf8))
     }
 
+    /// epub:type values that mark footnote-family asides (otherwise read
+    /// aloud inline — a footnote body landing mid-sentence).
+    private static let footnoteTypes: Set<String> = [
+        "footnote", "endnote", "rearnote", "marginnote", "note", "footnotes", "endnotes"
+    ]
+
+    static func isFootnoteAside(_ attributes: [String: String]) -> Bool {
+        let type = attributes["epub:type"] ?? attributes["type"] ?? ""
+        return type.split(separator: " ").contains { footnoteTypes.contains(String($0)) }
+    }
+
     private final class Delegate: NSObject, XMLParserDelegate {
         private static let blockTags: Set<String> = [
             "p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "blockquote",
@@ -119,6 +130,11 @@ public enum XhtmlText {
         private var paragraphs: [String] = []
         private var buffer = ""
         private var skipDepth = 0
+        /// `aside` elements (epub:type footnote/endnote/…) read inline
+        /// otherwise: a footnote BODY interrupts the sentence mid-flow and a
+        /// `sup` noteref digit reads as a random number. Scrub both; `rt`
+        /// (ruby annotation) likewise — the base text carries the meaning.
+        private var asideDepth = 0
 
         var paragraphText: String {
             flush()
@@ -146,7 +162,16 @@ public enum XhtmlText {
                 skipDepth += 1
                 return
             }
-            guard skipDepth == 0 else { return }
+            if name == "aside" {
+                if Self.isFootnoteAside(attributeDict) {
+                    asideDepth += 1
+                    return
+                }
+            } else if name == "sup" || name == "rt" {
+                asideDepth += 1
+                return
+            }
+            guard skipDepth == 0, asideDepth == 0 else { return }
             if Self.blockTags.contains(name) {
                 flush()
             } else if name == "br" {
@@ -170,7 +195,7 @@ public enum XhtmlText {
         }
 
         func parser(_ parser: XMLParser, foundCharacters string: String) {
-            guard skipDepth == 0 else { return }
+            guard skipDepth == 0, asideDepth == 0 else { return }
             buffer += string
         }
 
@@ -183,6 +208,12 @@ public enum XhtmlText {
             let name = elementName.split(separator: ":", maxSplits: 1).last.map(String.init) ?? elementName
             if Self.skipTags.contains(name) {
                 skipDepth = max(0, skipDepth - 1)
+                return
+            }
+            if asideDepth > 0 {
+                if name == "aside" || name == "sup" || name == "rt" {
+                    asideDepth = max(0, asideDepth - 1)
+                }
                 return
             }
             guard skipDepth == 0 else { return }

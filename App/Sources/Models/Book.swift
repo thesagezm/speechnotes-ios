@@ -54,6 +54,10 @@ struct Book: Identifiable, Codable, Equatable, Hashable {
     var hasCover: Bool
     var toc: [BookTocEntry]?
     var position: BookPosition?
+    /// Set at import when the book parsed badly (DRM/encryption, malformed
+    /// container) — the shelf explains WHY instead of shelving a silent
+    /// husk with no TOC and no TTS.
+    var importError: String?
 
     init(
         id: UUID,
@@ -70,7 +74,8 @@ struct Book: Identifiable, Codable, Equatable, Hashable {
         pdfChapterSource: String? = nil,
         hasCover: Bool = false,
         toc: [BookTocEntry]? = nil,
-        position: BookPosition? = nil
+        position: BookPosition? = nil,
+        importError: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -87,6 +92,7 @@ struct Book: Identifiable, Codable, Equatable, Hashable {
         self.hasCover = hasCover
         self.toc = toc
         self.position = position
+        self.importError = importError
     }
 }
 
