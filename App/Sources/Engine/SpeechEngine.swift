@@ -14,7 +14,13 @@ protocol SpeechEngine: AnyObject {
     var onStateChanged: ((SpeechState) -> Void)? { get set }
     /// Progress through the spoken text, 0…1 (chunk-granular). Engines that
     /// can't measure progress simply never call it.
-    var onProgress: ((Double) -> Void)? { get set }
+    var onProgress: ((Double) -> Void)?
+    /// Fired ONLY when an utterance reaches its natural end — the final
+    /// audio buffer has played out. DELIBERATELY not fired on stop(): a real
+    /// completion signal lets book auto-advance fire exactly when the audio
+    /// ends, without guessing from a 0.98 progress heuristic (which missed
+    /// the last short chunk and stranded books mid-listen).
+    var onFinished: (() -> Void)? { get set }
     /// Play-time signal: UTF-16 character count of the spoken string whose
     /// audio is ACTUALLY sounding or has finished — never schedule-ahead
     /// (the v0.5 read-along failed by highlighting at schedule time, up to

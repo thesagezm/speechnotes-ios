@@ -10,6 +10,9 @@ final class SystemEngine: NSObject, SpeechEngine {
     /// Play-time signal — willSpeakRangeOfSpeechString fires per word as the
     /// audio sounds, so this is exact (see SpeechEngine.onPlayedChars).
     var onPlayedChars: ((Int) -> Void)?
+    /// Natural completion (AVSpeechSynthesizerDelegate.didFinish) — exact,
+    /// unlike the ONNX engines' buffer-completion signal.
+    var onFinished: (() -> Void)?
 
     private let synthesizer = AVSpeechSynthesizer()
 
@@ -117,7 +120,10 @@ extension SystemEngine: AVSpeechSynthesizerDelegate {
     }
 
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
-        DispatchQueue.main.async { self.state = .idle }
+        DispatchQueue.main.async {
+            self.onFinished?()
+            self.state = .idle
+        }
     }
 
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {

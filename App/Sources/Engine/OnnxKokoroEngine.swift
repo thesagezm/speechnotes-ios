@@ -25,6 +25,8 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
     var onProgress: ((Double) -> Void)?
     /// Play-time position (see SpeechEngine.onPlayedChars).
     var onPlayedChars: ((Int) -> Void)?
+    /// Natural completion (see SpeechEngine.onFinished).
+    var onFinished: (() -> Void)?
 
     var voice = "am_eric"
 
@@ -78,6 +80,7 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
         core.onStateChanged = { [weak self] state in self?.onStateChanged?(state) }
         core.onProgress = { [weak self] progress in self?.onProgress?(progress) }
         core.onPlayedChars = { [weak self] chars in self?.onPlayedChars?(chars) }
+        core.onFinished = { [weak self] in self?.onFinished?() }
     }
 
     // MARK: - SpeechEngine

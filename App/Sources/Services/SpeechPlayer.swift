@@ -705,17 +705,16 @@ final class SpeechPlayer: ObservableObject {
                       activeEngine === self.engine else { return }
                 self.state = newState
                 if newState == .idle {
-                    // Captured BEFORE the hook fires: a natural book-chapter
-                    // finish arms the next chapter's generation, and the
-                    // lock-screen surface must survive that gap (clearing it
-                    // blanks Control Center and weakens the background-mode
-                    // contract mid-book).
-                    let bookSessionContinues = self.onNaturalFinish != nil && self.lastRawProgress >= 0.98
+                    // NOTE idle path: no onFinished signal fired it (engine
+                    // reported completion separately above). Book auto-advance
+                    // already ran via onFinished when the audio actually
+                    // ended — this branch only runs for externally-driven
+                    // idles (engine fallback path / suspension), so just tidy.
+                    let bookSessionContinues = false
                     if self.lastRawProgress >= 0.98 {
-                        self.clearBookmark()            // finished naturally
-                        self.onNaturalFinish?()         // books: advance to the next chapter
+                        self.clearBookmark()
                     } else if self.inFlightBookmark != nil {
-                        self.persistPlaybackBookmark()  // stopped part-way
+                        self.persistPlaybackBookmark()
                     }
                     self.lastRawProgress = 0
                     self.resumeBaseFraction = 0
@@ -770,6 +769,27 @@ final class SpeechPlayer: ObservableObject {
                       let activeEngine = activeEngine,
                       activeEngine === self.engine else { return }
                 self.updateReadAlong(engineCharsDone: engineCharsDone)
+            }
+        }
+        activeEngine?.onFinished = { [weak self] in
+            Task { @MainActor in
+                guard let self,
+                      let activeEngine = activeEngine,
+                      activeEngine === self.engine else { return }
+                // EXACT completion signal from the engine — the old code
+                // guessed from a 0.98 progress heuristic, which missed the
+                // last short chunk and stranded books mid-listen.
+                self.lastRawProgress = 1.0
+                self.clearBookmark()
+                self.onNaturalFinish?()
+                self.lastRawProgress = 0
+                self.resumeBaseFraction = 0
+                self.nowPlayingTitle = nil
+                self.nowPlayingNoteId = nil
+                self.nowPlayingBookId = nil
+                self.finishAuditionIfActive()
+                self.endReadAlong()
+                NowPlayingCenter.shared.clear()
             }
         }
     }

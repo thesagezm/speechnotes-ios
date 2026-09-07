@@ -19,6 +19,8 @@ final class SupertonicEngine: NSObject, SpeechEngine {
     var onProgress: ((Double) -> Void)?
     /// Play-time position (see SpeechEngine.onPlayedChars).
     var onPlayedChars: ((Int) -> Void)?
+    /// Natural completion (see SpeechEngine.onFinished).
+    var onFinished: (() -> Void)?
 
     /// Voice style id — one of ModelManager.supertonicVoices ("M1"…"F5").
     var voice = "M1"
@@ -65,6 +67,7 @@ final class SupertonicEngine: NSObject, SpeechEngine {
         core.onStateChanged = { [weak self] state in self?.onStateChanged?(state) }
         core.onProgress = { [weak self] progress in self?.onProgress?(progress) }
         core.onPlayedChars = { [weak self] chars in self?.onPlayedChars?(chars) }
+        core.onFinished = { [weak self] in self?.onFinished?() }
     }
 
     // MARK: - Model loading (generateQueue)

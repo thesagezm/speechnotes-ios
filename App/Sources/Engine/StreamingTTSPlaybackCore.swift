@@ -50,6 +50,10 @@ final class StreamingTTSPlaybackCore: NSObject {
     var onStateChanged: ((SpeechState) -> Void)?
     var onProgress: ((Double) -> Void)?
     var onPlayedChars: ((Int) -> Void)?
+    /// Natural completion — the final buffer has played out. Replaces the
+    /// old 0.98 progress heuristic so book auto-advance fires exactly when
+    /// the audio ends (the last short chunk no longer strands the book).
+    var onFinished: (() -> Void)?
 
     private let generateQueue = DispatchQueue(label: "com.speechnotes.streaming-core", qos: .userInitiated)
 
@@ -274,6 +278,7 @@ final class StreamingTTSPlaybackCore: NSObject {
                     if self.state == .speaking || self.state == .paused || self.state == .generating {
                         self.onProgress?(1.0)
                         self.playTracker.finish(totalChars: self.totalChars)
+                        self.onFinished?()
                         self.state = .idle
                     }
                     return
