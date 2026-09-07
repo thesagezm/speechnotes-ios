@@ -88,11 +88,11 @@ extension XhtmlTextTests {
         XCTAssertTrue(text.contains("C"), text)   // content AFTER the mapped one survived
     }
 
-    func testReplacingNamedEntitiesMapsKnownAndKeepsUnknown() {
+    func testReplacingNamedEntitiesMapsKnownAndStripsUnknown() {
         let out = XhtmlText.replacingNamedEntities("x&nbsp;y &mdash; z &weirdentity; w &#8212; n")
         XCTAssertFalse(out.contains("&nbsp;"), out)
         XCTAssertFalse(out.contains("&mdash;"), out)
-        XCTAssertTrue(out.contains("weirdentity;"), out)  // unknown falls through as text
+        XCTAssertFalse(out.contains("weirdentity"), out)  // unknown token stripped (a strict parser treats it as fatal)
         XCTAssertTrue(out.contains("&#8212;"), out)       // numeric refs stay for the parser
     }
 

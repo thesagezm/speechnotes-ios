@@ -64,8 +64,12 @@ public enum XhtmlText {
                     name.append(cj)
                     j = xhtml.index(after: j)
                 }
-                if closed, let mapped = namedEntities[name] {
-                    out += mapped
+                if closed {
+                    // Known → Unicode; UNKNOWN → strip the token. Leaving it
+                    // in place would abort the strict parser anyway (an
+                    // undefined entity is fatal) — losing one glyph beats
+                    // losing the rest of the chapter.
+                    out += namedEntities[name] ?? ""
                     i = xhtml.index(after: j)
                     continue
                 }
