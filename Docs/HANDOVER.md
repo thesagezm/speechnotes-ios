@@ -621,64 +621,30 @@ Bump the four version fields → 1.5.0/30, README, fast-forward main, tag v1.5.0
 attach the IPA from the green run. Until then `v15-books-complete` stays the
 integration branch.
 
-## 2026-09-07 addendum #11 — sage-upgrades: page-follow reverted + 11 upgrade batches (ALL CI GREEN)
+## 2026-09-07 addendum #11 — sage-upgrades: page-follow reverted + upgrade batches (ALL CI GREEN)
 
-Branch `sage-upgrades` off `v15-books-complete`. Two pushes on the base branch:
+Branch `sage-upgrades` off `v15-books-complete`. **FULL CATALOG + device checklist
+live in `Docs/MASTER-CATALOG.md`** — every recommendation from the palace plan
+AND the TTS/EPUB research report, tiered and ticked off against what shipped.
 
-- **`f5214d9` on `v15-books-complete`: REVERT of `9b54af7`** (PDF page-follow)
-  per user device report ("TTS slow, highlighter gone"). Reverting restored the
-  ReadAlongView swap for PDFs and removed the page-follow machinery. All other
-  v1.5 work untouched. If page-turns are ever re-attempted: follow at most once
-  per page crossing, skip turns during user interaction, never re-decode
-  offsets outside chapter changes.
+### What landed on `sage-upgrades` (tip `47686f4`, run 34085875577 ALL GREEN — logic tests, 4 spikes, IPA)
 
-### What landed on `sage-upgrades` (tip `36c5aa8`, run 34072972995 ALL GREEN — logic tests, 4 spikes, IPA)
+1. **B1 bug sweep** — sort persists; recycle-bin purge cleans image dirs; clear-all-images is web-cache only; Kokoro deinit observer; accent gradients; stop-on-note/book-delete; appearance JS debounce; http/https image fetch; Helper throws; empty-draft discard; dead-code sweep.
+2. **B2 slash menu** — MarkdownSlashMenu wired in (15 tests; public Trigger init).
+3. **B3 NotesStore** — off-main encode; corrupt-file quarantine + `notes.backup.json` recovery; row-metadata cache.
+4. **B4 ToastCenter** — root toast + Undo-delete, list-export failure, book-finished + import-success.
+5. **B5 BookmarkStore** — per-item (`note:<uuid>` / `book:<uuid>:<ch>`), LRU 100, legacy slot migrated; writes every tick (500ms-coalesced).
+6. **B6 StreamingTTSPlaybackCore** — the ~330 duplicated pipeline lines are ONE class. Fixes: semaphore pacing (no poll spin), live rate, PLAY-ACCURATE progress, deinit hygiene.
+7. **B6b book pipeline** — named-entity pre-pass (truncation + cache-poisoning fixed; entities stripped, ~120 mapped, parseCompleted guard); footnote/aside/sup/rt scrubbing; br-in-cell comma-join; SystemEngine interruption + word-rate throttle; book-bar tap pauses the ongoing session; generating-tap no longer kills a book; read-along scan off-main; prefetch loops past empty chapters; lock-screen continuity; chapter label chip.
+8. **B6c scheme handler** — stop-safe + FileHandle-streamed in 256KB chunks off-main.
+9. **B7** — WAV export streamed (constant memory); exports named for content; background grace task bridges chapter gaps.
+10. **B8** — ZipReader CRC-32 + lenient name fallback; DRM/locked books explain themselves on the shelf.
+11. **B9** — tracker scan cursor; Supertonic idle unload (5 min); CRC/footnote/streaming tests; br-in-cell.
+12. **P22** — resume snappiness (precomputed read-along pieces).
+13. **onFinished** — EXACT chapter-completion signal (see below).
 
-1. **B1 bug sweep** — sort order persists (was never saved); recycle-bin
-   purge/empty clean `note-images/<uuid>` (leak); "Clear all cached images" is
-   web-cache only (was deleting note ATTACHMENTS); Kokoro engine deinit
-   observer removal (tier rebuilds leaked observers); accent gradients
-   replace hardcoded purple; deleting the speaking note/book stops playback;
-   epub appearance JS debounced; remote image fetch restricted to http/https;
-   vendored Helper throws instead of fatalError; empty-draft discard <10s;
-   dead code removed.
-2. **B2 slash menu** — MarkdownSlashMenu (fully built but 100% unwired) now
-   drives a floating command menu in the note editor; 15 new unit tests; the
-   menu's Trigger gained a public init.
-3. **B3 NotesStore** — debounced saves encode OFF-main (write hops back to
-   main, ordered); flushNow stays synchronous; corrupt notes.json is
-   QUARANTINED (was: silently overwritten → total data loss) with recovery
-   from `notes.backup.json` (rolling, every 10th save); row-metadata cache
-   (title/preview/words/minutes) replaces the preview cache.
-4. **B4 ToastCenter** — root toast surface + Undo-delete, list-export failure
-   surfacing, book-finished + import-success toasts.
-5. **B5 BookmarkStore** — per-item bookmarks (`note:<uuid>` /
-   `book:<uuid>:<ch>`, Documents/bookmarks.json, LRU 100, legacy slot
-   migrated); bookmark writes through EVERY tick (500ms-coalesced) — a jetsam
-   kill mid-chapter no longer loses the position; deleted notes' slots drop;
-   stableHash moved to SpeechLogic.TextHash with compatibility vectors.
-6. **B6 StreamingTTSPlaybackCore** — the ~330 duplicated pipeline lines of
-   both ONNX engines are ONE class (engines = model load + synthesis
-   closures). Fixes land once: semaphore pacing (no more 50ms poll spin),
-   LIVE rate (slider applies from the next sentence), PLAY-ACCURATE progress
-   (bars/lock-screen follow the sounding audio, not the schedule cursor that
-   ran 2-3 chunks ahead), deinit hygiene.
-7. **B6b book pipeline** (from the TTS/EPUB research report) — **named-entity
-   pre-pass in XhtmlText** (the first `&nbsp;` used to truncate a chapter and
-   the truncation was CACHED FOREVER; unknown entities stripped, ~120 mapped,
-   `extract` reports parseCompleted and the chapter cache refuses suspects);
-   footnote-family asides/sup noterefs/ruby rt scrubbed (with tests;
-   pullquotes kept); `<br>` inside table cells comma-joins instead of
-   splitting rows; SystemEngine interruption observer (phone calls used to
-   leave dead air + stuck UI) and word-rate callback throttling; book bar tap
-   pauses the ONGOING session even when scrolled elsewhere (re-speaking the
-   viewed chapter abandoned auto-advance); tapping play during .generating no
-   longer kills a book; read-along sentence scan off-main; prefetch loops
-   past empty chapters (fixes PDF prefetch too); lock-screen surface survives
-   chapter gaps ("Loading next chapter…"); chapter label chip in the reader
-   bar (from manifest TOC).
-8. **B6c scheme handler** — WKURLSchemeHandler is stop-safe (delivering to a
-   stopped task was an NSException — the likely "reader crash on big books")
+### The single most impactful fix
+**`onFinished` exact completion signal** — the old code guessed from a 0.98 progress heuristic; the last short chunk of a chapter often peaks at ~0.97, so books silently stranded at chapter boundaries. Every engine now reports exact completion; auto-advance fires when the audio actually ends — no heuristic, no missed chunks, no stranding. This was the direct answer to "TTS stopped moving to the next chapter."
    and streams via FileHandle in 256KB chunks off-main (no whole-book RAM copy).
 9. **B7/B8/B9** — WAV export STREAMED to disk (constant memory; a 200k-char
    chapter was ~1.1 GB of samples); exports named for their content;
