@@ -139,3 +139,41 @@ final class EpubInfoTests: XCTestCase {
         }
     }
 }
+
+// MARK: - CRC verification (v1.5 sage round)
+
+extension ZipReaderTests {
+
+    /// Flipping a payload byte must be CAUGHT — size-only validation used to
+    /// accept plausible-length garbage that then got cached as chapter text.
+    func testCorruptStoredPayloadFailsCRC() throws {
+        let data = fixture("sample")
+        let entries = try ZipReader.entries(in: data)
+        let mimetype = try XCTUnwrap(entries.first { $0.name == "mimetype" })
+
+        // Payload offset: local header (30) + local name + local extra.
+        let headerAt = mimetype.localHeaderOffset
+        let nameLength = Int(data[headerAt + 26]) | (Int(data[headerAt + 27]) << 8)
+        let extraLength = Int(data[headerAt + 28]) | (Int(data[headerAt + 29]) << 8)
+        let payloadAt = headerAt + 30 + nameLength + extraLength
+
+        var corrupted = data
+        corrupted[payloadAt] ^= 0xFF
+
+        XCTAssertThrowsError(try ZipReader.readEntry("mimetype", in: corrupted)) { error in
+            guard case ZipReader.ZipError.corrupt = error else {
+                return XCTFail("expected .corrupt, got \\(error)")
+            }
+        }
+    }
+
+    func testIntactEntriesStillPassCRC() throws {
+        let data = fixture("sample")
+        let entries = try ZipReader.entries(in: data)
+        XCTAssertTrue(entries.contains { $0.crc != 0 }, "fixture entries should carry real CRCs")
+        // Every stored+deflated entry reads back cleanly (all CRCs match).
+        for entry in entries where !entry.isDirectory {
+            _ = try ZipReader.read(entry, in: data)
+        }
+    }
+}

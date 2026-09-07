@@ -174,3 +174,35 @@ final class WAVWriterTests: XCTestCase {
         Int16(bitPattern: u16(data, at: 44 + index * 2))
     }
 }
+
+// MARK: - Streaming writer (v1.5 sage round)
+
+extension WAVWriterTests {
+
+    /// Byte-for-byte parity: appending in chunks must produce exactly the
+    /// single-shot wavData encoding, including the patched size fields.
+    func testStreamingWriterMatchesSingleShotEncoding() throws {
+        var samples = (0..<2000).map { Float($0 % 251) / 125.0 - 1.0 }
+        samples += [0.5, -0.5, 1.0, -1.0, .nan, .infinity]
+
+        let expected = WAVWriter.wavData(samples: samples, sampleRate: 24_000)
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("streaming-\(UUID().uuidString).wav")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let writer = try WAVWriter.StreamingWriter(url: url, sampleRate: 24_000)
+        let cuts = [0, 1, 700, 1000, samples.count - 1]
+        var previous = 0
+        for cut in cuts {
+            try writer.append(Array(samples[previous..<cut]))
+            previous = cut
+        }
+        try writer.append(Array(samples[previous...]))
+        try writer.close()
+
+        let streamed = try Data(contentsOf: url)
+        XCTAssertEqual(streamed, expected)
+        XCTAssertEqual(writer.sampleCount, samples.count)
+    }
+}

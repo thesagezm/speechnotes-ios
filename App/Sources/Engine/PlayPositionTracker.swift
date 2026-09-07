@@ -21,6 +21,10 @@ final class PlayPositionTracker {
     private var lastEmittedChar: Int = 0
     private var timer: Timer?
     private var totalChars = 1
+    /// Lowest marker index not yet fully passed by playback — `report()`
+    /// resumes its scan here instead of walking every marker from zero
+    /// (a 200k-char chapter schedules ~1300 markers, 3 heartbeats a second).
+    private var scannedMarker = 0
 
     init(playerNode: AVAudioPlayerNode) {
         self.playerNode = playerNode
@@ -48,6 +52,7 @@ final class PlayPositionTracker {
         lastNodeSample = -1
         nodeSampleBase = 0
         lastEmittedChar = 0
+        scannedMarker = 0
     }
 
     private func startHeartbeat() {
@@ -77,21 +82,25 @@ final class PlayPositionTracker {
         var prevSample: Int64 = 0
         var prevChar = 0
         var chars: Int? = nil
-        for marker in markers {
-            if played < marker.endSample {
-                let span = marker.endSample - prevSample
-                if span > 0 {
-                    let frac = Double(played - prevSample) / Double(span)
-                    chars = prevChar + Int(frac * Double(marker.endChar - prevChar))
-                } else {
-                    chars = prevChar
-                }
-                break
-            }
-            prevSample = marker.endSample
-            prevChar = marker.endChar
+        var index = scannedMarker
+        while index < markers.count, played >= markers[index].endSample {
+            prevSample = markers[index].endSample
+            prevChar = markers[index].endChar
+            index += 1
         }
-        if chars == nil { chars = prevChar }
+        scannedMarker = index
+        if index < markers.count {
+            let marker = markers[index]
+            let span = marker.endSample - prevSample
+            if span > 0 {
+                let frac = Double(played - prevSample) / Double(span)
+                chars = prevChar + Int(frac * Double(marker.endChar - prevChar))
+            } else {
+                chars = prevChar
+            }
+        } else {
+            chars = prevChar
+        }
 
         if let chars, chars > lastEmittedChar {
             lastEmittedChar = chars

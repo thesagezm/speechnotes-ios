@@ -116,3 +116,30 @@ extension XhtmlTextTests {
         XCTAssertTrue(result.text.contains("—"))
     }
 }
+
+// MARK: - Footnote scrubbing (v1.5 sage round)
+
+extension XhtmlTextTests {
+
+    func testFootnoteAsidesAndNoterefsAreScrubbed() {
+        let xhtml = """
+        <html><body>
+        <p>Solid ground<sup class="noteref"><a href="#n1">12</a></sup> beneath us.</p>
+        <aside epub:type="footnote" id="n1"><p>12. The footnote body that used to interrupt.</p></aside>
+        <p>After the aside.</p>
+        </body></html>
+        """
+        let text = XhtmlText.plainText(from: xhtml)
+        XCTAssertTrue(text.contains("Solid ground beneath us."), text)
+        XCTAssertFalse(text.contains("footnote body"), text)
+        XCTAssertFalse(text.contains("12."), text)
+        XCTAssertTrue(text.contains("After the aside."), text)
+    }
+
+    func testNonFootnoteAsidesAreKept() {
+        // epub:type="pullquote"-style asides are CONTENT — never scrubbed.
+        let xhtml = "<html><body><p>Main text.</p><aside epub:type=\"pullquote\"><p>A quoted aside.</p></aside></body></html>"
+        let text = XhtmlText.plainText(from: xhtml)
+        XCTAssertTrue(text.contains("A quoted aside."), text)
+    }
+}

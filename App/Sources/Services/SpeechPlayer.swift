@@ -595,6 +595,25 @@ final class SpeechPlayer: ObservableObject {
         engine?.name ?? "none"
     }
 
+    /// Unloads the ~399 MB Supertonic session set after 5 minutes idle:
+    /// in LiveContainer every guest shares the jetsam budget, so a merely
+    /// SELECTED engine shouldn't pin it for hours. The engine transparently
+    /// reloads (and logs) on next use.
+    private var supertonicIdleUnloadTask: Task<Void, Never>?
+    private func scheduleSupertonicIdleUnload() {
+        supertonicIdleUnloadTask?.cancel()
+        guard engineKind == .supertonic, supertonicEngine != nil else { return }
+        supertonicIdleUnloadTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 5 * 60 * 1_000_000_000)
+            guard !Task.isCancelled, let self else { return }
+            guard self.engineKind == .supertonic, self.state == .idle, !self.isExporting else { return }
+            guard self.supertonicEngine?.hasLoadedModel == true else { return }
+            Log.shared.info("SpeechPlayer: unloading idle Supertonic sessions (~399 MB)")
+            self.supertonicEngine = nil
+            self.rebuildEngine()
+        }
+    }
+
     /// Which model file the cached OnnxKokoroEngine instance points at —
     /// the fp32 and uint8 tiers share one slot, so a tier switch must
     /// rebuild it rather than reuse the other tier's session.
@@ -621,6 +640,7 @@ final class SpeechPlayer: ObservableObject {
 
     private func rebuildEngine() {
         engine?.stop()
+        scheduleSupertonicIdleUnload()
 
         // The Supertonic set is ~399 MB of resident sessions — release it as
         // soon as another engine takes over (single-slot rule, PocketPal

@@ -33,6 +33,10 @@ final class SupertonicEngine: NSObject, SpeechEngine {
 
     private let core: StreamingTTSPlaybackCore
 
+    /// True once sessions were actually loaded this instance — the idle
+    /// unload only pays off when there's something resident to free.
+    var hasLoadedModel: Bool { modelLoadAttempted }
+
     // Model state — the core's generateQueue only.
     private var ortEnv: ORTEnv?
     private var tts: TextToSpeech?
