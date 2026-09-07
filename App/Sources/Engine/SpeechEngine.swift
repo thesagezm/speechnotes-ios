@@ -14,7 +14,7 @@ protocol SpeechEngine: AnyObject {
     var onStateChanged: ((SpeechState) -> Void)? { get set }
     /// Progress through the spoken text, 0…1 (chunk-granular). Engines that
     /// can't measure progress simply never call it.
-    var onProgress: ((Double) -> Void)?
+    var onProgress: ((Double) -> Void)? { get set }
     /// Fired ONLY when an utterance reaches its natural end — the final
     /// audio buffer has played out. DELIBERATELY not fired on stop(): a real
     /// completion signal lets book auto-advance fire exactly when the audio

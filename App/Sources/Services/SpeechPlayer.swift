@@ -705,12 +705,13 @@ final class SpeechPlayer: ObservableObject {
                       activeEngine === self.engine else { return }
                 self.state = newState
                 if newState == .idle {
-                    // NOTE idle path: no onFinished signal fired it (engine
-                    // reported completion separately above). Book auto-advance
-                    // already ran via onFinished when the audio actually
-                    // ended — this branch only runs for externally-driven
-                    // idles (engine fallback path / suspension), so just tidy.
-                    let bookSessionContinues = false
+                    // BOOK completion is handled ENTIRELY by onFinished
+                    // (which fires before this idle transition): it advances
+                    // the chapter, re-publishes the lock screen, and clears
+                    // the bookmark. This branch must NOT run for a book —
+                    // clearing nowPlayingTitle here would wipe the next
+                    // chapter's title that onNaturalFinish just set.
+                    guard self.onNaturalFinish == nil else { return }
                     if self.lastRawProgress >= 0.98 {
                         self.clearBookmark()
                     } else if self.inFlightBookmark != nil {
@@ -723,16 +724,7 @@ final class SpeechPlayer: ObservableObject {
                     self.nowPlayingBookId = nil
                     self.finishAuditionIfActive()
                     self.endReadAlong()
-                    if bookSessionContinues {
-                        NowPlayingCenter.shared.publish(
-                            title: "Loading next chapter…",
-                            isPlaying: false,
-                            progress: nil,
-                            rate: Float(self.rateMultiplier)
-                        )
-                    } else {
-                        NowPlayingCenter.shared.clear()
-                    }
+                    NowPlayingCenter.shared.clear()
                 } else {
                     NowPlayingCenter.shared.publish(
                         title: self.nowPlayingTitle,
@@ -780,7 +772,19 @@ final class SpeechPlayer: ObservableObject {
                 // guessed from a 0.98 progress heuristic, which missed the
                 // last short chunk and stranded books mid-listen.
                 self.lastRawProgress = 1.0
+                let bookWasPlaying = self.onNaturalFinish != nil
                 self.clearBookmark()
+                // Keep the lock-screen surface alive across the chapter gap
+                // (clearing it blanks Control Center mid-book): the next
+                // chapter's speak() re-publishes once it starts generating.
+                if bookWasPlaying {
+                    NowPlayingCenter.shared.publish(
+                        title: "Loading next chapter…",
+                        isPlaying: false,
+                        progress: nil,
+                        rate: Float(self.rateMultiplier)
+                    )
+                }
                 self.onNaturalFinish?()
                 self.lastRawProgress = 0
                 self.resumeBaseFraction = 0
@@ -789,7 +793,12 @@ final class SpeechPlayer: ObservableObject {
                 self.nowPlayingBookId = nil
                 self.finishAuditionIfActive()
                 self.endReadAlong()
-                NowPlayingCenter.shared.clear()
+                // Clear only when the book truly ended (onNaturalFinish
+                // already cleared activeBook); the gap publish above is
+                // replaced by the next chapter's generating publish.
+                if self.onNaturalFinish == nil {
+                    NowPlayingCenter.shared.clear()
+                }
             }
         }
     }
