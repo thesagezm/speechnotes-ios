@@ -135,6 +135,10 @@ public enum XhtmlText {
         /// `sup` noteref digit reads as a random number. Scrub both; `rt`
         /// (ruby annotation) likewise — the base text carries the meaning.
         private var asideDepth = 0
+        /// Inside `<td>/<th>` a `<br>` means "same cell, new line" — the
+        /// cells are comma-joined for speech, so a br must NOT flush a
+        /// paragraph (it split table rows mid-sentence).
+        private var cellDepth = 0
 
         var paragraphText: String {
             flush()
@@ -172,17 +176,25 @@ public enum XhtmlText {
                 return
             }
             guard skipDepth == 0, asideDepth == 0 else { return }
-            if Self.blockTags.contains(name) {
-                flush()
-            } else if name == "br" {
-                flush()
-            } else if name == "td" || name == "th" {
+            if name == "td" || name == "th" {
+                cellDepth += 1
                 // Table cells read as one running line, comma-joined — a
                 // paragraph break per cell would be unbearably choppy.
                 let text = buffer
                     .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 if !text.isEmpty { buffer = text + ", " }
+            } else if name == "br" {
+                if cellDepth > 0 {
+                    // Table cells read as one running line, comma-joined — a
+                    // br inside a cell is "same cell, next line", not a
+                    // paragraph break (it used to split rows mid-sentence).
+                    buffer += ", "
+                } else {
+                    flush()
+                }
+            } else if Self.blockTags.contains(name) {
+                flush()
             } else if name == "img" {
                 // Always emit a word boundary — an alt-less image must not
                 // glue the surrounding words together ("Beforeafter").
@@ -216,8 +228,11 @@ public enum XhtmlText {
                 }
                 return
             }
+            if name == "td" || name == "th" {
+                cellDepth = max(0, cellDepth - 1)
+            }
             guard skipDepth == 0 else { return }
-            if Self.blockTags.contains(name) || name == "br" {
+            if Self.blockTags.contains(name) || (name == "br" && cellDepth == 0) {
                 flush()
             }
         }
