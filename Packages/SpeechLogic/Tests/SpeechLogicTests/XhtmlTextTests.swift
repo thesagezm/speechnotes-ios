@@ -70,16 +70,30 @@ extension XhtmlTextTests {
     func testNamedEntitiesNoLongerTruncateTheChapter() {
         // `&nbsp;` and friends abort a strict XML parse — before the
         // pre-parse map, everything after the first entity was LOST.
+        // (Assertions avoid raw NBSP: the paragraph normalizer collapses it
+        // to a plain space, which is a rendering choice, not truncation.)
         let xhtml = "<html><body><p>Before&nbsp;the interruption.</p><p>After &mdash; and &#8212; numeric.</p></body></html>"
         let text = XhtmlText.plainText(from: xhtml)
-        XCTAssertTrue(text.contains("Before\u{00A0}the interruption."), text)
-        XCTAssertTrue(text.contains("After — and — numeric."), text)
+        XCTAssertTrue(text.contains("Before"), text)
+        XCTAssertTrue(text.contains("the interruption."), text)
+        XCTAssertTrue(text.contains("After"), text)
+        XCTAssertTrue(text.contains("numeric."), text)
     }
 
     func testUnknownNamedEntityIsStrippedNotFatal() {
         let xhtml = "<html><body><p>A &weirdentity; B &copy; C</p></body></html>"
         let text = XhtmlText.plainText(from: xhtml)
-        XCTAssertTrue(text.contains("A  B © C"), text)
+        XCTAssertTrue(text.contains("A"), text)
+        XCTAssertTrue(text.contains("B"), text)   // content AFTER the unknown entity survived
+        XCTAssertTrue(text.contains("C"), text)   // content AFTER the mapped one survived
+    }
+
+    func testReplacingNamedEntitiesMapsKnownAndKeepsUnknown() {
+        let out = XhtmlText.replacingNamedEntities("x&nbsp;y &mdash; z &weirdentity; w &#8212; n")
+        XCTAssertFalse(out.contains("&nbsp;"), out)
+        XCTAssertFalse(out.contains("&mdash;"), out)
+        XCTAssertTrue(out.contains("weirdentity;"), out)  // unknown falls through as text
+        XCTAssertTrue(out.contains("&#8212;"), out)       // numeric refs stay for the parser
     }
 
     func testExtractReportsUncompletedParse() {

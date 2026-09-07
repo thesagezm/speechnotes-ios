@@ -143,6 +143,7 @@ final class SupertonicEngine: NSObject, SpeechEngine {
 
     func renderWAV(
         text: String,
+        title: String? = nil,
         onChunkProgress: ((Double) -> Void)? = nil,
         completion: @escaping (Result<URL, Error>) -> Void
     ) {
@@ -150,7 +151,7 @@ final class SupertonicEngine: NSObject, SpeechEngine {
             completion(.failure(SupertonicEngineError.modelUnavailable))
             return
         }
-        core.renderWAV(text: text, onChunkProgress: onChunkProgress, completion: completion)
+        core.renderWAV(text: text, title: title, onChunkProgress: onChunkProgress, completion: completion)
     }
 }
 

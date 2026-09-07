@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 import SpeechLogic
 
 /// Drives TTS for books on top of the note playback machinery: ONE chapter
@@ -91,12 +92,14 @@ final class BookPlaybackController: ObservableObject {
                         chapterIndex: index
                     )
                 )
+                endChapterGapGrace()
                 return
             }
             Log.shared.info("BookPlayback: ch\(index) of \(book.title) has no speech text — skipping")
             index += 1
         }
         Log.shared.info("BookPlayback: no speakable chapters from \(startIndex) in \(book.title)")
+        endChapterGapGrace()
         activeBook = nil
     }
 
@@ -116,12 +119,35 @@ final class BookPlaybackController: ObservableObject {
             Log.shared.info("BookPlayback: finished \(book.title)")
             Haptics.success()
             ToastCenter.shared.show("Finished \"\(book.title.prefix(40))\"")
+            endChapterGapGrace()
             activeBook = nil
             return
         }
+        // Between chapters NOTHING is playing, so iOS may suspend the app
+        // despite the audio background mode — the book stops mid-listen.
+        // A background grace task bridges the gap (chapter text resolve +
+        // first-chunk generation) and ends once the next chapter speaks.
+        beginChapterGapGrace()
         Task { [weak self] in
             await self?.speak(book: book, from: next)
         }
+    }
+
+    // MARK: - Chapter-gap background grace
+
+    private var chapterGapTask: UIBackgroundTaskIdentifier = .invalid
+
+    private func beginChapterGapGrace() {
+        endChapterGapGrace()
+        chapterGapTask = UIApplication.shared.beginBackgroundTask(withName: "BookChapterGap") { [weak self] in
+            self?.endChapterGapGrace()
+        }
+    }
+
+    private func endChapterGapGrace() {
+        guard chapterGapTask != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(chapterGapTask)
+        chapterGapTask = .invalid
     }
 
     /// Chapter speech text: disk cache first, then extract off-main and cache
@@ -188,7 +214,7 @@ final class BookPlaybackController: ObservableObject {
             Log.shared.info("BookPlayback: export — ch\(chapterIndex) of \(book.title) has no speech text")
             return
         }
-        player.export(text)
+        player.export(text, title: book.title)
     }
 
     /// Resolves the sounding chapter's display label from the manifest TOC

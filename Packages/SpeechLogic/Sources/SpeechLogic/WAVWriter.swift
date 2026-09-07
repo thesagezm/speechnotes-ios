@@ -90,7 +90,7 @@ public enum WAVWriter {
     /// Converts one `Float` sample to `Int16` by multiplying by 32767 and
     /// clamping to `[-32768, 32767]`. `NaN` maps to `0` (silence), and
     /// infinities clamp to the matching full-scale value.
-    private static func quantize(_ sample: Float) -> Int16 {
+    static func quantize(_ sample: Float) -> Int16 {
         if sample.isNaN {
             return 0
         }
@@ -106,17 +106,100 @@ public enum WAVWriter {
 
     /// Appends a `UInt16` in little-endian byte order, one explicit byte at a
     /// time (never relies on host endianness).
-    private static func appendUInt16(_ value: UInt16, to data: inout Data) {
+    static func appendUInt16(_ value: UInt16, to data: inout Data) {
         data.append(UInt8(value & 0xFF))
         data.append(UInt8((value >> 8) & 0xFF))
     }
 
     /// Appends a `UInt32` in little-endian byte order, one explicit byte at a
     /// time (never relies on host endianness).
-    private static func appendUInt32(_ value: UInt32, to data: inout Data) {
+    static func appendUInt32(_ value: UInt32, to data: inout Data) {
         data.append(UInt8(value & 0xFF))
         data.append(UInt8((value >> 8) & 0xFF))
         data.append(UInt8((value >> 16) & 0xFF))
         data.append(UInt8((value >> 24) & 0xFF))
+    }
+}
+
+/// Streaming WAV writer: constant memory regardless of render length.
+///
+/// `renderWAV` used to accumulate every chunk's samples in one `[Float]` —
+/// a 200k-character chapter ≈ 1.1 GB of samples, a guaranteed jetsam kill.
+/// This writer emits the 44-byte RIFF header with placeholder sizes up
+/// front, appends Int16 frames as chunks finish, and patches both size
+/// fields on close. NOT thread-safe: one writer per export, used from the
+/// engine's serial generate queue.
+public final class StreamingWriter {
+
+    private let fileHandle: FileHandle
+    private let sampleRate: Int
+    public private(set) var sampleCount = 0
+    private var closed = false
+
+    /// Creates (or truncates) the file at `url` and writes the canonical
+    /// header with placeholder size fields.
+    public init(url: URL, sampleRate: Int) throws {
+        FileManager.default.createFile(atPath: url.path, contents: nil)
+        self.fileHandle = try FileHandle(forWritingTo: url)
+        self.sampleRate = sampleRate
+
+        var header = Data()
+        header.append(contentsOf: Array("RIFF".utf8))
+        appendUInt32(0, to: &header)                     // RIFF size — patched at close
+        header.append(contentsOf: Array("WAVE".utf8))
+        header.append(contentsOf: Array("fmt ".utf8))
+        appendUInt32(16, to: &header)
+        appendUInt16(1, to: &header)                     // PCM
+        appendUInt16(1, to: &header)                     // mono
+        appendUInt32(UInt32(sampleRate), to: &header)
+        appendUInt32(UInt32(sampleRate * 2), to: &header)
+        appendUInt16(2, to: &header)
+        appendUInt16(16, to: &header)
+        header.append(contentsOf: Array("data".utf8))
+        appendUInt32(0, to: &header)                     // data size — patched at close
+        try fileHandle.write(contentsOf: header)
+    }
+
+    /// Encodes and appends one batch of mono Float32 samples.
+    public func append(_ samples: [Float]) throws {
+        guard !closed else { throw WAVWriterError.alreadyClosed }
+        var bytes = Data(capacity: samples.count * 2)
+        for sample in samples {
+            appendUInt16(UInt16(bitPattern: WAVWriter.quantize(sample)), to: &bytes)
+        }
+        sampleCount += samples.count
+        try fileHandle.write(contentsOf: bytes)
+    }
+
+    /// Patches the RIFF + data size fields and closes the file. Safe to
+    /// call twice; a writer dropped without close() still finalizes.
+    public func close() throws {
+        guard !closed else { return }
+        closed = true
+        let dataByteCount = sampleCount * 2
+        try fileHandle.seek(toOffset: 4)
+        var riffSize = Data()
+        appendUInt32(UInt32(36 + dataByteCount), to: &riffSize)
+        try fileHandle.write(contentsOf: riffSize)
+        try fileHandle.seek(toOffset: 40)
+        var dataSize = Data()
+        appendUInt32(UInt32(dataByteCount), to: &dataSize)
+        try fileHandle.write(contentsOf: dataSize)
+        try fileHandle.close()
+    }
+
+    deinit {
+        if !closed { try? close() }
+    }
+}
+
+/// Streaming-writer failures.
+public enum WAVWriterError: Error, LocalizedError {
+    case alreadyClosed
+
+    public var errorDescription: String? {
+        switch self {
+        case .alreadyClosed: return "The streaming WAV writer was already closed."
+        }
     }
 }

@@ -543,7 +543,7 @@ struct NoteEditorView: View {
                     // what the user just wrote, not whatever the 400 ms
                     // debounce last committed.
                     updateSpeechCaches()
-                    player.export(speechText)
+                    player.export(speechText, title: currentNote?.title)
                 } label: {
                     if case .running(let progress) = player.exportState {
                         Label("Exporting… \(Int(progress * 100))%", systemImage: "square.and.arrow.up")

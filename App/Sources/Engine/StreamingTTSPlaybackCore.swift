@@ -327,6 +327,7 @@ final class StreamingTTSPlaybackCore: NSObject {
 
     func renderWAV(
         text: String,
+        title: String? = nil,
         onChunkProgress: ((Double) -> Void)? = nil,
         completion: @escaping (Result<URL, Error>) -> Void
     ) {
@@ -355,34 +356,40 @@ final class StreamingTTSPlaybackCore: NSObject {
                 return
             }
 
-            var samples: [Float] = []
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy-MM-dd-HHmmss"
+            let exportsDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("Exports")
             do {
+                try FileManager.default.createDirectory(at: exportsDir, withIntermediateDirectories: true)
+                // Exports are named for the content now — "Note-2026…" told
+                // the user nothing two days later.
+                let base = Self.sanitizedFilename(title ?? "Note")
+                let url = exportsDir.appendingPathComponent("\(base)-\(formatter.string(from: Date())).wav")
+
+                // STREAMED: one chunk in memory at a time. The old path
+                // accumulated every sample — a 200k-char chapter was ~1.1 GB.
+                let writer = try WAVWriter.StreamingWriter(url: url, sampleRate: Int(self.sampleRate))
+                var charsDone = 0
                 for (index, chunk) in renderChunks.enumerated() {
                     if index > 0, self.config.exportInterChunkSilence > 0 {
-                        samples.append(contentsOf: [Float](
+                        try writer.append([Float](
                             repeating: 0,
                             count: Int(self.config.exportInterChunkSilence * Float(self.sampleRate))
                         ))
                     }
                     do {
-                        samples.append(contentsOf: try Self.generateWithRetry(self, chunk.text, attempts: 3))
+                        try writer.append(try Self.generateWithRetry(self, chunk.text, attempts: 3))
                     } catch {
                         Log.shared.error("\(self.config.logPrefix) export chunk failed after retries (\(error)): «\(chunk.text.prefix(60))» — silence inserted")
-                        samples.append(contentsOf: Array(repeating: Float(0), count: Int(self.sampleRate) / 2))
+                        try writer.append([Float](repeating: 0, count: Int(self.sampleRate) / 2))
                     }
-                    let charsDone = renderChunks.prefix(index + 1).reduce(0) { $0 + $1.length }
+                    charsDone += chunk.length
                     let progress = min(1.0, Double(charsDone) / Double(total))
                     DispatchQueue.main.async { onChunkProgress?(progress) }
                 }
-
-                let formatter = DateFormatter()
-                formatter.dateFormat = "yyyy-MM-dd-HHmmss"
-                let exportsDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-                    .appendingPathComponent("Exports")
-                try FileManager.default.createDirectory(at: exportsDir, withIntermediateDirectories: true)
-                let url = exportsDir.appendingPathComponent("Note-\(formatter.string(from: Date())).wav")
-                try WAVWriter.write(samples: samples, sampleRate: Int(self.sampleRate), to: url)
-                let seconds = Double(samples.count) / self.sampleRate
+                try writer.close()
+                let seconds = Double(writer.sampleCount) / self.sampleRate
                 Log.shared.info("\(self.config.logPrefix) exported \(String(format: "%.1f", seconds))s of audio to \(url.lastPathComponent)")
                 DispatchQueue.main.async { completion(.success(url)) }
             } catch {
@@ -390,6 +397,16 @@ final class StreamingTTSPlaybackCore: NSObject {
                 DispatchQueue.main.async { completion(.failure(error)) }
             }
         }
+    }
+
+    /// "Chapter One: The Beginning" → "Chapter_One__The_Beginning" (≤40
+    /// chars) — letters/digits survive, everything else becomes "_".
+    private static func sanitizedFilename(_ text: String, maxLen: Int = 40) -> String {
+        let truncated = text.count > maxLen ? String(text.prefix(maxLen)) : text
+        let cleaned = truncated.reduce(into: "") { partial, char in
+            partial.append(char.isLetter || char.isNumber ? char : "_")
+        }
+        return cleaned.isEmpty ? "Note" : cleaned
     }
 
     // MARK: - Retry + buffers

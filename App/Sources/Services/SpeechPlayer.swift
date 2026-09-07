@@ -908,7 +908,7 @@ final class SpeechPlayer: ObservableObject {
         return false
     }
 
-    func export(_ text: String) {
+    func export(_ text: String, title: String? = nil) {
         guard case .idle = exportState else { return }
         guard usingSystemFallback == false, engineKind != .system else {
             exportState = .failed("Export needs a neural engine — download a Kokoro model in Settings first.")
@@ -940,9 +940,9 @@ final class SpeechPlayer: ObservableObject {
         }
 
         if engineKind == .supertonic, let supertonicEngine {
-            supertonicEngine.renderWAV(text: text, onChunkProgress: progress, completion: finish)
+            supertonicEngine.renderWAV(text: text, title: title, onChunkProgress: progress, completion: finish)
         } else if let onnxEngine {
-            onnxEngine.renderWAV(text: text, onChunkProgress: progress, completion: finish)
+            onnxEngine.renderWAV(text: text, title: title, onChunkProgress: progress, completion: finish)
         } else {
             exportState = .failed("No neural engine available — download a model in Settings first.")
         }
