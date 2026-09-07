@@ -173,7 +173,7 @@ extension ZipReaderTests {
         XCTAssertTrue(entries.contains { $0.crc != 0 }, "fixture entries should carry real CRCs")
         // Every stored+deflated entry reads back cleanly (all CRCs match).
         for entry in entries where !entry.isDirectory {
-            _ = try ZipReader.read(entry, in: data)
+            try ZipReader.read(entry, in: data)
         }
     }
 }

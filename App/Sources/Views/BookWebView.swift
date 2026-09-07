@@ -209,7 +209,7 @@ struct BookWebView: UIViewRepresentable {
                     guard self?.isLive(taskID) == true else { return }
                     self?.liveTasks.remove(taskID)
                     if failed {
-                        task.didFailWithError(URLError(.fileReadFailed))
+                        task.didFailWithError(URLError(.cannotOpenFile))
                     } else {
                         task.didFinish()
                     }

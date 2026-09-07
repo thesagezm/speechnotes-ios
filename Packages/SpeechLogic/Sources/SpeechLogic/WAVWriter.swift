@@ -119,7 +119,6 @@ public enum WAVWriter {
         data.append(UInt8((value >> 16) & 0xFF))
         data.append(UInt8((value >> 24) & 0xFF))
     }
-}
 
 /// Streaming WAV writer: constant memory regardless of render length.
 ///
@@ -202,4 +201,5 @@ public enum WAVWriterError: Error, LocalizedError {
         case .alreadyClosed: return "The streaming WAV writer was already closed."
         }
     }
+}
 }
