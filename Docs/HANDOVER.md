@@ -620,3 +620,107 @@ Branch `v15-books-complete` off main fbfb854. Tip `b530289`, ALL CI jobs green
 Bump the four version fields → 1.5.0/30, README, fast-forward main, tag v1.5.0,
 attach the IPA from the green run. Until then `v15-books-complete` stays the
 integration branch.
+
+## 2026-09-07 addendum #11 — sage-upgrades: page-follow reverted + 11 upgrade batches (ALL CI GREEN)
+
+Branch `sage-upgrades` off `v15-books-complete`. Two pushes on the base branch:
+
+- **`f5214d9` on `v15-books-complete`: REVERT of `9b54af7`** (PDF page-follow)
+  per user device report ("TTS slow, highlighter gone"). Reverting restored the
+  ReadAlongView swap for PDFs and removed the page-follow machinery. All other
+  v1.5 work untouched. If page-turns are ever re-attempted: follow at most once
+  per page crossing, skip turns during user interaction, never re-decode
+  offsets outside chapter changes.
+
+### What landed on `sage-upgrades` (tip `36c5aa8`, run 34072972995 ALL GREEN — logic tests, 4 spikes, IPA)
+
+1. **B1 bug sweep** — sort order persists (was never saved); recycle-bin
+   purge/empty clean `note-images/<uuid>` (leak); "Clear all cached images" is
+   web-cache only (was deleting note ATTACHMENTS); Kokoro engine deinit
+   observer removal (tier rebuilds leaked observers); accent gradients
+   replace hardcoded purple; deleting the speaking note/book stops playback;
+   epub appearance JS debounced; remote image fetch restricted to http/https;
+   vendored Helper throws instead of fatalError; empty-draft discard <10s;
+   dead code removed.
+2. **B2 slash menu** — MarkdownSlashMenu (fully built but 100% unwired) now
+   drives a floating command menu in the note editor; 15 new unit tests; the
+   menu's Trigger gained a public init.
+3. **B3 NotesStore** — debounced saves encode OFF-main (write hops back to
+   main, ordered); flushNow stays synchronous; corrupt notes.json is
+   QUARANTINED (was: silently overwritten → total data loss) with recovery
+   from `notes.backup.json` (rolling, every 10th save); row-metadata cache
+   (title/preview/words/minutes) replaces the preview cache.
+4. **B4 ToastCenter** — root toast surface + Undo-delete, list-export failure
+   surfacing, book-finished + import-success toasts.
+5. **B5 BookmarkStore** — per-item bookmarks (`note:<uuid>` /
+   `book:<uuid>:<ch>`, Documents/bookmarks.json, LRU 100, legacy slot
+   migrated); bookmark writes through EVERY tick (500ms-coalesced) — a jetsam
+   kill mid-chapter no longer loses the position; deleted notes' slots drop;
+   stableHash moved to SpeechLogic.TextHash with compatibility vectors.
+6. **B6 StreamingTTSPlaybackCore** — the ~330 duplicated pipeline lines of
+   both ONNX engines are ONE class (engines = model load + synthesis
+   closures). Fixes land once: semaphore pacing (no more 50ms poll spin),
+   LIVE rate (slider applies from the next sentence), PLAY-ACCURATE progress
+   (bars/lock-screen follow the sounding audio, not the schedule cursor that
+   ran 2-3 chunks ahead), deinit hygiene.
+7. **B6b book pipeline** (from the TTS/EPUB research report) — **named-entity
+   pre-pass in XhtmlText** (the first `&nbsp;` used to truncate a chapter and
+   the truncation was CACHED FOREVER; unknown entities stripped, ~120 mapped,
+   `extract` reports parseCompleted and the chapter cache refuses suspects);
+   footnote-family asides/sup noterefs/ruby rt scrubbed (with tests;
+   pullquotes kept); `<br>` inside table cells comma-joins instead of
+   splitting rows; SystemEngine interruption observer (phone calls used to
+   leave dead air + stuck UI) and word-rate callback throttling; book bar tap
+   pauses the ONGOING session even when scrolled elsewhere (re-speaking the
+   viewed chapter abandoned auto-advance); tapping play during .generating no
+   longer kills a book; read-along sentence scan off-main; prefetch loops
+   past empty chapters (fixes PDF prefetch too); lock-screen surface survives
+   chapter gaps ("Loading next chapter…"); chapter label chip in the reader
+   bar (from manifest TOC).
+8. **B6c scheme handler** — WKURLSchemeHandler is stop-safe (delivering to a
+   stopped task was an NSException — the likely "reader crash on big books")
+   and streams via FileHandle in 256KB chunks off-main (no whole-book RAM copy).
+9. **B7/B8/B9** — WAV export STREAMED to disk (constant memory; a 200k-char
+   chapter was ~1.1 GB of samples); exports named for their content;
+   background grace task bridges the between-chapters gap; ZipReader verifies
+   CRC-32 per entry (size-only checks accepted corrupt garbage that got
+   cached) + percent-decode/case-fold name fallback; DRM/locked books explain
+   themselves on the shelf card (`Book.importError`); Supertonic sessions
+   unload after 5 min idle (~399 MB freed, reloads on next use);
+   PlayPositionTracker scan cursor.
+
+### Device checklist for `sage-upgrades` (against the v1.5 checklist, deltas only)
+
+1. Editor: type `/` at line start → slash menu; apply bold/table with and
+   without selection; menu closes when the context breaks.
+2. Kill the app mid-chapter (jetsam or swipe-up) → relaunch → the note resumes
+   from the last sentence, NOT from the last backgrounding.
+3. Two notes + one book: resume positions are INDEPENDENT now.
+4. Speed slider during playback: new rate applies from the next sentence.
+5. Progress % (bars + lock screen) matches the ears; read-along unchanged.
+6. Delete a speaking note/book → playback stops; bin purge cleans image dirs.
+7. Chapter transition: no silence-suspension with headphones; lock screen
+   shows "Loading next chapter…" then the next chapter; bar shows the
+   sounding chapter's label; tapping the bar while scrolled elsewhere
+   PAUSES (does not re-speak).
+8. Import a DRM epub / locked PDF → the shelf card explains it.
+9. A book with `&nbsp;`/footnotes: chapter speaks fully past the entity;
+   footnotes/noterefs don't interrupt; second play uses the cache (not
+   re-extraction).
+10. WAV export of a LONG chapter: completes without jetsam; file named after
+    the content; plays in Files.
+11. Unplug headphones → playback pauses (does not switch to speaker).
+12. Supertonic selected + idle >5 min → log line "unloading idle Supertonic";
+    next play reloads (a few seconds) and works.
+
+### Deliberately deferred (research report items needing product decisions or
+### bigger prototyping — user's call)
+
+Cross-chapter pre-generation (P3), epub.js annotations (P5), selection
+popover + dictionary (P6), paginated flow (P7), in-webview search jump
+(P8, needs the native search), adaptive generation-ahead (P10), two-column
+epub extraction (P19), epub narration-follow (P20 — the PDF revert stung;
+needs a product decision first).
+
+Golden rules unchanged. `sage-upgrades` is NOT merged to `v15-books-complete`
+yet — merge after the device round.
