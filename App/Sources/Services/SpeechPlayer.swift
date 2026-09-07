@@ -1,4 +1,5 @@
 import Foundation
+import AVFoundation
 import SpeechLogic
 
 /// UI-facing wrapper around the active speech engine. Engines are swappable at
@@ -136,8 +137,27 @@ final class SpeechPlayer: ObservableObject {
     private func beginReadAlong(fullText: String) {
         activeSpeechText = fullText
         readAlongRange = nil
-        readAlongPieces = SentenceChunker.sentencePieces(in: fullText)
+        readAlongPieces = []
+        readAlongPiecesTask?.cancel()
+        readAlongGeneration += 1
+        let generation = readAlongGeneration
+        // A 200k-char chapter means a full sentence scan + ~1000 tuple
+        // allocations — exactly at the chapter transition where the next
+        // generation also kicks off. Compute off the main actor; the
+        // highlight simply appears a beat later.
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let pieces = SentenceChunker.sentencePieces(in: fullText)
+            await MainActor.run {
+                guard let self,
+                      self.readAlongGeneration == generation,
+                      self.activeSpeechText == fullText else { return }
+                self.readAlongPieces = pieces
+            }
+        }
     }
+
+    private var readAlongPiecesTask: Task<Void, Never>?
+    private var readAlongGeneration = 0
 
     private static func leadingWhitespaceUTF16(_ s: String) -> Int {
         var count = 0
@@ -171,6 +191,8 @@ final class SpeechPlayer: ObservableObject {
     }
 
     private func endReadAlong() {
+        readAlongPiecesTask?.cancel()
+        readAlongGeneration += 1
         activeSpeechText = nil
         readAlongRange = nil
         readAlongPieces = []
@@ -521,6 +543,23 @@ final class SpeechPlayer: ObservableObject {
             Log.shared.info("SpeechPlayer: deleted note was playing — stopping")
             self.stop()
         }
+        // Headphones unplugged / Bluetooth headset died → iOS switches the
+        // route to the speaker mid-sentence. Standard audio-app behavior is
+        // to PAUSE, not to start blaring from the speaker. One observer here
+        // covers every engine.
+        NotificationCenter.default.addObserver(
+            forName: AVAudioSession.routeChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let self else { return }
+            let reasonRaw = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt ?? 0
+            if reasonRaw == AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue,
+               self.state == .speaking {
+                Log.shared.info("SpeechPlayer: audio route lost — pausing")
+                self.engine?.pause()
+            }
+        }
         Log.shared.info("SpeechPlayer wired (engine=\(engineKind.rawValue), voice=\(voice), supertonic=\(supertonicVoice)@\(supertonicLang))")
     }
 
@@ -634,6 +673,12 @@ final class SpeechPlayer: ObservableObject {
                       activeEngine === self.engine else { return }
                 self.state = newState
                 if newState == .idle {
+                    // Captured BEFORE the hook fires: a natural book-chapter
+                    // finish arms the next chapter's generation, and the
+                    // lock-screen surface must survive that gap (clearing it
+                    // blanks Control Center and weakens the background-mode
+                    // contract mid-book).
+                    let bookSessionContinues = self.onNaturalFinish != nil && self.lastRawProgress >= 0.98
                     if self.lastRawProgress >= 0.98 {
                         self.clearBookmark()            // finished naturally
                         self.onNaturalFinish?()         // books: advance to the next chapter
@@ -647,7 +692,16 @@ final class SpeechPlayer: ObservableObject {
                     self.nowPlayingBookId = nil
                     self.finishAuditionIfActive()
                     self.endReadAlong()
-                    NowPlayingCenter.shared.clear()
+                    if bookSessionContinues {
+                        NowPlayingCenter.shared.publish(
+                            title: "Loading next chapter…",
+                            isPlaying: false,
+                            progress: nil,
+                            rate: Float(self.rateMultiplier)
+                        )
+                    } else {
+                        NowPlayingCenter.shared.clear()
+                    }
                 } else {
                     NowPlayingCenter.shared.publish(
                         title: self.nowPlayingTitle,
@@ -718,8 +772,11 @@ final class SpeechPlayer: ObservableObject {
         }
         switch state {
         case .generating:
-            // Tapping during generation cancels it.
-            stop()
+            // Tapping during generation cancels a NOTE's pending speech.
+            // For a BOOK the tap is far more likely a stray double-tap:
+            // cancelling there would kill the chapter AND the auto-advance
+            // chain, which reads as "the book stopped by itself".
+            if book == nil { stop() }
         case .speaking:
             engine?.pause()
         case .paused:

@@ -63,3 +63,42 @@ final class XhtmlTextTests: XCTestCase {
         XCTAssertEqual(text, "Prefixed")
     }
 }
+
+// MARK: - Named entities + parse diagnostics (v1.5 sage round)
+
+extension XhtmlTextTests {
+    func testNamedEntitiesNoLongerTruncateTheChapter() {
+        // `&nbsp;` and friends abort a strict XML parse — before the
+        // pre-parse map, everything after the first entity was LOST.
+        let xhtml = "<html><body><p>Before&nbsp;the interruption.</p><p>After &mdash; and &#8212; numeric.</p></body></html>"
+        let text = XhtmlText.plainText(from: xhtml)
+        XCTAssertTrue(text.contains("Before\u{00A0}the interruption."), text)
+        XCTAssertTrue(text.contains("After — and — numeric."), text)
+    }
+
+    func testUnknownNamedEntityIsStrippedNotFatal() {
+        let xhtml = "<html><body><p>A &weirdentity; B &copy; C</p></body></html>"
+        let text = XhtmlText.plainText(from: xhtml)
+        XCTAssertTrue(text.contains("A  B © C"), text)
+    }
+
+    func testExtractReportsUncompletedParse() {
+        // A document that is genuinely malformed XML must be reported as
+        // suspect so callers refuse to cache the truncated extraction.
+        let broken = "<html><body><p>Fine text</p><p>&bogus; broken"
+        let result = XhtmlText.extract(from: Data(broken.utf8))
+        // The entity map strips &bogus; so this actually completes — force a
+        // real failure instead: unterminated tag.
+        let reallyBroken = "<html><body><p>Fine</p><p>D <unclosed"
+        let r2 = XhtmlText.extract(from: Data(reallyBroken.utf8))
+        XCTAssertFalse(r2.parseCompleted, "unterminated tag must fail the parse")
+        _ = result
+    }
+
+    func testExtractReportsCompletedParse() {
+        let ok = "<html><body><p>All &mdash; good</p></body></html>"
+        let result = XhtmlText.extract(from: Data(ok.utf8))
+        XCTAssertTrue(result.parseCompleted)
+        XCTAssertTrue(result.text.contains("—"))
+    }
+}

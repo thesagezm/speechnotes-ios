@@ -8,12 +8,16 @@ import SpeechLogic
 /// so replay/resume never re-extracts — and never needs the reader's
 /// webview, which may not even exist while a book is playing.
 @MainActor
-final class BookPlaybackController {
+final class BookPlaybackController: ObservableObject {
     static let shared = BookPlaybackController()
 
     private weak var player: SpeechPlayer?
     private(set) var activeBook: Book?
-    private(set) var activeChapterIndex = 0
+    @Published private(set) var activeChapterIndex = 0
+    /// "Ch 12 — The Reunion" style label for the reader's player bar —
+    /// during auto-advance the user otherwise can't tell WHICH chapter is
+    /// sounding. Resolved from the manifest TOC when one exists.
+    @Published private(set) var nowPlayingChapterLabel: String?
 
     /// Wired once from SpeechnotesApp's onAppear (same launch-hygiene window
     /// as notesProvider).
@@ -49,10 +53,12 @@ final class BookPlaybackController {
             title: book.title,
             chapterIndex: chapterIndex
         )
-        let alreadyActive = activeBook?.id == book.id
-            && activeChapterIndex == chapterIndex
-            && player.nowPlayingBookId == book.id.uuidString
-        if alreadyActive, player.state != .idle {
+        // The reader bar shows "pause" whenever THIS book is the live
+        // speech — even if the user has scrolled to a different chapter
+        // than the one sounding. A tap there must pause/resume the ONGOING
+        // session, not re-speak the viewed chapter and silently abandon
+        // auto-advance.
+        if player.nowPlayingBookId == book.id.uuidString, player.state != .idle {
             player.togglePlay("", note: nil, book: ref)
             return
         }
@@ -71,6 +77,7 @@ final class BookPlaybackController {
         while index < chapterCount {
             if let text = await chapterText(for: book, chapterIndex: index) {
                 activeChapterIndex = index
+                publishChapterLabel(for: book, chapterIndex: index)
                 prefetchNextChapter(of: book, after: index)
                 player.onNaturalFinish = { [weak self] in
                     self?.advanceToNextChapter()
@@ -126,19 +133,27 @@ final class BookPlaybackController {
         if let cached = try? String(contentsOf: cacheURL, encoding: .utf8), !cached.isEmpty {
             return cached
         }
+        var suspectParse = false
         let extracted: (text: String, pageOffsets: [PdfPageOffset]?)?
         switch book.format {
         case .epub:
             guard let spine = book.spine, chapterIndex < spine.count else { return nil }
             let archiveURL = BooksStore.originalFileURL(book)
             let entry = spine[chapterIndex]
-            let text = await Task.detached(priority: .userInitiated) { () -> String? in
+            let result = await Task.detached(priority: .userInitiated) { () -> (text: String, parseCompleted: Bool)? in
                 guard let data = try? Data(contentsOf: archiveURL, options: .mappedIfSafe),
                       let xhtml = try? ZipReader.readEntry(entry, in: data) else { return nil }
-                let plain = XhtmlText.plainText(from: xhtml)
-                return plain.isEmpty ? nil : plain
+                let extraction = XhtmlText.extract(from: xhtml)
+                return extraction.text.isEmpty ? nil : (extraction.text, extraction.parseCompleted)
             }.value
-            extracted = text.map { (text: $0, pageOffsets: nil as [PdfPageOffset]?) }
+            // A parse that aborted mid-document (rare after the entity
+            // pre-pass, still possible) must NOT be cached — the truncated
+            // text would replay on every future play/resume with no error.
+            if let result, !result.parseCompleted {
+                suspectParse = true
+                Log.shared.error("BookPlayback: ch\(chapterIndex) of \(book.title) — XML parse aborted near char \(result.text.utf16.count); NOT caching")
+            }
+            extracted = result.map { (text: $0.text, pageOffsets: nil as [PdfPageOffset]?) }
         case .pdf:
             guard let result = await PdfSpeechText.chapterText(book: book, chapterIndex: chapterIndex) else {
                 return nil
@@ -149,6 +164,7 @@ final class BookPlaybackController {
         if text.utf16.count > 200_000 {
             Log.shared.info("BookPlayback: ch\(chapterIndex) is \(text.utf16.count) chars — engines may take a while")
         }
+        if !suspectParse {
         try? FileManager.default.createDirectory(
             at: cacheURL.deletingLastPathComponent(),
             withIntermediateDirectories: true
@@ -157,6 +173,7 @@ final class BookPlaybackController {
         if let pageOffsets = extracted?.pageOffsets,
            let data = try? JSONEncoder().encode(pageOffsets) {
             try? data.write(to: BooksStore.speechTextOffsetsURL(book, chapterIndex: chapterIndex), options: .atomic)
+        }
         }
         return text
     }
@@ -174,13 +191,31 @@ final class BookPlaybackController {
         player.export(text)
     }
 
-    /// Warm the next chapter's cache while the current one plays so the
-    /// chapter boundary in auto-advance is seamless.
+    /// Resolves the sounding chapter's display label from the manifest TOC
+    /// (first entry pointing at this spine index), falling back to the
+    /// chapter number.
+    private func publishChapterLabel(for book: Book, chapterIndex: Int) {
+        let count = Self.chapterCount(of: book)
+        let number = count > 0 ? "Ch \(chapterIndex + 1) of \(count)" : "Ch \(chapterIndex + 1)"
+        if let toc = book.toc,
+           let entry = toc.first(where: { $0.spineIndex == chapterIndex }), !entry.label.isEmpty {
+            nowPlayingChapterLabel = entry.label.count <= 48 ? entry.label : String(entry.label.prefix(46)) + "…"
+        } else {
+            nowPlayingChapterLabel = number
+        }
+    }
+
+    /// Warm upcoming chapters while the current one plays so the chapter
+    /// boundary in auto-advance is seamless. Loops past chapters with no
+    /// extractable text — warming exactly index+1 doubled the gap precisely
+    /// when the next item was a cover/image-only unit.
     private func prefetchNextChapter(of book: Book, after chapterIndex: Int) {
-        guard let spine = book.spine, chapterIndex + 1 < spine.count else { return }
-        let next = chapterIndex + 1
         Task { [weak self] in
-            _ = await self?.chapterText(for: book, chapterIndex: next)
+            var index = chapterIndex + 1
+            while index < Self.chapterCount(of: book) {
+                if await self?.chapterText(for: book, chapterIndex: index) != nil { break }
+                index += 1
+            }
         }
     }
 }

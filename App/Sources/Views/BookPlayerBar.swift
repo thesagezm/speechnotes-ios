@@ -12,6 +12,9 @@ struct BookPlayerBar: View {
     @ObservedObject var player: SpeechPlayer
     /// Fires BookPlaybackController.togglePlay for the current chapter.
     let onToggle: () -> Void
+    /// Chapter label for the sounding session — during auto-advance the
+    /// user otherwise can't tell WHICH chapter is playing.
+    @ObservedObject private var controller = BookPlaybackController.shared
     /// v1.5 per-chapter WAV export (present only when the reader offers it).
     /// Renders THIS chapter only — the whole book stays off the table.
     var onExport: (() -> Void)? = nil
@@ -70,10 +73,18 @@ struct BookPlayerBar: View {
                     .disabled(player.isExporting)
                 }
 
-                Text(progressLabel)
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                VStack(alignment: .leading, spacing: 1) {
+                    if chapterIsActive, let label = controller.nowPlayingChapterLabel {
+                        Text(label)
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                    }
+                    Text(progressLabel)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
 
                 Spacer(minLength: 8)
             } else {

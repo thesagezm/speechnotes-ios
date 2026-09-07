@@ -11,20 +11,102 @@ import Foundation
 /// head/style/script content is dropped entirely.
 public enum XhtmlText {
 
+    /// HTML named character references beyond XML's five predefined ones.
+    /// XMLParser is STRICT XML: the first `&nbsp;` in a real-world book
+    /// aborts the parse, which silently TRUNCATES the chapter at that point
+    /// (and the truncation used to be cached forever). The pre-parse pass
+    /// below maps the common named set to Unicode so the parser never sees
+    /// them; unknown names are stripped (losing a glyph beats losing the
+    /// rest of the chapter).
+    public static let namedEntities: [String: String] = [
+        "nbsp": "\u{00A0}", "iexcl": "¡", "cent": "¢", "pound": "£", "curren": "¤",
+        "yen": "¥", "brvbar": "¦", "sect": "§", "uml": "¨", "copy": "©",
+        "ordf": "ª", "laquo": "«", "not": "¬", "shy": "\u{00AD}", "reg": "®",
+        "macr": "¯", "deg": "°", "plusmn": "±", "sup2": "²", "sup3": "³",
+        "acute": "´", "micro": "µ", "para": "¶", "middot": "·", "cedil": "¸",
+        "sup1": "¹", "ordm": "º", "raquo": "»", "frac14": "¼", "frac12": "½",
+        "frac34": "¾", "iquest": "¿", "times": "×", "divide": "÷",
+        "mdash": "—", "ndash": "–", "hellip": "…", "ldquo": "\u{201C}",
+        "rdquo": "\u{201D}", "lsquo": "\u{2018}", "rsquo": "\u{2019}",
+        "sbquo": "‚", "bdquo": "„", "lsaquo": "‹", "rsaquo": "›",
+        "bull": "•", "dagger": "†", "Dagger": "‡", "permil": "‰",
+        "prime": "′", "Prime": "″", "euro": "€", "trade": "™",
+        "aacute": "á", "agrave": "à", "acirc": "â", "auml": "ä", "aring": "å",
+        "aelig": "æ", "ccedil": "ç", "eacute": "é", "egrave": "è", "ecirc": "ê",
+        "euml": "ë", "iacute": "í", "igrave": "ì", "icirc": "î", "ntilde": "ñ",
+        "oacute": "ó", "ograve": "ò", "ocirc": "ô", "ouml": "ö", "oslash": "ø",
+        "uacute": "ú", "ugrave": "ù", "ucirc": "û", "uuml": "ü", "szlig": "ß",
+        "OElig": "Œ", "oelig": "œ", "Scaron": "Š", "scaron": "š",
+        "Yuml": "Ÿ", "fnof": "ƒ", "circ": "ˆ", "tilde": "˜", "ensp": "\u{2002}",
+        "emsp": "\u{2003}", "thinsp": "\u{2009}", "zwnj": "\u{200C}",
+        "zwj": "\u{200D}", "lrm": "\u{200E}", "rlm": "\u{200F}",
+    ]
+
+    /// Rewrites `&name;` references the XML parser would reject. Numeric
+    /// references (`&#8212;`, `&#x2014;`) and the five XML entities are
+    /// standard XML and pass through untouched.
+    public static func replacingNamedEntities(_ xhtml: String) -> String {
+        guard xhtml.contains("&") else { return xhtml }
+        var out = ""
+        out.reserveCapacity(xhtml.count)
+        var i = xhtml.startIndex
+        while i < xhtml.endIndex {
+            let c = xhtml[i]
+            if c == "&" {
+                // Bounded scan: a name is ≤10 letters/digits before ';'.
+                var j = xhtml.index(after: i)
+                var name = ""
+                var closed = false
+                while j < xhtml.endIndex, xhtml.distance(from: i, to: j) <= 10 {
+                    let cj = xhtml[j]
+                    if cj == ";" { closed = true; break }
+                    if !cj.isLetter && !cj.isNumber { break }
+                    name.append(cj)
+                    j = xhtml.index(after: j)
+                }
+                if closed, let mapped = namedEntities[name] {
+                    out += mapped
+                    i = xhtml.index(after: j)
+                    continue
+                }
+            }
+            out.append(c)
+            i = xhtml.index(after: i)
+        }
+        return out
+    }
+
     /// Extracts speech text from serialized XHTML. Returns "" for input with
     /// no extractable text (a cover-only spine item, for instance).
     public static func plainText(from xhtml: Data) -> String {
+        extract(from: xhtml).text
+    }
+
+    /// Full-fidelity extraction: the plain text PLUS whether the parser ran
+    /// to completion. Callers that CACHE the result (the chapter speech-text
+    /// cache) must refuse when `parseCompleted` is false — caching a
+    /// truncated extraction would poison every future play/resume.
+    public static func extract(from xhtml: Data) -> (text: String, parseCompleted: Bool) {
+        // Named-entity pre-pass needs UTF-8 text; for anything else let the
+        // parser handle its own declared encoding (a Latin-1 book with named
+        // entities stays broken, but bytes are never mangled).
+        let prepared: Data
+        if let text = String(data: xhtml, encoding: .utf8) {
+            prepared = Data(replacingNamedEntities(text).utf8)
+        } else {
+            prepared = xhtml
+        }
         let delegate = Delegate()
-        let parser = XMLParser(data: xhtml)
+        let parser = XMLParser(data: prepared)
         parser.delegate = delegate
         parser.shouldResolveExternalEntities = false
-        parser.parse()
-        return delegate.paragraphText
+        let completed = parser.parse()
+        return (delegate.paragraphText, completed)
     }
 
     /// Convenience for test authors and callers holding a String.
     public static func plainText(from xhtml: String) -> String {
-        plainText(from: Data(xhtml.utf8))
+        plainText(from: Data(replacingNamedEntities(xhtml).utf8))
     }
 
     private final class Delegate: NSObject, XMLParserDelegate {

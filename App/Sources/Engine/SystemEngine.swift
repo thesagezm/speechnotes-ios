@@ -27,6 +27,14 @@ final class SystemEngine: NSObject, SpeechEngine {
         }
     }
 
+    /// Per-word progress callbacks coalesced to ~3.3 Hz — each one
+    /// publishes progress and invalidates observing views; word-rate
+    /// emissions were measurable churn for long notes. The FINAL range is
+    /// always emitted so completion progress reaches 1.0.
+    private var lastSignalAt: Date = .distantPast
+
+    private var interruptionObserver: NSObjectProtocol?
+
     override init() {
         super.init()
         synthesizer.delegate = self
@@ -39,7 +47,32 @@ final class SystemEngine: NSObject, SpeechEngine {
         } catch {
             Log.shared.error("Audio session setup failed: \(error)")
         }
+        // Phone calls must actually pause system-voice speech: without this
+        // observer the session was interrupted, the utterance died, and the
+        // UI stayed "speaking" with dead air and no resume (the ONNX engines
+        // always handled this — parity here).
+        interruptionObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let self else { return }
+            let typeRaw = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
+            let optionsRaw = notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
+            if typeRaw == AVAudioSession.InterruptionType.began.rawValue {
+                if self.state == .speaking { self.pause() }
+            } else if typeRaw == AVAudioSession.InterruptionType.ended.rawValue,
+                      optionsRaw & AVAudioSession.InterruptionOptions.shouldResume.rawValue != 0 {
+                if self.state == .paused { self.resume() }
+            }
+        }
         Log.shared.info("SystemEngine ready")
+    }
+
+    deinit {
+        if let interruptionObserver {
+            NotificationCenter.default.removeObserver(interruptionObserver)
+        }
     }
 
     func speak(_ text: String, rateMultiplier: Double) {
@@ -100,8 +133,11 @@ extension SystemEngine: AVSpeechSynthesizerDelegate {
     ) {
         let total = (utterance.speechString as NSString).length
         guard total > 0, characterRange.location + characterRange.length > 0 else { return }
-        let fraction = Double(characterRange.location + characterRange.length) / Double(total)
         let charsDone = characterRange.location + characterRange.length
+        let now = Date()
+        guard charsDone >= total || now.timeIntervalSince(lastSignalAt) >= 0.3 else { return }
+        lastSignalAt = now
+        let fraction = Double(charsDone) / Double(total)
         DispatchQueue.main.async {
             self.onProgress?(min(1.0, fraction))
             self.onPlayedChars?(charsDone)
