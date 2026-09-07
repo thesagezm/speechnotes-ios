@@ -147,7 +147,7 @@ extension ZipReaderTests {
     /// Flipping a payload byte must be CAUGHT — size-only validation used to
     /// accept plausible-length garbage that then got cached as chapter text.
     func testCorruptStoredPayloadFailsCRC() throws {
-        let data = fixture("sample")
+        let data = try fixture("sample")
         let entries = try ZipReader.entries(in: data)
         let mimetype = try XCTUnwrap(entries.first { $0.name == "mimetype" })
 
@@ -168,7 +168,7 @@ extension ZipReaderTests {
     }
 
     func testIntactEntriesStillPassCRC() throws {
-        let data = fixture("sample")
+        let data = try fixture("sample")
         let entries = try ZipReader.entries(in: data)
         XCTAssertTrue(entries.contains { $0.crc != 0 }, "fixture entries should carry real CRCs")
         // Every stored+deflated entry reads back cleanly (all CRCs match).
