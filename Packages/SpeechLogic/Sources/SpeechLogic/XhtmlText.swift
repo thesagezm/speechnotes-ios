@@ -163,7 +163,7 @@ public enum XhtmlText {
                 return
             }
             if name == "aside" {
-                if Self.isFootnoteAside(attributeDict) {
+                if XhtmlText.isFootnoteAside(attributeDict) {
                     asideDepth += 1
                     return
                 }
