@@ -75,6 +75,13 @@ struct BookWebView: UIViewRepresentable {
 
     final class Coordinator: NSObject, WKURLSchemeHandler, WKScriptMessageHandler {
         var parent: BookWebView?
+        /// Scheme tasks currently being served. `stop` removes the task, and
+        /// every didReceive/didFinish/didFail below checks membership first —
+        /// calling into a stopped task raises NSException, which is exactly
+        /// what happened when the reader closed mid-load of a big book.
+        private var liveTasks = Set<ObjectIdentifier>()
+        /// File reads run off the main thread; deliveries hop back to main.
+        private let ioQueue = DispatchQueue(label: "com.speechnotes.bookscheme", qos: .userInitiated)
 
         // Classes get no memberwise init — one must be explicit.
         init(parent: BookWebView?) {
@@ -88,78 +95,144 @@ struct BookWebView: UIViewRepresentable {
                 urlSchemeTask.didFailWithError(URLError(.badURL))
                 return
             }
+            let taskID = ObjectIdentifier(urlSchemeTask)
+            liveTasks.insert(taskID)
+            ioQueue.async { [weak self] in
+                self?.serve(url: url, task: urlSchemeTask, taskID: taskID)
+            }
+        }
 
-            // Route: bookscheme://shell/<file>          -> bundle resource,
-            //        bookscheme://shell/book/<uuid>/…   -> that book's file
-            //        (SAME origin as the shell — see shellURL),
-            //        bookscheme://book/<uuid>/original.epub (legacy alias).
-            let response: URLResponse
-            let data: Data
+        func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {
+            // The serve loop checks liveTasks between chunks and bails —
+            // delivering data to a stopped task is an NSException.
+            liveTasks.remove(ObjectIdentifier(urlSchemeTask))
+        }
+
+        private func isLive(_ taskID: ObjectIdentifier) -> Bool {
+            liveTasks.contains(taskID)
+        }
+
+        /// Streams the resolved route in bounded chunks. All task deliveries
+        /// happen on the main thread (where `start` arrived) and only while
+        /// the task is still live.
+        private func serve(url: URL, task: WKURLSchemeTask, taskID: ObjectIdentifier) {
+            enum Source {
+                case data(Data, String)
+                case stream(FileHandle, Int64, String)
+            }
+            let source: Source
             do {
                 switch url.host {
                 case "shell":
                     let path = url.path.isEmpty || url.path == "/" ? "/index.html" : url.path
                     if path.hasPrefix("/book/") {
-                        data = try Self.bookFile(path: path)
-                        response = Self.httpResponse(url: url, data: data, mime: "application/epub+zip")
+                        let (handle, size) = try Self.openBookFile(path: path)
+                        source = .stream(handle, size, "application/epub+zip")
                     } else {
                         let name = String(path.dropFirst())
                         guard let (resourceData, mime) = Self.bundleResource(name) else {
                             throw URLError(.fileDoesNotExist)
                         }
-                        data = resourceData
-                        response = Self.httpResponse(url: url, data: data, mime: mime)
+                        source = .data(resourceData, mime)
                     }
                 case "book":
                     // Path is /<UUID>/original.epub — parse the UUID and serve
                     // only from that book's own directory.
                     let parts = url.path.split(separator: "/")
-                    guard parts.count == 2,
-                          let id = UUID(uuidString: String(parts[0])) else {
+                    guard parts.count == 2, UUID(uuidString: String(parts[0])) != nil else {
                         throw URLError(.badURL)
                     }
-                    data = try Self.bookFile(path: url.path)
-                    response = Self.httpResponse(url: url, data: data, mime: "application/epub+zip")
+                    let (handle, size) = try Self.openBookFile(path: url.path)
+                    source = .stream(handle, size, "application/epub+zip")
                 default:
                     throw URLError(.unsupportedURL)
                 }
             } catch {
-                urlSchemeTask.didFailWithError(error)
+                DispatchQueue.main.async { [weak self] in
+                    guard self?.isLive(taskID) == true else { return }
+                    self?.liveTasks.remove(taskID)
+                    task.didFailWithError(error)
+                }
                 return
             }
 
-            // Scheme-task responses must stay on the receiving thread; the
-            // book file is one sequential read, chunked politely.
-            urlSchemeTask.didReceive(response)
-            let chunkSize = 1 << 18 // 256 KB
-            var offset = 0
-            while offset < data.count {
-                let end = min(offset + chunkSize, data.count)
-                urlSchemeTask.didReceive(data.subdata(in: offset..<end))
-                offset = end
+            switch source {
+            case .data(let data, let mime):
+                let response = Self.httpResponse(url: url, data: data, mime: mime)
+                DispatchQueue.main.async { [weak self] in
+                    guard self?.isLive(taskID) == true else { return }
+                    self?.liveTasks.remove(taskID)
+                    task.didReceive(response)
+                    task.didReceive(data)
+                    task.didFinish()
+                }
+            case .stream(let handle, let size, let mime):
+                let response = HTTPURLResponse(
+                    url: url,
+                    statusCode: 200,
+                    httpVersion: "HTTP/1.1",
+                    headerFields: [
+                        "Content-Type": mime,
+                        "Access-Control-Allow-Origin": "*",
+                        "Content-Length": String(size),
+                    ]
+                ) ?? URLResponse(url: url, mimeType: mime, expectedContentLength: Int(size), textEncodingName: nil)
+                DispatchQueue.main.async { [weak self] in
+                    guard self?.isLive(taskID) == true else {
+                        handle.closeFile()
+                        return
+                    }
+                    task.didReceive(response)
+                }
+                let chunkSize = 1 << 18 // 256 KB
+                var offset: Int64 = 0
+                var failed = false
+                while offset < size {
+                    guard isLive(taskID) else {
+                        handle.closeFile()
+                        return
+                    }
+                    handle.seek(toFileOffset: UInt64(offset))
+                    let chunk = handle.readData(ofLength: chunkSize)
+                    if chunk.isEmpty {
+                        failed = true
+                        break
+                    }
+                    DispatchQueue.main.sync { [weak self] in
+                        guard self?.isLive(taskID) == true else { return }
+                        task.didReceive(chunk)
+                    }
+                    offset += Int64(chunk.count)
+                }
+                handle.closeFile()
+                DispatchQueue.main.async { [weak self] in
+                    guard self?.isLive(taskID) == true else { return }
+                    self?.liveTasks.remove(taskID)
+                    if failed {
+                        task.didFailWithError(URLError(.fileReadFailed))
+                    } else {
+                        task.didFinish()
+                    }
+                }
             }
-            if data.isEmpty {
-                urlSchemeTask.didReceive(Data())
-            }
-            urlSchemeTask.didFinish()
         }
 
-        func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {
-            // Synchronous serving finishes before stop can matter.
-        }
-
-        /// Serves the EPUB of the book named by a /book/<uuid>/original.epub
-        /// path — only ever from that book's own directory.
-        private static func bookFile(path: String) throws -> Data {
+        /// Opens the EPUB of the book named by a /book/<uuid>/original.epub
+        /// path — only ever from that book's own directory. Returns the
+        /// handle and its byte size; the caller streams it (no whole-file
+        /// RAM copy — a 50 MB book used to be fully materialized here).
+        private static func openBookFile(path: String) throws -> (FileHandle, Int64) {
             let parts = path.split(separator: "/")
             guard parts.count == 3, parts[0] == "book",
-                  let id = UUID(uuidString: String(parts[1])) else {
+                  UUID(uuidString: String(parts[1])) != nil else {
                 throw URLError(.badURL)
             }
-            return try Data(
-                contentsOf: BooksStore.bookDirectory(id).appendingPathComponent("original.epub"),
-                options: .mappedIfSafe
-            )
+            let url = BooksStore.bookDirectory(UUID(uuidString: String(parts[1]))!)
+                .appendingPathComponent("original.epub")
+            let handle = try FileHandle(forReadingFrom: url)
+            let size = try handle.seekToEnd()
+            try handle.seek(toOffset: 0)
+            return (handle, Int64(size))
         }
 
         /// HTTP-flavoured response so fetch/XHR see status + CORS headers
