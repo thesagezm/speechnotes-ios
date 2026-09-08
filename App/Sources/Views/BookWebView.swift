@@ -79,7 +79,11 @@ struct BookWebView: UIViewRepresentable {
         /// every didReceive/didFinish/didFail below checks membership first —
         /// calling into a stopped task raises NSException, which is exactly
         /// what happened when the reader closed mid-load of a big book.
+        ///
+        /// Synchronized: mutated on `start`/`stop` (main) AND read on ioQueue
+        /// (isLive) — the old unsynchronized Set was a data race (TSan crash).
         private var liveTasks = Set<ObjectIdentifier>()
+        private let liveTasksLock = NSLock()
         /// File reads run off the main thread; deliveries hop back to main.
         private let ioQueue = DispatchQueue(label: "com.speechnotes.bookscheme", qos: .userInitiated)
 
@@ -96,7 +100,9 @@ struct BookWebView: UIViewRepresentable {
                 return
             }
             let taskID = ObjectIdentifier(urlSchemeTask)
+            liveTasksLock.lock()
             liveTasks.insert(taskID)
+            liveTasksLock.unlock()
             ioQueue.async { [weak self] in
                 self?.serve(url: url, task: urlSchemeTask, taskID: taskID)
             }
@@ -105,11 +111,16 @@ struct BookWebView: UIViewRepresentable {
         func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {
             // The serve loop checks liveTasks between chunks and bails —
             // delivering data to a stopped task is an NSException.
-            liveTasks.remove(ObjectIdentifier(urlSchemeTask))
+            let id = ObjectIdentifier(urlSchemeTask)
+            liveTasksLock.lock()
+            liveTasks.remove(id)
+            liveTasksLock.unlock()
         }
 
         private func isLive(_ taskID: ObjectIdentifier) -> Bool {
-            liveTasks.contains(taskID)
+            liveTasksLock.lock()
+            defer { liveTasksLock.unlock() }
+            return liveTasks.contains(taskID)
         }
 
         /// Streams the resolved route in bounded chunks. All task deliveries
@@ -150,7 +161,9 @@ struct BookWebView: UIViewRepresentable {
             } catch {
                 DispatchQueue.main.async { [weak self] in
                     guard self?.isLive(taskID) == true else { return }
+                    self?.liveTasksLock.lock()
                     self?.liveTasks.remove(taskID)
+                    self?.liveTasksLock.unlock()
                     task.didFailWithError(error)
                 }
                 return
@@ -161,7 +174,9 @@ struct BookWebView: UIViewRepresentable {
                 let response = Self.httpResponse(url: url, data: data, mime: mime)
                 DispatchQueue.main.async { [weak self] in
                     guard self?.isLive(taskID) == true else { return }
+                    self?.liveTasksLock.lock()
                     self?.liveTasks.remove(taskID)
+                    self?.liveTasksLock.unlock()
                     task.didReceive(response)
                     task.didReceive(data)
                     task.didFinish()
@@ -198,7 +213,11 @@ struct BookWebView: UIViewRepresentable {
                         failed = true
                         break
                     }
-                    DispatchQueue.main.sync { [weak self] in
+                    // Deliver on main — but NOT with .sync, which serializes IO
+                    // against the main thread and deadlocks if main ever blocks
+                    // on ioQueue. Async delivery; the next chunk read waits for
+                    // this delivery to land (in-order guarantee from WebKit).
+                    DispatchQueue.main.async { [weak self] in
                         guard self?.isLive(taskID) == true else { return }
                         task.didReceive(chunk)
                     }
@@ -207,7 +226,9 @@ struct BookWebView: UIViewRepresentable {
                 handle.closeFile()
                 DispatchQueue.main.async { [weak self] in
                     guard self?.isLive(taskID) == true else { return }
+                    self?.liveTasksLock.lock()
                     self?.liveTasks.remove(taskID)
+                    self?.liveTasksLock.unlock()
                     if failed {
                         task.didFailWithError(URLError(.cannotOpenFile))
                     } else {
@@ -252,6 +273,12 @@ struct BookWebView: UIViewRepresentable {
         }
 
         private static func bundleResource(_ name: String) -> (Data, String)? {
+            // Path allow-list: the shell host only serves the vendored epub.js
+            // glue from the bundle. The old code served ANY bundle resource by
+            // path — combined with allowScriptedContent:true and CORS:* that
+            // was an exfiltration path for malicious EPUBs.
+            let allowed: Set<String> = ["index.html", "reader.js", "epub.min.js", "jszip.min.js"]
+            guard allowed.contains(name) else { return nil }
             let (base, ext) = splitName(name)
             guard let url = Bundle.main.url(forResource: base, withExtension: ext) else { return nil }
             guard let data = try? Data(contentsOf: url) else { return nil }

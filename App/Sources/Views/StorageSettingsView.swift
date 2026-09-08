@@ -18,6 +18,20 @@ struct StorageSettingsView: View {
     private let imagePreviewLimit = 16
     private let exportPreviewLimit = 5
 
+    // Usage-breakdown bytes — computed ONCE off-main in .task, not on every
+    // body evaluation (the old synchronous directory walks re-enumerated
+    // thousands of files per render).
+    @State private var usage: UsageBreakdown?
+
+    struct UsageBreakdown {
+        let notesBytes: Int64
+        let booksBytes: Int64
+        let onnxBytes: Int64
+        let supertonicBytes: Int64
+        let exportsBytes: Int64
+        let imageBytes: Int64
+    }
+
     var body: some View {
         Form {
             usageSection
@@ -28,6 +42,7 @@ struct StorageSettingsView: View {
         .navigationTitle("Storage")
         .refreshable { exports.refresh() }
         .onAppear { exports.refresh() }
+        .task { await loadUsage() }
         .sheet(item: $sharingURL) { url in
             ShareSheet(items: [url])
         }
@@ -43,19 +58,45 @@ struct StorageSettingsView: View {
         }
     }
 
+    private func loadUsage() async {
+        let (breakdown, images): (UsageBreakdown, [CachedImageEntry]) = await Task.detached(priority: .utility) {
+            let usage = UsageBreakdown(
+                notesBytes: NotesStoreSizeReader.notesBytes,
+                booksBytes: BooksStore.directorySize(),
+                onnxBytes: ExportsStore.directorySize(ModelManager.onnxDirectory),
+                supertonicBytes: ExportsStore.directorySize(ModelManager.supertonicDirectory),
+                exportsBytes: ExportsStore.directorySize(ExportsStore.exportsDirectory),
+                imageBytes: NoteImageStore.totalFootprint() + RemoteImageStore.totalFootprint()
+            )
+            var entries: [CachedImageEntry] = []
+            for target in NoteImageStore.allTargets() {
+                entries.append(CachedImageEntry(source: .note(target: target)))
+            }
+            for entry in RemoteImageStore.allEntries() {
+                entries.append(CachedImageEntry(source: .web(entry)))
+            }
+            return (usage, entries)
+        }.value
+        await MainActor.run {
+            self.usage = breakdown
+            self.cachedImages = images
+        }
+    }
+
     // MARK: - Usage breakdown
 
     private var usageSection: some View {
         Section {
-            usageRow("Notes (notes.json)", NotesStoreSizeReader.notesBytes)
-            usageRow("Books library", BooksStore.directorySize())
-            usageRow("Kokoro models (fp32 + uint8)", ExportsStore.directorySize(ModelManager.onnxDirectory))
-            usageRow("Supertonic model", ExportsStore.directorySize(ModelManager.supertonicDirectory))
-            usageRow("Exported audio", ExportsStore.directorySize(ExportsStore.exportsDirectory))
-            usageRow(
-                "Cached images",
-                NoteImageStore.totalFootprint() + RemoteImageStore.totalFootprint()
-            )
+            if let usage {
+                usageRow("Notes (notes.json)", usage.notesBytes)
+                usageRow("Books library", usage.booksBytes)
+                usageRow("Kokoro models (fp32 + uint8)", usage.onnxBytes)
+                usageRow("Supertonic model", usage.supertonicBytes)
+                usageRow("Exported audio", usage.exportsBytes)
+                usageRow("Cached images", usage.imageBytes)
+            } else {
+                ProgressView().frame(maxWidth: .infinity)
+            }
         } header: {
             Text("Storage used")
         } footer: {
@@ -231,36 +272,26 @@ struct StorageSettingsView: View {
         }
     }
 
-    /// Every cached image across both stores. Computed once per body
-    /// evaluation so header / grid / footer stay consistent.
-    private var cachedImages: [CachedImageEntry] {
-        var entries: [CachedImageEntry] = []
-        for target in NoteImageStore.allTargets() {
-            entries.append(CachedImageEntry(source: .note(target: target)))
-        }
-        for entry in RemoteImageStore.allEntries() {
-            entries.append(CachedImageEntry(source: .web(entry)))
-        }
-        return entries
-    }
+    /// Every cached image across both stores, loaded once off-main in the
+    /// same task as the usage breakdown. The old computed property enumerated
+    /// both stores — including per-entry `resourceValues` file-size stats —
+    /// synchronously on every body evaluation.
+    @State private var cachedImages: [CachedImageEntry]?
 
     private var totalImageBytes: Int64 {
-        cachedImages.reduce(0) { $0 + $1.bytes }
+        cachedImages?.reduce(0) { $0 + $1.bytes } ?? 0
     }
 
-    /// Browsable gallery: every cached image (notes + web) as tappable
-    /// thumbnails — tap opens the full pinch-to-zoom viewer, long-press
-    /// offers share/delete, and the footer counts both stores together.
     private var imagesSection: some View {
         Section {
-            if cachedImages.isEmpty {
+            if let cachedImages, cachedImages.isEmpty {
                 Label(
                     "No images cached yet — insert one in a markdown note.",
                     systemImage: "photo.on.rectangle"
                 )
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
-            } else {
+            } else if let cachedImages {
                 LazyVGrid(
                     columns: [GridItem(.adaptive(minimum: 84), spacing: 10)],
                     spacing: 10
@@ -289,11 +320,13 @@ struct StorageSettingsView: View {
                 } label: {
                     Label("Clear web-downloaded images", systemImage: "trash.slash")
                 }
+            } else {
+                ProgressView().frame(maxWidth: .infinity)
             }
         } header: {
             Text("Cached images")
         } footer: {
-            if !cachedImages.isEmpty {
+            if let cachedImages, !cachedImages.isEmpty {
                 Text("\(cachedImages.count) image(s) · \(ByteCountFormatter.string(fromByteCount: totalImageBytes, countStyle: .file)) — attached and web previews")
             }
         }
@@ -303,7 +336,8 @@ struct StorageSettingsView: View {
     }
 
     private var visibleCachedImages: [CachedImageEntry] {
-        showingAllImages ? cachedImages : Array(cachedImages.prefix(imagePreviewLimit))
+        guard let cachedImages else { return [] }
+        return showingAllImages ? cachedImages : Array(cachedImages.prefix(imagePreviewLimit))
     }
 
     private func galleryCell(_ entry: CachedImageEntry) -> some View {
