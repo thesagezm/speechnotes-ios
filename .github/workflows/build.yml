@@ -1,18 +1,29 @@
 name: Build IPA
 
+# In-progress cancellation: only one run per branch, so a push during an
+# active build doesn't queue a second (they'd both finish with the same
+# result). The branch-level key means main and sage-upgrades can run in
+# parallel; two pushes to the same branch cancel the older one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 on:
   push:
-    branches: [main, bisect-g, books-v1.4.2, v15-books-complete, sage-upgrades]
+    branches: [main, sage-upgrades]
   workflow_dispatch:
 
 jobs:
   logic-tests:
-    name: Logic tests (chunker + WAV writer)
+    name: Logic tests (version fields + SpeechLogic)
     runs-on: macos-latest
     timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Version-field consistency check
+        run: Scripts/version-check.sh
 
       - name: Run SpeechLogic package tests
         run: |
@@ -307,6 +318,7 @@ jobs:
   build-ipa:
     name: Build unsigned IPA
     runs-on: macos-latest
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
