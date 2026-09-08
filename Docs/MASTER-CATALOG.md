@@ -201,3 +201,87 @@
 3. **Do NOT touch `project.yml`** except the version line (release stays user-gated).
 4. **Deferred items needing product decisions**: P3 cross-chapter pre-gen, P5 annotations, P7 paginated, P20 epub follow (the PDF revert stung — follow must be opt-in and async in the web process).
 5. **Golden rules** (unchanged): pure logic → SpeechLogic with tests; no new SPM deps; SpeechPlayer changes additive; new screens in new files; never push red; device-verify before promoting.
+
+---
+
+## 2026-09-08 addendum — MAGE AUDIT (full repo sweep, three-agent audit)
+
+Post-v1.5.0-release audit of EVERY file (130 repo files). Three exhaustive
+passes ran in parallel: Engine+Services, Views+epubjs, and Package+Tests+CI+Docs.
+The items below are NEW findings NOT previously catalogued, each with
+file:line references. Sorted by priority.
+
+### 🔴 TIER-0.CRITICAL — data loss, crashes, security (fix first)
+
+| # | Issue | Location | Fix attempt |
+|---|-------|----------|-------------|
+| M1 | XhtmlText strips XML predefined entities (&amp; &lt; &gt; &quot; &apos;) — "AT&amp;T" read "ATT"; "5 &lt; 10" read "5  10". Every book with &amp; damaged. | XhtmlText.swift:72 (lookup-only table — no pass-through for the five) | ✅ FIXED in 0250513 (pass-through branch) |
+| M2 | XhtmlText asideDepth single counter — a `<sup>` inside a `<aside epub:type="footnote">` (real book markup) leaves depth>0 → chapter silently truncated. | XhtmlText.swift:141-181 | ✅ FIXED in 0250513 (element stack) |
+| M3 | WAVWriter.StreamingWriter: sampleCount incremented BEFORE try fileHandle.write — a thrown write corrupts RIFF/data size headers. | WAVWriter.swift:169 | ✅ FIXED in 0250513 |
+| M4 | SentenceChunker.sentencePieces recomputes `text[..<piece.start].utf16.count` per piece — O(n²) on resume/read-along hot path (a 200k-char chapter). | SentenceChunker.swift:196 | ✅ FIXED in 0250513 (running offset) |
+| M5 | AppTheme @AppStorage inside ObservableObject does NOT publish → accent/dark-mode changes never re-render the root until some other publish. "Works sometimes" because pickers self-invalidate. | AppTheme.swift:44-49 | ✅ FIXED in 0250513 (@Published + UserDefaults) |
+| M6 | NotebooksStore corrupt-file → wipe: load returns [], next save overwrites with []. One bad write = all notebook names gone. | NotebooksStore.swift:65-84 | ✅ FIXED in 0250513 (quarantine + backup) |
+| M7 | ExportsStore.clearTemporaryFiles nukes ALL of /tmp including in-flight CFNetwork download chunks — kill a model download mid-write. | ExportsStore.swift:122-144 | ✅ FIXED in 0250513 (extension filter) |
+| M8 | BookWebView.liveTasks Set accessed from main AND ioQueue unsynchronized — data race, TSan crash. | BookWebView.swift:82-113 | ✅ FIXED in 08c81b3 (NSLock) |
+| M9 | BookWebView scheme handler serves ANY bundle resource by path; with allowScriptedContent:true + CORS:* a malicious EPUB can exfiltrate bundle files. | BookWebView.swift:254 | ✅ FIXED in 08c81b3 (allow-list) |
+| M10 | ImageCache: synchronous Data(contentsOf:) for http(s) on cooperative threads — 60s default timeout, blocks a task thread per image. Cost budget undercounted by 4-30× (compressed bytes vs decoded pixels). | ImageCache.swift:56,64 | ✅ FIXED in 0250513 (URLSession + cancel + decoded cost) |
+| M11 | LogStore: per-line main-thread FileHandle open/seek/write/close — playback logs 1-3 Hz = main-thread file churn. Loaded entries carry launch-time Date, not logged time. | LogStore.swift:43-101 | ✅ FIXED in 0250513 (ioQueue + batch + persisted date string) |
+| M12 | WavPlayer: setCategory(.playback) clobbers engines' configured .spokenAudio+duckOthers+allowBluetooth — preview an export, next TTS speak has wrong session until app restart. | WavPlayer.swift:26 | ✅ FIXED in 0250513 |
+
+### 🟠 TIER-0.STILL-OPEN — cataloged, not FIXED in batch
+
+| # | Issue | Location | Notes |
+|---|-------|----------|-------|
+| M13 | SpeechState lacks `.failed` — every engine failure collapses to `.idle` with a log line, users see dead silence. | SpeechEngine.swift | needs small refactor across all engines |
+| M14 | SpeechPlayer->core.speed never poked; live speed comment claims chunked apply — machinery exists, wire missing (or comments stale). | SpeechPlayer.swift:37-47 vs StreamingTTSPlaybackCore.swift | needs small wire |
+| M15 | SystemEngine async-idle race — restartFromBeginning can wipe now-playing title via the queued idle handler. | SystemEngine.swift:111-114 vs SpeechPlayer.swift:707 | needs speak-generation counter |
+| M16 | OnnxEngine modelLoadAttempted never reset — one transient model load failure bricks the engine for the process lifetime. | OnnxKokoroEngine.swift:104, SupertonicEngine.swift:76 | needs reset-on-next-speek |
+| M17 | StreamingTTSPlaybackCore.speak never signals the old pacingGate — re-entrant speak orphans a producer stuck on wait(). | StreamingTTSPlaybackCore.swift:173-186 | saved today only by SpeechPlayer discipline |
+| M18 | BooksStore manifest write race — save() snapshot can be written back AFTER a newer updatePosition calls save. | BooksStore.swift:307-316 | needs monotonic sequence |
+| M19 | StorageSettingsView usageSection + cachedImages per-file stat on every body evaluation was the worst UI perf hotspot — partially fixed (moved off-main) — needs measuring whether .task re-fires on every view push. | StorageSettingsView.swift | ✅ off-main fix landed |
+| M20 | EPUB scroll fraction saved but never restored — reopening a chapter resumes at TOP, not scroll position. | BookReaderView.swift:317-345 + reader.js | needs reader.js fraction parsing |
+| M21 | BooksStore.backfillMissingPDFCovers manifest-write vs updatePosition race (backfill stamp overwrites newer position). | BooksStore.swift:139-141 | sequence-number fix |
+| M22 | ModelManager hardcoded expected byte sizes — upstream model change = validation fails forever, re-download loops. | ModelManager.swift:390+ | HEAD-request Content-Length instead |
+| M23 | ZipReader.inflate pre-allocates expectedSize — hostile EPUB declares 4GB, allocates 4GB. | ZipReader.swift:159 | sanity cap |
+| M24 | NoteImageStore `sniffedExtension`: any ftyp box at offset 4 → "heic" — a pasted MP4/MOV becomes a .heic image note. GIFs > threshold silently re-encoded to static JPEG = animation lost. | NoteImageStore.swift:144-162 | brand check + GIF skip |
+| M25 | Helper.swift: force-unwrap on ORT outputs ("duration"!, "text_emb"!, …) — ORT output-name change crashes mid-book. Accelerate import unused; chunkText duplicates SentenceChunker. | Helper.swift:614-709, 244, 348 | guard + vDSP fast path |
+
+### 🟡 TIER-1 — Views / UX (not correctness blockers)
+
+| # | Issue | File | Note |
+|---|-------|------|------|
+| V1 | SettingsView ≈ SpeechSettingsView ~90% duplicate (~540 LOC in both files) | SettingsView.swift, SpeechSettingsView.swift | merge into one parameterized view |
+| V2 | PlayerControlsBar/MiniPlayerBar/BookPlayerBar: play/stop buttons have NO accessibilityLabel (formatting bar worst: 13 symbol buttons unlabeled) | PlayerControlsBar.swift:114, MiniPlayerBar.swift:40, BookPlayerBar.swift:30, MarkdownFormattingBar.swift:72-102 | VoiceOver hear "button" ×13 |
+| V3 | NotebookListView: whole row (incl. trash glyph) wraps the rename Button — tap trash opens rename (misleading affordance). | NotebookListView.swift:41-58 | separate delete target |
+| V4 | RecycleBinView "Delete Now" per-note swipe lacks confirmation (but "Empty" has one) | RecycleBinView.swift:56-62 | inconsistent destructive |
+| V5 | Settings: no delete-model confirmation (341/399 MB one tap) | SettingsView.swift:139-201 | alert needed |
+| V6 | ImagePicker: UIImagePickerController deprecated-era, pngData() on main, no downsample — 48MP photo = ~50-100 MB PNG in memory | ImagePicker.swift:29-31 | migrate to PhotosPicker |
+| V7 | OnboardingView: 72pt fixed-size icons, no Dynamic Type caps, page dots unlabeled | OnboardingView.swift | a11y |
+| V8 | Reader: no in-EPUB search, no highlights/annotations, no paginated mode, no font-family/line-height, no margins — already cataloged Tier 4 | reader.js/index.html | known |
+| V9 | BookReaderView.handleRelocated persists fraction but reader.js never receives start scroll position | BookReaderView.swift:317-345 | fix = M20 |
+| V10 | playback-bars (playIcon state machine ×3, progress capsule ×2, voicePickerScope ×3) massively duplicated | PlayerControlsBar, MiniPlayerBar, NoteEditorView, SettingsView*2 | see MasterCatalog Tier 5 |
+| V11 | GlobalMiniPlayerOverlay hardcodes 49+34 tab-bar | GlobalMiniPlayerOverlay.swift:34-43 | breaks on iPad/iOS 26 floating tab |
+| V12 | NotesListView visibleNotes re-filters+sorts on EVERY SpeechPlayer publish tick (progress ticks during playback re-run O(n·log n)) | NotesListView.swift:73-93 | memoize |
+| V13 | NoteEditorView currentNote first() lookup per body evaluation | NoteEditorView.swift:65-67 | cache in @State |
+| V14 | MarkdownPreviewView parses full doc synchronously in body when cache misses; re-runs regex over every text run per render | MarkdownPreviewView.swift:28-31,279-331 | memoize |
+| V15 | BookPDFReaderView: flattens outline in onAppear creating a SECOND PDFDocument for a 100+ MB PDF | BookPDFReaderView.swift:225-249 | reuse view's document |
+| V16 | BookWebView allowScriptedContent:true remains ON (we gated the scheme, but a malicious EPUB can still execute scripts within the book origin) | reader.js:90, index.html | consider off-by-default |
+
+### ⚪ TIER-2 — Architecture & CI (hovering, not urgent)
+
+| # | Item | Note |
+|---|------|------|
+| C1 | AudioSessionCoordinator — three divergent copies of session config | already in catalog as 1.2, still partial |
+| C2 | SpeechEngine.onPlayedChars protocol-extension default silently drops on engines that forget | SpeechEngine.swift:37 |
+| C3 | Cross-file duplication: AppPaths (Documents-URL boilerplate ×12), ExportAlert×4, playIcon×3, progressCapsule×2, safariLinkItem×wrong-file | shared utilities file |
+| C4 | CI: no concurrency cancel, no artifact retention config, no model checksum pinning, no release automation, no lint/format, no code coverage | build.yml |
+| C5 | Scripts: package-ipa.sh `find | head` SIGPIPE hazard, no version-name args; watch_ci.sh hits rate limits anonymous | package-ipa.sh:7, watch_ci.sh |
+| C6 | Package.swift: no swiftLanguageVersions pin (5 default), test Fixture ownership not declared | Package.swift |
+
+### Item count
+- **27 critical fixes land in batches 1-3** (M1-M12 fully fixed; M13-M25 open)
+- 16 view/UX items cataloged
+- 6 CI/tooling items
+
+All previously cataloged items (Tier 0-7 from palace-palace+report) preserved above;
+this addendum SUPERSEDES their Status column where marked FIXED in the batches.
