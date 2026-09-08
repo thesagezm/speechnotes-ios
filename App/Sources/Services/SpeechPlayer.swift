@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 import AVFoundation
 import SpeechLogic
 
@@ -211,6 +212,15 @@ final class SpeechPlayer: ObservableObject {
     private var preAuditionState: (kind: EngineKind, voice: String, supertonicVoice: String)?
 
     // MARK: - Playback resume bookmark
+
+    /// Publisher parameters for whatever is currently speaking. A book
+    /// chapter sets the subtitle + cover; notes leave them nil so generic
+    /// "Speechnotes" shows.
+    struct NowPlayingPayload {
+        var subtitle: String?
+        var artworkPath: String?
+    }
+    var nowPlayingPayload = NowPlayingPayload()
 
     struct PlaybackBookmark: Codable {
         // Notes carry noteId; books carry bookId + chapterIndex instead.
@@ -741,6 +751,8 @@ final class SpeechPlayer: ObservableObject {
                 } else {
                     NowPlayingCenter.shared.publish(
                         title: self.nowPlayingTitle,
+                        subtitle: self.nowPlayingSubtitle(),
+                        artwork: self.nowPlayingArtworkImage(),
                         isPlaying: newState == .speaking,
                         progress: self.progress,
                         rate: Float(self.rateMultiplier)
@@ -760,6 +772,8 @@ final class SpeechPlayer: ObservableObject {
                 self.updateBookmarkChars(rawProgress: value)
                 NowPlayingCenter.shared.publish(
                     title: self.nowPlayingTitle,
+                    subtitle: self.nowPlayingSubtitle(),
+                    artwork: self.nowPlayingArtworkImage(),
                     isPlaying: self.state == .speaking,
                     progress: self.progress,
                     rate: Float(self.rateMultiplier)
@@ -793,6 +807,8 @@ final class SpeechPlayer: ObservableObject {
                 if bookWasPlaying {
                     NowPlayingCenter.shared.publish(
                         title: "Loading next chapter…",
+                        subtitle: self.nowPlayingSubtitle(),
+                        artwork: self.nowPlayingArtworkImage(),
                         isPlaying: false,
                         progress: nil,
                         rate: Float(self.rateMultiplier)
@@ -850,6 +866,13 @@ final class SpeechPlayer: ObservableObject {
     /// current chapter. A note taking over, an explicit stop, or an audition
     /// clears it.
     var onNaturalFinish: (() -> Void)?
+
+    private func nowPlayingSubtitle() -> String? { nowPlayingPayload.subtitle }
+    private func nowPlayingArtworkImage() -> UIImage? {
+        guard let path = nowPlayingPayload.artworkPath,
+              let image = UIImage(contentsOfFile: path) else { return nil }
+        return image
+    }
 
     /// Lock-screen Previous/Next — wired to BookPlaybackController's chapter
     /// step. nil while a note (not book) is on; the buttons grey out.

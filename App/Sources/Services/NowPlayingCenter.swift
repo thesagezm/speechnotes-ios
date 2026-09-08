@@ -1,5 +1,6 @@
 import Foundation
 import MediaPlayer
+import UIKit
 
 /// Keeps the lock screen / Control Center "Now Playing" surface in sync with
 /// `SpeechPlayer`.
@@ -32,6 +33,12 @@ final class NowPlayingCenter {
 
     /// Set by SpeechPlayer once — decides what each remote command does.
     var onCommand: ((Command) -> Void)?
+
+    /// Set by SpeechPlayer/BookPlaybackController when a book chapter starts
+    /// — subtitle (e.g. "Ch 12 — The Reunion") and cover go out on every
+    /// publish until another book/none takes over.
+    var currentSubtitle: String?
+    var currentArtwork: UIImage?
 
     private let infoCenter = MPNowPlayingInfoCenter.default()
 
@@ -102,8 +109,17 @@ final class NowPlayingCenter {
     /// an advancing elapsed time, and a roughly-correct total duration.
     /// Accepts a title of nil (anonymous text) with a generic fallback — a
     /// missing surface during backgrounded speech weakens the background
-    /// mode contract.
-    func publish(title: String?, isPlaying: Bool, progress: Double?, rate: Float) {
+    /// mode contract. `subtitle` shows as the artist row (book chapter,
+    /// e.g. "Ch 12 — The Reunion"); `artwork` is a pre-rendered UIImage
+    /// (book cover) that lands as the lock-screen thumbnail.
+    func publish(
+        title: String?,
+        subtitle: String? = nil,
+        artwork: UIImage? = nil,
+        isPlaying: Bool,
+        progress: Double?,
+        rate: Float
+    ) {
         let now = Date()
 
         // Bank playing time; pause/resume no longer loses elapsed seconds.
@@ -129,11 +145,16 @@ final class NowPlayingCenter {
 
         var info: [String: Any] = [
             MPMediaItemPropertyTitle: displayTitle,
-            MPMediaItemPropertyArtist: "Speechnotes",
+            MPMediaItemPropertyArtist: subtitle ?? currentSubtitle ?? "Speechnotes",
             MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? rate : 0,
             MPNowPlayingInfoPropertyElapsedPlaybackTime: elapsed,
             MPNowPlayingInfoPropertyIsLiveStream: false,
         ]
+        let resolvedArtwork = artwork ?? currentArtwork
+        if let resolvedArtwork {
+            let item = MPMediaItemArtwork(boundsSize: resolvedArtwork.size) { _ in resolvedArtwork }
+            info[MPMediaItemPropertyArtwork] = item
+        }
         // Derive a plausibly-stable total duration from progress. Only
         // publish once progress has meaningfully advanced — the early
         // estimates jump around visibly in Control Center.
@@ -158,5 +179,7 @@ final class NowPlayingCenter {
         elapsed = 0
         playStartedAt = nil
         lastPublishAt = nil
+        currentSubtitle = nil
+        currentArtwork = nil
     }
 }
