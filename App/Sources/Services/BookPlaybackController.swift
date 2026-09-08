@@ -91,11 +91,13 @@ final class BookPlaybackController: ObservableObject {
         }
         // Chapter skip buttons light up as soon as a book takes the player.
         NowPlayingCenter.shared.setChapterSkipEnabled(true)
+        // Lock-screen dressing flows through the player (single writer —
+        // a stray publish from the controller can't fight the player's own).
+        player.nowPlayingPayload = SpeechPlayer.NowPlayingPayload(
+            subtitle: nil, // set per-chapter in publishChapterLabel
+            artworkPath: BooksStore.coverFileURL(book).path
+        )
         activeBook = book
-        // Lock-screen dressing: chapter label + cover art (authoritative at
-        // every chapter start, survives the between-chapter metadata-only
-        // "Loading next chapter…" publish).
-        NowPlayingCenter.shared.currentArtwork = UIImage(contentsOfFile: BooksStore.coverFileURL(book).path)
         await speak(book: book, from: chapterIndex)
     }
 
@@ -111,7 +113,7 @@ final class BookPlaybackController: ObservableObject {
             if let text = await chapterText(for: book, chapterIndex: index) {
                 activeChapterIndex = index
                 publishChapterLabel(for: book, chapterIndex: index)
-                NowPlayingCenter.shared.currentSubtitle = nowPlayingChapterLabel
+                player.nowPlayingPayload.subtitle = nowPlayingChapterLabel
                 prefetchNextChapter(of: book, after: index)
                 player.onNaturalFinish = { [weak self] in
                     self?.advanceToNextChapter()

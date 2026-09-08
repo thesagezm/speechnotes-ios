@@ -918,9 +918,11 @@ final class SpeechPlayer: ObservableObject {
             stop()
             return
         }
-        // Anything that isn't a book speak ends book auto-advance.
+        // Anything that isn't a book speak ends book auto-advance and the
+        // book's lock-screen dressing.
         if book == nil {
             onNaturalFinish = nil
+            nowPlayingPayload = NowPlayingPayload()
         }
         switch state {
         case .generating:
