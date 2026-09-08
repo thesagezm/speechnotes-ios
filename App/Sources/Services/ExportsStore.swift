@@ -133,7 +133,12 @@ final class ExportsStore: ObservableObject {
         }
         let tmp = fm.temporaryDirectory
         if let files = try? fm.contentsOfDirectory(at: tmp, includingPropertiesForKeys: nil) {
-            targets += files.map { tmp.appendingPathComponent($0.lastPathComponent) }
+            // Same conservative extension filter — tmp can hold in-flight
+            // CFNetwork download chunks from an ACTIVE model download.
+            // Nuking every tmp file would kill a download mid-write.
+            targets += files.filter {
+                ["part", "resumeData", "resumeSource"].contains($0.pathExtension)
+            }
         }
         var freed: Int64 = 0
         for url in targets {

@@ -62,6 +62,11 @@ final class NotebooksStore: ObservableObject {
 
     // MARK: - Persistence
 
+    private static var backupFileURL: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("notebooks.backup.json")
+    }
+
     private static func loadNotebooks() -> [Notebook] {
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
             return []
@@ -69,7 +74,19 @@ final class NotebooksStore: ObservableObject {
         do {
             return try JSONDecoder().decode([Notebook].self, from: try Data(contentsOf: fileURL))
         } catch {
-            Log.shared.error("Failed to load notebooks: \(error)")
+            // A notebooks.json that fails to decode must never be silently
+            // replaced by the next save — that turns one bad write into total
+            // data loss (every notebook name gone, notes fall back to Unfiled).
+            // Quarantine the bad file, recover from the rolling backup, carry on.
+            Log.shared.error("Failed to load notebooks: \(error) — quarantining notebooks.json")
+            let quarantine = fileURL.appendingPathExtension("corrupt-\(Int(Date().timeIntervalSince1970))")
+            try? FileManager.default.moveItem(at: fileURL, to: quarantine)
+            if let backup = try? Data(contentsOf: backupFileURL),
+               let recovered = try? JSONDecoder().decode([Notebook].self, from: backup),
+               !recovered.isEmpty {
+                Log.shared.error("NotebooksStore: recovered \(recovered.count) notebook(s) from notebooks.backup.json")
+                return recovered
+            }
             return []
         }
     }
@@ -78,6 +95,10 @@ final class NotebooksStore: ObservableObject {
         do {
             let data = try JSONEncoder().encode(notebooks)
             try data.write(to: Self.fileURL, options: .atomic)
+            // Mirror the rolling backup pattern from NotesStore — a backup
+            // taken before each overwrite is the cheapest insurance against
+            // a mid-write corruption.
+            try? data.write(to: Self.backupFileURL, options: .atomic)
         } catch {
             Log.shared.error("Failed to save notebooks: \(error)")
         }

@@ -23,7 +23,12 @@ final class WavPlayer: ObservableObject {
     private func play(_ url: URL) {
         stop()
         do {
-            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
+            // Do NOT re-set the audio session category — the engines configure
+            // it (.spokenAudio + duckOthers + allowBluetooth) in their init,
+            // and clobbering it here with .playback/.default means the NEXT
+            // engine speak after previewing an export runs with the degraded
+            // session (no ducking, wrong mode) until app restart. AVAudioPlayer
+            // plays fine under the existing spoken-audio category.
             let p = try AVAudioPlayer(contentsOf: url)
             p.prepareToPlay()
             p.play()

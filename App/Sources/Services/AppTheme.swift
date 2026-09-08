@@ -42,13 +42,32 @@ enum AccentColorChoice: String, CaseIterable, Identifiable {
 }
 
 final class AppTheme: ObservableObject {
-    @AppStorage("accentColorChoice") var accentChoice: AccentColorChoice = .system
-    @AppStorage("appAppearance") var appearance: String = "system" // "light", "dark", "system"
+    // NOTE: @AppStorage does NOT publish changes when stored inside an
+    // ObservableObject — it only triggers view invalidation when the
+    // property wrapper lives in a View/Scene. Using @Published + explicit
+    // UserDefaults sync so the root `.accentColor(theme.accentColor)` and
+    // `.preferredColorScheme(theme.colorScheme)` in SpeechnotesApp re-render
+    // when the user changes these in AppearanceSettingsView.
+    @Published var accentChoice: AccentColorChoice {
+        didSet { UserDefaults.standard.set(accentChoice.rawValue, forKey: "accentColorChoice") }
+    }
+    @Published var appearance: String {
+        didSet { UserDefaults.standard.set(appearance, forKey: "appAppearance") }
+    }
     /// Reading-view text scale — 1.0 = 100%, range 0.75…1.5. Applied to the
     /// markdown preview's body font so users can size text for their eyes.
-    @AppStorage("previewTextScale") var previewTextScale: Double = 1.0
+    @Published var previewTextScale: Double {
+        didSet { UserDefaults.standard.set(previewTextScale, forKey: "previewTextScale") }
+    }
 
     enum AppearanceMode: String { case light = "light", dark = "dark", system = "system" }
+
+    init() {
+        let defaults = UserDefaults.standard
+        accentChoice = AccentColorChoice(rawValue: defaults.string(forKey: "accentColorChoice") ?? "") ?? .system
+        appearance = defaults.string(forKey: "appAppearance") ?? "system"
+        previewTextScale = defaults.object(forKey: "previewTextScale") as? Double ?? 1.0
+    }
 
     var accentColor: Color { accentChoice.color }
 

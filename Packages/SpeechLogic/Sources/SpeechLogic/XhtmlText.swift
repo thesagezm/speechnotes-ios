@@ -42,6 +42,14 @@ public enum XhtmlText {
         "zwj": "\u{200D}", "lrm": "\u{200E}", "rlm": "\u{200F}",
     ]
 
+    /// XML's five predefined entities. These are legal to the strict parser
+    /// and MUST pass through this pre-pass VERBATIM — mapping `&lt;` to a
+    /// literal `<` here would hand the parser broken markup (the very
+    /// failure this pass exists to prevent), and stripping them (the old
+    /// behavior) deleted every "&" in every book ("AT&amp;T" → "ATT").
+    /// XMLParser resolves them in foundCharacters.
+    private static let xmlPredefined: Set<String> = ["amp", "lt", "gt", "quot", "apos"]
+
     /// Rewrites `&name;` references the XML parser would reject. Numeric
     /// references (`&#8212;`, `&#x2014;`) and the five XML entities are
     /// standard XML and pass through untouched.
@@ -54,10 +62,11 @@ public enum XhtmlText {
             let c = xhtml[i]
             if c == "&" {
                 // Entity-shaped token: a letters/digits run closed by ';'
-                // (cap 32 — real names are far shorter). Known → Unicode;
-                // UNKNOWN → strip the token, because a strict parser treats
-                // ANY undefined entity as fatal and one `&weirdname;` would
-                // otherwise truncate the rest of the chapter.
+                // (cap 32 — real names are far shorter). XML-predefined →
+                // verbatim; known HTML name → Unicode; UNKNOWN → strip the
+                // token, because a strict parser treats ANY undefined entity
+                // as fatal and one `&weirdname;` would otherwise truncate
+                // the rest of the chapter.
                 var j = xhtml.index(after: i)
                 var name = ""
                 var closed = false
@@ -69,7 +78,11 @@ public enum XhtmlText {
                     j = xhtml.index(after: j)
                 }
                 if closed {
-                    out += namedEntities[name] ?? ""
+                    if xmlPredefined.contains(name) {
+                        out += "&\(name);"
+                    } else {
+                        out += namedEntities[name] ?? ""
+                    }
                     i = xhtml.index(after: j)
                     continue
                 }
@@ -138,7 +151,21 @@ public enum XhtmlText {
         /// otherwise: a footnote BODY interrupts the sentence mid-flow and a
         /// `sup` noteref digit reads as a random number. Scrub both; `rt`
         /// (ruby annotation) likewise — the base text carries the meaning.
-        private var asideDepth = 0
+        ///
+        /// Scrub state is a stack of EVERY open element, not a depth counter:
+        /// a plain (non-footnote) `</aside>` or a nested `</sup>` inside a
+        /// footnote must not end the footnote's scrub — only the close of the
+        /// element that STARTED the scrub may. (The old single counter was
+        /// decremented by any aside/sup/rt close, which leaked or lost
+        /// footnote content depending on nesting order.)
+        private struct OpenElement { let name: String; let scrubs: Bool }
+        private var openElements: [OpenElement] = []
+        private var scrubCount = 0
+        /// Void (self-closing) elements: didEndElement never fires for them,
+        /// so they must never be pushed onto the stack.
+        private static let voidElements: Set<String> = [
+            "br", "img", "hr", "meta", "link", "input", "area", "base", "col", "embed", "source", "track", "wbr"
+        ]
         /// Inside `<td>/<th>` a `<br>` means "same cell, new line" — the
         /// cells are comma-joined for speech, so a br must NOT flush a
         /// paragraph (it split table rows mid-sentence).
@@ -172,14 +199,19 @@ public enum XhtmlText {
             }
             if name == "aside" {
                 if XhtmlText.isFootnoteAside(attributeDict) {
-                    asideDepth += 1
+                    openElements.append(.init(name: name, scrubs: true))
+                    scrubCount += 1
                     return
                 }
             } else if name == "sup" || name == "rt" {
-                asideDepth += 1
+                openElements.append(.init(name: name, scrubs: true))
+                scrubCount += 1
                 return
             }
-            guard skipDepth == 0, asideDepth == 0 else { return }
+            if !Self.voidElements.contains(name) {
+                openElements.append(.init(name: name, scrubs: false))
+            }
+            guard skipDepth == 0, scrubCount == 0 else { return }
             if name == "td" || name == "th" {
                 cellDepth += 1
                 // Table cells read as one running line, comma-joined — a
@@ -211,7 +243,7 @@ public enum XhtmlText {
         }
 
         func parser(_ parser: XMLParser, foundCharacters string: String) {
-            guard skipDepth == 0, asideDepth == 0 else { return }
+            guard skipDepth == 0, scrubCount == 0 else { return }
             buffer += string
         }
 
@@ -226,12 +258,17 @@ public enum XhtmlText {
                 skipDepth = max(0, skipDepth - 1)
                 return
             }
-            if asideDepth > 0 {
-                if name == "aside" || name == "sup" || name == "rt" {
-                    asideDepth = max(0, asideDepth - 1)
-                }
-                return
+            // Pop the stack, searching from the END for the matching open
+            // element name — <a><b></b></a> is fine but a malformed
+            // <a><sup></sup> (no inner `</a>`) must still resolve. Only the
+            // element that STARTED the scrub can clear it; any nested close
+            // leaves the scrub in force.
+            if let idx = openElements.lastIndex(where: { $0.name == name }) {
+                let popped = openElements[idx]
+                if popped.scrubs { scrubCount = max(0, scrubCount - 1) }
+                openElements.remove(at: idx)
             }
+            if scrubCount > 0 { return }
             if name == "td" || name == "th" {
                 cellDepth = max(0, cellDepth - 1)
             }

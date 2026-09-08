@@ -53,15 +53,31 @@ final class ImageCache {
             if let disk = RemoteImageStore.loadData(for: url) {
                 data = disk
             } else {
-                guard let fetched = try? Data(contentsOf: url), !fetched.isEmpty else { return nil }
-                RemoteImageStore.store(fetched, for: url)
-                data = fetched
+                // URLSession with timeout — Data(contentsOf:) blocks the
+                // cooperative thread with no cancellation and a 60s default
+                // timeout, and many images in one note = many blocked threads.
+                var fetched: Data?
+                let sem = DispatchSemaphore(value: 0)
+                let task = URLSession.shared.dataTask(with: url) { d, _, _ in
+                    fetched = d
+                    sem.signal()
+                }
+                task.resume()
+                _ = sem.wait(timeout: .now() + 15)
+                task.cancel()
+                guard let d = fetched, !d.isEmpty else { return nil }
+                RemoteImageStore.store(d, for: url)
+                data = d
             }
         }
         guard let data, let decoded = UIImage(data: data) else { return nil }
         lock.lock()
         defer { lock.unlock() }
-        cache.setObject(decoded, forKey: cacheKey(for: url), cost: data.count)
+        // Cost in DECODED bytes (compressed bytes * 4–30× undercount and
+        // the 64 MB totalCostLimit would hold hundreds of MB of bitmaps).
+        let pixelSize = (decoded.cgImage?.bytesPerRow ?? 0) * (decoded.cgImage?.height ?? 0)
+        let cost = max(pixelSize, data.count)
+        cache.setObject(decoded, forKey: cacheKey(for: url), cost: cost)
         return decoded
     }
 

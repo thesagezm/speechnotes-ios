@@ -166,8 +166,8 @@ public final class StreamingWriter {
         for sample in samples {
             WAVWriter.appendUInt16(UInt16(bitPattern: WAVWriter.quantize(sample)), to: &bytes)
         }
-        sampleCount += samples.count
         try fileHandle.write(contentsOf: bytes)
+        sampleCount += samples.count
     }
 
     /// Patches the RIFF + data size fields and closes the file. Safe to

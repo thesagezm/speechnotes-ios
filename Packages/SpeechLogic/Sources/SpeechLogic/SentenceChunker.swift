@@ -189,13 +189,18 @@ public enum SentenceChunker {
     public static func sentencePieces(in text: String, maxChars: Int = 200) -> [(offset: Int, endOffset: Int)] {
         guard !text.isEmpty, text.contains(where: { !$0.isWhitespace }) else { return [] }
         var result: [(offset: Int, endOffset: Int)] = []
+        let utf16 = text.utf16
         var cursor = text.startIndex
+        // Running UTF-16 offset — avoids recomputing `text[..<piece.start].utf16.count`
+        // per piece, which was O(n²) on the resume/read-along hot path.
+        var runningOffset = 0
+        let startIndex = text.startIndex
         while cursor < text.endIndex {
             let end = sentenceEnd(in: text, from: cursor, limit: text.endIndex) ?? text.endIndex
             for piece in splitOversized(text, start: cursor, end: end, maxUtf16: max(1, maxChars)) {
-                let offset = text[text.startIndex..<piece.start].utf16.count
-                let endOffset = offset + text[piece.start..<piece.end].utf16.count
-                result.append((offset: offset, endOffset: endOffset))
+                let pieceLength = text[piece.start..<piece.end].utf16.count
+                result.append((offset: runningOffset, endOffset: runningOffset + pieceLength))
+                runningOffset += pieceLength
             }
             cursor = end
         }

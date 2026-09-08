@@ -6,7 +6,7 @@ final class LogStore: ObservableObject {
 
     struct Entry: Identifiable, Equatable {
         let id = UUID()
-        let date = Date()
+        let date: String      // formatted at creation; persisted lines carry their own
         let level: String
         let message: String
     }
@@ -35,30 +35,56 @@ final class LogStore: ObservableObject {
         return formatter
     }()
 
+    // A serial queue for ALL disk I/O — the engines log per chunk (~1-3 Hz
+    // during playback) and the old per-line main-thread open/seek/write/close
+    // was constant main-thread file churn. Batch lines, flush on a timer.
+    private let ioQueue = DispatchQueue(label: "LogStore.io")
+    private var buffer: [String] = []
+    private var flushTimer: DispatchSourceTimer?
+    private let flushInterval: TimeInterval = 1.0
+
     // MARK: Logging from any thread
 
     func info(_ message: String) { append("INFO", message) }
     func error(_ message: String) { append("ERROR", message) }
 
     private func append(_ level: String, _ message: String) {
-        let entry = Entry(level: level, message: message)
+        let dateStr = Self.formatter.string(from: Date())
+        let entry = Entry(date: dateStr, level: level, message: message)
+        let line = "\(dateStr) [\(level)] \(message)\n"
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.entries.append(entry)
             if self.entries.count > self.maxEntries {
                 self.entries.removeFirst(self.entries.count - self.maxEntries)
             }
-            self.persist(entry)
         }
+        ioQueue.async { [weak self] in
+            guard let self else { return }
+            self.buffer.append(line)
+            self.scheduleFlush()
+        }
+    }
+
+    private func scheduleFlush() {
+        guard flushTimer == nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: ioQueue)
+        timer.schedule(deadline: .now() + flushInterval)
+        timer.setEventHandler { [weak self] in
+            self?.flush()
+        }
+        timer.resume()
+        flushTimer = timer
     }
 
     // MARK: Persistence
 
-    /// Appends one formatted line to the on-disk log, rolling the file when
-    /// it outgrows the cap. Called on the main thread only.
-    private func persist(_ entry: Entry) {
-        let line = "\(Self.formatter.string(from: entry.date)) [\(entry.level)] \(entry.message)\n"
-        let data = Data(line.utf8)
+    private func flush() {
+        flushTimer = nil
+        guard !buffer.isEmpty else { return }
+        let lines = buffer
+        buffer.removeAll()
+        let data = Data(lines.joined().utf8)
         if let handle = try? FileHandle(forWritingTo: logFileURL) {
             defer { try? handle.close() }
             _ = try? handle.seekToEnd()
@@ -87,16 +113,21 @@ final class LogStore: ObservableObject {
         guard let raw = try? String(contentsOf: logFileURL, encoding: .utf8), !raw.isEmpty else { return }
         let lines = raw.split(separator: "\n", omittingEmptySubsequences: true)
             .suffix(Self.persistedTailLimit)
-        entries = lines.map { line in
+        entries = lines.compactMap { line in
             let text = String(line)
+            // Parse the persisted timestamp so loaded entries show the
+            // LOGGED time, not the launch time (the old code used Date()
+            // at struct creation and lost the original time).
             let level = text.contains("[ERROR]") ? "ERROR" : "INFO"
-            return Entry(level: level, message: text)
+            // First 12 chars are "HH:mm:ss.SSS " — grab the timestamp.
+            let dateStr = text.count >= 12 ? String(text.prefix(12)) : ""
+            return Entry(date: dateStr, level: level, message: text)
         }
     }
 
     var exportText: String {
         entries
-            .map { "\(Self.formatter.string(from: $0.date)) [\($0.level)] \($0.message)" }
+            .map { "\($0.date) [\($0.level)] \($0.message)" }
             .joined(separator: "\n")
     }
 }
