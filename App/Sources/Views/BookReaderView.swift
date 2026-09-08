@@ -38,6 +38,9 @@ struct BookReaderView: View {
     /// The chapter whose position was last written to the manifest —
     /// relocated fires on every scroll tick; only chapter changes persist.
     @State private var persistedChapter: Int
+    /// Last CFI the webview reported — persisted alongside the chapter
+    /// index so reopening lands mid-chapter (M20 fix).
+    @State private var lastKnownCFI: String?
 
     init(book: Book, store: BooksStore) {
         self.book = book
@@ -46,6 +49,7 @@ struct BookReaderView: View {
         _chapterIndex = State(initialValue: saved?.chapterIndex ?? 0)
         _chapterFraction = State(initialValue: saved?.chapterFraction ?? 0)
         _persistedChapter = State(initialValue: saved?.chapterIndex ?? -1)
+        _lastKnownCFI = State(initialValue: saved?.cfi)
         _totalChapters = State(initialValue: book.spineCount ?? 0)
     }
 
@@ -152,6 +156,7 @@ struct BookReaderView: View {
             startChapter: chapterIndex,
             startTheme: theme,
             startFontSize: Int(fontSize),
+            startCFI: book.position?.cfi,
             onRelocated: handleRelocated,
             onTOC: { toc = $0 },
             onError: { errorMessage = $0 },
@@ -334,9 +339,10 @@ struct BookReaderView: View {
 
     // MARK: - Actions & plumbing
 
-    private func handleRelocated(index: Int, fraction: Double, total: Int) {
+    private func handleRelocated(index: Int, fraction: Double, total: Int, cfi: String?) {
         chapterIndex = max(0, index)
         chapterFraction = fraction
+        if let cfi { lastKnownCFI = cfi }
         if total > 0 { totalChapters = total }
         if !bookLoaded { bookLoaded = true }
         if index != persistedChapter {
@@ -346,7 +352,12 @@ struct BookReaderView: View {
 
     private func persistPosition() {
         persistedChapter = chapterIndex
-        store.updatePosition(book, chapterIndex: chapterIndex, chapterFraction: chapterFraction)
+        store.updatePosition(
+            book,
+            chapterIndex: chapterIndex,
+            chapterFraction: chapterFraction,
+            cfi: lastKnownCFI
+        )
     }
 
     private func goChapter(_ index: Int) {

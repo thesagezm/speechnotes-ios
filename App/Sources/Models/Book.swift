@@ -8,10 +8,13 @@ enum BookFormat: String, Codable {
 
 /// Where the reader left off. EPUB: spine index + scroll fraction inside the
 /// chapter; PDF: page index + fraction inside the page. One shape keeps the
-/// manifest and the resume logic format-agnostic.
+/// manifest and the resume logic format-agnostic. `cfi` is EPUB-only and
+/// survives font-size/rotation better than the index+fraction pair — when
+/// set it wins on restore and the other fields are the fallback.
 struct BookPosition: Codable, Equatable, Hashable {
     var chapterIndex: Int
     var chapterFraction: Double
+    var cfi: String?
 }
 
 /// One TOC row snapshotted at import time (epub: from EpubInfo's native
