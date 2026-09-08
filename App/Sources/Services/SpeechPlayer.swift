@@ -37,6 +37,9 @@ final class SpeechPlayer: ObservableObject {
     @Published var rateMultiplier: Double {
         didSet {
             guard rateMultiplier != oldValue else { return }
+            // Live-apply: the engines read the rate per chunk, so the slider
+            // takes effect from the next sentence without a restart (M14).
+            engine?.speed = Float(min(2.0, max(0.5, rateMultiplier)))
             ratePersistTask?.cancel()
             ratePersistTask = Task { [weak self] in
                 try? await Task.sleep(nanoseconds: 500_000_000)

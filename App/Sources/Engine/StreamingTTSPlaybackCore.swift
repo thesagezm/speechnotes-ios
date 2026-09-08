@@ -30,8 +30,9 @@ final class StreamingTTSPlaybackCore: NSObject {
         let chunkMaxChars: Int
         /// How many chunks beyond the playback cursor the producer may run.
         let generationAheadLimit: Int
-        /// Silence appended BETWEEN chunks in WAV exports (mirrors playback
-        /// chunk gaps; 0 for Kokoro, the Helper's silenceDuration for Supertonic).
+        /// Inter-chunk pause baked into WAV exports only (playback itself
+        /// schedules back-to-back). Kept small so a skipped chunk reads as a
+        /// breath, not dead air.
         let exportInterChunkSilence: Float
         let logPrefix: String
     }
@@ -68,14 +69,22 @@ final class StreamingTTSPlaybackCore: NSObject {
     private var playbackGeneration = 0
 
     private var chunks: [Chunk] = []
-    private var generatedBuffers: [Int: AVAudioPCMBuffer] = [:]
+    /// Slot states: -1 pending, -2 skipped, ≥0 = id into `bufferPool`.
+    /// Skipped chunks (synthesis failed) step the schedule cursor over them
+    /// so one bad sentence never deadlocks the pipeline.
+    private var bufferSlots: [Int] = []
+    private var bufferPool: [Int: AVAudioPCMBuffer] = [:]
+    private var nextBufferId = 0
     private var scheduledUpTo = -1
     private var totalChars = 1
+    private static let slotPending = -1
+    private static let slotSkipped = -2
 
     /// Spoken-text speed — written from main (the rate slider), read per
     /// chunk on generateQueue. Lock-guarded because it crosses threads.
     private let rateLock = NSLock()
     private var storedSpeed: Float = 1.0
+    /// Live: assigning mid-playback takes effect from the very next chunk.
     var speed: Float {
         get { rateLock.lock(); defer { rateLock.unlock() }; return storedSpeed }
         set { rateLock.lock(); storedSpeed = Float(min(2.0, max(0.5, newValue))); rateLock.unlock() }
@@ -113,10 +122,13 @@ final class StreamingTTSPlaybackCore: NSObject {
         }
     }
 
-    init(config: Config) {
-        self.config = config
-        self.storedSampleRate = config.sampleRate
-        super.init()
+    /// Audio-session category applied lazily on first actual playback —
+    /// configuring it in init landed an OSStatus -50 at every cold start
+    /// (the session isn't attachable before the app is fully active).
+    private var audioSessionConfigured = false
+    private func configureAudioSessionIfNeeded() {
+        guard !audioSessionConfigured else { return }
+        audioSessionConfigured = true
         do {
             try AVAudioSession.sharedInstance().setCategory(
                 .playback,
@@ -126,6 +138,12 @@ final class StreamingTTSPlaybackCore: NSObject {
         } catch {
             Log.shared.error("\(config.logPrefix) audio session setup failed: \(error)")
         }
+    }
+
+    init(config: Config) {
+        self.config = config
+        self.storedSampleRate = config.sampleRate
+        super.init()
         interruptionObserver = NotificationCenter.default.addObserver(
             forName: AVAudioSession.interruptionNotification,
             object: nil,
@@ -172,9 +190,16 @@ final class StreamingTTSPlaybackCore: NSObject {
 
         let generation = playbackGeneration + 1
         playbackGeneration = generation
+        // Supersede any in-flight producer: signal the gate it may be
+        // blocked on BEFORE replacing it, so it wakes, reads the bumped
+        // generation, and exits instead of leaking until stop().
+        for _ in 0...(config.generationAheadLimit + 1) {
+            pacingGate?.signal()
+        }
 
         chunks = allChunks
-        generatedBuffers = [:]
+        bufferSlots = [Int](repeating: Self.slotPending, count: allChunks.count)
+        bufferPool = [:]
         scheduledUpTo = -1
         totalChars = max(1, clean.utf16.count)
         playTracker.reset()
@@ -202,20 +227,31 @@ final class StreamingTTSPlaybackCore: NSObject {
                     self.pacingGate?.wait()
                 }
                 guard self.playbackGeneration == generation else { return }
-                // One flaky chunk must never end a reading: retry, then
-                // insert 0.5 s of silence and keep going.
-                let samples: [Float]
+                // A bad chunk once cost the listener a 30–90 s pause (3
+                // attempts × retry sleep, then a 0.5 s silence gap): one
+                // retry, then SKIP the chunk — continuity beats
+                // completeness when the alternative is dead air. The slot
+                // gets the skipped sentinel so the schedule cursor steps
+                // past it and the read-along char math still accounts for
+                // the text that won't sound.
                 do {
-                    samples = try Self.generateWithRetry(self, chunk.text, attempts: 3)
+                    let samples = try Self.generateWithRetry(self, chunk.text, attempts: 2)
+                    let buffer = Self.makeMonoBuffer(samples: samples, sampleRate: self.sampleRate)
+                    DispatchQueue.main.async {
+                        guard self.playbackGeneration == generation else { return }
+                        let id = self.nextBufferId
+                        self.nextBufferId += 1
+                        self.bufferPool[id] = buffer
+                        self.bufferSlots[index] = id
+                        self.scheduleReadyChunks(generation: generation)
+                    }
                 } catch {
-                    Log.shared.error("\(self.config.logPrefix) chunk \(index + 1) failed after retries (\(error)): «\(chunk.text.prefix(60))» — inserting 0.5s silence")
-                    samples = Array(repeating: Float(0), count: Int(self.sampleRate) / 2)
-                }
-                let buffer = Self.makeMonoBuffer(samples: samples, sampleRate: self.sampleRate)
-                DispatchQueue.main.async {
-                    guard self.playbackGeneration == generation else { return }
-                    self.generatedBuffers[index] = buffer
-                    self.scheduleReadyChunks(generation: generation)
+                    Log.shared.error("\(self.config.logPrefix) chunk \(index + 1) skipped (\(error)): «\(chunk.text.prefix(60))»")
+                    DispatchQueue.main.async {
+                        guard self.playbackGeneration == generation else { return }
+                        self.bufferSlots[index] = Self.slotSkipped
+                        self.scheduleReadyChunks(generation: generation)
+                    }
                 }
             }
         }
@@ -249,7 +285,21 @@ final class StreamingTTSPlaybackCore: NSObject {
         guard playbackGeneration == generation else { return }
         while true {
             let next = scheduledUpTo + 1
-            guard next < chunks.count, let buffer = generatedBuffers[next] else { return }
+            guard next < chunks.count else { return }
+            let slot = bufferSlots[next]
+            guard slot != Self.slotPending else { return } // producer hasn't resolved this chunk yet
+            if slot == Self.slotSkipped {
+                // Failed chunk: step over it so the chain advances and the
+                // natural-finish path still fires when the LAST chunk was
+                // skipped. The play tracker still counts the chunk's chars
+                // (charsDone below includes it via the chunks array), which
+                // keeps the read-along cursor moving past unspeakable text.
+                scheduledUpTo = next
+                pacingGate?.signal()
+                if next == chunks.count - 1 { finishLastChunk(generation: generation) }
+                continue
+            }
+            guard let buffer = bufferPool[slot] else { return }
             scheduledUpTo = next
             pacingGate?.signal()
             schedule(buffer: buffer, index: next, isLast: next == chunks.count - 1, generation: generation)
@@ -259,7 +309,10 @@ final class StreamingTTSPlaybackCore: NSObject {
     private func schedule(buffer: AVAudioPCMBuffer, index: Int, isLast: Bool, generation: Int) {
         ensureAudioEngineRunning(format: buffer.format)
 
-        let charsDone = chunks.prefix(scheduledUpTo + 1).reduce(0) { $0 + $1.length }
+        // Play-end char position includes skipped chunks (their text counts
+        // as "passed" so the read-along cursor never stalls on a sentence
+        // that produced no audio).
+        let charsDone = chunks[...scheduledUpTo].reduce(0) { $0 + $1.length }
         playTracker.onPlayedChars = { [weak self] playedChars in
             guard let self else { return }
             // Play-accurate progress: derived from the position that is
@@ -273,14 +326,9 @@ final class StreamingTTSPlaybackCore: NSObject {
         playerNode.scheduleBuffer(buffer, at: nil, options: []) { [weak self] in
             DispatchQueue.main.async {
                 guard let self, self.playbackGeneration == generation else { return }
-                self.generatedBuffers[index] = nil
+                self.bufferPool[self.bufferSlots[index]] = nil
                 if isLast {
-                    if self.state == .speaking || self.state == .paused || self.state == .generating {
-                        self.onProgress?(1.0)
-                        self.playTracker.finish(totalChars: self.totalChars)
-                        self.onFinished?()
-                        self.state = .idle
-                    }
+                    self.finishLastChunk(generation: generation)
                     return
                 }
                 self.scheduleReadyChunks(generation: generation)
@@ -295,7 +343,19 @@ final class StreamingTTSPlaybackCore: NSObject {
         }
     }
 
+    /// The natural-completion path — reached from the last chunk's buffer
+    /// callback OR synchronously when the last chunk was skipped.
+    private func finishLastChunk(generation: Int) {
+        guard playbackGeneration == generation else { return }
+        guard state == .speaking || state == .paused || state == .generating else { return }
+        onProgress?(1.0)
+        playTracker.finish(totalChars: totalChars)
+        onFinished?()
+        state = .idle
+    }
+
     private func ensureAudioEngineRunning(format: AVAudioFormat) {
+        configureAudioSessionIfNeeded()
         if !audioNodesAttached {
             audioEngine.attach(playerNode)
             audioNodesAttached = true
@@ -320,11 +380,11 @@ final class StreamingTTSPlaybackCore: NSObject {
         playerNode.stop()
         audioEngine.stop()
         audioEngineRunning = false
-        try? AVAudioSession.sharedInstance().setActive(
-            false,
-            options: .notifyOthersOnDeactivation
-        )
-        generatedBuffers = [:]
+        // Do NOT deactivate the shared session here: in LiveContainer the
+        // category transition can fail — deactivation from idle is the OS's
+        // job, and forcing it re-created background-audio edge cases.
+        bufferPool = [:]
+        bufferSlots = []
         scheduledUpTo = -1
     }
 

@@ -21,6 +21,11 @@ final class SystemEngine: NSObject, SpeechEngine {
     /// identifier no longer resolves (voice deleted from the device).
     var voiceIdentifier: String?
 
+    /// Applied on the next utterance — AVSpeechSynthesizer can't vary rate
+    /// mid-utterance, but the slider shouldn't have to wait for a full
+    /// note restart either.
+    var speed: Float = 1.0
+
     private var state: SpeechState = .idle {
         didSet {
             if state != oldValue {
@@ -38,9 +43,12 @@ final class SystemEngine: NSObject, SpeechEngine {
 
     private var interruptionObserver: NSObjectProtocol?
 
-    override init() {
-        super.init()
-        synthesizer.delegate = self
+    /// Session category is applied on first REAL speech, not at init —
+    /// doing it pre-activate logged OSStatus -50 at every cold start.
+    private var audioSessionConfigured = false
+    private func configureAudioSessionIfNeeded() {
+        guard !audioSessionConfigured else { return }
+        audioSessionConfigured = true
         do {
             try AVAudioSession.sharedInstance().setCategory(
                 .playback,
@@ -50,6 +58,11 @@ final class SystemEngine: NSObject, SpeechEngine {
         } catch {
             Log.shared.error("Audio session setup failed: \(error)")
         }
+    }
+
+    override init() {
+        super.init()
+        synthesizer.delegate = self
         // Phone calls must actually pause system-voice speech: without this
         // observer the session was interrupted, the utterance died, and the
         // UI stayed "speaking" with dead air and no resume (the ONNX engines
@@ -82,10 +95,13 @@ final class SystemEngine: NSObject, SpeechEngine {
         let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
         synthesizer.stopSpeaking(at: .immediate)
+        configureAudioSessionIfNeeded()
 
         let utterance = AVSpeechUtterance(string: clean)
+        // Live speed wins over the call-site multiplier once set.
+        let effectiveRate = speed == 1.0 ? rateMultiplier : Double(speed)
         // AVSpeechUtterance.rate: 0.0...1.0, default 0.5 — map our multiplier onto it.
-        utterance.rate = Float(min(1.0, max(0.1, 0.5 * rateMultiplier)))
+        utterance.rate = Float(min(1.0, max(0.1, 0.5 * effectiveRate)))
         if let identifier = voiceIdentifier,
            let voice = AVSpeechSynthesisVoice(identifier: identifier) {
             utterance.voice = voice
