@@ -153,6 +153,11 @@ public enum ZipReader {
 
     private static func inflate(_ payload: Data, expectedSize: Int, entry: String) throws -> Data {
         guard expectedSize > 0 else { return Data() }
+        // A hostile EPUB can declare an absurd uncompressed size — the zip
+        // bomb is bounded here, before the allocation (M23).
+        guard expectedSize <= 100 * 1024 * 1024 else {
+            throw ZipError.corrupt(reason: "\(entry) declares \(expectedSize) bytes uncompressed — beyond the 100 MB safety cap")
+        }
         guard !payload.isEmpty else {
             throw ZipError.corrupt(reason: "empty deflate payload for \(entry)")
         }

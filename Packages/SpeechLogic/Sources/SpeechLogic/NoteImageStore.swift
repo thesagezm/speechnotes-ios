@@ -158,7 +158,17 @@ public enum NoteImageStore {
         if b[0] == 0x47, b[1] == 0x49, b[2] == 0x46 { return "gif" }
         if b[0] == 0x52, b[1] == 0x49, b[2] == 0x46, b[3] == 0x46,
            b[8] == 0x57, b[9] == 0x45, b[10] == 0x42, b[11] == 0x50 { return "webp" }
-        if b[4] == 0x66, b[5] == 0x74, b[6] == 0x79, b[7] == 0x70 { return "heic" } // "ftyp"
+        // ISO-BMFF containers ("ftyp" at byte 4): the brand distinguishes
+        // HEIC-family stills from MP4-family videos — any ftyp used to claim
+        // "heic", which buried pasted MP4s as broken images (M24).
+        if b[4] == 0x66, b[5] == 0x74, b[6] == 0x79, b[7] == 0x70 {
+            let brand = String(bytes: b[8...11], encoding: .ascii) ?? ""
+            switch brand {
+            case "heic", "heix", "hevc", "hevx", "mif1", "msf1", "heif": return "heic"
+            case "avif", "avis": return "avif"
+            default: return "bin" // mp41/mp42/isom etc. are videos, not images
+            }
+        }
         return nil
     }
 
