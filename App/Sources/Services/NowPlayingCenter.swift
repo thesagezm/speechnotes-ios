@@ -1,5 +1,6 @@
 import Foundation
 import MediaPlayer
+import UIKit
 
 /// Keeps the lock screen / Control Center "Now Playing" surface in sync with
 /// `SpeechPlayer`.
@@ -25,10 +26,19 @@ final class NowPlayingCenter {
         case play
         case pause
         case stop
+        /// Chapter-granular skips — the reader's Previous/Next buttons.
+        case previousChapter
+        case nextChapter
     }
 
     /// Set by SpeechPlayer once — decides what each remote command does.
     var onCommand: ((Command) -> Void)?
+
+    /// Set by SpeechPlayer/BookPlaybackController when a book chapter starts
+    /// — subtitle (e.g. "Ch 12 — The Reunion") and cover go out on every
+    /// publish until another book/none takes over.
+    var currentSubtitle: String?
+    var currentArtwork: UIImage?
 
     private let infoCenter = MPNowPlayingInfoCenter.default()
 
@@ -56,6 +66,22 @@ final class NowPlayingCenter {
         commands.playCommand.isEnabled = true
         commands.pauseCommand.isEnabled = true
         commands.stopCommand.isEnabled = true
+        // Skip buttons double as chapter navigation for books: content isn't
+        // seconds-addressable (it's synthesized per sentence chunk), so a
+        // ±15 s seek would be a lie. Chapter skip is exact.
+        commands.previousTrackCommand.isEnabled = true
+        commands.nextTrackCommand.isEnabled = true
+
+        commands.previousTrackCommand.addTarget { [weak self] _ in
+            guard let handler = self?.onCommand else { return .commandFailed }
+            handler(.previousChapter)
+            return .success
+        }
+        commands.nextTrackCommand.addTarget { [weak self] _ in
+            guard let handler = self?.onCommand else { return .commandFailed }
+            handler(.nextChapter)
+            return .success
+        }
 
         commands.togglePlayPauseCommand.addTarget { [weak self] _ in
             guard let handler = self?.onCommand else { return .commandFailed }
@@ -83,8 +109,17 @@ final class NowPlayingCenter {
     /// an advancing elapsed time, and a roughly-correct total duration.
     /// Accepts a title of nil (anonymous text) with a generic fallback — a
     /// missing surface during backgrounded speech weakens the background
-    /// mode contract.
-    func publish(title: String?, isPlaying: Bool, progress: Double?, rate: Float) {
+    /// mode contract. `subtitle` shows as the artist row (book chapter,
+    /// e.g. "Ch 12 — The Reunion"); `artwork` is a pre-rendered UIImage
+    /// (book cover) that lands as the lock-screen thumbnail.
+    func publish(
+        title: String?,
+        subtitle: String? = nil,
+        artwork: UIImage? = nil,
+        isPlaying: Bool,
+        progress: Double?,
+        rate: Float
+    ) {
         let now = Date()
 
         // Bank playing time; pause/resume no longer loses elapsed seconds.
@@ -110,11 +145,16 @@ final class NowPlayingCenter {
 
         var info: [String: Any] = [
             MPMediaItemPropertyTitle: displayTitle,
-            MPMediaItemPropertyArtist: "Speechnotes",
+            MPMediaItemPropertyArtist: subtitle ?? currentSubtitle ?? "Speechnotes",
             MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? rate : 0,
             MPNowPlayingInfoPropertyElapsedPlaybackTime: elapsed,
             MPNowPlayingInfoPropertyIsLiveStream: false,
         ]
+        let resolvedArtwork = artwork ?? currentArtwork
+        if let resolvedArtwork {
+            let item = MPMediaItemArtwork(boundsSize: resolvedArtwork.size) { _ in resolvedArtwork }
+            info[MPMediaItemPropertyArtwork] = item
+        }
         // Derive a plausibly-stable total duration from progress. Only
         // publish once progress has meaningfully advanced — the early
         // estimates jump around visibly in Control Center.
@@ -124,11 +164,22 @@ final class NowPlayingCenter {
         infoCenter.nowPlayingInfo = info
     }
 
+    /// Chapter skating is book-only: when SpeechPlayer has no book bound,
+    /// the buttons stay registered but greyed (system behavior for
+    /// unsupported track commands).
+    func setChapterSkipEnabled(_ enabled: Bool) {
+        let commands = MPRemoteCommandCenter.shared()
+        commands.previousTrackCommand.isEnabled = enabled
+        commands.nextTrackCommand.isEnabled = enabled
+    }
+
     /// Clear the lock-screen surface (speech finished, stopped, or reset).
     func clear() {
         infoCenter.nowPlayingInfo = nil
         elapsed = 0
         playStartedAt = nil
         lastPublishAt = nil
+        currentSubtitle = nil
+        currentArtwork = nil
     }
 }

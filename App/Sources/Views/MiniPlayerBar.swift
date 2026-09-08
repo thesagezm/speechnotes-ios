@@ -79,6 +79,41 @@ struct MiniPlayerBar: View {
                         .controlSize(.small)
                 }
 
+                Menu {
+                    Button { player.setSleepTimer(.minutes(5)) }
+                        label: { Label("5 minutes", systemImage: "moon") }
+                    Button { player.setSleepTimer(.minutes(15)) }
+                        label: { Label("15 minutes", systemImage: "moon") }
+                    Button { player.setSleepTimer(.minutes(30)) }
+                        label: { Label("30 minutes", systemImage: "moon") }
+                    Button { player.setSleepTimer(.minutes(60)) }
+                        label: { Label("1 hour", systemImage: "moon") }
+                    Divider()
+                    if player.nowPlayingBookId != nil {
+                        Button { player.setSleepTimer(.endOfChapter) }
+                            label: { Label("End of chapter", systemImage: "book.closed") }
+                    }
+                    if player.sleepTimer != .off {
+                        Button(role: .destructive) { player.setSleepTimer(.off) }
+                            label: { Label("Cancel sleep timer", systemImage: "moon.zzz") }
+                    }
+                } label: {
+                    ZStack(alignment: .topTrailing) {
+                        Image(systemName: "moon")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(player.sleepTimer == .off ? .secondary : Color.accentColor)
+                            .frame(width: 32, height: 32)
+                            .background(Circle().fill(Color.secondary.opacity(0.12)))
+                        if player.sleepTimer != .off {
+                            Circle()
+                                .fill(Color.accentColor)
+                                .frame(width: 7, height: 7)
+                                .offset(x: -1, y: 1)
+                        }
+                    }
+                }
+                .accessibilityLabel(player.sleepTimer == .off ? "Sleep timer off" : "Sleep timer: \(player.sleepTimer)")
+
                 // Minimize to the floating bubble.
                 Button {
                     Haptics.tap()

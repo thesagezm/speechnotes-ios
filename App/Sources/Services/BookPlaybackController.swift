@@ -24,6 +24,25 @@ final class BookPlaybackController: ObservableObject {
     /// as notesProvider).
     func bind(to player: SpeechPlayer) {
         self.player = player
+        // Lock-screen Previous/Next — SpeechPlayer forwards; we own the
+        // chapter chain so the command becomes a chapter jump when a book
+        // is active.
+        player.onChapterSkip = { [weak self] delta in
+            self?.skipChapters(by: delta)
+        }
+    }
+
+    /// Lock-screen track-skip → chapter jump. A skip lands on the previous/
+    /// next chapter from the SOUNDING one (not the viewed one), so a user
+    /// listening while browsing keeps their place.
+    private func skipChapters(by delta: Int) {
+        guard let book = activeBook else { return }
+        let target = max(0, min(Self.chapterCount(of: book) - 1, activeChapterIndex + delta))
+        guard target != activeChapterIndex else { return }
+        player?.stop()
+        Task { [weak self] in
+            await self?.speak(book: book, from: target)
+        }
     }
 
     /// True when THIS book+chapter is the live speech — drives the reader's
@@ -40,6 +59,13 @@ final class BookPlaybackController: ObservableObject {
     func isBookActive(_ book: Book) -> Bool {
         guard let player else { return false }
         return player.nowPlayingBookId == book.id.uuidString && player.state != .idle
+    }
+
+    /// A note/conversation takeover or an explicit stop nulls the book —
+    /// chapter-skip goes back to grey.
+    private func clearActiveBook() {
+        activeBook = nil
+        NowPlayingCenter.shared.setChapterSkipEnabled(false)
     }
 
     /// The reader's play control. When this exact chapter is already the live
@@ -63,6 +89,14 @@ final class BookPlaybackController: ObservableObject {
             player.togglePlay("", note: nil, book: ref)
             return
         }
+        // Chapter skip buttons light up as soon as a book takes the player.
+        NowPlayingCenter.shared.setChapterSkipEnabled(true)
+        // Lock-screen dressing flows through the player (single writer —
+        // a stray publish from the controller can't fight the player's own).
+        player.nowPlayingPayload = SpeechPlayer.NowPlayingPayload(
+            subtitle: nil, // set per-chapter in publishChapterLabel
+            artworkPath: BooksStore.coverFileURL(book).path
+        )
         activeBook = book
         await speak(book: book, from: chapterIndex)
     }
@@ -79,6 +113,7 @@ final class BookPlaybackController: ObservableObject {
             if let text = await chapterText(for: book, chapterIndex: index) {
                 activeChapterIndex = index
                 publishChapterLabel(for: book, chapterIndex: index)
+                player.nowPlayingPayload.subtitle = nowPlayingChapterLabel
                 prefetchNextChapter(of: book, after: index)
                 player.onNaturalFinish = { [weak self] in
                     self?.advanceToNextChapter()
@@ -100,7 +135,7 @@ final class BookPlaybackController: ObservableObject {
         }
         Log.shared.info("BookPlayback: no speakable chapters from \(startIndex) in \(book.title)")
         endChapterGapGrace()
-        activeBook = nil
+        clearActiveBook()
     }
 
     /// Format-neutral speech units: epub = spine items, pdf = manifest
@@ -120,7 +155,7 @@ final class BookPlaybackController: ObservableObject {
             Haptics.success()
             ToastCenter.shared.show("Finished \"\(book.title.prefix(40))\"")
             endChapterGapGrace()
-            activeBook = nil
+            clearActiveBook()
             return
         }
         // Between chapters NOTHING is playing, so iOS may suspend the app
