@@ -303,13 +303,31 @@ final class BooksStore: ObservableObject {
         books.removeAll { $0.id == book.id }
     }
 
+    /// Monotonic write counter per book — a detached encode-then-write can
+    /// land AFTER a newer save (e.g. updatePosition fired again while the
+    /// first encode was queued), and the stale manifest would win. Holding
+    /// the newest sequence per book and dropping older writes at flush time
+    /// keeps last-writer-wins instead of last-flush-wins (M18).
+    private static let seqLock = NSLock()
+    nonisolated(unsafe) private static var writeSeq: [UUID: Int] = [:]
+
     /// Saves a mutated book (position, lastOpenedAt) back to its manifest.
     func save(_ book: Book) {
         guard let idx = books.firstIndex(where: { $0.id == book.id }) else { return }
         books[idx] = book
+        Self.seqLock.lock()
+        let seq = (Self.writeSeq[book.id] ?? 0) + 1
+        Self.writeSeq[book.id] = seq
+        Self.seqLock.unlock()
         let snapshot = book
         Task.detached(priority: .utility) {
             if let data = try? JSONEncoder().encode(snapshot) {
+                // A NEWER save() was already issued while this encode was in
+                // flight — drop the stale write rather than overwrite with it.
+                Self.seqLock.lock()
+                let latest = Self.writeSeq[snapshot.id]
+                Self.seqLock.unlock()
+                guard latest == seq else { return }
                 try? data.write(to: Self.manifestURL(snapshot.id), options: .atomic)
             }
         }
