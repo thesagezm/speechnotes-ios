@@ -27,6 +27,10 @@ protocol SpeechEngine: AnyObject {
     /// 3 chunks ahead of the audio). Optional: engines without play-time
     /// tracking keep the default no-op.
     var onPlayedChars: ((Int) -> Void)? { get set }
+    /// Live speech rate — setting this mid-playback takes effect from the
+    /// next chunk/utterance. Engines without per-utterance rate apply it on
+    /// the next speak().
+    var speed: Float { get set }
 
     func speak(_ text: String, rateMultiplier: Double)
     func pause()
@@ -37,6 +41,11 @@ protocol SpeechEngine: AnyObject {
 extension SpeechEngine {
     var onPlayedChars: ((Int) -> Void)? {
         get { nil }
+        set {}
+    }
+    /// Default: engines that can't vary rate mid-flight ignore live sets.
+    var speed: Float {
+        get { 1.0 }
         set {}
     }
 }

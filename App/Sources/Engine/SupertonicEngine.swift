@@ -27,6 +27,13 @@ final class SupertonicEngine: NSObject, SpeechEngine {
     /// ISO language code (AVAILABLE_LANGS in Helper.swift); "en" default.
     var lang = "en"
 
+    /// Live rate — forwarded to the core so the NEXT chunk reflects a
+    /// slider change without a restart (duration predictor takes speed).
+    var speed: Float {
+        get { core.speed }
+        set { core.speed = newValue }
+    }
+
     /// Upstream ExampleONNX default — 8 denoising steps.
     private static let totalStep = 8
     /// Supertonic's own chunker accepts up to 300 chars for non-CJK; our
@@ -74,7 +81,6 @@ final class SupertonicEngine: NSObject, SpeechEngine {
 
     private func loadModelIfNeeded() {
         guard !modelLoadAttempted else { return }
-        modelLoadAttempted = true
 
         guard ModelManager.supertonicFilesAreValid() else {
             Log.shared.error("SupertonicEngine: model files missing or invalid at \(ModelManager.supertonicDirectory.path)")
@@ -96,10 +102,13 @@ final class SupertonicEngine: NSObject, SpeechEngine {
                 styles[voice] = try loadVoiceStyle([path], verbose: false)
             }
             Log.shared.info("SupertonicEngine: 4 sessions + \(styles.count) styles loaded in \(String(format: "%.1f", Date().timeIntervalSince(started)))s (\(textToSpeech.sampleRate) Hz)")
+            // Only latch AFTER success — a transient load failure (jettison
+            // mid-load, file lock) used to brick the engine until relaunch.
+            modelLoadAttempted = true
         } catch {
             tts = nil
             styles = [:]
-            Log.shared.error("SupertonicEngine: model load failed: \(error)")
+            Log.shared.error("SupertonicEngine: model load failed: \(error) — will retry on next speak")
         }
     }
 

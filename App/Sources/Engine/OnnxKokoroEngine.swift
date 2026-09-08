@@ -30,6 +30,13 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
 
     var voice = "am_eric"
 
+    /// Live rate — forwarded to the core so the NEXT chunk reflects a
+    /// slider change without a restart (the model takes speed natively).
+    var speed: Float {
+        get { core.speed }
+        set { core.speed = newValue }
+    }
+
     /// Which model file + validator this instance serves — the fp32 tier and
     /// the small uint8 tier share one engine class.
     private let modelFileURL: URL
@@ -103,7 +110,6 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
 
     private func loadModelIfNeeded() {
         guard !modelLoadAttempted else { return }
-        modelLoadAttempted = true
 
         let modelPath = modelFileURL
         let tokenizerPath = ModelManager.onnxTokenizerFileURL
@@ -144,9 +150,12 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
             }
             voicesFlat = flat
             Log.shared.info("OnnxKokoroEngine: \(vocab.count) vocab entries, \(flat.count) voices ready")
+            // Only latch AFTER success — a transient ORT error (memory
+            // pressure, file lock) used to brick the engine until relaunch.
+            modelLoadAttempted = true
         } catch {
             ortSession = nil
-            Log.shared.error("OnnxKokoroEngine: model load failed: \(error)")
+            Log.shared.error("OnnxKokoroEngine: model load failed: \(error) — will retry on next speak")
         }
     }
 
