@@ -25,6 +25,9 @@ final class NowPlayingCenter {
         case play
         case pause
         case stop
+        /// Chapter-granular skips — the reader's Previous/Next buttons.
+        case previousChapter
+        case nextChapter
     }
 
     /// Set by SpeechPlayer once — decides what each remote command does.
@@ -56,6 +59,22 @@ final class NowPlayingCenter {
         commands.playCommand.isEnabled = true
         commands.pauseCommand.isEnabled = true
         commands.stopCommand.isEnabled = true
+        // Skip buttons double as chapter navigation for books: content isn't
+        // seconds-addressable (it's synthesized per sentence chunk), so a
+        // ±15 s seek would be a lie. Chapter skip is exact.
+        commands.previousTrackCommand.isEnabled = true
+        commands.nextTrackCommand.isEnabled = true
+
+        commands.previousTrackCommand.addTarget { [weak self] _ in
+            guard let handler = self?.onCommand else { return .commandFailed }
+            handler(.previousChapter)
+            return .success
+        }
+        commands.nextTrackCommand.addTarget { [weak self] _ in
+            guard let handler = self?.onCommand else { return .commandFailed }
+            handler(.nextChapter)
+            return .success
+        }
 
         commands.togglePlayPauseCommand.addTarget { [weak self] _ in
             guard let handler = self?.onCommand else { return .commandFailed }
@@ -122,6 +141,15 @@ final class NowPlayingCenter {
             info[MPMediaItemPropertyPlaybackDuration] = elapsed / progress
         }
         infoCenter.nowPlayingInfo = info
+    }
+
+    /// Chapter skating is book-only: when SpeechPlayer has no book bound,
+    /// the buttons stay registered but greyed (system behavior for
+    /// unsupported track commands).
+    func setChapterSkipEnabled(_ enabled: Bool) {
+        let commands = MPRemoteCommandCenter.shared()
+        commands.previousTrackCommand.isEnabled = enabled
+        commands.nextTrackCommand.isEnabled = enabled
     }
 
     /// Clear the lock-screen surface (speech finished, stopped, or reset).

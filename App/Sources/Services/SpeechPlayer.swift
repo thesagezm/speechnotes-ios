@@ -588,6 +588,9 @@ final class SpeechPlayer: ObservableObject {
         nowPlayingWired = true
 
         NowPlayingCenter.shared.configure()
+        // Chapter skip is off until a book binds — leaves notes with greyed
+        // track buttons instead of the system default (no-op taps).
+        NowPlayingCenter.shared.setChapterSkipEnabled(false)
         NowPlayingCenter.shared.onCommand = { [weak self] command in
             Task { @MainActor in
                 guard let self else { return }
@@ -601,6 +604,13 @@ final class SpeechPlayer: ObservableObject {
                     else if self.state == .paused { self.engine?.resume() }
                 case .stop:
                     self.stop()
+                case .previousChapter:
+                    // Chapter-gone-back is a book-level op — the player
+                    // forwards to BookPlaybackController, which owns the
+                    // chapter chain. A no-op for notes.
+                    self.onChapterSkip?(-1)
+                case .nextChapter:
+                    self.onChapterSkip?(1)
                 }
             }
         }
@@ -788,6 +798,23 @@ final class SpeechPlayer: ObservableObject {
                         rate: Float(self.rateMultiplier)
                     )
                 }
+                // End-of-chapter sleep timer: swallow the natural finish —
+                // the chain stops HERE, no next-chapter publish, and the
+                // bookmark is kept so resume lands on the chapter that just
+                // ended (the listener can replay past it).
+                if self.sleepTimer == .endOfChapter, bookWasPlaying {
+                    self.sleepTimer = .off
+                    self.lastRawProgress = 0
+                    self.resumeBaseFraction = 0
+                    self.nowPlayingTitle = nil
+                    self.nowPlayingNoteId = nil
+                    self.nowPlayingBookId = nil
+                    self.finishAuditionIfActive()
+                    self.endReadAlong()
+                    self.onNaturalFinish = nil
+                    NowPlayingCenter.shared.clear()
+                    return
+                }
                 self.onNaturalFinish?()
                 self.lastRawProgress = 0
                 self.resumeBaseFraction = 0
@@ -823,6 +850,44 @@ final class SpeechPlayer: ObservableObject {
     /// current chapter. A note taking over, an explicit stop, or an audition
     /// clears it.
     var onNaturalFinish: (() -> Void)?
+
+    /// Lock-screen Previous/Next — wired to BookPlaybackController's chapter
+    /// step. nil while a note (not book) is on; the buttons grey out.
+    var onChapterSkip: ((Int) -> Void)?
+
+    // MARK: - Sleep timer
+
+    /// "Stop speaking after this" — user-set in the player bubble.
+    enum SleepTimer: Equatable {
+        case off
+        /// Wall-clock minutes from now. One-shot: reaching it stops AND
+        /// clears, like every podcast player.
+        case minutes(Int)
+        /// Stop when the current chapter/item finishes — ideal for books.
+        case endOfChapter
+    }
+    @Published private(set) var sleepTimer: SleepTimer = .off
+    private var sleepTimerTask: Task<Void, Never>?
+
+    func setSleepTimer(_ timer: SleepTimer) {
+        sleepTimerTask?.cancel()
+        sleepTimerTask = nil
+        sleepTimer = timer
+        switch timer {
+        case .minutes(let minutes):
+            sleepTimerTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(minutes) * 60 * 1_000_000_000)
+                guard !Task.isCancelled, let self else { return }
+                Log.shared.info("SpeechPlayer: sleep timer fired (\(minutes) min)")
+                self.sleepTimer = .off
+                self.stop()
+            }
+        case .endOfChapter:
+            break // checked in the onFinished path
+        case .off:
+            break
+        }
+    }
 
     func togglePlay(_ text: String, note: Note? = nil, book: BookPlaybackRef? = nil) {
         if isAuditioning {
