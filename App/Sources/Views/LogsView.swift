@@ -17,11 +17,9 @@ struct LogsView: View {
                     LazyVStack(alignment: .leading, spacing: 6) {
                         ForEach(logs.entries) { entry in
                             VStack(alignment: .leading, spacing: 1) {
-                                Text(
-                                    "\(entry.date, format: .dateTime.hour().minute().second()) [\(entry.level)]"
-                                )
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
+                                Text("\(entry.date) [\(entry.level)]")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
 
                                 Text(entry.message)
                                     .font(.caption.monospaced())
