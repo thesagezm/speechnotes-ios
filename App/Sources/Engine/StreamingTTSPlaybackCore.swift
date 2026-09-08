@@ -39,8 +39,9 @@ final class StreamingTTSPlaybackCore: NSObject {
 
     let config: Config
 
-    /// generateQueue-only: one chunk of text → mono Float samples. Throwing
-    /// triggers the retry-then-silence resilience rule.
+    /// generateQueue-only: one chunk of text → mono Float samples. A throw
+    /// gets ONE retry in the core, then the chunk is skipped — no silence
+    /// insertion (it read as dead air at the retry boundary).
     var generateChunk: (String) throws -> [Float] = { _ in
         throw StreamingCoreError.notConfigured
     }
