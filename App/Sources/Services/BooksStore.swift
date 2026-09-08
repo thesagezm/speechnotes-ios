@@ -339,9 +339,13 @@ final class BooksStore: ObservableObject {
         save(updated)
     }
 
-    func updatePosition(_ book: Book, chapterIndex: Int, chapterFraction: Double) {
+    func updatePosition(_ book: Book, chapterIndex: Int, chapterFraction: Double, cfi: String? = nil) {
         var updated = book
-        updated.position = BookPosition(chapterIndex: chapterIndex, chapterFraction: chapterFraction)
+        updated.position = BookPosition(
+            chapterIndex: chapterIndex,
+            chapterFraction: chapterFraction,
+            cfi: cfi
+        )
         save(updated)
     }
 }

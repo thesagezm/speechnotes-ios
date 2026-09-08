@@ -14,8 +14,11 @@ struct BookWebView: UIViewRepresentable {
     let startChapter: Int
     let startTheme: String
     let startFontSize: Int
-    /// (chapterIndex, fractionWithinChapter, totalChapters)
-    var onRelocated: (Int, Double, Int) -> Void
+    /// epub.js CFI restored from the manifest — wins over `startChapter` when
+    /// present so reopening lands mid-chapter, not at the chapter top (M20).
+    let startCFI: String?
+    /// (chapterIndex, fractionWithinChapter, totalChapters, cfi)
+    var onRelocated: (Int, Double, Int, String?) -> Void
     var onTOC: ([BookTocEntry]) -> Void
     var onError: (String) -> Void
     /// Hands the live WKWebView to the parent so it can evaluate commands.
@@ -38,7 +41,7 @@ struct BookWebView: UIViewRepresentable {
         webView.scrollView.backgroundColor = .clear
         context.coordinator.parent = self
 
-        if let url = Self.shellURL(book: book, chapter: startChapter, theme: startTheme, fontSize: startFontSize) {
+        if let url = Self.shellURL(book: book, chapter: startChapter, theme: startTheme, fontSize: startFontSize, cfi: startCFI) {
             webView.load(URLRequest(url: url))
         }
         // Async: setting parent @State synchronously inside makeUIView would
@@ -60,14 +63,18 @@ struct BookWebView: UIViewRepresentable {
     /// across two custom-scheme hosts is cross-origin between opaque
     /// origins and WebKit blocks it ("TypeError: Load failed" — the first
     /// device build's failure).
-    static func shellURL(book: Book, chapter: Int, theme: String, fontSize: Int) -> URL? {
+    static func shellURL(book: Book, chapter: Int, theme: String, fontSize: Int, cfi: String?) -> URL? {
         var components = URLComponents(string: "bookscheme://shell/index.html")
-        components?.queryItems = [
+        var items = [
             URLQueryItem(name: "bookPath", value: "/book/\(book.id.uuidString)/original.epub"),
             URLQueryItem(name: "chapter", value: String(chapter)),
             URLQueryItem(name: "theme", value: theme),
             URLQueryItem(name: "fontSize", value: String(fontSize)),
         ]
+        if let cfi, !cfi.isEmpty {
+            items.append(URLQueryItem(name: "cfi", value: cfi))
+        }
+        components?.queryItems = items
         return components?.url
     }
 
@@ -314,7 +321,8 @@ struct BookWebView: UIViewRepresentable {
                 let index = (body["index"] as? NSNumber)?.intValue ?? 0
                 let fraction = (body["fraction"] as? NSNumber)?.doubleValue ?? 0
                 let total = (body["total"] as? NSNumber)?.intValue ?? 0
-                parent.onRelocated(index, fraction, total)
+                let cfi = body["cfi"] as? String
+                parent.onRelocated(index, fraction, total, cfi)
             case "toc":
                 guard let items = body["items"] as? [[String: Any]] else { return }
                 let entries = items.compactMap { item -> BookTocEntry? in

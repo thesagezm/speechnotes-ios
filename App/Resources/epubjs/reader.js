@@ -99,6 +99,11 @@
           type: "relocated",
           index: start && typeof start.index === "number" ? start.index : 0,
           fraction: relocatedFraction(location),
+          // epub.js hands us a stable CFI per relocation — the app persists
+          // it so reopening restores mid-chapter position even after a
+          // font-size change or rotation (the old chapterIndex+fraction
+          // only ever got you back to the top of the chapter).
+          cfi: (start && start.cfi) || null,
           total: book.spine ? book.spine.length : 0
         });
       });
@@ -119,6 +124,17 @@
       // Display once the container is open — displaying earlier races
       // spine parsing on big books.
       book.opened.then(function () {
+        // A saved CFI wins over the chapter index: the app persists CFI on
+        // relocation, so reopening restores mid-chapter; fall back to the
+        // chapter index on first open / legacy data / unrenderable CFI.
+        var initialCfi = params.get("cfi");
+        if (initialCfi) {
+          rendition.display(initialCfi).catch(function () {
+            var fallback = book.spine.get(startChapter);
+            rendition.display(fallback ? fallback.href : undefined);
+          });
+          return;
+        }
         var target = book.spine.get(startChapter);
         rendition.display(target ? target.href : undefined);
       });
