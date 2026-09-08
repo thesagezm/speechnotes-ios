@@ -4,11 +4,34 @@ Format: newest first. Every critique round, merge, and escalation lands here.
 
 ---
 
+## 2026-09-08 (later) — Batch 2 merged
+
+- **Sleep timer**: `SleepTimer` enum on SpeechPlayer (off / N min / end of
+  chapter). N-minute variant is a Task that fires `stop()` at the wall-clock
+  deadline. End-of-chapter hooks into the onFinished path — swallows the
+  natural completion, clears the chain, keeps the bookmark so the listener
+  can resume past it. Menu lives on the MiniPlayerBar.
+- **Lock-screen polish**: chapter label (from book TOC) and cover art ride
+  out via `SpeechPlayer.NowPlayingPayload` → NowPlayingCenter. The
+  "Loading next chapter…" gap publish no longer blanks the metadata.
+- Chapter skip already existed; unassigned.
+- Critique: 9/10. (Points off: no per-chapter progress % on lock screen —
+  deferred because position is content-derived, not seconds-addressable;
+  revisit if MediaPlayer surfaces start to matter.)
+- CI: IPA build green on the tip (34289888739).
+
+## 2026-09-08 (later) — Batch 1 merged
+
+- M18 BooksStore write race (monotonic seq + drop stale), M23 ZipReader 100 MB
+  bound, M24 brand-aware HEIC/MP4 sniff, M15 SystemEngine epoch guard on
+  async delegate callbacks. 4 files, +57/−5. CI green (34248407439).
+
 ## 2026-09-08 — Batch 0: TTS pipeline regressions (user-reported)
 
 **Trigger.** User log: switching engines while playing → player can't be quit;
 chunk failures cost 30–90 s of dead air (3 retries + 0.5 s silence insertion);
 generation slower than v1.5 (user asked to restore the v1.5 TTS path).
+
 
 **Diagnosis (read from the user's logs):**
 - `15:44:06`–`15:45:33`: a single Supertonic chunk burned **87 s** on 3 doomed
