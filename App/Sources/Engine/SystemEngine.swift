@@ -26,6 +26,11 @@ final class SystemEngine: NSObject, SpeechEngine {
     /// note restart either.
     var speed: Float = 1.0
 
+    /// Every async state jump carries the utterance epoch it belongs to —
+    /// a `speak`/`stop` interleave used to let a stale queued `idle`/`speaking`
+    /// clobber the newer state (M15). Bumped on each speak() and stop().
+    private var epoch = 0
+
     private var state: SpeechState = .idle {
         didSet {
             if state != oldValue {
@@ -96,6 +101,8 @@ final class SystemEngine: NSObject, SpeechEngine {
         guard !clean.isEmpty else { return }
         synthesizer.stopSpeaking(at: .immediate)
         configureAudioSessionIfNeeded()
+        epoch += 1
+        let epochAtSpeak = epoch
 
         let utterance = AVSpeechUtterance(string: clean)
         // Live speed wins over the call-site multiplier once set.
@@ -125,25 +132,37 @@ final class SystemEngine: NSObject, SpeechEngine {
     }
 
     func stop() {
+        epoch += 1
+        let epochAtStop = epoch
         synthesizer.stopSpeaking(at: .immediate)
-        DispatchQueue.main.async { self.state = .idle }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.epoch == epochAtStop else { return }
+            self.state = .idle
+        }
     }
 }
 
 extension SystemEngine: AVSpeechSynthesizerDelegate {
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didStart utterance: AVSpeechUtterance) {
-        DispatchQueue.main.async { self.state = .speaking }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.epoch > 0 else { return }
+            self.state = .speaking
+        }
     }
 
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
-        DispatchQueue.main.async {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
             self.onFinished?()
             self.state = .idle
         }
     }
 
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
-        DispatchQueue.main.async { self.state = .idle }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.state = .idle
+        }
     }
 
     /// Fires before each spoken word-range; location+length ≈ chars spoken
