@@ -42,9 +42,10 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
     private let modelFileURL: URL
     private let modelFilesValid: () -> Bool
 
-    /// How many play-path validations this instance has timed — the first is
-    /// always logged, later ones only when they get slow.
-    private var validationTimingsLogged = 0
+    /// How many times `speak()` has validated on this instance — the first is
+    /// always logged, later ones only when they get slow. Main thread only
+    /// (every `speak()` call is), like the rest of the engine's non-model state.
+    private var validationCalls = 0
 
     private let core: StreamingTTSPlaybackCore
 
@@ -100,8 +101,8 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
         let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
         // Timed because it sits upstream of TTFA's t0 — see PlaybackMetrics.
-        let logIt = validationTimingsLogged == 0
-        validationTimingsLogged += 1
+        let logIt = validationCalls == 0
+        validationCalls += 1
         let filesValid = PlaybackMetrics.timedValidation(
             prefix: core.config.logPrefix,
             label: "play-path file validation",

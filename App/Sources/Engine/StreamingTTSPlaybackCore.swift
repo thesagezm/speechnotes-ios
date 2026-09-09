@@ -166,6 +166,11 @@ final class StreamingTTSPlaybackCore: NSObject {
     }
 
     deinit {
+        // Best-effort only: `Timer.invalidate()` is not documented as safe from
+        // a thread other than the one that installed it, and deinit runs on
+        // whatever released the last reference. The real invalidation points are
+        // `stopStallWatchdog()` from teardownPlayback() and from stop(); this
+        // is the backstop for a core dropped without either.
         stallWatchdog?.invalidate()
         if let interruptionObserver {
             NotificationCenter.default.removeObserver(interruptionObserver)
@@ -236,7 +241,16 @@ final class StreamingTTSPlaybackCore: NSObject {
 
         generateQueue.async { [weak self] in
             guard let self, self.playbackGeneration == generation else { return }
-            guard self.isModelReady() else {
+            // Timed separately because a cold session hides a multi-second
+            // model load inside TTFA and nothing else explains it.
+            let readyStart = PlaybackMetrics.monotonicNow()
+            let modelReady = self.isModelReady()
+            let readySeconds = PlaybackMetrics.seconds(since: readyStart)
+            DispatchQueue.main.async {
+                guard self.playbackGeneration == generation else { return }
+                self.metrics.modelReady(seconds: readySeconds)
+            }
+            guard modelReady else {
                 Log.shared.error("\(self.config.logPrefix) asked to speak but the model isn't ready")
                 DispatchQueue.main.async {
                     if self.playbackGeneration == generation { self.state = .idle }
@@ -275,21 +289,29 @@ final class StreamingTTSPlaybackCore: NSObject {
                         self.nextBufferId += 1
                         self.bufferPool[id] = buffer
                         self.bufferSlots[index] = id
+                        // Schedule FIRST. The log call is a DateFormatter, a
+                        // UUID, two String(format:) and two GCD dispatches —
+                        // tens of microseconds of main-thread work, but it
+                        // would sit between "buffer ready" and the call that
+                        // actually queues audio, which is the one thing this
+                        // block must not delay. Logging after also puts the
+                        // chunk lines in schedule order rather than
+                        // generation order.
+                        self.scheduleReadyChunks(generation: generation)
                         self.metrics.chunkGenerated(
                             index: index,
                             chars: chunk.length,
                             generationSeconds: generationSeconds,
                             audioSeconds: audioSeconds
                         )
-                        self.scheduleReadyChunks(generation: generation)
                     }
                 } catch {
                     Log.shared.error("\(self.config.logPrefix) chunk \(index + 1) skipped (\(error)): «\(chunk.text.prefix(60))»")
                     DispatchQueue.main.async {
                         guard self.playbackGeneration == generation else { return }
                         self.bufferSlots[index] = Self.slotSkipped
-                        self.metrics.chunkSkipped(index: index, chars: chunk.length)
                         self.scheduleReadyChunks(generation: generation)
+                        self.metrics.chunkSkipped(index: index, chars: chunk.length)
                     }
                 }
             }
@@ -306,6 +328,9 @@ final class StreamingTTSPlaybackCore: NSObject {
     func resume() {
         guard audioEngineRunning, !playerNode.isPlaying, state == .paused else { return }
         playerNode.play()
+        // Closes the paused-time bank so `wall` in the session summary can be
+        // read honestly next to the audio figure.
+        metrics.playbackResumed()
         state = .speaking
     }
 
@@ -316,6 +341,12 @@ final class StreamingTTSPlaybackCore: NSObject {
         for _ in 0...(config.generationAheadLimit + 1) {
             pacingGate?.signal()
         }
+        // Invalidated here, not only via `teardownPlayback()`: speak() starts
+        // the watchdog before it defers `state = .generating` to a later
+        // main-queue turn, so a stop() landing in between finds state already
+        // .idle, the assignment is a no-op, the didSet never fires and
+        // teardown never runs — the timer would tick for the process lifetime.
+        stopStallWatchdog()
         // Before the state flip: `state = .idle` tears down, and teardown ends
         // the session under its own catch-all reason.
         metrics.endSession(reason: "stopped")
@@ -381,8 +412,9 @@ final class StreamingTTSPlaybackCore: NSObject {
 
         // `state == .speaking` with a node that is NOT playing means the node
         // drained: everything already queued ran out before the producer caught
-        // up. That is audible silence, measured here event-to-event (last buffer
-        // ended → node restarted) rather than inferred from chunk sizes.
+        // up. That is audible silence, measured here rather than inferred from
+        // chunk sizes — but measured event-to-event on the main queue, so it is
+        // a LOWER BOUND (see PlaybackMetrics.nodeRestarted()).
         let restartedAfterDrain = state == .speaking && !playerNode.isPlaying
         if state == .generating {
             state = .speaking
@@ -393,7 +425,10 @@ final class StreamingTTSPlaybackCore: NSObject {
         // Order matters: nodeRestarted labels the gap with the buffer count as
         // it stood BEFORE this one is added to it.
         if restartedAfterDrain { metrics.nodeRestarted() }
-        metrics.bufferScheduled(chars: chunks[index].length)
+        metrics.bufferScheduled(
+            chars: chunks[index].length,
+            audioSeconds: Double(buffer.frameLength) / buffer.format.sampleRate
+        )
     }
 
     /// The natural-completion path — reached from the last chunk's buffer
@@ -403,6 +438,13 @@ final class StreamingTTSPlaybackCore: NSObject {
         guard state == .speaking || state == .paused || state == .generating else { return }
         onProgress?(1.0)
         playTracker.finish(totalChars: totalChars)
+        // `onFinished` is called BEFORE the session is closed, so it must not
+        // re-enter this pipeline: SpeechPlayer's handler advances to the next
+        // chapter and calls speak() again, and a speak() that landed first
+        // would have its brand-new session closed by the endSession below.
+        // Safe today because that handler dispatches the next chapter
+        // asynchronously — the dependency is worth stating rather than
+        // relying on.
         onFinished?()
         // Before the state flip — `state = .idle` tears down, and teardown's
         // catch-all endSession must find the session already closed.

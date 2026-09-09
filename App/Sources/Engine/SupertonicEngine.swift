@@ -42,9 +42,10 @@ final class SupertonicEngine: NSObject, SpeechEngine {
 
     private let core: StreamingTTSPlaybackCore
 
-    /// How many play-path validations this instance has timed — the first is
-    /// always logged, later ones only when they get slow.
-    private var validationTimingsLogged = 0
+    /// How many times `speak()` has validated on this instance — the first is
+    /// always logged, later ones only when they get slow. Main thread only
+    /// (every `speak()` call is), like the rest of the engine's non-model state.
+    private var validationCalls = 0
 
     /// True once sessions were actually loaded this instance — the idle
     /// unload only pays off when there's something resident to free.
@@ -124,8 +125,8 @@ final class SupertonicEngine: NSObject, SpeechEngine {
         // Timed because it sits upstream of TTFA's t0 — see PlaybackMetrics.
         // Supertonic's check is the heavier of the two: one `attributesOfItem`
         // per model file across four ONNX sessions.
-        let logIt = validationTimingsLogged == 0
-        validationTimingsLogged += 1
+        let logIt = validationCalls == 0
+        validationCalls += 1
         let filesValid = PlaybackMetrics.timedValidation(
             prefix: core.config.logPrefix,
             label: "play-path file validation",

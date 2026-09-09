@@ -2,63 +2,58 @@ import Foundation
 
 /// Per-session playback instrumentation for `StreamingTTSPlaybackCore`.
 ///
-/// Why this exists: every claim in `TTS_BASELINE.md` about where the pipeline
-/// loses time is currently ARITHMETIC — chars → audio seconds → generation
-/// seconds at an assumed real-time factor. There is no device in this
-/// environment and no benchmark has ever been recorded, so those numbers are
-/// models, not measurements. This turns them into measurements the first time
-/// somebody plays a note on a device and opens LogsView.
+/// The pipeline's timing behaviour has never been measured — there is no device
+/// in the development environment and no recorded benchmark, so every claim
+/// about where it loses time is arithmetic. This produces the numbers instead.
 ///
-/// Nothing here changes playback behavior. It records timestamps and logs.
+/// - **TTFA** — `speak()` entry to the first buffer queued on the player node.
+/// - **T2B** — `speak()` entry to the *second* buffer queued, logged against
+///   the first buffer's audio duration. Whether that audio covers the wait is
+///   the entire first-sentence-stall question, so the line answers it directly.
+/// - **Synthesis RTF** — per chunk: chars → audio seconds → generation seconds.
+///   Measured around the whole `generateChunk` closure (retries included), so it
+///   covers phonemization and tokenization, which the engines' own per-chunk log
+///   omits. It excludes time blocked on the pacing gate by construction, so it
+///   describes the model, not the pipeline.
+/// - **GAP** — the node drained and had to be restarted. A lower bound: see
+///   `nodeRestarted()`.
+/// - **STALL** — the pipeline reports speaking, the node is silent, and it stays
+///   that way. The "UI shows playing, nothing sounds" failure mode.
+/// - **Session summary** — one line at finish / stop / teardown.
 ///
-/// Every line carries the `metrics` tag, so an exported log can be filtered
-/// down to just the instrumentation:
+/// Every line carries the `metrics` tag, so a log can be filtered to them.
+/// All durations are computed in-code from `ContinuousClock` — monotonic, and
+/// it counts through device sleep so a background stall is still measured as
+/// one and an NTP correction cannot invent a gap. Never diffed from log
+/// timestamps, which are wall-clock. Suspension safety is load-bearing on
+/// `playbackPaused()` clearing the pending gap and stall stamps.
 ///
-///     OnnxKokoroEngine metrics TTFA 1180ms — first buffer scheduled (84 chars)
-///     OnnxKokoroEngine metrics chunk 2/12 — 160 chars → 4.20s audio in 2.11s (RTF 0.50)
-///     OnnxKokoroEngine metrics GAP 0.48s of silence — node drained …
-///     OnnxKokoroEngine metrics session finished — 12 chunks …
+/// Threading: main-thread confined, matching the core's own pipeline state —
+/// a comment-only contract, same as the core's. `@MainActor` would enforce it
+/// but would then reject the `DispatchQueue.main.async` call sites in the core,
+/// whose closures are not main-actor-isolated in Swift 5 mode. The three
+/// `static` members are the only surface touched from `generateQueue`; they
+/// read a monotonic clock and return value types, so no measurement crosses a
+/// thread as shared mutable state.
 ///
-/// What it measures
-///  - **TTFA** — `speak()` entry to the first buffer actually queued on the
-///    player node. The number a listener experiences as "how long after I tap
-///    play before anything sounds".
-///  - **T2B** — `speak()` entry to the *second* buffer queued. This is the
-///    quantity that decides the first-sentence stall: chunk 0's audio has to
-///    last until chunk 1 is scheduled, or the node drains and there is
-///    silence. The log line prints both halves of that comparison.
-///  - **Per-chunk RTF** — chars → audio seconds → generation seconds. Measured
-///    around the whole `generateChunk` closure, so it includes phonemization
-///    and tokenization; the engines' own per-chunk log times only `synthesize`
-///    and therefore understates the cost.
-///  - **Audible gap** — the node drained and had to be restarted. Measured
-///    event-to-event, not inferred.
-///  - **Stall** — the pipeline believes it is speaking, the node is silent, and
-///    work is still outstanding. This is the "UI says playing, nothing sounds"
-///    failure mode, and it is the one thing no amount of source analysis can
-///    rule out.
-///  - **Session summary** — one line at natural finish, so a single grep answers
-///    "was this session smooth?" without stitching per-chunk lines together.
-///
-/// Threading: main-thread confined, exactly like the core's own pipeline state.
-/// The two `static` clock helpers are the only surface touched from
-/// `generateQueue`; they read a monotonic clock and return value types, so no
-/// measurement crosses a thread as shared mutable state.
+/// The log sink is injectable so the arithmetic below can be asserted without
+/// the `LogStore` singleton.
 final class PlaybackMetrics {
     private let prefix: String
 
+    /// `(message, isError)`. Swappable for tests; defaults to the app log.
+    var sink: (String, Bool) -> Void
+
     init(prefix: String) {
         self.prefix = prefix
+        self.sink = { message, isError in
+            if isError { Log.shared.error(message) } else { Log.shared.info(message) }
+        }
     }
 
-    // MARK: - Clock helpers (safe off the main thread)
+    // MARK: - Clock + pure decisions (safe off the main thread)
 
-    // `ContinuousClock` rather than `Date()`: monotonic, and it keeps counting
-    // while the device sleeps, so a background stall is still measured as one
-    // and an NTP correction can't invent a gap that never happened.
-
-    /// Stamp the start of a measured interval. Called on `generateQueue`
-    /// around a synthesis call.
+    /// Stamp the start of a measured interval. Called on `generateQueue`.
     static func monotonicNow() -> ContinuousClock.Instant { ContinuousClock.now }
 
     /// Seconds elapsed since `instant`. Pure — no shared state.
@@ -66,23 +61,367 @@ final class PlaybackMetrics {
         seconds(from: instant, to: ContinuousClock.now)
     }
 
-    /// Times a synchronous model-file validation performed on the play path and
-    /// logs the cost under the `metrics` tag.
+    /// Which chunks get their own RTF line: the first few (they set TTFA and
+    /// T2B and are the stall-prone ones), every 25th after that, and the last.
     ///
-    /// Why this is instrumented separately from TTFA: both ONNX engines
-    /// validate their model files on the main thread inside their own `speak()`,
-    /// BEFORE handing off to the core — so the cost sits upstream of TTFA's t0
-    /// and would otherwise be invisible. Kokoro's path is 3 `attributesOfItem`
-    /// syscalls plus a full read-and-parse of `tokenizer.json`; Supertonic's is
-    /// roughly 16 syscalls across its four sessions. Neither result can change
-    /// between two taps seconds apart, which makes both pure overhead on the
-    /// critical path and gives a caching change a measured before/after instead
-    /// of a guess.
+    /// A 200k-char chapter is ~1300 chunks. Logging all of them takes per-chunk
+    /// volume to ~2600 lines, which evicts TTFA from `LogStore`'s 500-entry
+    /// ring before the chapter ends — and with it the only record of whether
+    /// RTF degraded across a 40-minute session (thermal throttling on a
+    /// 326 MB CPU ONNX model is plausible and is exactly what the quartile
+    /// lines are for).
+    static func shouldLogChunk(index: Int, chunkCount: Int) -> Bool {
+        if index < 4 { return true }
+        if index == chunkCount - 1 { return true }
+        return index % 25 == 0
+    }
+
+    /// Signed margin between the audio the first buffer carried and the wait
+    /// for the second. Positive means covered; negative is silence the listener
+    /// hears. Always printed — the size of the margin is the diagnostic, and a
+    /// bare "covered" hides a 5 ms near-miss behind a 3 s comfortable start.
+    static func marginText(audioSeconds: Double, waitSeconds: Double) -> String {
+        let marginMs = Int(((audioSeconds - waitSeconds) * 1000).rounded())
+        return marginMs >= 0 ? "margin +\(marginMs)ms (covered)" : "margin \(marginMs)ms (SHORT — audible silence)"
+    }
+
+    /// A gap only escalates to ERROR at half a second. The first-sentence drain
+    /// is a known, expected, sub-half-second event today; logging it at ERROR on
+    /// every play would drain the level of meaning, and this repo otherwise
+    /// reserves `.error` for real failures.
+    static func gapIsError(_ seconds: Double) -> Bool { seconds >= 0.5 }
+
+    /// Re-log a continuing stall at most every 5 s. At 1 Hz a backgrounded
+    /// stall would evict the 500-entry ring buffer — the log that was supposed
+    /// to explain it — in about 8 minutes; at 5 s it takes ~42, and the
+    /// persisted 300-line tail covers ~25.
+    static func stallShouldLog(elapsedSeconds: Double, lastLoggedSeconds: Double) -> Bool {
+        elapsedSeconds >= lastLoggedSeconds + 5.0
+    }
+
+    private static func seconds(from a: ContinuousClock.Instant, to b: ContinuousClock.Instant) -> Double {
+        let interval = a.duration(to: b)
+        return Double(interval.components.seconds)
+            + Double(interval.components.attoseconds) / 1_000_000_000_000_000_000
+    }
+
+    // MARK: - Session state (main thread only)
+
+    private var sessionActive = false
+    private var sessionStart: ContinuousClock.Instant?
+    private var chunkCount = 0
+    private var firstChunkChars = 0
+    private var sessionRate: Float = 1.0
+
+    /// Facts about the buffer that ACTUALLY sounded first — not chunk index 0,
+    /// which can be skipped, in which case its char count would be printed
+    /// against audio it never produced.
+    private var firstScheduledChars = 0
+    private var firstScheduledAudioSeconds: Double = 0
+
+    private var firstAudioAt: ContinuousClock.Instant?
+    private var secondBufferAt: ContinuousClock.Instant?
+    private var scheduledBuffers = 0
+
+    private var generatedChunks = 0
+    private var skippedChunks = 0
+    private var totalGenerationSeconds: Double = 0
+    private var totalAudioSeconds: Double = 0
+    private var fastestChunkRTF: Double = 0
+    private var slowestChunkRTF: Double = 0
+    private var lastQuartileLogged = 0
+
+    private var lastBufferEndedAt: ContinuousClock.Instant?
+    private var gapCount = 0
+    private var worstGapSeconds: Double = 0
+
+    private var pausedAt: ContinuousClock.Instant?
+    private var pausedSeconds: Double = 0
+    private var pauseCount = 0
+
+    private var stallStart: ContinuousClock.Instant?
+    private var stallTicks = 0
+    private var lastStallLoggedSeconds: Double = -1
+
+    private func reset() {
+        sessionStart = ContinuousClock.now
+        firstScheduledChars = 0
+        firstScheduledAudioSeconds = 0
+        firstAudioAt = nil
+        secondBufferAt = nil
+        scheduledBuffers = 0
+        generatedChunks = 0
+        skippedChunks = 0
+        totalGenerationSeconds = 0
+        totalAudioSeconds = 0
+        fastestChunkRTF = 0
+        slowestChunkRTF = 0
+        lastQuartileLogged = 0
+        lastBufferEndedAt = nil
+        gapCount = 0
+        worstGapSeconds = 0
+        pausedAt = nil
+        pausedSeconds = 0
+        pauseCount = 0
+        stallStart = nil
+        stallTicks = 0
+        lastStallLoggedSeconds = -1
+    }
+
+    // MARK: - Session lifecycle
+
+    /// Called from `speak(_:)`. Closes any session left open — a second play
+    /// tap supersedes the first without going through `stop()` — then stamps t0.
+    func beginSession(chunkCount: Int, firstChunkChars: Int, rate: Float) {
+        if sessionActive { endSession(reason: "superseded") }
+
+        sessionActive = true
+        self.chunkCount = chunkCount
+        self.firstChunkChars = firstChunkChars
+        self.sessionRate = rate
+        reset()
+
+        emit("session start — \(chunkCount) chunks, chunk 0 is \(firstChunkChars) chars, rate@start \(twoDP(Double(rate)))")
+    }
+
+    /// One summary line, then the session goes quiet. `reason` separates a
+    /// natural finish from a user stop from a teardown nobody asked for; the
+    /// last is the interesting one.
     ///
-    /// `alwaysLog` is true for the first call in an engine's life and false
-    /// afterwards, so a 300-chapter book doesn't push 300 identical lines
-    /// through a 500-entry ring buffer. Anything at or over
-    /// `slowThresholdSeconds` logs regardless — that's the case worth seeing.
+    /// `wall` is speak-entry to now on a clock that counts through sleep, and
+    /// it INCLUDES every pause — so it is not comparable to the `audio` figure
+    /// beside it. The paused total and pause count are printed for exactly that
+    /// reason.
+    func endSession(reason: String) {
+        guard sessionActive else { return }
+        sessionActive = false
+        closeOpenPause()
+
+        guard let start = sessionStart else {
+            emit("session \(reason) — no start stamp")
+            return
+        }
+        let wall = Self.seconds(from: start, to: ContinuousClock.now)
+        let synthesisRTF = totalAudioSeconds > 0 ? totalGenerationSeconds / totalAudioSeconds : 0
+        let rtfRange = slowestChunkRTF > 0
+            ? "chunk RTF \(twoDP(fastestChunkRTF))–\(twoDP(slowestChunkRTF))"
+            : "chunk RTF n/a"
+        emit("session \(reason) — \(generatedChunks) chunks (\(skippedChunks) skipped), "
+            + "\(twoDP(totalAudioSeconds))s audio, \(twoDP(totalGenerationSeconds))s gen, "
+            + "synthesis RTF \(twoDP(synthesisRTF)) [\(rtfRange)], "
+            + "TTFA \(ttfaText), T2B \(t2bText), gaps \(gapCount) (worst \(twoDP(worstGapSeconds))s, lower bound), "
+            + "wall \(twoDP(wall))s incl. \(twoDP(pausedSeconds))s paused across \(pauseCount) pause(s), "
+            + "rate@start \(twoDP(Double(sessionRate)))")
+    }
+
+    /// Model readiness resolved on `generateQueue`. Separates a cold session
+    /// (Kokoro: a 326 MB ONNX session load plus a tokenizer parse) from a warm
+    /// one — otherwise a 25 s cold TTFA and a 1.2 s warm TTFA land in the same
+    /// field with the same label and nothing explains the difference.
+    func modelReady(seconds: Double) {
+        guard sessionActive else { return }
+        let cold = seconds >= 1.0
+        emit("model-ready \(twoDP(seconds))s (\(cold ? "COLD — includes the model load, inside TTFA" : "warm"))", isError: cold)
+    }
+
+    private var ttfaText: String {
+        guard let start = sessionStart, let first = firstAudioAt else { return "n/a" }
+        return "\(milliseconds(from: start, to: first))ms"
+    }
+
+    private var t2bText: String {
+        guard let start = sessionStart, let second = secondBufferAt else { return "n/a" }
+        return "\(milliseconds(from: start, to: second))ms"
+    }
+
+    // MARK: - Generation
+
+    /// A chunk came back from the model. `generationSeconds` was measured on
+    /// `generateQueue` around the whole `generateChunk` closure — retries and
+    /// their back-off sleeps included, since a retry is part of what the
+    /// listener waits for, but time blocked on the pacing gate excluded, since
+    /// that is the pipeline waiting on playback and not the model working.
+    func chunkGenerated(index: Int, chars: Int, generationSeconds: Double, audioSeconds: Double) {
+        guard sessionActive else { return }
+        generatedChunks += 1
+        totalGenerationSeconds += generationSeconds
+        totalAudioSeconds += audioSeconds
+
+        let rtf = audioSeconds > 0 ? generationSeconds / audioSeconds : 0
+        if audioSeconds > 0 {
+            fastestChunkRTF = fastestChunkRTF > 0 ? min(fastestChunkRTF, rtf) : rtf
+            slowestChunkRTF = max(slowestChunkRTF, rtf)
+        }
+        if Self.shouldLogChunk(index: index, chunkCount: chunkCount) {
+            emit("chunk \(index + 1)/\(chunkCount) — \(chars) chars → \(twoDP(audioSeconds))s audio in \(twoDP(generationSeconds))s (RTF \(twoDP(rtf)))")
+        }
+        logQuartileIfNeeded()
+    }
+
+    /// Synthesis failed twice and the chunk was skipped. The core already logs
+    /// WHY at error level; this records what it cost the session accounting.
+    func chunkSkipped(index: Int, chars: Int) {
+        guard sessionActive else { return }
+        skippedChunks += 1
+        emit("chunk \(index + 1)/\(chunkCount) SKIPPED — \(chars) chars will not sound")
+    }
+
+    /// Running-mean RTF at each quartile of a session long enough for the
+    /// trend to mean something. Comparing these four lines is how a device
+    /// session answers "does synthesis slow down as the chapter goes on?".
+    private func logQuartileIfNeeded() {
+        guard chunkCount >= 16 else { return }
+        let quartile = (generatedChunks * 4) / chunkCount
+        guard quartile > lastQuartileLogged, quartile < 4 else { return }
+        lastQuartileLogged = quartile
+        let mean = totalAudioSeconds > 0 ? totalGenerationSeconds / totalAudioSeconds : 0
+        emit("RTF at \(quartile * 25)% — \(generatedChunks)/\(chunkCount) chunks, mean RTF \(twoDP(mean)), "
+            + "chunk RTF \(twoDP(fastestChunkRTF))–\(twoDP(slowestChunkRTF)), "
+            + "\(twoDP(totalAudioSeconds))s audio / \(twoDP(totalGenerationSeconds))s gen")
+    }
+
+    // MARK: - Scheduling
+
+    /// A buffer was queued on the player node. The first call stamps TTFA, the
+    /// second stamps T2B.
+    func bufferScheduled(chars: Int, audioSeconds: Double) {
+        guard sessionActive, let start = sessionStart else { return }
+        scheduledBuffers += 1
+        let now = ContinuousClock.now
+
+        if scheduledBuffers == 1 {
+            firstAudioAt = now
+            firstScheduledChars = chars
+            firstScheduledAudioSeconds = audioSeconds
+            emit("TTFA \(milliseconds(from: start, to: now))ms — first buffer scheduled (\(chars) chars → \(twoDP(audioSeconds))s audio)")
+            return
+        }
+        guard scheduledBuffers == 2, let first = firstAudioAt else { return }
+        secondBufferAt = now
+        let wait = Self.seconds(from: first, to: now)
+        emit("T2B \(milliseconds(from: start, to: now))ms — second buffer \(milliseconds(from: first, to: now))ms after the first; "
+            + "the first was \(firstScheduledChars) chars / \(twoDP(firstScheduledAudioSeconds))s of audio → "
+            + Self.marginText(audioSeconds: firstScheduledAudioSeconds, waitSeconds: wait))
+    }
+
+    /// A buffer finished rendering out of the node.
+    func bufferEnded() {
+        guard sessionActive else { return }
+        lastBufferEndedAt = ContinuousClock.now
+    }
+
+    /// The node had drained and is being restarted; whatever elapsed since the
+    /// last buffer ended was audible silence.
+    ///
+    /// A LOWER BOUND, for two reasons. (1) Both endpoints are stamped on the
+    /// main queue, not in the render callback, so each carries main-queue
+    /// dispatch latency and the two do not cancel. (2) A drain across a
+    /// pause/resume is dropped: `playbackPaused()` clears the pending stamp so
+    /// a 10-minute pause is never reported as a 10-minute gap, and nothing
+    /// re-arms it on resume.
+    func nodeRestarted() {
+        guard sessionActive, let ended = lastBufferEndedAt else { return }
+        let gap = Self.seconds(from: ended, to: ContinuousClock.now)
+        gapCount += 1
+        worstGapSeconds = max(worstGapSeconds, gap)
+        lastBufferEndedAt = nil
+        emit("GAP \(twoDP(gap))s of silence — node drained after \(scheduledBuffers) buffers, restarted for buffer \(scheduledBuffers + 1)",
+             isError: Self.gapIsError(gap))
+    }
+
+    // MARK: - Pause
+
+    /// Clears the pending gap and stall stamps so a pause is never reported as
+    /// either, and starts banking paused time.
+    func playbackPaused() {
+        lastBufferEndedAt = nil
+        stallStart = nil
+        stallTicks = 0
+        lastStallLoggedSeconds = -1
+        if pausedAt == nil {
+            pausedAt = ContinuousClock.now
+            pauseCount += 1
+        }
+    }
+
+    func playbackResumed() {
+        closeOpenPause()
+    }
+
+    private func closeOpenPause() {
+        guard let paused = pausedAt else { return }
+        pausedSeconds += Self.seconds(from: paused, to: ContinuousClock.now)
+        pausedAt = nil
+    }
+
+    // MARK: - Stall watchdog
+
+    /// Ticked at 1 Hz by the core's watchdog while a session is live.
+    ///
+    /// A stall is: the pipeline reports `.speaking`, the node is silent, audio
+    /// has already started, and that has held for two consecutive ticks.
+    ///
+    /// - `scheduledBuffers > 0` because before the first buffer this is just
+    ///   TTFA — without it every session "stalls" for its whole warm-up.
+    /// - Two ticks because a drain of D seconds straddles a 1 Hz tick with
+    ///   probability ≈ D, so a single-tick trigger reports an ordinary 0.3 s
+    ///   boundary drain as a stall roughly a third of the time.
+    /// - Deliberately NOT conditioned on chunks still being outstanding. The
+    ///   terminal case this exists for is a hang AFTER the last schedule — a
+    ///   route or engine-configuration change kills the audio graph, the last
+    ///   buffer's completion never fires, `state` stays `.speaking`, the UI
+    ///   shows playing and the book never advances. Requiring pending chunks
+    ///   would make the detector silent in exactly that case.
+    func checkStall(stateIsSpeaking: Bool, nodeIsPlaying: Bool, pendingChunks: Int) {
+        guard sessionActive else { return }
+
+        let stalling = stateIsSpeaking && !nodeIsPlaying && scheduledBuffers > 0
+        guard stalling else {
+            if let start = stallStart {
+                let duration = Self.seconds(from: start, to: ContinuousClock.now)
+                stallStart = nil
+                stallTicks = 0
+                lastStallLoggedSeconds = -1
+                if duration >= 0.5 {
+                    emit("stall cleared after \(twoDP(duration))s")
+                }
+            }
+            return
+        }
+
+        stallTicks += 1
+        guard stallTicks >= 2 else { return }
+
+        let now = ContinuousClock.now
+        let duration: Double
+        if let start = stallStart {
+            duration = Self.seconds(from: start, to: now)
+            guard Self.stallShouldLog(elapsedSeconds: duration, lastLoggedSeconds: lastStallLoggedSeconds) else { return }
+        } else {
+            stallStart = now
+            duration = 0
+        }
+        lastStallLoggedSeconds = duration
+        emit("STALL \(twoDP(duration))s — state speaking, node silent, \(scheduledBuffers)/\(chunkCount) buffers scheduled, \(pendingChunks) chunks outstanding",
+             isError: true)
+    }
+
+    // MARK: - Play-path validation (called from the engines)
+
+    /// Times a synchronous model-file validation performed on the play path.
+    ///
+    /// Both ONNX engines validate their model files on the main thread inside
+    /// their own `speak()`, BEFORE handing off to the core — so the cost sits
+    /// upstream of TTFA's t0 and would otherwise be invisible. Kokoro's path is
+    /// three `attributesOfItem` syscalls plus reading and JSON-parsing
+    /// `tokenizer.json` (~3.5 KB); Supertonic's is roughly sixteen syscalls
+    /// across four ONNX sessions. Neither result can change between two taps
+    /// seconds apart, which makes both pure overhead on the critical path and
+    /// gives a caching change a measured before/after instead of a guess.
+    ///
+    /// `alwaysLog` is true for an engine's first call and false afterwards, so a
+    /// 300-chapter book does not push 300 identical lines through a 500-entry
+    /// ring buffer. Anything at or over `slowThresholdSeconds` logs regardless.
     static func timedValidation(
         prefix: String,
         label: String,
@@ -100,227 +439,11 @@ final class PlaybackMetrics {
         return result
     }
 
-    private static func seconds(from a: ContinuousClock.Instant, to b: ContinuousClock.Instant) -> Double {
-        let interval = a.duration(to: b)
-        return Double(interval.components.seconds)
-            + Double(interval.components.attoseconds) / 1_000_000_000_000_000_000
+    // MARK: - Output
+
+    private func emit(_ message: String, isError: Bool = false) {
+        sink("\(prefix) metrics \(message)", isError)
     }
-
-    // MARK: - Session state (main thread only)
-
-    private var sessionActive = false
-    private var sessionStart: ContinuousClock.Instant?
-    private var chunkCount = 0
-    private var firstChunkChars = 0
-    private var firstChunkAudioSeconds: Double = 0
-    private var sessionRate: Float = 1.0
-
-    private var firstAudioAt: ContinuousClock.Instant?
-    private var secondBufferAt: ContinuousClock.Instant?
-    private var scheduledBuffers = 0
-
-    private var generatedChunks = 0
-    private var skippedChunks = 0
-    private var totalGenerationSeconds: Double = 0
-    private var totalAudioSeconds: Double = 0
-
-    private var lastBufferEndedAt: ContinuousClock.Instant?
-    private var gapCount = 0
-    private var worstGapSeconds: Double = 0
-
-    private var stallStart: ContinuousClock.Instant?
-    private var lastStallLoggedSeconds: Double = 0
-
-    // MARK: - Session lifecycle
-
-    /// Called from `speak(_:)`. Ends any session left open (a second play tap
-    /// supersedes the first without going through `stop()`) and stamps t0.
-    func beginSession(chunkCount: Int, firstChunkChars: Int, rate: Float) {
-        if sessionActive { endSession(reason: "superseded") }
-
-        sessionActive = true
-        sessionStart = ContinuousClock.now
-        self.chunkCount = chunkCount
-        self.firstChunkChars = firstChunkChars
-        self.firstChunkAudioSeconds = 0
-        self.sessionRate = rate
-        firstAudioAt = nil
-        secondBufferAt = nil
-        scheduledBuffers = 0
-        generatedChunks = 0
-        skippedChunks = 0
-        totalGenerationSeconds = 0
-        totalAudioSeconds = 0
-        lastBufferEndedAt = nil
-        gapCount = 0
-        worstGapSeconds = 0
-        stallStart = nil
-        lastStallLoggedSeconds = 0
-
-        Log.shared.info("\(prefix) metrics session start — \(chunkCount) chunks, first \(firstChunkChars) chars, rate \(twoDP(Double(rate)))")
-    }
-
-    /// One summary line, then the session goes quiet. `reason` distinguishes a
-    /// natural finish from a user stop from a teardown nobody asked for — the
-    /// last of those is the interesting one.
-    func endSession(reason: String) {
-        guard sessionActive else { return }
-        sessionActive = false
-
-        let summary: String
-        if let start = sessionStart {
-            let wall = Self.seconds(from: start, to: ContinuousClock.now)
-            let pipelineRTF = totalAudioSeconds > 0 ? totalGenerationSeconds / totalAudioSeconds : 0
-            summary = "\(prefix) metrics session \(reason) — \(generatedChunks) chunks (\(skippedChunks) skipped), "
-                + "\(twoDP(totalAudioSeconds))s audio, \(twoDP(totalGenerationSeconds))s gen, pipeline RTF \(twoDP(pipelineRTF)), "
-                + "TTFA \(ttfaText), T2B \(t2bText), gaps \(gapCount) (worst \(twoDP(worstGapSeconds))s), wall \(twoDP(wall))s, rate \(twoDP(Double(sessionRate)))"
-        } else {
-            summary = "\(prefix) metrics session \(reason) — no start stamp"
-        }
-        Log.shared.info(summary)
-
-        sessionStart = nil
-        firstAudioAt = nil
-        secondBufferAt = nil
-        stallStart = nil
-        lastBufferEndedAt = nil
-        lastStallLoggedSeconds = 0
-    }
-
-    private var ttfaText: String {
-        guard let start = sessionStart, let first = firstAudioAt else { return "n/a" }
-        return "\(milliseconds(from: start, to: first))ms"
-    }
-
-    private var t2bText: String {
-        guard let start = sessionStart, let second = secondBufferAt else { return "n/a" }
-        return "\(milliseconds(from: start, to: second))ms"
-    }
-
-    // MARK: - Generation
-
-    /// A chunk came back from the model. `generationSeconds` was measured on
-    /// `generateQueue` around the whole `generateChunk` closure — retries
-    /// included, since a retry IS part of what the listener waits for.
-    func chunkGenerated(index: Int, chars: Int, generationSeconds: Double, audioSeconds: Double) {
-        guard sessionActive else { return }
-        generatedChunks += 1
-        totalGenerationSeconds += generationSeconds
-        totalAudioSeconds += audioSeconds
-        if index == 0 { firstChunkAudioSeconds = audioSeconds }
-
-        let rtf = audioSeconds > 0 ? generationSeconds / audioSeconds : 0
-        Log.shared.info("\(prefix) metrics chunk \(index + 1)/\(chunkCount) — \(chars) chars → \(twoDP(audioSeconds))s audio in \(twoDP(generationSeconds))s (RTF \(twoDP(rtf)))")
-    }
-
-    /// Synthesis failed twice and the chunk was skipped. Logged separately from
-    /// the error line the core already emits: the error says WHY, this says
-    /// what it cost the session accounting (chars that will never sound).
-    func chunkSkipped(index: Int, chars: Int) {
-        guard sessionActive else { return }
-        skippedChunks += 1
-        Log.shared.info("\(prefix) metrics chunk \(index + 1)/\(chunkCount) SKIPPED — \(chars) chars will not sound")
-    }
-
-    // MARK: - Scheduling
-
-    /// A buffer was queued on the player node. The first call in a session
-    /// stamps TTFA; the second stamps T2B.
-    func bufferScheduled(chars: Int) {
-        guard sessionActive, let start = sessionStart else { return }
-        scheduledBuffers += 1
-        let now = ContinuousClock.now
-
-        if scheduledBuffers == 1 {
-            firstAudioAt = now
-            Log.shared.info("\(prefix) metrics TTFA \(milliseconds(from: start, to: now))ms — first buffer scheduled (\(chars) chars)")
-            return
-        }
-        if scheduledBuffers == 2 {
-            secondBufferAt = now
-            // The whole first-stall hypothesis in one line: chunk 0's audio
-            // duration versus how long chunk 1 took to arrive. When the wait
-            // exceeds the audio, the difference is silence the listener hears.
-            let waitFromFirst = firstAudioAt.map { self.milliseconds(from: $0, to: now) } ?? 0
-            let audioMs = Int((firstChunkAudioSeconds * 1000).rounded())
-            let verdict = audioMs > waitFromFirst ? "covered" : "SHORT by \(waitFromFirst - audioMs)ms"
-            Log.shared.info("\(prefix) metrics T2B \(milliseconds(from: start, to: now))ms — second buffer \(waitFromFirst)ms after the first; chunk 0 was \(firstChunkChars) chars / \(twoDP(firstChunkAudioSeconds))s of audio (\(audioMs)ms) → \(verdict)")
-        }
-    }
-
-    /// A buffer finished rendering out of the node.
-    func bufferEnded() {
-        guard sessionActive else { return }
-        lastBufferEndedAt = ContinuousClock.now
-    }
-
-    /// The node had drained and is being restarted. Whatever elapsed since the
-    /// last buffer ended was audible silence — this is a measured gap, not an
-    /// estimate, and it is the ground truth for the stall model.
-    func nodeRestarted() {
-        guard sessionActive, let ended = lastBufferEndedAt else { return }
-        let gap = Self.seconds(from: ended, to: ContinuousClock.now)
-        gapCount += 1
-        worstGapSeconds = max(worstGapSeconds, gap)
-        lastBufferEndedAt = nil
-        Log.shared.error("\(prefix) metrics GAP \(twoDP(gap))s of silence — node drained after \(scheduledBuffers) buffers, restarted for buffer \(scheduledBuffers + 1)")
-    }
-
-    // MARK: - Pause
-
-    /// Pause discards the pending-gap timestamp so a 30 s pause followed by a
-    /// resume is never reported as a 30 s audible gap.
-    func playbackPaused() {
-        lastBufferEndedAt = nil
-        stallStart = nil
-        lastStallLoggedSeconds = 0
-    }
-
-    // MARK: - Stall watchdog
-
-    /// Ticked at 1 Hz by the core's watchdog while a session is live.
-    ///
-    /// A stall is all three of: the pipeline reports `.speaking`, the node is
-    /// silent, and chunks are still outstanding. Before the first buffer this
-    /// is just TTFA (measured separately), so `scheduledBuffers > 0` is part of
-    /// the condition — otherwise every session "stalls" for its whole warm-up.
-    ///
-    /// Logs on detection and then once every 5 s while it lasts. A permanent
-    /// silence behind a playing UI is the worst outcome this pipeline can have
-    /// and should not be quiet about it — but the log ring buffer holds 500
-    /// entries, so a per-second cadence would let a backgrounded stall evict
-    /// the very log that was supposed to explain it. The "stall cleared" line
-    /// carries the exact total either way.
-    func checkStall(stateIsSpeaking: Bool, nodeIsPlaying: Bool, pendingChunks: Int) {
-        guard sessionActive else { return }
-
-        let stalling = stateIsSpeaking && !nodeIsPlaying && scheduledBuffers > 0 && pendingChunks > 0
-        guard stalling else {
-            if let start = stallStart {
-                let duration = Self.seconds(from: start, to: ContinuousClock.now)
-                stallStart = nil
-                lastStallLoggedSeconds = 0
-                if duration >= 0.5 {
-                    Log.shared.info("\(prefix) metrics stall cleared after \(twoDP(duration))s")
-                }
-            }
-            return
-        }
-
-        let now = ContinuousClock.now
-        let duration: Double
-        if let start = stallStart {
-            duration = Self.seconds(from: start, to: now)
-            guard duration >= lastStallLoggedSeconds + 5.0 else { return }
-        } else {
-            stallStart = now
-            duration = 0
-        }
-        lastStallLoggedSeconds = duration
-        Log.shared.error("\(prefix) metrics STALL \(twoDP(duration))s — state speaking, node silent, \(pendingChunks) chunks outstanding (\(scheduledBuffers)/\(chunkCount) scheduled)")
-    }
-
-    // MARK: - Formatting
 
     private func milliseconds(from a: ContinuousClock.Instant, to b: ContinuousClock.Instant) -> Int {
         Int((Self.seconds(from: a, to: b) * 1000).rounded())
