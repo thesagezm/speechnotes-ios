@@ -108,6 +108,15 @@ final class StreamingTTSPlaybackCore: NSObject {
     private var pacingGate: DispatchSemaphore?
     private var freeChunksRemaining = 0
 
+    /// TTFA / T2B / RTF / gap / stall instrumentation. Records and logs only
+    /// — it never gates playback, so an instrumented build behaves exactly
+    /// like an uninstrumented one.
+    private let metrics: PlaybackMetrics
+    /// 1 Hz stall watchdog, live only while a session is. Same shape as
+    /// `PlayPositionTracker`'s heartbeat: a main-runloop timer in `.common`
+    /// mode, so it keeps ticking while the UI is scrolling.
+    private var stallWatchdog: Timer?
+
     private var interruptionObserver: NSObjectProtocol?
 
     private var state: SpeechState = .idle {
@@ -144,6 +153,7 @@ final class StreamingTTSPlaybackCore: NSObject {
     init(config: Config) {
         self.config = config
         self.storedSampleRate = config.sampleRate
+        self.metrics = PlaybackMetrics(prefix: config.logPrefix)
         super.init()
         interruptionObserver = NotificationCenter.default.addObserver(
             forName: AVAudioSession.interruptionNotification,
@@ -156,6 +166,7 @@ final class StreamingTTSPlaybackCore: NSObject {
     }
 
     deinit {
+        stallWatchdog?.invalidate()
         if let interruptionObserver {
             NotificationCenter.default.removeObserver(interruptionObserver)
         }
@@ -186,6 +197,18 @@ final class StreamingTTSPlaybackCore: NSObject {
             batchMaxChars: config.chunkMaxChars
         )
         guard !allChunks.isEmpty else { return }
+
+        // t0 for TTFA. Note the boundary: this is core entry, which is AFTER
+        // the engine's own `speak()` has validated its model files on the main
+        // thread (for Kokoro that includes a full JSON parse of
+        // tokenizer.json). A measured TTFA is therefore a LOWER BOUND on
+        // tap-to-audio — see TTS_BASELINE.md §"What TTFA does not include".
+        metrics.beginSession(
+            chunkCount: allChunks.count,
+            firstChunkChars: allChunks[0].length,
+            rate: speed
+        )
+        startStallWatchdog()
 
         DispatchQueue.main.async { self.state = .generating }
 
@@ -236,14 +259,28 @@ final class StreamingTTSPlaybackCore: NSObject {
                 // past it and the read-along char math still accounts for
                 // the text that won't sound.
                 do {
+                    let generationStart = PlaybackMetrics.monotonicNow()
                     let samples = try Self.generateWithRetry(self, chunk.text, attempts: 2)
-                    let buffer = Self.makeMonoBuffer(samples: samples, sampleRate: self.sampleRate)
+                    let outputRate = self.sampleRate
+                    let buffer = Self.makeMonoBuffer(samples: samples, sampleRate: outputRate)
+                    // Wall time the listener actually waits for this chunk —
+                    // retries and back-off sleeps included. The engines' own
+                    // per-chunk log times only `synthesize`, which omits
+                    // phonemization and tokenization.
+                    let generationSeconds = PlaybackMetrics.seconds(since: generationStart)
+                    let audioSeconds = Double(buffer.frameLength) / outputRate
                     DispatchQueue.main.async {
                         guard self.playbackGeneration == generation else { return }
                         let id = self.nextBufferId
                         self.nextBufferId += 1
                         self.bufferPool[id] = buffer
                         self.bufferSlots[index] = id
+                        self.metrics.chunkGenerated(
+                            index: index,
+                            chars: chunk.length,
+                            generationSeconds: generationSeconds,
+                            audioSeconds: audioSeconds
+                        )
                         self.scheduleReadyChunks(generation: generation)
                     }
                 } catch {
@@ -251,6 +288,7 @@ final class StreamingTTSPlaybackCore: NSObject {
                     DispatchQueue.main.async {
                         guard self.playbackGeneration == generation else { return }
                         self.bufferSlots[index] = Self.slotSkipped
+                        self.metrics.chunkSkipped(index: index, chars: chunk.length)
                         self.scheduleReadyChunks(generation: generation)
                     }
                 }
@@ -261,6 +299,7 @@ final class StreamingTTSPlaybackCore: NSObject {
     func pause() {
         guard audioEngineRunning, playerNode.isPlaying else { return }
         playerNode.pause()
+        metrics.playbackPaused()
         state = .paused
     }
 
@@ -277,6 +316,9 @@ final class StreamingTTSPlaybackCore: NSObject {
         for _ in 0...(config.generationAheadLimit + 1) {
             pacingGate?.signal()
         }
+        // Before the state flip: `state = .idle` tears down, and teardown ends
+        // the session under its own catch-all reason.
+        metrics.endSession(reason: "stopped")
         state = .idle
     }
 
@@ -327,6 +369,7 @@ final class StreamingTTSPlaybackCore: NSObject {
         playerNode.scheduleBuffer(buffer, at: nil, options: []) { [weak self] in
             DispatchQueue.main.async {
                 guard let self, self.playbackGeneration == generation else { return }
+                self.metrics.bufferEnded()
                 self.bufferPool[self.bufferSlots[index]] = nil
                 if isLast {
                     self.finishLastChunk(generation: generation)
@@ -336,12 +379,21 @@ final class StreamingTTSPlaybackCore: NSObject {
             }
         }
 
+        // `state == .speaking` with a node that is NOT playing means the node
+        // drained: everything already queued ran out before the producer caught
+        // up. That is audible silence, measured here event-to-event (last buffer
+        // ended → node restarted) rather than inferred from chunk sizes.
+        let restartedAfterDrain = state == .speaking && !playerNode.isPlaying
         if state == .generating {
             state = .speaking
             playerNode.play()
-        } else if state == .speaking, !playerNode.isPlaying {
+        } else if restartedAfterDrain {
             playerNode.play()
         }
+        // Order matters: nodeRestarted labels the gap with the buffer count as
+        // it stood BEFORE this one is added to it.
+        if restartedAfterDrain { metrics.nodeRestarted() }
+        metrics.bufferScheduled(chars: chunks[index].length)
     }
 
     /// The natural-completion path — reached from the last chunk's buffer
@@ -352,7 +404,34 @@ final class StreamingTTSPlaybackCore: NSObject {
         onProgress?(1.0)
         playTracker.finish(totalChars: totalChars)
         onFinished?()
+        // Before the state flip — `state = .idle` tears down, and teardown's
+        // catch-all endSession must find the session already closed.
+        metrics.endSession(reason: "finished")
         state = .idle
+    }
+
+    // MARK: - Stall watchdog
+
+    private func startStallWatchdog() {
+        stopStallWatchdog()
+        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            self.metrics.checkStall(
+                stateIsSpeaking: self.state == .speaking,
+                nodeIsPlaying: self.playerNode.isPlaying,
+                pendingChunks: max(0, self.chunks.count - self.scheduledUpTo - 1)
+            )
+        }
+        // `.common` mode, matching PlayPositionTracker's heartbeat: the default
+        // mode stops firing while the user scrolls, which is exactly when a
+        // background stall would go unreported.
+        RunLoop.main.add(timer, forMode: .common)
+        stallWatchdog = timer
+    }
+
+    private func stopStallWatchdog() {
+        stallWatchdog?.invalidate()
+        stallWatchdog = nil
     }
 
     private func ensureAudioEngineRunning(format: AVAudioFormat) {
@@ -377,6 +456,7 @@ final class StreamingTTSPlaybackCore: NSObject {
     }
 
     private func teardownPlayback() {
+        stopStallWatchdog()
         playTracker.reset()
         playerNode.stop()
         audioEngine.stop()
@@ -387,6 +467,10 @@ final class StreamingTTSPlaybackCore: NSObject {
         bufferPool = [:]
         bufferSlots = []
         scheduledUpTo = -1
+        // Catch-all: a natural finish and a user stop both close the session
+        // first, so reaching here with one still open means the pipeline was
+        // torn down underneath it (model not ready, engine failed to start).
+        metrics.endSession(reason: "teardown")
     }
 
     // MARK: - WAV export

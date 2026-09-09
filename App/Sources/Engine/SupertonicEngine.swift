@@ -42,6 +42,10 @@ final class SupertonicEngine: NSObject, SpeechEngine {
 
     private let core: StreamingTTSPlaybackCore
 
+    /// How many play-path validations this instance has timed — the first is
+    /// always logged, later ones only when they get slow.
+    private var validationTimingsLogged = 0
+
     /// True once sessions were actually loaded this instance — the idle
     /// unload only pays off when there's something resident to free.
     var hasLoadedModel: Bool { modelLoadAttempted }
@@ -117,7 +121,17 @@ final class SupertonicEngine: NSObject, SpeechEngine {
     func speak(_ text: String, rateMultiplier: Double) {
         let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
-        guard ModelManager.supertonicFilesAreValid() else {
+        // Timed because it sits upstream of TTFA's t0 — see PlaybackMetrics.
+        // Supertonic's check is the heavier of the two: one `attributesOfItem`
+        // per model file across four ONNX sessions.
+        let logIt = validationTimingsLogged == 0
+        validationTimingsLogged += 1
+        let filesValid = PlaybackMetrics.timedValidation(
+            prefix: core.config.logPrefix,
+            label: "play-path file validation",
+            alwaysLog: logIt
+        ) { ModelManager.supertonicFilesAreValid() }
+        guard filesValid else {
             Log.shared.error("SupertonicEngine asked to speak but its model isn't downloaded")
             return
         }

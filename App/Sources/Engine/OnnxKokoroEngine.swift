@@ -42,6 +42,10 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
     private let modelFileURL: URL
     private let modelFilesValid: () -> Bool
 
+    /// How many play-path validations this instance has timed — the first is
+    /// always logged, later ones only when they get slow.
+    private var validationTimingsLogged = 0
+
     private let core: StreamingTTSPlaybackCore
 
     private static let styleDim = 256
@@ -95,7 +99,15 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
     func speak(_ text: String, rateMultiplier: Double) {
         let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
-        guard modelFilesValid() else {
+        // Timed because it sits upstream of TTFA's t0 — see PlaybackMetrics.
+        let logIt = validationTimingsLogged == 0
+        validationTimingsLogged += 1
+        let filesValid = PlaybackMetrics.timedValidation(
+            prefix: core.config.logPrefix,
+            label: "play-path file validation",
+            alwaysLog: logIt
+        ) { self.modelFilesValid() }
+        guard filesValid else {
             Log.shared.error("OnnxKokoroEngine asked to speak but no ONNX model is downloaded")
             return
         }

@@ -45,8 +45,8 @@ targets:
         # packaged IPA had no version at all and iOS reported 1.0 (About read
         # a hardcoded string before, which masked it). Bump together with
         # MARKETING_VERSION / CURRENT_PROJECT_VERSION below on every release.
-        CFBundleShortVersionString: "1.5.0"
-        CFBundleVersion: "30"
+        CFBundleShortVersionString: "1.5.1"
+        CFBundleVersion: "31"
         UILaunchScreen: {}
         # Portrait-only: the v1.2.0 release added LandscapeLeft/Right here and
         # the build black-screened at launch inside LiveContainer on iOS 26
@@ -82,8 +82,8 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.speechnotes.ios
         # Keep CFBundleShortVersionString / CFBundleVersion in info.properties
         # above in sync — release bump touches all three.
-        MARKETING_VERSION: "1.5.0"
-        CURRENT_PROJECT_VERSION: "30"
+        MARKETING_VERSION: "1.5.1"
+        CURRENT_PROJECT_VERSION: "31"
         TARGETED_DEVICE_FAMILY: "1"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
