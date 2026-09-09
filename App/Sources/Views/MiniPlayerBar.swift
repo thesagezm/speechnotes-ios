@@ -48,6 +48,7 @@ struct MiniPlayerBar: View {
                         .background(Circle().fill(theme.accentGradient))
                 }
                 .disabled(player.state == .generating)
+                .accessibilityLabel(player.state == .speaking ? "Pause" : "Play")
 
                 Button(role: .destructive) {
                     Haptics.press()
@@ -59,6 +60,7 @@ struct MiniPlayerBar: View {
                         .frame(width: 32, height: 32)
                         .background(Circle().fill(Color.red.opacity(0.12)))
                 }
+                .accessibilityLabel("Stop playback")
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(player.nowPlayingTitle ?? "Speaking")

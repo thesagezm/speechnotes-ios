@@ -24,31 +24,31 @@ struct MarkdownFormattingBar: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 4) {
                 group {
-                    button(symbol: "bold") { wrap(prefix: "**", suffix: "**", placeholder: "bold") }
-                    button(symbol: "italic") { wrap(prefix: "*", suffix: "*", placeholder: "italic") }
-                    button(symbol: "strikethrough") { wrap(prefix: "~~", suffix: "~~", placeholder: "strike") }
+                    button(symbol: "bold", a11y: "Bold") { wrap(prefix: "**", suffix: "**", placeholder: "bold") }
+                    button(symbol: "italic", a11y: "Italic") { wrap(prefix: "*", suffix: "*", placeholder: "italic") }
+                    button(symbol: "strikethrough", a11y: "Strikethrough") { wrap(prefix: "~~", suffix: "~~", placeholder: "strike") }
                 }
                 divider
                 group {
-                    iconButton(label: "H1", action: { applyHeading(level: 1) })
-                    iconButton(label: "H2", action: { applyHeading(level: 2) })
+                    iconButton(label: "H1", a11y: "Heading 1", action: { applyHeading(level: 1) })
+                    iconButton(label: "H2", a11y: "Heading 2", action: { applyHeading(level: 2) })
                 }
                 divider
                 group {
-                    button(symbol: "list.bullet") { applyList(marker: "- ") }
-                    button(symbol: "list.number") { applyList(marker: "1. ") }
-                    button(symbol: "text.quote") { applyBlockquote() }
+                    button(symbol: "list.bullet", a11y: "Bulleted list") { applyList(marker: "- ") }
+                    button(symbol: "list.number", a11y: "Numbered list") { applyList(marker: "1. ") }
+                    button(symbol: "text.quote", a11y: "Block quote") { applyBlockquote() }
                 }
                 divider
                 group {
-                    button(symbol: "chevron.left.forwardslash.chevron.right") { applyInlineCode() }
-                    button(symbol: "curlybraces") { applyFencedCode() }
-                    button(symbol: "minus") { applyDivider() }
+                    button(symbol: "chevron.left.forwardslash.chevron.right", a11y: "Inline code") { applyInlineCode() }
+                    button(symbol: "curlybraces", a11y: "Code block") { applyFencedCode() }
+                    button(symbol: "minus", a11y: "Horizontal rule") { applyDivider() }
                 }
                 divider
                 group {
-                    button(symbol: "link") { linkFlow() }
-                    button(symbol: "photo") { insertImage() }
+                    button(symbol: "link", a11y: "Insert link") { linkFlow() }
+                    button(symbol: "photo", a11y: "Insert image") { insertImage() }
                 }
             }
             .padding(.horizontal, 8)
@@ -70,7 +70,7 @@ struct MarkdownFormattingBar: View {
     }
 
     @ViewBuilder
-    private func button(symbol: String, action: @escaping () -> Void) -> some View {
+    private func button(symbol: String, a11y: String, action: @escaping () -> Void) -> some View {
         Button {
             Haptics.tap()
             action()
@@ -82,12 +82,14 @@ struct MarkdownFormattingBar: View {
                 .clipShape(RoundedRectangle(cornerRadius: 7))
         }
         .buttonStyle(.plain)
+        // Symbol-only buttons read as "button" 13× to VoiceOver without this.
+        .accessibilityLabel(a11y)
     }
 
     /// Text-label button for symbols that don't have a safe SF Symbol name
     /// on iOS 18+ (h1/h2 live only under the "textformat" family).
     @ViewBuilder
-    private func iconButton(label: String, action: @escaping () -> Void) -> some View {
+    private func iconButton(label: String, a11y: String, action: @escaping () -> Void) -> some View {
         Button {
             Haptics.tap()
             action()
@@ -99,6 +101,7 @@ struct MarkdownFormattingBar: View {
                 .clipShape(RoundedRectangle(cornerRadius: 7))
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(a11y)
     }
 
     // MARK: - Range editing helpers

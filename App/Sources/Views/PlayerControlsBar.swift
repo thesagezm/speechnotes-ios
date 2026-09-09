@@ -132,6 +132,7 @@ struct PlayerControlsBar: View {
                     .frame(width: 52, height: 52)
                 }
                 .disabled(playButtonDisabled)
+                .accessibilityLabel(player.state == .speaking ? "Pause" : "Play")
 
                 if player.state == .speaking || player.state == .paused || player.state == .generating {
                     // Live read-along toggle: sentence-highlighted reader
@@ -158,10 +159,13 @@ struct PlayerControlsBar: View {
                             .frame(width: 36, height: 36)
                             .background(Circle().fill(Color.red.opacity(0.12)))
                     }
+                    .accessibilityLabel("Stop playback")
                 }
 
                 Slider(value: $player.rateMultiplier, in: 0.5...2.0, step: 0.05)
                     .frame(height: 44)
+                    .accessibilityLabel("Speech rate")
+                    .accessibilityValue(String(format: "%.2f times", player.rateMultiplier))
 
                 Text(String(format: "%.2f×", player.rateMultiplier))
                     .font(.callout.monospacedDigit())
