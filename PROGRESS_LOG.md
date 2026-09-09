@@ -4,6 +4,34 @@ Format: newest first. Every critique round, merge, and escalation lands here.
 
 ---
 
+**Batch 5 — Accessibility sweep** (branch `fix/a11y-labels`, merged @ `4d83a3e`):
+- MarkdownFormattingBar's 13 icon buttons labeled; MiniPlayerBar play/stop; PlayerControlsBar play/stop/read-along + rate slider label + value.
+- No visual change; VoiceOver goes from "button" ×13 to named controls.
+- CI: green (34293436652).
+
+---
+
+## Cycle summary
+
+6 batches → all ≥8/10 critique, all CI green, zero escalations:
+
+| Batch | Scope | Merge | CI run |
+|---|---|---|---|
+| 0 | TTS pipeline regressions (quit-bug, retry-storm, live-rate, load-latch, audio session init) | 4d7286e | 34242349583 ✅ |
+| 1 | BooksStore race, zip-bomb bound, image-sniff brand, SystemEngine epoch | f9e56bd | 34248407439 ✅ |
+| 2 | Sleep timer, lock-screen subtitle + cover | b3455b5 | 34289888739 ✅ |
+| 3 | Joplin JEX export + 6 unit tests | 78ff6e3 | 34291148672 ✅ |
+| 3b | Note share as MD/TXT/PDF | c1b8a7f | 34292710925 ✅ |
+| 4 | EPUB mid-chapter CFI restore (M20) | cd0b6f8 | 34292066132 ✅ |
+| 5 | A11y labels | 4d83a3e | 34293436652 ✅ |
+
+## Deferred (documented for next cycle)
+- True playback queue (replaces onNaturalFinish chain) — scope, not a stuck task.
+- Per-chapter % on lock screen — content isn't seconds-addressable.
+- In-book search, highlight model, translation — sequenced after CFI restore shipped.
+- `AVSpeechSynthesisProvider` system-voice extension — high complexity, high value; needs its own phase.
+- M22 ModelManager HEAD-size check; M25 Supertonic Helper force-unwraps.
+
 ## 2026-09-08 (late) — Batches delivered and merged
 
 **Batch 0 — TTS pipeline regressions** (branch `fix/playback-pipeline-regressions`, merged to `sage-upgrades` @ `4d7286e`):
