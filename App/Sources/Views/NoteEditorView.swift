@@ -33,6 +33,9 @@ struct NoteEditorView: View {
     @State private var showingPhotoPicker = false
     @State private var showingImageURLPrompt = false
     @State private var showingLinkPrompt = false
+    /// Set when a non-engine share (md/txt/pdf) succeeds — drives the same
+    /// share sheet the WAV export uses.
+    @State private var sharedDocumentURL: URL?
     @State private var pendingLinkLabel: String = ""
     @State private var pendingLinkURL: String = ""
     @State private var imageURLDraft: String = ""
@@ -235,7 +238,7 @@ struct NoteEditorView: View {
                 .environmentObject(player)
         }
         .sheet(isPresented: shareSheetBinding) {
-            if let url = player.shareURL {
+            if let url = player.shareURL ?? sharedDocumentURL {
                 ShareSheet(items: [url])
             }
         }
@@ -339,10 +342,89 @@ struct NoteEditorView: View {
         )
     }
 
+    // MARK: - Non-audio share (md / txt / pdf)
+
+    private enum ShareFormat {
+        case markdown
+        case plainText
+        case pdf
+    }
+
+    /// Writes the note body (or its rendered form) into a temp file and
+    /// presents the system share sheet. PDF needs a renderer; a raw-text
+    /// UIMarkup shortcut would read "like the note reads aloud" but fall
+    /// apart on CJK and long unbroken lines.
+    private func shareNoteAs(_ format: ShareFormat) {
+        guard let note = currentNote else { return }
+        updateSpeechCaches()
+        let title = note.title.isEmpty ? "note" : Self.safeFilename(note.title)
+        let tempDir = FileManager.default.temporaryDirectory
+        switch format {
+        case .markdown:
+            let url = tempDir.appendingPathComponent("\(title).md")
+            try? draft.write(to: url, atomically: true, encoding: .utf8)
+            sharedDocumentURL = url
+        case .plainText:
+            let url = tempDir.appendingPathComponent("\(title).txt")
+            try? MarkdownText.plainText(draft).write(to: url, atomically: true, encoding: .utf8)
+            sharedDocumentURL = url
+        case .pdf:
+            let text = MarkdownText.plainText(draft)
+            let renderer = UIPrintPageRenderer()
+            let formatter = UIMarkupTextPrintFormatter(markupText: Self.htmlBody(for: text, title: note.title))
+            renderer.addPrintFormatter(formatter, startingAtPageAt: 0)
+            let pageSize = CGSize(width: 612, height: 792) // US Letter
+            renderer.setValue(NSValue(cgRect: CGRect(origin: .zero, size: pageSize)), forKey: "paperRect")
+            renderer.setValue(NSValue(cgRect: CGRect(origin: .zero, size: pageSize).insetBy(dx: 48, dy: 48)), forKey: "printableRect")
+            let data = NSMutableData()
+            UIGraphicsBeginPDFContextToData(data, .zero, nil)
+            UIGraphicsBeginPDFPage()
+            renderer.drawPrintFormatter(formatter, forPageAt: 0)
+            var page = 1
+            while page < renderer.numberOfPages {
+                UIGraphicsBeginPDFPage()
+                renderer.drawPrintFormatter(formatter, forPageAt: page)
+                page += 1
+            }
+            UIGraphicsEndPDFContext()
+            let url = tempDir.appendingPathComponent("\(title).pdf")
+            do {
+                try data.write(to: url, options: .atomic)
+            } catch {
+                return
+            }
+            sharedDocumentURL = url
+        }
+    }
+
+    private static func safeFilename(_ text: String) -> String {
+        let cleaned = text.reduce(into: "") { partial, char in
+            partial.append(char.isLetter || char.isNumber || char == "-" || char == "_" ? char : "_")
+        }
+        return cleaned.isEmpty ? "note" : String(cleaned.prefix(60))
+    }
+
+    private static func htmlBody(for plainText: String, title: String) -> String {
+        let escaped = plainText
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+        let paragraphs = escaped.components(separatedBy: "\n\n")
+            .map { "<p>\($0.replacingOccurrences(of: "\n", with: "<br/>"))</p>" }
+            .joined()
+        return """
+        <html><head><meta charset="utf-8"><style>
+          body { font-family: -apple-system; font-size: 12pt; line-height: 1.5; color: #111; }
+          h1 { font-size: 20pt; margin-bottom: 12px; }
+        </style></head>
+        <body><h1>\(title)</h1>\(paragraphs)</body></html>
+        """
+    }
+
     private var shareSheetBinding: Binding<Bool> {
         Binding(
-            get: { player.shareURL != nil },
-            set: { if !$0 { player.shareURL = nil } }
+            get: { player.shareURL != nil || sharedDocumentURL != nil },
+            set: { if !$0 { player.shareURL = nil; sharedDocumentURL = nil } }
         )
     }
 
@@ -552,6 +634,24 @@ struct NoteEditorView: View {
                     }
                 }
                 .disabled(!canExport)
+                Button {
+                    Haptics.tap()
+                    shareNoteAs(.markdown)
+                } label: {
+                    Label("Share as Markdown", systemImage: "doc.text")
+                }
+                Button {
+                    Haptics.tap()
+                    shareNoteAs(.plainText)
+                } label: {
+                    Label("Share as plain text", systemImage: "doc.plaintext")
+                }
+                Button {
+                    Haptics.tap()
+                    shareNoteAs(.pdf)
+                } label: {
+                    Label("Share as PDF", systemImage: "doc.richtext")
+                }
                 Button {
                     showingSettings = true
                 } label: {
