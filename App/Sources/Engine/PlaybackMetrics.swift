@@ -110,7 +110,6 @@ final class PlaybackMetrics {
     private var sessionActive = false
     private var sessionStart: ContinuousClock.Instant?
     private var chunkCount = 0
-    private var firstChunkChars = 0
     private var sessionRate: Float = 1.0
 
     /// Facts about the buffer that ACTUALLY sounded first — not chunk index 0,
@@ -141,7 +140,10 @@ final class PlaybackMetrics {
 
     private var stallStart: ContinuousClock.Instant?
     private var stallTicks = 0
-    private var lastStallLoggedSeconds: Double = -1
+    /// Seconds-of-stall at the last STALL line. nil means none has been
+    /// emitted for the current stall, which is what lets the first one go
+    /// out immediately while the repeats stay on the 5 s cadence.
+    private var lastStallLoggedSeconds: Double?
 
     private func reset() {
         sessionStart = ContinuousClock.now
@@ -165,7 +167,7 @@ final class PlaybackMetrics {
         pauseCount = 0
         stallStart = nil
         stallTicks = 0
-        lastStallLoggedSeconds = -1
+        lastStallLoggedSeconds = nil
     }
 
     // MARK: - Session lifecycle
@@ -177,7 +179,6 @@ final class PlaybackMetrics {
 
         sessionActive = true
         self.chunkCount = chunkCount
-        self.firstChunkChars = firstChunkChars
         self.sessionRate = rate
         reset()
 
@@ -221,7 +222,11 @@ final class PlaybackMetrics {
     func modelReady(seconds: Double) {
         guard sessionActive else { return }
         let cold = seconds >= 1.0
-        emit("model-ready \(twoDP(seconds))s (\(cold ? "COLD — includes the model load, inside TTFA" : "warm"))", isError: cold)
+        // Not an error even when cold: the first play after launch always
+        // pays the model load, so routing it to the error channel would
+        // make every normal cold start look like a fault. The label carries
+        // the distinction.
+        emit("model-ready \(twoDP(seconds))s (\(cold ? "COLD — includes the model load, inside TTFA" : "warm"))")
     }
 
     private var ttfaText: String {
@@ -334,14 +339,17 @@ final class PlaybackMetrics {
     /// Clears the pending gap and stall stamps so a pause is never reported as
     /// either, and starts banking paused time.
     func playbackPaused() {
+        // Stamps are cleared whether or not a session is open: a pause must
+        // never be re-reported as a gap or a stall. The banking below is
+        // session-scoped — `pauseCount` and `pausedSeconds` only mean anything
+        // inside one summary line, and `reset()` clears them at the next start.
         lastBufferEndedAt = nil
         stallStart = nil
         stallTicks = 0
-        lastStallLoggedSeconds = -1
-        if pausedAt == nil {
-            pausedAt = ContinuousClock.now
-            pauseCount += 1
-        }
+        lastStallLoggedSeconds = nil
+        guard sessionActive, pausedAt == nil else { return }
+        pausedAt = ContinuousClock.now
+        pauseCount += 1
     }
 
     func playbackResumed() {
@@ -377,29 +385,42 @@ final class PlaybackMetrics {
 
         let stalling = stateIsSpeaking && !nodeIsPlaying && scheduledBuffers > 0
         guard stalling else {
-            if let start = stallStart {
-                let duration = Self.seconds(from: start, to: ContinuousClock.now)
-                stallStart = nil
-                stallTicks = 0
-                lastStallLoggedSeconds = -1
-                if duration >= 0.5 {
-                    emit("stall cleared after \(twoDP(duration))s")
-                }
+            // Report a clearance only for a stall that was actually reported,
+            // so the two lines always pair. `stallStart` is stamped at
+            // detection rather than at drain onset, so its duration carries the
+            // watchdog's ±1 s quantisation — printing that for an ordinary
+            // 0.3 s boundary drain would both overstate the drain and add a
+            // line at roughly a third of all chunk boundaries, which is exactly
+            // the volume the thinning in TTS_BASELINE.md §6 exists to prevent.
+            // Hence "≥": like the gap figure, this is a lower bound.
+            if let start = stallStart, lastStallLoggedSeconds != nil {
+                emit("stall cleared after ≥\(twoDP(Self.seconds(from: start, to: ContinuousClock.now)))s")
             }
+            // Reset UNCONDITIONALLY. `stallTicks` is incremented on the first
+            // tick, before `stallStart` is ever read back, so gating the reset
+            // on `stallStart` would let a count survive a clearance: tick 1 of
+            // one drain, a recovery, then tick 1 of an unrelated drain would
+            // add up to two and log — reintroducing the single-tick false
+            // positive the two-tick condition exists to prevent.
+            stallStart = nil
+            stallTicks = 0
+            lastStallLoggedSeconds = nil
             return
         }
 
         stallTicks += 1
-        guard stallTicks >= 2 else { return }
-
         let now = ContinuousClock.now
-        let duration: Double
-        if let start = stallStart {
-            duration = Self.seconds(from: start, to: now)
-            guard Self.stallShouldLog(elapsedSeconds: duration, lastLoggedSeconds: lastStallLoggedSeconds) else { return }
-        } else {
-            stallStart = now
-            duration = 0
+        // Stamped on FIRST detection, not on first log, so the reported duration
+        // is real rather than 0.00s — the stall began a tick ago.
+        if stallStart == nil { stallStart = now }
+        guard stallTicks >= 2, let start = stallStart else { return }
+
+        let duration = Self.seconds(from: start, to: now)
+        // nil means "not yet logged this stall": the first line goes out as soon
+        // as the two-tick condition is met, and only the repeats are throttled.
+        if let last = lastStallLoggedSeconds,
+           !Self.stallShouldLog(elapsedSeconds: duration, lastLoggedSeconds: last) {
+            return
         }
         lastStallLoggedSeconds = duration
         emit("STALL \(twoDP(duration))s — state speaking, node silent, \(scheduledBuffers)/\(chunkCount) buffers scheduled, \(pendingChunks) chunks outstanding",
