@@ -90,3 +90,14 @@ proper queue becomes both needed and testable.)
 - `FEATURE_BACKLOG.md` — full prioritized list from the 8 reference repos.
 - `INTEGRATION_PLAN.md` — phase plan, dependency graph, license fence.
 - `UPGRADE_AUDIT.md` — codebase map + open findings.
+
+## [2026-09-10 ~11:20Z] Batch A — Phase 0 deliverables + instrumentation
+- Pushed: `070d38f` (docs commit pending: TTS_REGRESSION_AUDIT.md, this log, CRITIC_REVIEWS.md)
+- CI: logic-tests ✅ 52s · build-ipa ✅ 6m57s — run 34468296292, all 6 jobs green (third consecutive sub-7-min build; the 45-min premise is retired, see TTS_BASELINE §7)
+- Critic Round 2: Score 8/10 (approved). Round 1: 6/10.
+- Issues found: Round 1 B1–B6 (stall watchdog false positives, timer leak, gap misclassification, metrics on critical path, commit-message overclaim); Round 2 N1–N6 — including two defects introduced by Round 1 itself (stall-tick reset gating, clearance-gate volume)
+- Issues fixed: all of B1–B4, N1–N6. B5 recorded in CRITIC_REVIEWS.md (immutable commit message). B6 accepted as designed.
+- Next action: commit the three docs, then Batch B (resume resurrection — prime-after-read in both branches, debounce→throttle, resumeIfBookmarkPending markdown fix, readAlongPiecesTask assignment + generation bump in the fast path)
+- TTS baseline impact: **slower by~10⁻⁵ of measured work** (the one exception to the no-regression-by-removal rule, accounted line-by-line in TTS_BASELINE §6, with the thinning that keeps a 1300-chunk chapter at ~64 log lines)
+- O5 decision recorded: README stays at v1.5.0 — 1.5.1/31 is a diagnostic build number, and the release procedure (README refresh + tag + fast-forward) is reserved by constraint
+- O7 deferred to Batch C: PlaybackMetrics testability needs SpeechLogic reachability or an app test target; rides with the chunker contract tests
