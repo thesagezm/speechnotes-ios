@@ -83,3 +83,52 @@ lines (one self-inflicted duplicate caught and removed mid-edit).
 (N1, N6) were *both introduced by the critic's own previous round*. That is
 the strongest available argument for keeping the loop at ≥2 rounds per batch
 even inline, and it is recorded as supporting evidence for AP1.
+
+---
+
+## Batch B — Round 1 (diff `b491803`, inline, evidence-first)
+
+**Score: 8/10 → approved. TTS slower than baseline: NO.**
+
+Mandatory question answered from the diff, line-by-line: the play hot path
+gains nothing — no new per-chunk or per-tick work. The resume path LOSES a
+full-text `sentencePieces` scan (the stale detached task is now cancelled and
+never even started, since each branch calls beginReadAlong exactly once). The
+one added cost is the 1 Hz bookmark JSON write (≤100 small marks, atomic,
+main actor): sub-millisecond, and it replaces a write that never landed
+during playback at all. Verdict: NO — strictly less work before the first
+phoneme on the resume path, unchanged elsewhere.
+
+Findings from re-reading the post-edit source (not recollection):
+
+1. **(fixed pre-commit)** Resume-prime seeded `charsDone: 0` into the new
+   in-flight mark: if the engine died before the first progress tick, the
+   position we had just resumed from was erased. Fix: primers take
+   `charsDone` and resume seeds `plan.offset`. (Found by tracing
+   `updateBookmarkChars` → `persistPlaybackBookmark` on a pre-tick failure.)
+2. **(verified clean)** `restartFromBeginning` order (clear → prime → speak)
+   is correct as-is: the clear guarantees resumePlan finds nothing to race
+   with; priming-with-0 there is the intent, not the bug.
+3. **(verified clean)** No schedulePersist/persistNow callers outside the
+   store besides `persistPlaybackBookmark` — the throttle's two synchronous
+   escape hatches (scenePhase leave, idle<0.98) are intact and unchanged.
+4. **(verified clean)** `resumeBaseFraction` consumed only by
+   `updateBookmarkChars`; with resume now reachable, the remapping it feeds
+   is live again (base = plan.offset, suffixProgress scaled) — the arithmetic
+   matches snapResume's suffix definition.
+5. **(recorded, not fixed)** `mostRecentNoteBookmark` can still surface the
+   just-primed mark of a note the user explicitly stopped if the app is
+   re-foregrounded <5 min later — `stop()` clears the slot, but a *pause* +
+   background + return re-plays. That is the intended auto-resume semantics
+   (pause is not stop); no change.
+6. **(recorded, not fixed)** `resumeIfBookmarkPending` re-derives
+   `MarkdownText.plainText` synchronously on the main actor (≈whole-draft
+   regex walk). Once per foreground return, already off first frame; the
+   editor's own cached recompute is untouched. Batch D hot-path hygiene may
+   revisit.
+
+Design note for the ledger: the fix is ordering + one seeded parameter, not a
+new store — per golden rule "SpeechPlayer changes stay additive". The
+read-before-priming invariant is commented at the call site so the next
+agent cannot re-invert it (this is now the second regression history shows
+at this exact seam: 292df75 unified stores, this branch un-broke the order).
