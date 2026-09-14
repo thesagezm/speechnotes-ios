@@ -143,19 +143,24 @@ final class SpeechPlayer: ObservableObject {
         readAlongRange = nil
         readAlongPieces = []
         readAlongPiecesTask?.cancel()
+        // Bump the generation on EVERY entry, including the pre-computed
+        // fast path. It used to return before bumping, so a detached scan
+        // started by an earlier call passed the guard below and later
+        // overwrote the pieces with char-0-relative offsets — the
+        // post-resume highlight desync.
+        readAlongGeneration += 1
         // Pre-computed by snapResume — no scan needed (one pass instead of
         // three before the first phoneme on resume).
         if let pieces {
             readAlongPieces = pieces
             return
         }
-        readAlongGeneration += 1
         let generation = readAlongGeneration
         // A 200k-char chapter means a full sentence scan + ~1000 tuple
         // allocations — exactly at the chapter transition where the next
         // generation also kicks off. Compute off the main actor; the
         // highlight simply appears a beat later.
-        Task.detached(priority: .userInitiated) { [weak self] in
+        readAlongPiecesTask = Task.detached(priority: .userInitiated) { [weak self] in
             let pieces = SentenceChunker.sentencePieces(in: fullText)
             await MainActor.run {
                 guard let self,
@@ -399,7 +404,16 @@ final class SpeechPlayer: ObservableObject {
             return
         }
         Log.shared.info("SpeechPlayer: resuming bookmarked note after suspension")
-        togglePlay(note.text, note: note)
+        // Speak the same derived text every other path speaks. The stored
+        // bookmark's textHash is over the speech text, so replaying raw
+        // note.text here could never match it (with rendering on) — the
+        // resume would silently fall through to "from the beginning" and
+        // then prime the slot with the raw-text hash, corrupting the
+        // bookmark for the editor's next tap. Key name shared with
+        // NoteEditorView's @AppStorage("renderMarkdown").
+        let renderMarkdown = UserDefaults.standard.bool(forKey: "renderMarkdown")
+        let speechText = renderMarkdown ? MarkdownText.plainText(note.text) : note.text
+        togglePlay(speechText, note: note)
     }
 
     /// Stop + speak the full text from the start, clearing any bookmark.
@@ -417,12 +431,12 @@ final class SpeechPlayer: ObservableObject {
         engine?.speak(text, rateMultiplier: rateMultiplier)
     }
 
-    private func primeBookmark(noteId: UUID, fullText: String) {
+    private func primeBookmark(noteId: UUID, fullText: String, charsDone: Int = 0) {
         let key = BookmarkStore.noteKey(noteId)
         inFlightBookmarkKey = key
         inFlightBookmark = PlaybackBookmark(
             noteId: noteId,
-            charsDone: 0,
+            charsDone: charsDone,
             textLength: fullText.utf16.count,
             textHash: Self.stableHash(fullText),
             savedAt: Date()
@@ -430,13 +444,13 @@ final class SpeechPlayer: ObservableObject {
         bookmarkStore.set(key, inFlightBookmark!)
     }
 
-    private func primeBookBookmark(bookId: String, chapterIndex: Int, fullText: String) {
+    private func primeBookBookmark(bookId: String, chapterIndex: Int, fullText: String, charsDone: Int = 0) {
         let key = BookmarkStore.bookKey(bookId, chapter: chapterIndex)
         inFlightBookmarkKey = key
         inFlightBookmark = PlaybackBookmark(
             bookId: bookId,
             chapterIndex: chapterIndex,
-            charsDone: 0,
+            charsDone: charsDone,
             textLength: fullText.utf16.count,
             textHash: Self.stableHash(fullText),
             savedAt: Date()
@@ -942,28 +956,44 @@ final class SpeechPlayer: ObservableObject {
             nowPlayingBookId = book?.id
             resumeBaseFraction = 0
             lastRawProgress = 0
-            beginReadAlong(fullText: text)
-                if let note {
-                    primeBookmark(noteId: note.id, fullText: text)
-                    if let plan = resumePlan(for: note.id, fullText: text) {
-                        resumeBaseFraction = Double(plan.offset) / Double(max(1, text.utf16.count))
-                        engineSpeechOffset = plan.offset + Self.leadingWhitespaceUTF16(plan.suffix)
-                        beginReadAlong(fullText: text, pieces: plan.pieces)
-                        Log.shared.info("SpeechPlayer: resuming note at char \(plan.offset)/\(text.utf16.count)")
-                        engine?.speak(plan.suffix, rateMultiplier: rateMultiplier)
-                        return
-                    }
-                } else if let book {
-                    primeBookBookmark(bookId: book.id, chapterIndex: book.chapterIndex, fullText: text)
-                    if let plan = resumeBookPlan(bookId: book.id, chapterIndex: book.chapterIndex, fullText: text) {
-                        resumeBaseFraction = Double(plan.offset) / Double(max(1, text.utf16.count))
-                        engineSpeechOffset = plan.offset + Self.leadingWhitespaceUTF16(plan.suffix)
-                        beginReadAlong(fullText: text, pieces: plan.pieces)
-                        Log.shared.info("SpeechPlayer: resuming book \(book.id) ch\(book.chapterIndex) at char \(plan.offset)/\(text.utf16.count)")
-                        engine?.speak(plan.suffix, rateMultiplier: rateMultiplier)
-                        return
-                    }
+            // The resume plan MUST be read before priming: primeBookmark
+            // stamps charsDone: 0 into the very slot resumePlan reads, so
+            // priming first made resume structurally impossible (and
+            // destroyed the stored position) since 292df75 unified the two
+            // bookmark stores. Each path calls beginReadAlong exactly once.
+            if let note {
+                if let plan = resumePlan(for: note.id, fullText: text) {
+                    // Seed the in-flight mark at the resume offset, not 0: if
+                    // the engine fails to start (or the process dies) before
+                    // the first progress tick, the persisted bookmark still
+                    // holds the position we just resumed from.
+                    primeBookmark(noteId: note.id, fullText: text, charsDone: plan.offset)
+                    resumeBaseFraction = Double(plan.offset) / Double(max(1, text.utf16.count))
+                    engineSpeechOffset = plan.offset + Self.leadingWhitespaceUTF16(plan.suffix)
+                    beginReadAlong(fullText: text, pieces: plan.pieces)
+                    Log.shared.info("SpeechPlayer: resuming note at char \(plan.offset)/\(text.utf16.count)")
+                    engine?.speak(plan.suffix, rateMultiplier: rateMultiplier)
+                    return
                 }
+                primeBookmark(noteId: note.id, fullText: text)
+                beginReadAlong(fullText: text)
+            } else if let book {
+                if let plan = resumeBookPlan(bookId: book.id, chapterIndex: book.chapterIndex, fullText: text) {
+                    // Same rationale as the note branch: don't let a
+                    // pre-first-tick failure erase the resumed position.
+                    primeBookBookmark(bookId: book.id, chapterIndex: book.chapterIndex, fullText: text, charsDone: plan.offset)
+                    resumeBaseFraction = Double(plan.offset) / Double(max(1, text.utf16.count))
+                    engineSpeechOffset = plan.offset + Self.leadingWhitespaceUTF16(plan.suffix)
+                    beginReadAlong(fullText: text, pieces: plan.pieces)
+                    Log.shared.info("SpeechPlayer: resuming book \(book.id) ch\(book.chapterIndex) at char \(plan.offset)/\(text.utf16.count)")
+                    engine?.speak(plan.suffix, rateMultiplier: rateMultiplier)
+                    return
+                }
+                primeBookBookmark(bookId: book.id, chapterIndex: book.chapterIndex, fullText: text)
+                beginReadAlong(fullText: text)
+            } else {
+                beginReadAlong(fullText: text)
+            }
             engineSpeechOffset = Self.leadingWhitespaceUTF16(text)
             engine?.speak(text, rateMultiplier: rateMultiplier)
         }

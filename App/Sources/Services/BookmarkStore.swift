@@ -78,14 +78,27 @@ final class BookmarkStore {
     }
 
     private var persistTask: Task<Void, Never>?
+    private var lastPersist = Date.distantPast
 
-    /// Coalesces bursts (the bookmark timestamp updates on playback ticks
-    /// through SpeechPlayer's throttled persist path).
+    /// Throttle with a GUARANTEED trailing write (min interval 1 s). The old
+    /// code was a re-arming 500 ms debounce: playback ticks fire every 0.3 s
+    /// and each tick cancelled the pending write, so the file NEVER landed
+    /// during continuous playback — exactly the jetsam-window loss the
+    /// per-item store was supposed to prevent. Now: at most one write per
+    /// second, and if writes keep coming a trailing one is always scheduled
+    /// for the interval boundary instead of being deferred forever.
     private func schedulePersist() {
-        persistTask?.cancel()
+        let sinceLast = Date().timeIntervalSince(lastPersist)
+        if sinceLast >= 1.0 {
+            persistNow()
+            return
+        }
+        guard persistTask == nil else { return } // trailing write already armed
+        let wait = UInt64((1.0 - sinceLast) * 1_000_000_000)
         persistTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 500_000_000)
+            try? await Task.sleep(nanoseconds: wait)
             guard !Task.isCancelled else { return }
+            self?.persistTask = nil
             self?.persistNow()
         }
     }
