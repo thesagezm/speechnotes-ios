@@ -5,9 +5,19 @@ final class SpeechSanitizerTests: XCTestCase {
 
     // MARK: - clean(_:)
 
-    func testCleanRemovesSoftHyphenAndZeroWidth() {
+    func testCleanReplacesSoftHyphenAndZeroWidthWithSpace() {
+        // Replaced, not deleted: deleting would join "hy"+"phen" into one word
+        // the reader never saw. The whitespace normaliser collapses the runs.
         let raw = "hy\u{00AD}phen and ze\u{200B}ro and jo\u{200D}in"
-        XCTAssertEqual(SpeechSanitizer.clean(raw), "hyphen and zero and join")
+        XCTAssertEqual(SpeechSanitizer.clean(raw), "hy phen and ze ro and jo in")
+    }
+
+    func testCleanJoinsWordsOnlyWhenThereIsNoGap() {
+        // An unspeakable scalar with no space around it still becomes a space,
+        // so "exam\u{00AD}ple" (a wrapped line) is spoken as two words rather
+        // than the fused "example" the page never showed.
+        let raw = "exam\u{00AD}ple"
+        XCTAssertEqual(SpeechSanitizer.clean(raw), "exam ple")
     }
 
     func testCleanDropsBOMAndVariationSelectors() {
@@ -20,9 +30,9 @@ final class SpeechSanitizerTests: XCTestCase {
         XCTAssertEqual(SpeechSanitizer.clean("Star \u{F0A7} here"), "Star here")
     }
 
-    func testCleanDropsControlBytesButKeepsTabAndNewline() {
+    func testCleanReplacesControlBytesWithSpace() {
         let raw = "one\u{00}two\u{07}three\u{1B}[0m\nfour\tfive\r\nsix"
-        XCTAssertEqual(SpeechSanitizer.clean(raw), "onetwothree[0m\nfour five\nsix")
+        XCTAssertEqual(SpeechSanitizer.clean(raw), "one two three [0m\nfour five\nsix")
     }
 
     func testCleanCollapsesBlankLineRuns() {
@@ -69,13 +79,17 @@ final class SpeechSanitizerTests: XCTestCase {
 
     func testPreservingOffsetsKeepsOffsetsStable() {
         // The read-along contract: a marker after the dirty span must still be
-        // found at the same UTF-16 offset in the cleaned string.
+        // found at the same UTF-16 offset in the cleaned string. "dirty" is 5
+        // units, then four unspeakable scalars, so MARKER starts at unit 9 in
+        // BOTH strings — the whole point of the function.
         let raw = "dirty\u{00AD}\u{200B}\u{FEFF}\u{07}MARKER"
         let cleaned = SpeechSanitizer.cleanedPreservingOffsets(raw)
         XCTAssertEqual(cleaned.utf16.count, raw.utf16.count)
-        let units = Array(cleaned.utf16)
-        let marker = Array("MARKER".utf16)
-        XCTAssertEqual(Array(units[11..<17]), marker)
+        let rawUnits = Array(raw.utf16)
+        let cleanedUnits = Array(cleaned.utf16)
+        let markerOffset = Array("MARKER".utf16)
+        XCTAssertEqual(Array(rawUnits[9..<15]), markerOffset)
+        XCTAssertEqual(Array(cleanedUnits[9..<15]), markerOffset)
     }
 
     // MARK: - snappedSpan
