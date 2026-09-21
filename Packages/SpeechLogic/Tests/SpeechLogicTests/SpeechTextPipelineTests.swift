@@ -16,7 +16,7 @@ final class SpeechTextPipelineTests: XCTestCase {
         let text = "A complete sentence ends here. x"
         let chunks = SentenceChunker.chunks(for: text, firstMaxChars: 160, batchMaxChars: 160)
         XCTAssertEqual(chunks.count, 2)
-        XCTAssertEqual(chunks[1].text, " x")
+        XCTAssertEqual(chunks[1].text, "x")
         XCTAssertEqual(chunks.map(\.text).joined(), text)
     }
 

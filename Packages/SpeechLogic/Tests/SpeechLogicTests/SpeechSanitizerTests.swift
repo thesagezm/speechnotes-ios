@@ -69,12 +69,15 @@ final class SpeechSanitizerTests: XCTestCase {
         XCTAssertEqual(cleaned.utf16.count, raw.utf16.count)
     }
 
-    func testPreservingOffsetsTurnsBreaksIntoNewlines() {
-        let raw = "one\u{2028}two\u{2029}three\rfour"
-        XCTAssertEqual(
-            SpeechSanitizer.cleanedPreservingOffsets(raw),
-            "one\ntwo\nthree\nfour"
-        )
+    func testPreservingOffsetsKeepsLineSeparatorsAsBreaks() {
+        // U+2028/U+2029 are separators, not whitespace, so
+        // Character.isWhitespace misses them — the sanitizer keeps them (and
+        // clean() maps them to a newline) so the chunker's sentence
+        // boundaries survive.
+        let raw = "one\u{2028}two\u{2029}three"
+        let cleaned = SpeechSanitizer.cleanedPreservingOffsets(raw)
+        XCTAssertEqual(cleaned, raw)
+        XCTAssertEqual(SpeechSanitizer.clean(raw), "one\ntwo\nthree")
     }
 
     func testPreservingOffsetsKeepsOffsetsStable() {

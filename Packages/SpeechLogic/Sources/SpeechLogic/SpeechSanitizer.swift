@@ -159,12 +159,18 @@ public enum SpeechSanitizer {
     /// blank line. Idempotent — `clean(clean(x)) == clean(x)`.
     public static func normalizeWhitespace(_ text: String) -> String {
         guard !text.isEmpty else { return text }
+        // Normalise line endings FIRST. A lone CR is a line break in every
+        // text format this app reads; if it survives into a line,
+        // collapseSpaces treats it as an ordinary space and silently joins two
+        // lines the document had apart — the chunker then loses a sentence
+        // boundary.
+        let normalised = text
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
         var lines: [String] = []
         lines.reserveCapacity(64)
-        for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
-            var line = rawLine
-            if line.hasSuffix("\r") { line = line.dropLast() }
-            lines.append(collapseSpaces(in: line))
+        for rawLine in normalised.split(separator: "\n", omittingEmptySubsequences: false) {
+            lines.append(collapseSpaces(in: rawLine))
         }
 
         // Trim leading/trailing blank lines, collapse 3+ to 2.
