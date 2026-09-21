@@ -36,6 +36,7 @@ struct BookAudioReaderView: View {
 
     private var chapters: [AudioChapter] { book.audioChapters ?? [] }
 
+
     init(book: Book, store: BooksStore) {
         self.book = book
         self.store = store
@@ -255,6 +256,9 @@ struct BookAudioReaderView: View {
                     progress = next
                     publishNowPlaying()
                 }
+                if isPlaying != audioPlayer.isPlaying {
+                    isPlaying = audioPlayer.isPlaying
+                }
                 if audioPlayer.chapterIsFinished, chapterIndex < chapters.count - 1 {
                     stepChapter(1)
                 }
@@ -263,12 +267,12 @@ struct BookAudioReaderView: View {
     }
 
     private func togglePlayback() {
-        if isPlaying {
+        if audioPlayer.isPlaying {
             audioPlayer.pause()
-            isPlaying = false
         } else {
             playChapter(chapterIndex)
         }
+        isPlaying = audioPlayer.isPlaying
         publishNowPlaying()
     }
 
@@ -276,7 +280,7 @@ struct BookAudioReaderView: View {
         guard chapters.indices.contains(index) else { return }
         chapterIndex = index
         audioPlayer.play(book: book, chapterIndex: index)
-        isPlaying = true
+        isPlaying = audioPlayer.isPlaying
         publishNowPlaying()
         persistPosition()
     }
@@ -291,30 +295,29 @@ struct BookAudioReaderView: View {
     private func wireRemoteCommands() {
         guard !remoteWired else { return }
         remoteWired = true
-        NowPlayingCenter.shared.onCommand = { [weak self] command in
+        // A View is a struct, so [weak self] is not available — and this
+        // closure is long-lived (the shared NowPlayingCenter outlives the
+        // view). The handler therefore lives on the @StateObject player,
+        // which is a class the closure can hold weakly.
+        audioPlayer.remoteHandler = { [weak audioPlayer] command in
             Task { @MainActor in
-                guard let self else { return }
+                guard let audioPlayer else { return }
                 switch command {
                 case .play, .toggle:
-                    if self.isPlaying {
-                        self.audioPlayer.pause()
-                        self.isPlaying = false
+                    if audioPlayer.isPlaying {
+                        audioPlayer.pause()
                     } else {
-                        self.playChapter(self.chapterIndex)
+                        audioPlayer.resumeCurrent()
                     }
                 case .pause:
-                    self.audioPlayer.pause()
-                    self.isPlaying = false
+                    audioPlayer.pause()
                 case .stop:
-                    self.audioPlayer.stop()
-                    self.isPlaying = false
-                    NowPlayingCenter.shared.clear()
+                    audioPlayer.stop()
                 case .previousChapter:
-                    self.stepChapter(-1)
+                    audioPlayer.stepChapter(-1)
                 case .nextChapter:
-                    self.stepChapter(1)
+                    audioPlayer.stepChapter(1)
                 }
-                self.publishNowPlaying()
             }
         }
     }
@@ -445,6 +448,37 @@ final class AudioBookPlayer: ObservableObject {
               chapters.indices.contains(chapterIndex) else { return false }
         return player.currentTime >= chapters[chapterIndex].endSeconds
     }
+
+    // MARK: - Remote commands
+
+    /// Lock-screen / Control Center handler. Installed by the reader (which
+    /// owns the NowPlayingCenter surface) and held here because a View is a
+    /// struct and cannot be captured weakly by a long-lived closure.
+    var remoteHandler: ((NowPlayingCenter.Command) -> Void)?
+
+    /// Whether audio is currently sounding — the reader mirrors this so its
+    /// icon, the lock screen and the remote handler never disagree.
+    var isPlaying: Bool { player?.isPlaying ?? false }
+
+    /// Resumes the chapter the reader last started, or the bound start
+    /// chapter on first use. The remote play button has no chapter index of
+    /// its own; with nothing bound there is nothing to resume and it no-ops.
+    func resumeCurrent() {
+        guard let book else { return }
+        if player == nil {
+            play(book: book, chapterIndex: chapterIndex)
+        } else {
+            player?.play()
+        }
+    }
+
+    /// Chapter step for the remote skip buttons.
+    func stepChapter(_ delta: Int) {
+        let target = max(0, min(chapters.count - 1, chapterIndex + delta))
+        guard target != chapterIndex, let book else { return }
+        play(book: book, chapterIndex: target)
+    }
+
 
     private func startTicker() {
         stopTicker()
