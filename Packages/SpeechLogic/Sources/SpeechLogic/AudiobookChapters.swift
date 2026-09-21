@@ -80,7 +80,10 @@ public enum AudiobookChapters {
         if bytes[5] & 0x40 != 0, cursor + 4 <= tagEnd {
             let extended: Int
             if major == 4 {
-                extended = syncSafeInt(bytes[cursor + 2], bytes[cursor + 3], bytes[cursor + 4], bytes[cursor + 5])
+                // v2.4's extended header is [4-byte sync-safe size][1-byte
+                // flags][4-byte padding size] — the size comes FIRST and
+                // counts only what follows it.
+                extended = syncSafeInt(bytes[cursor], bytes[cursor + 1], bytes[cursor + 2], bytes[cursor + 3])
                 cursor += 4 + extended
             } else {
                 extended = Int(be32(bytes, cursor))
