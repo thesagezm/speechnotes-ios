@@ -79,7 +79,13 @@ public enum SpeechSanitizer {
         var out = String.UnicodeScalarView()
         out.reserveCapacity(text.unicodeScalars.count)
         for scalar in text.unicodeScalars {
-            if isUnspeakable(scalar) { continue }
+            if isUnspeakable(scalar) {
+                // Replace rather than delete: "Body\u{07}text" must not become
+                // "Bodytext", or the engine hears one word the reader never
+                // saw. normalizeWhitespace collapses the runs this creates.
+                out.append(" ")
+                continue
+            }
             out.append(scalar)
         }
         return normalizeWhitespace(String(out))

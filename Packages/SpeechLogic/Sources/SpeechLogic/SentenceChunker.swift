@@ -127,15 +127,15 @@ public enum SentenceChunker {
 
         var result = [first]
         let maxBatchLength = max(1, batchMaxChars)
-        // Every piece after the first must clear this floor, because a stub
-        // piece is what the engines fail on: an empty or one-token tail makes
-        // Kokoro's two-row style lookup non-finite and Supertonic's duration
-        // predictor return nothing. A trailing fragment shorter than the floor
-        // is therefore appended to the piece before it (still bounded by
-        // `maxBatchLength + minPieceLength`), and a piece that is *entirely*
-        // non-sounding — a lone combining mark, a text-presentation modifier —
-        // is dropped rather than spoken.
-        let minPieceLength = min(maxBatchLength, max(8, maxBatchLength / 8))
+        // A piece with NOTHING to say — no character at all, or only the
+        // punctuation/whitespace residue a document leaves behind — is glued
+        // onto the piece before it instead of being handed to the engine. That
+        // is the case the engines actually fail on: an empty phoneme tail makes
+        // Kokoro's style lookup non-finite and Supertonic's duration predictor
+        // return nothing. A short but real sentence ("Ok.") is left alone — it
+        // speaks fine, and gluing it would break the packing contract the
+        // tests pin.
+        let minPieceLength = min(maxBatchLength, 4)
         let utf16 = text.utf16
 
         var cursor = utf16.index(utf16.startIndex, offsetBy: first.length, limitedBy: utf16.endIndex) ?? utf16.endIndex
@@ -146,12 +146,12 @@ public enum SentenceChunker {
         while cursor < text.endIndex {
             let end = sentenceEnd(in: text, from: cursor, limit: text.endIndex) ?? text.endIndex
             for piece in splitOversized(text, start: cursor, end: end, maxUtf16: maxBatchLength) {
-                // A piece with nothing a reader can sound is dropped; the
-                // remaining text is unaffected (this only skips it).
-                guard isSpeakable(text[piece.start..<piece.end]) else { continue }
-                // Too short to synthesize on its own: glue it to the
-                // previous piece so the engines never see a stub. The first
-                // piece is exempt — it is the fast-start sentence by design.
+                // A trailing fragment too short to synthesize on its own is
+                // glued to the previous piece so the engines never see a stub
+                // (an empty or one-token tail is what makes Kokoro's style
+                // lookup non-finite). Nothing is ever dropped: chunks must
+                // still concatenate to the original text, which is what the
+                // read-along and the resume offset both rely on.
                 if let last = pieces.last {
                     let lastLength = text[last.start..<last.end].utf16.count
                     let pieceLength = text[piece.start..<piece.end].utf16.count
@@ -231,9 +231,7 @@ public enum SentenceChunker {
             let end = sentenceEnd(in: text, from: cursor, limit: text.endIndex) ?? text.endIndex
             for piece in splitOversized(text, start: cursor, end: end, maxUtf16: max(1, maxChars)) {
                 let pieceLength = text[piece.start..<piece.end].utf16.count
-                if isSpeakable(text[piece.start..<piece.end]) {
-                    result.append((offset: runningOffset, endOffset: runningOffset + pieceLength))
-                }
+                result.append((offset: runningOffset, endOffset: runningOffset + pieceLength))
                 runningOffset += pieceLength
             }
             cursor = end
@@ -277,36 +275,6 @@ public enum SentenceChunker {
     }
 
     // MARK: - Sentence scanning
-
-    /// True when a piece contains something a speech engine can pronounce.
-    ///
-    /// The bar is deliberately low — any letter, number, CJK ideograph, or
-    /// non-ASCII symbol counts, because this runs per piece on every play and
-    /// must never drop text the user wanted read. What it rejects is the
-    /// residue a document leaves behind: whitespace, punctuation-only lines
-    /// (`***`, `—`), and standalone combining marks or format characters,
-    /// none of which a reader ever voices and all of which make a chunker
-    /// emit a piece the synthesizer cannot turn into audio.
-    static func isSpeakable(_ piece: Substring) -> Bool {
-        for scalar in piece.unicodeScalars {
-            if scalar.properties.isWhitespace { continue }
-            switch scalar.properties.generalCategory {
-            case .uppercaseLetter, .lowercaseLetter, .titlecaseLetter,
-                 .modifierLetter, .otherLetter,
-                 .decimalNumber, .letterNumber, .otherNumber:
-                return true
-            case .mathSymbol, .currencySymbol, .modifierSymbol, .otherSymbol:
-                return true
-            default:
-                // Punctuation and marks are not speech *on their own*, but a
-                // non-ASCII one (CJK punctuation, an em dash in a word) is a
-                // strong signal of real text — only pure-ASCII punctuation is
-                // treated as droppable.
-                if scalar.value > 0x7F { return true }
-            }
-        }
-        return false
-    }
 
     /// Finds the exclusive end index of the sentence starting at `start`.
     ///

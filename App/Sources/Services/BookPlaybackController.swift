@@ -144,8 +144,13 @@ final class BookPlaybackController: ObservableObject {
         switch book.format {
         case .epub: return book.spine?.count ?? 0
         case .pdf: return book.pdfChapters?.count ?? 0
+        case .audio: return book.audioChapters?.count ?? 0
         }
     }
+
+    /// True when the item is a finished audiobook file: the audio already
+    /// exists, so playback goes through AudioBookPlayer, not the engines.
+    static func isAudioBook(_ book: Book) -> Bool { book.format == .audio }
 
     private func advanceToNextChapter() {
         guard let book = activeBook else { return }
@@ -220,6 +225,12 @@ final class BookPlaybackController: ObservableObject {
                 return nil
             }
             extracted = (result.text, result.pageOffsets)
+        case .audio:
+            // An audiobook's speech text is its own chapter metadata — the
+            // engine path never runs for it, and this only feeds the reader's
+            // chapter label and any export the user asks for.
+            guard let chapters = book.audioChapters, chapterIndex < chapters.count else { return nil }
+            extracted = (chapters[chapterIndex].title, nil as [PdfPageOffset]?)
         }
         guard let rawText = extracted?.text, !rawText.isEmpty else { return nil }
         // Sanitised at this boundary, before the cache write, so the chapter

@@ -4,6 +4,11 @@ import SpeechLogic
 enum BookFormat: String, Codable {
     case epub
     case pdf
+    /// A finished audiobook file (M4B / M4A / MP4 with a chpl atom, or MP3 with
+    /// ID3 CHAP frames). The audio already exists — Speechnotes plays it and
+    /// keeps the chapter list for navigation and lock-screen controls, instead
+    /// of synthesizing anything.
+    case audio
 }
 
 /// Where the reader left off. EPUB: spine index + scroll fraction inside the
@@ -54,6 +59,16 @@ struct Book: Identifiable, Codable, Equatable, Hashable {
     /// chapter pipeline reads these exactly like an epub's spine.
     var pdfChapters: [PdfChapter]?
     var pdfChapterSource: String?
+    /// audio: the chapters read out of the file's own metadata (chpl / ID3
+    /// CHAP). One list, so the shelf, the player bar, lock screen and the
+    /// mini-player all agree on the unit boundaries without re-parsing.
+    var audioChapters: [AudioChapter]?
+    /// audio: where the chapters came from — "chpl", "id3" or "single" when
+    /// the file has no chapter metadata at all (one implicit chapter).
+    var audioChapterSource: String?
+    /// audio: total duration in seconds, read at import for the player bar
+    /// and the lock-screen scrubber.
+    var audioDuration: Double?
     var hasCover: Bool
     var toc: [BookTocEntry]?
     var position: BookPosition?
@@ -75,6 +90,9 @@ struct Book: Identifiable, Codable, Equatable, Hashable {
         pageCount: Int? = nil,
         pdfChapters: [PdfChapter]? = nil,
         pdfChapterSource: String? = nil,
+        audioChapters: [AudioChapter]? = nil,
+        audioChapterSource: String? = nil,
+        audioDuration: Double? = nil,
         hasCover: Bool = false,
         toc: [BookTocEntry]? = nil,
         position: BookPosition? = nil,
@@ -92,6 +110,9 @@ struct Book: Identifiable, Codable, Equatable, Hashable {
         self.pageCount = pageCount
         self.pdfChapters = pdfChapters
         self.pdfChapterSource = pdfChapterSource
+        self.audioChapters = audioChapters
+        self.audioChapterSource = audioChapterSource
+        self.audioDuration = audioDuration
         self.hasCover = hasCover
         self.toc = toc
         self.position = position
@@ -103,6 +124,10 @@ extension Book {
     /// "Book Title — Chapter 3" style subtitle for the mini-player / list.
     var authorOrFormat: String {
         if let author, !author.isEmpty { return author }
-        return format == .epub ? "EPUB" : "PDF"
+        switch format {
+        case .epub: return "EPUB"
+        case .pdf: return "PDF"
+        case .audio: return "Audiobook"
+        }
     }
 }

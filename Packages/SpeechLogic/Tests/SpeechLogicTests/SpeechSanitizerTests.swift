@@ -17,7 +17,7 @@ final class SpeechSanitizerTests: XCTestCase {
 
     func testCleanDropsPrivateUseGlyphs() {
         // Icons from an embedded font (Wingdings-style) come through as PUA.
-        XCTAssertEqual(SpeechSanitizer.clean("Star \u{F0A7} here"), "Star  here")
+        XCTAssertEqual(SpeechSanitizer.clean("Star \u{F0A7} here"), "Star here")
     }
 
     func testCleanDropsControlBytesButKeepsTabAndNewline() {

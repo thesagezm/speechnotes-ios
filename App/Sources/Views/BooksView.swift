@@ -9,6 +9,13 @@ import UniformTypeIdentifiers
 /// mini-player's tap lands here while a book speaks — pushing the playing
 /// book's reader.
 struct BooksView: View {
+    /// What the importer offers. `.mpeg4Audio` covers M4B/M4A/MP4 (the same
+    /// UTType family), `.mp3` the ID3-chaptered MP3s, and `.epub`/`.pdf` the
+    /// read-along books. The UTType set lives here rather than in BooksStore
+    /// so the picker's contents and the store's accepted extensions cannot
+    /// drift apart.
+    private static let importableBookTypes: [UTType] = [.epub, .pdf, .mpeg4Audio, .mp3]
+
     @StateObject private var store = BooksStore()
     @EnvironmentObject private var player: SpeechPlayer
     @State private var showingImporter = false
@@ -55,7 +62,7 @@ struct BooksView: View {
             }
             .fileImporter(
                 isPresented: $showingImporter,
-                allowedContentTypes: [.epub, .pdf],
+                allowedContentTypes: Self.importableBookTypes,
                 allowsMultipleSelection: false
             ) { result in
                 handleImportResult(result)
@@ -64,6 +71,7 @@ struct BooksView: View {
                 switch book.format {
                 case .epub: BookReaderView(book: book, store: store)
                 case .pdf: BookPDFReaderView(book: book, store: store)
+                case .audio: BookAudioReaderView(book: book, store: store)
                 }
             }
             .onAppear {
@@ -164,7 +172,7 @@ struct BooksView: View {
                 .foregroundStyle(.secondary)
             Text("No books yet")
                 .font(.headline)
-            Text("Import an EPUB or PDF to start reading and listening.\nYou can also open files into Speechnotes from the Files app.")
+            Text("Import an EPUB, a PDF, or an audiobook (M4B / M4A / MP3) to start reading and listening.\nYou can also open files into Speechnotes from the Files app.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -269,6 +277,13 @@ private struct BookGridCard: View {
                 parts.append("\(chapters.count) ch")
             } else if let pages = book.pageCount {
                 parts.append("\(pages) p")
+            }
+        case .audio:
+            if let chapters = book.audioChapters, !chapters.isEmpty {
+                parts.append("\(chapters.count) ch")
+            }
+            if let duration = book.audioDuration, duration > 0 {
+                parts.append("\(Int(duration / 60)) min")
             }
         }
         return parts.joined(separator: " · ")

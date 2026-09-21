@@ -1,6 +1,7 @@
 import Foundation
 import UIKit
 import PDFKit
+import AVFoundation
 import SpeechLogic
 
 /// The Books library. Each book is a self-contained directory under
@@ -123,6 +124,11 @@ final class BooksStore: ObservableObject {
                             book.pdfChapterSource = resolved.source
                         }
                     }
+                case .audio:
+                    if book.audioChapters == nil {
+                        let refreshed = Self.buildAudioManifest(book: book, directory: dir)
+                        book = refreshed
+                    }
                 case .epub:
                     guard let data = try? Data(contentsOf: dir.appendingPathComponent("original.epub"), options: .mappedIfSafe),
                           let info = try? EpubParser.parse(archive: data), !info.spine.isEmpty else { continue }
@@ -161,11 +167,18 @@ final class BooksStore: ObservableObject {
         defer { isImporting = false }
 
         let ext = sourceURL.pathExtension.lowercased()
-        let format: BookFormat
+        let format: BookFormat?
         switch ext {
         case "epub": format = .epub
         case "pdf": format = .pdf
+        // Audiobooks: M4B/M4A are mpeg4 containers, and an MP3 with ID3 CHAP
+        // frames is the other one that carries chapters. Anything else is not
+        // a book.
+        case "m4b", "m4a", "mp4", "mp3": format = .audio
         default:
+            format = nil
+        }
+        guard let format else {
             importError = "Unsupported book format: .\(ext)"
             return nil
         }
@@ -282,6 +295,73 @@ final class BooksStore: ObservableObject {
                     }
                 }
             }
+        case .audio:
+            book = Self.buildAudioManifest(book: book, directory: directory)
+        }
+        return book
+    }
+
+    /// Reads what an audiobook file says about itself: title/author from the
+    /// tags, duration from the audio file, and the chapter list from the
+    /// container's own metadata. All off-main (the caller detaches) and all
+    /// bounded — a chapter list is small by definition and the duration comes
+    /// from AVURLAsset, which reads the header rather than the samples.
+    nonisolated private static func buildAudioManifest(book: Book, directory: URL) -> Book {
+        var book = book
+        let original = directory.appendingPathComponent("original." + book.format.rawValue)
+        let asset = AVURLAsset(url: original, options: [AVURLAssetPreferPreciseDurationAndTimingKey: false])
+        let seconds = asset.duration.seconds
+        if seconds.isFinite, seconds > 0 { book.audioDuration = seconds }
+
+        // Chapters: read the head of the file. MP4 boxes need only the first
+        // few hundred KB (chpl sits inside moov, before mdat); an ID3 tag lives
+        // at offset 0. Reading a bounded slice rather than the whole file keeps
+        // a 900 MB audiobook import cheap.
+        let fileSize = (try? original.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        let headBytes = min(8 * 1024 * 1024, max(0, fileSize))
+        if headBytes > 0, let handle = try? FileHandle(forReadingFrom: original) {
+            let head = handle.readData(ofLength: Int(headBytes))
+            try? handle.close()
+
+            if head.starts(with: [0x49, 0x44, 0x33]) { // "ID3"
+                let chapters = AudiobookChapters.chaptersFromID3(head)
+                if !chapters.isEmpty {
+                    book.audioChapters = chapters
+                    book.audioChapterSource = "id3"
+                }
+            } else {
+                let chapters = AudiobookChapters.chaptersFromMP4(head, totalSeconds: book.audioDuration ?? 0)
+                if !chapters.isEmpty {
+                    book.audioChapters = chapters
+                    book.audioChapterSource = "chpl"
+                }
+            }
+        }
+
+        // No chapter metadata: the whole file is one chapter so the player bar
+        // has a unit and the position can still be remembered.
+        if book.audioChapters == nil {
+            book.audioChapters = [AudioChapter(
+                title: "Full audiobook",
+                startSeconds: 0,
+                endSeconds: book.audioDuration ?? 0
+            )]
+            book.audioChapterSource = "single"
+        }
+
+        // Tags: AVAsset's commonKey metadata covers MP3 (ID3) and MP4 (ilst)
+        // with the same two keys we show on the shelf.
+        let title = AVMetadataItem(for: asset, metadataItem: AVMetadataItem.commonKeyTitle, withValue: nil)?.stringValue
+        if let title, !title.isEmpty { book.title = title }
+        let artist = AVMetadataItem(for: asset, metadataItem: AVMetadataItem.commonKeyArtist, withValue: nil)?.stringValue
+        if let artist, !artist.isEmpty { book.author = artist }
+
+        // Cover: MP4/M4B often embeds one; an MP3 may embed it in ID3 either.
+        // If not, the shelf shows the format glyph, same as a cover-less PDF.
+        if let artwork = AVMetadataItem(for: asset, metadataItem: AVMetadataItem.commonKeyArtwork, withValue: nil)?.dataValue,
+           !artwork.isEmpty {
+            try? artwork.write(to: directory.appendingPathComponent("cover.jpg"), options: .atomic)
+            book.hasCover = true
         }
         return book
     }

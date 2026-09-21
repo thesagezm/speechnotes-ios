@@ -37,6 +37,15 @@ struct BookRowView: View {
             } else if let pages = book.pageCount {
                 parts.append("\(pages) pages")
             }
+        case .audio:
+            if let chapters = book.audioChapters, !chapters.isEmpty {
+                parts.append("\(chapters.count) chapter\(chapters.count == 1 ? "" : "s")")
+            }
+            if let duration = book.audioDuration, duration > 0 {
+                let minutes = Int(duration / 60)
+                let hours = minutes / 60
+                parts.append(hours > 0 ? "\(hours)h \(minutes % 60)m" : "\(minutes) min")
+            }
         }
         return parts.joined(separator: " · ")
     }
