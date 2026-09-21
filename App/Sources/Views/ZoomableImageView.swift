@@ -53,6 +53,11 @@ struct ZoomableImageView: View {
     }
 }
 
+/// Zoom limits for the viewer. File-scope so both the representable and its
+/// coordinator reach them without qualification.
+private let imageZoomMin: CGFloat = 1.0
+private let imageZoomMax: CGFloat = 5.0
+
 /// The UIKit half: one `UIScrollView` with the image as its content, zoom
 /// clamped to 1…5, double-tap-to-zoom at the tap point, and a single-tap
 /// callback for dismissal. All the behaviour that makes pinch-zoom feel
@@ -61,9 +66,6 @@ private struct ImageZoomScrollView: UIViewRepresentable {
     let image: UIImage
     let alt: String
     var onTap: () -> Void
-
-    private static let minZoom: CGFloat = 1.0
-    private static let maxZoom: CGFloat = 5.0
 
     func makeCoordinator() -> Coordinator {
         Coordinator(onTap: onTap)
@@ -142,9 +144,9 @@ private struct ImageZoomScrollView: UIViewRepresentable {
         /// image centred whenever it is smaller than the viewport.
         func layoutContent(in scrollView: UIScrollView) {
             guard let imageView, imageView.image != nil else { return }
-            scrollView.minimumZoomScale = Self.minZoom
-            scrollView.maximumZoomScale = Self.maxZoom
-            scrollView.zoomScale = Self.minZoom
+            scrollView.minimumZoomScale = imageZoomMin
+            scrollView.maximumZoomScale = imageZoomMax
+            scrollView.zoomScale = imageZoomMin
             centerContent(in: scrollView)
         }
 
@@ -165,9 +167,9 @@ private struct ImageZoomScrollView: UIViewRepresentable {
 
         @objc func handleDoubleTap(_ recognizer: UITapGestureRecognizer) {
             guard let scrollView else { return }
-            let next: CGFloat = scrollView.zoomScale > Self.minZoom + 0.01 ? Self.minZoom : 2.5
-            if next == Self.minZoom {
-                scrollView.setZoomScale(Self.minZoom, animated: true)
+            let next: CGFloat = scrollView.zoomScale > imageZoomMin + 0.01 ? imageZoomMin : 2.5
+            if next == imageZoomMin {
+                scrollView.setZoomScale(imageZoomMin, animated: true)
                 return
             }
             // Zoom toward the tapped point so the detail the user pointed at
@@ -180,8 +182,8 @@ private struct ImageZoomScrollView: UIViewRepresentable {
         @objc func handleSingleTap(_ recognizer: UITapGestureRecognizer) {
             guard let scrollView else { return }
             // A tap while zoomed in zooms back out; a tap at rest dismisses.
-            if scrollView.zoomScale > Self.minZoom + 0.01 {
-                scrollView.setZoomScale(Self.minZoom, animated: true)
+            if scrollView.zoomScale > imageZoomMin + 0.01 {
+                scrollView.setZoomScale(imageZoomMin, animated: true)
             } else {
                 onTap()
             }
