@@ -129,6 +129,9 @@ final class PlaybackMetrics {
     private var fastestChunkRTF: Double = 0
     private var slowestChunkRTF: Double = 0
     private var lastQuartileLogged = 0
+    /// Mean RTF through the first quartile — the pre-throttle reference for
+    /// the summary's drift label. Zero until a session reaches 25%.
+    private var firstQuartileMeanRTF: Double = 0
 
     private var lastBufferEndedAt: ContinuousClock.Instant?
     private var gapCount = 0
@@ -159,6 +162,7 @@ final class PlaybackMetrics {
         fastestChunkRTF = 0
         slowestChunkRTF = 0
         lastQuartileLogged = 0
+        firstQuartileMeanRTF = 0
         lastBufferEndedAt = nil
         gapCount = 0
         worstGapSeconds = 0
@@ -207,9 +211,14 @@ final class PlaybackMetrics {
         let rtfRange = slowestChunkRTF > 0
             ? "chunk RTF \(twoDP(fastestChunkRTF))–\(twoDP(slowestChunkRTF))"
             : "chunk RTF n/a"
+        // A session whose chunks slow down as it goes is thermally throttled,
+        // and the summary is where that shows: the first-quartile mean is
+        // printed beside the overall one so a device log can be read at a
+        // glance instead of comparing four quartile lines by hand.
+        let drift = Self.driftLabel(firstQuartileMean: firstQuartileMeanRTF, overallMean: synthesisRTF)
         emit("session \(reason) — \(generatedChunks) chunks (\(skippedChunks) skipped), "
             + "\(twoDP(totalAudioSeconds))s audio, \(twoDP(totalGenerationSeconds))s gen, "
-            + "synthesis RTF \(twoDP(synthesisRTF)) [\(rtfRange)], "
+            + "synthesis RTF \(twoDP(synthesisRTF)) [\(rtfRange)]\(drift), "
             + "TTFA \(ttfaText), T2B \(t2bText), gaps \(gapCount) (worst \(twoDP(worstGapSeconds))s, lower bound), "
             + "wall \(twoDP(wall))s incl. \(twoDP(pausedSeconds))s paused across \(pauseCount) pause(s), "
             + "rate@start \(twoDP(Double(sessionRate)))")
@@ -280,9 +289,25 @@ final class PlaybackMetrics {
         guard quartile > lastQuartileLogged, quartile < 4 else { return }
         lastQuartileLogged = quartile
         let mean = totalAudioSeconds > 0 ? totalGenerationSeconds / totalAudioSeconds : 0
+        // The first quartile is the reference point for the summary's drift
+        // label: it is the only quartile guaranteed to be pre-throttle.
+        if quartile == 1 { firstQuartileMeanRTF = mean }
         emit("RTF at \(quartile * 25)% — \(generatedChunks)/\(chunkCount) chunks, mean RTF \(twoDP(mean)), "
             + "chunk RTF \(twoDP(fastestChunkRTF))–\(twoDP(slowestChunkRTF)), "
             + "\(twoDP(totalAudioSeconds))s audio / \(twoDP(totalGenerationSeconds))s gen")
+    }
+
+    /// A one-glance verdict on whether synthesis slowed down during the
+    /// session. A mean RTF that ends materially above the first quartile's is
+    /// the thermal-throttling signature — the device got hot, the CPU was
+    /// dialled back, and every later chunk took longer to build. It is not an
+    /// error and it is not the model; it is the silicon.
+    static func driftLabel(firstQuartileMean: Double, overallMean: Double) -> String {
+        guard firstQuartileMean > 0, overallMean > 0 else { return "" }
+        let ratio = overallMean / firstQuartileMean
+        guard ratio >= 1.35 else { return "" }
+        let percent = Int((ratio - 1) * 100)
+        return ", SLOWED \(percent)% vs the first quartile (thermal throttling)"
     }
 
     // MARK: - Scheduling
