@@ -112,9 +112,12 @@ final class SpeechSanitizerTests: XCTestCase {
     }
 
     func testSnappedSpanSurvivesNoWhitespace() {
+        // No boundary exists within the slack, so the span is returned as
+        // asked for — snapping must never grow or shrink past what it found.
         let text = "abcdefghij"
         let span = SpeechSanitizer.snappedSpan(in: text, offset: 3, length: 3)
-        XCTAssertEqual(span.startOffset, 0)
-        XCTAssertEqual(span.endOffset, 10)
+        XCTAssertEqual(span.startOffset, 3)
+        XCTAssertEqual(span.endOffset, 6)
+        XCTAssertEqual(span.text, "def")
     }
 }

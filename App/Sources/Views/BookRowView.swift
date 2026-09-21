@@ -71,7 +71,7 @@ struct BookCoverView: View {
                 ZStack {
                     Rectangle()
                         .fill(Color.secondary.opacity(0.1))
-                    Image(systemName: book.format == .epub ? "book.closed" : "doc.richtext")
+                    Image(systemName: glyph(for: book.format))
                         .font(.title3)
                         .foregroundStyle(.secondary)
                 }
@@ -91,5 +91,15 @@ struct BookCoverView: View {
                 return UIImage(data: data)
             }.value
         }
+    }
+}
+
+/// Cover-less shelf glyph per format. A cover-less audiobook gets a speaker
+/// rather than a book — the shelf should say what kind of thing it is.
+private func glyph(for format: BookFormat) -> String {
+    switch format {
+    case .epub: return "book.closed"
+    case .pdf: return "doc.richtext"
+    case .audio: return "speaker.wave.2"
     }
 }

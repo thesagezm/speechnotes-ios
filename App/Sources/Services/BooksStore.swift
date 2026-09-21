@@ -349,21 +349,36 @@ final class BooksStore: ObservableObject {
             book.audioChapterSource = "single"
         }
 
-        // Tags: AVAsset's commonKey metadata covers MP3 (ID3) and MP4 (ilst)
-        // with the same two keys we show on the shelf.
-        let title = AVMetadataItem(for: asset, metadataItem: AVMetadataItem.commonKeyTitle, withValue: nil)?.stringValue
+        // Tags: read the two common keys the shelf shows. `AVMetadataItem`
+        // is created by asking the asset's metadata array for a key, not by
+        // a static constructor — the asset loads its metadata lazily, so this
+        // is a header read, not a whole-file scan.
+        let title = Self.metadataString(asset, key: AVMetadataKey.commonKeyTitle.rawValue)
         if let title, !title.isEmpty { book.title = title }
-        let artist = AVMetadataItem(for: asset, metadataItem: AVMetadataItem.commonKeyArtist, withValue: nil)?.stringValue
+        let artist = Self.metadataString(asset, key: AVMetadataKey.commonKeyArtist.rawValue)
         if let artist, !artist.isEmpty { book.author = artist }
 
-        // Cover: MP4/M4B often embeds one; an MP3 may embed it in ID3 either.
-        // If not, the shelf shows the format glyph, same as a cover-less PDF.
-        if let artwork = AVMetadataItem(for: asset, metadataItem: AVMetadataItem.commonKeyArtwork, withValue: nil)?.dataValue,
+        // Cover: MP4/M4B often embeds one. Without it the shelf shows the
+        // format glyph, exactly as a cover-less PDF does.
+        if let artwork = Self.metadataData(asset, key: AVMetadataKey.commonKeyArtwork.rawValue),
            !artwork.isEmpty {
-            try? artwork.write(to: directory.appendingPathComponent("cover.jpg"), options: .atomic)
+            try? artwork.write(to: directory.appendingPathComponent("cover.jpg"), options: [.atomic])
             book.hasCover = true
         }
         return book
+    }
+
+    /// One common metadata key as a string, or nil. Tolerant by design: an
+    /// unreadable or missing tag is not an import failure.
+    nonisolated private static func metadataString(_ asset: AVURLAsset, key: String) -> String? {
+        guard let item = asset.metadata.first(where: { $0.commonKey?.rawValue == key }) else { return nil }
+        return item.stringValue
+    }
+
+    /// One common metadata key as data (the artwork path), or nil.
+    nonisolated private static func metadataData(_ asset: AVURLAsset, key: String) -> Data? {
+        guard let item = asset.metadata.first(where: { $0.commonKey?.rawValue == key }) else { return nil }
+        return item.dataValue
     }
 
     /// Renders one PDF page as a shelf-cover JPEG. Width-fixed (600 pt),

@@ -83,7 +83,9 @@ public enum SpeechSanitizer {
                 // Replace rather than delete: "Body\u{07}text" must not become
                 // "Bodytext", or the engine hears one word the reader never
                 // saw. normalizeWhitespace collapses the runs this creates.
-                out.append(" ")
+                // Line separators become a newline so the chunker still sees a
+                // sentence boundary where the document had one.
+                out.append(Self.isLineBreak(scalar) ? "\n" : " ")
                 continue
             }
             out.append(scalar)
@@ -98,8 +100,8 @@ public enum SpeechSanitizer {
     /// convention (U+FFFD) is a better signal than a guess here.
     public static func isUnspeakable(_ scalar: Unicode.Scalar) -> Bool {
         switch scalar.value {
-        case 0x09, 0x0A, 0x0D:
-            return false // tab, LF, CR are real whitespace — keep them
+        case 0x09, 0x0A, 0x0D, 0x2028, 0x2029:
+            return false // tab, LF, CR and the Unicode line separators are whitespace
         case 0x00:
             return true // NUL never reaches a reader
         case 0x01...0x08, 0x0B, 0x0C, 0x0E...0x1F, 0x7F...0x9F:
@@ -113,6 +115,14 @@ public enum SpeechSanitizer {
         if variationSelectorsSupplement.contains(scalar) { return true }
         for range in privateUse where range.contains(scalar) { return true }
         return false
+    }
+
+    /// True for the two Unicode line separators, which `Character.isWhitespace`
+    /// does not report (they are `Separator`s, not `Whitespace`) — the chunker
+    /// treats them as hard sentence boundaries, so they must survive cleaning
+    /// as a newline rather than a space.
+    static func isLineBreak(_ scalar: Unicode.Scalar) -> Bool {
+        scalar == "\u{2028}" || scalar == "\u{2029}"
     }
 
     /// Offset-preserving variant of `clean(_:)` for paths that index the

@@ -11,11 +11,13 @@ final class SpeechTextPipelineTests: XCTestCase {
     func testChunksGlueLoneTrailingFragment() {
         // A fragment too short to synthesize on its own is glued to the piece
         // before it — the engines fail on a one-token tail, not on a short
-        // sentence, so only the stub case moves.
+        // sentence. Here the fast-start sentence is the exempt first piece, so
+        // the fragment travels WITH it rather than becoming its own chunk.
         let text = "A complete sentence ends here. x"
         let chunks = SentenceChunker.chunks(for: text, firstMaxChars: 160, batchMaxChars: 160)
-        XCTAssertEqual(chunks.count, 1)
-        XCTAssertTrue(chunks[0].text.hasSuffix("x"))
+        XCTAssertEqual(chunks.count, 2)
+        XCTAssertEqual(chunks[1].text, " x")
+        XCTAssertEqual(chunks.map(\.text).joined(), text)
     }
 
     func testPlainTextNeverLeavesUnspeakableResidue() {

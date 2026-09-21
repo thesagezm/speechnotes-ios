@@ -70,6 +70,11 @@ targets:
           - CFBundleTypeName: EPUB document
             LSHandlerRank: Alternate
             LSItemContentTypes: [org.idpf.epub-container]
+          # Audiobooks: an M4B/M4A is mpeg4 audio, an MP3 is public.mp3. The
+          # Books importer reads chapters from the file's own metadata.
+          - CFBundleTypeName: Audiobook
+            LSHandlerRank: Alternate
+            LSItemContentTypes: [public.mpeg4-audio, public.mp3]
         CFBundleURLTypes:
           - CFBundleURLName: com.speechnotes.ios
             CFBundleURLSchemes: [speechnotes]
