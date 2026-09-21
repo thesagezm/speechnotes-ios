@@ -155,8 +155,10 @@ final class AudiobookChaptersTests: XCTestCase {
                 : be32(6) + [0, 0]   // plain size 6, body is exactly those bytes
             let extended = body + frames
             let tagSize = extended.count
+            // Layout: "ID3" (0..2), major (3), revision (4), FLAGS (5),
+            // sync-safe size (6..9). The extended-header flag lives in byte 5.
             let header: [UInt8] = [
-                0x49, 0x44, 0x33, UInt8(major), 0x40, 0,
+                0x49, 0x44, 0x33, UInt8(major), 0, 0x40,
                 UInt8((tagSize >> 21) & 0x7F), UInt8((tagSize >> 14) & 0x7F),
                 UInt8((tagSize >> 7) & 0x7F), UInt8(tagSize & 0x7F),
             ]
