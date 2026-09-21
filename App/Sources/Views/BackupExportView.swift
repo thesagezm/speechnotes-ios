@@ -109,18 +109,16 @@ struct BackupExportView: View {
             if scope == .notebook {
                 Section {
                     // Tag the selection with a String, not UUID? — SwiftUI's
-                    // Picker needs a Hashable tag and infers its type from the
-                    // selection binding, which is optional and therefore not
-                    // directly usable as a tag.
-                    Picker("Notebook", selection: Binding(
+                    // Picker infers the tag type from the selection binding,
+                    // and an optional binding cannot be one. The bridge goes
+                    // through the uuid string.
+                    Picker(selection: Binding(
                         get: { selectedNotebookID?.uuidString ?? "" },
                         set: { selectedNotebookID = UUID(uuidString: $0) }
-                    )) {
+                    ), label: { Text("Notebook") }) {
                         ForEach(notebooks) { notebook in
                             Text(notebook.name).tag(notebook.id.uuidString)
                         }
-                    } label: {
-                        Text("Notebook")
                     }
                 }
             }

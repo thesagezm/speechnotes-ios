@@ -205,6 +205,7 @@ struct MarkdownPreviewView: View {
     /// a table that wraps: long cells break across lines, columns share the
     /// width fairly, and the table only scrolls sideways when even a fair
     /// share cannot fit (a genuinely wide table, not a long sentence).
+    @ViewBuilder
     private func tableView(headers: [String], rows: [[String]]) -> some View {
         let columnCount = max(headers.count, rows.map(\.count).max() ?? 0)
         // A column's floor is the longest single WORD in it, because that is
