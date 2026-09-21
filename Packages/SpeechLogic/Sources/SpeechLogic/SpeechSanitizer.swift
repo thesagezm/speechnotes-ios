@@ -230,7 +230,7 @@ public enum SpeechSanitizer {
     private static func isSpaceUnit(_ unit: UInt16) -> Bool {
         unit == 0x20 || unit == 0x09 || unit == 0x0A || unit == 0x0D || unit == 0x0C || unit == 0x0B
             || unit == 0xA0 || unit == 0x1680 || (0x2000...0x200A).contains(unit)
-            || unit == 0x2028 || unit == 0x2029 || unit == 0x202F || unit == 0x205F || unit == 0x3000
+            || unit == 0x202F || unit == 0x205F || unit == 0x3000
     }
 
     /// Collapses every run of space-like characters to one ASCII space and
@@ -241,7 +241,7 @@ public enum SpeechSanitizer {
         var pendingSpace = false
         var wroteAny = false
         for scalar in line.unicodeScalars {
-            if scalar == "\t" || scalar == "\u{A0}" || scalar.properties.isWhitespace {
+            if isSpaceLike(scalar) {
                 pendingSpace = true
                 continue
             }
@@ -251,6 +251,15 @@ public enum SpeechSanitizer {
             out.append(scalar)
         }
         return String(out)
+    }
+
+    /// The whitespace that collapses to one ASCII space: tab, NBSP, and
+    /// everything `Character.isWhitespace` reports. Deliberately NOT the
+    /// Unicode line/paragraph separators — `isWhitespace` misses them (they
+    /// are `Separator`s), and collapsing them would destroy a line break the
+    /// document had. They are handled as line breaks upstream.
+    private static func isSpaceLike(_ scalar: Unicode.Scalar) -> Bool {
+        scalar == "\t" || scalar == "\u{A0}" || scalar.properties.isWhitespace
     }
 
     /// Walks backwards from `from` to the first whitespace, returning the
