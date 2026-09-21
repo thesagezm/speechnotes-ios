@@ -18,6 +18,24 @@ struct MarkdownPreviewView: View {
     @Environment(\.noteId) private var envNoteId
     @EnvironmentObject private var theme: AppTheme
 
+    // MARK: - Spacing (user-tunable in Appearance → Reading View)
+
+    /// Line spacing inside paragraphs and quotes — base × user multiplier.
+    private var lineSpacing: CGFloat { ReaderSpacing.paragraphLine * theme.readerLineSpacing }
+    private var quoteLineSpacing: CGFloat { ReaderSpacing.quoteLine * theme.readerLineSpacing }
+
+    /// Vertical gap between blocks.
+    private var blockGap: CGFloat { ReaderSpacing.blockGap * theme.readerBlockSpacing }
+
+    /// Gap between list rows; clearance under/over headings.
+    private var listRowSpacing: CGFloat { ReaderSpacing.listRow * theme.readerBlockSpacing }
+    private var headingBottom: CGFloat { ReaderSpacing.headingBottom * theme.readerBlockSpacing }
+
+    /// Table row height + cell padding (its own multiplier — tables need more
+    /// air than prose before they stop looking cramped).
+    private var tableRowSpacing: CGFloat { ReaderSpacing.tableRow * theme.readerTableSpacing }
+    private var tableCellPadding: CGFloat { ReaderSpacing.tableCell * theme.readerTableSpacing }
+
     /// Cache so a body re-render (zoom state, theme tick, sheet state) doesn't
     /// re-parse the whole note. Recomputed only when `markdown` changes.
     @State private var parsedCache: (source: String, blocks: [MarkdownText.MarkdownBlock])?
@@ -120,12 +138,13 @@ struct MarkdownPreviewView: View {
         case .heading(let level, let text):
             styledText(text)
                 .font(headingFont(level))
-                .padding(.top, level <= 2 ? 18 : 14)
-                .padding(.bottom, 6)
+                .padding(.top, level <= 2 ? ReaderSpacing.headingTopLevel1 * theme.readerBlockSpacing
+                                         : ReaderSpacing.headingTopLevel3Plus * theme.readerBlockSpacing)
+                .padding(.bottom, headingBottom)
         case .paragraph(let text):
             runsView(MarkdownText.inlineRuns(text))
-                .lineSpacing(4)
-                .padding(.bottom, 14)
+                .lineSpacing(lineSpacing)
+                .padding(.bottom, blockGap)
         case .bulletList(let items):
             listRows(items, markerBuilder: { _, _ in "•" })
         case .orderedList(let items):
@@ -138,10 +157,10 @@ struct MarkdownPreviewView: View {
                     .padding(.top, 2)
                 styledText(text)
                     .foregroundStyle(.secondary)
-                    .lineSpacing(3)
+                    .lineSpacing(quoteLineSpacing)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(.bottom, 14)
+            .padding(.bottom, blockGap)
         case .code(let language, let text):
             VStack(alignment: .leading, spacing: 4) {
                 if let language {
@@ -159,15 +178,15 @@ struct MarkdownPreviewView: View {
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.15)))
-            .padding(.bottom, 14)
+            .padding(.bottom, blockGap)
         case .divider:
             Divider().padding(.vertical, 10)
         case .image(let alt, let url):
             imageView(url: url, alt: alt)
-                .padding(.bottom, 14)
+                .padding(.bottom, blockGap)
         case .table(let headers, let rows):
             tableView(headers: headers, rows: rows)
-                .padding(.bottom, 14)
+                .padding(.bottom, blockGap)
         }
     }
 
@@ -177,12 +196,12 @@ struct MarkdownPreviewView: View {
         _ items: [MarkdownText.ListItem],
         markerBuilder: @escaping (Int, MarkdownText.ListItem) -> String
     ) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: listRowSpacing) {
             ForEach(Array(items.enumerated()), id: \.offset) { index, item in
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     if item.isTask {
                         Image(systemName: item.isDone ? "checkmark.square.fill" : "square")
-                            .foregroundStyle(item.isDone ? Color.accentColor : Color.secondary)
+                            .foregroundStyle(item.isDone ? Color.accentColor : .secondary)
                             .font(.callout)
                     } else {
                         Text(markerBuilder(index, item))
@@ -190,12 +209,12 @@ struct MarkdownPreviewView: View {
                     }
                     styledText(item.text)
                         .strikethrough(item.isDone)
-                        .foregroundStyle(item.isDone ? Color.secondary : Color.primary)
+                        .foregroundStyle(item.isDone ? .secondary : .primary)
                 }
                 .padding(.leading, CGFloat(item.level) * 16)
             }
         }
-        .padding(.bottom, 14)
+        .padding(.bottom, blockGap)
     }
 
     /// Tables. The old `Grid` gave every column the width of its WIDEST cell,
@@ -212,20 +231,15 @@ struct MarkdownPreviewView: View {
         // the narrowest it can ever be without clipping. Share whatever width
         // is left over equally, so short columns stay tight and long ones get
         // the room — then let cells wrap inside what they get.
-        let minimums = (0..<columnCount).map { index -> CGFloat in
-            let cells = [headers[safe: index] ?? ""] + rows.compactMap { $0[safe: index] ?? "" }
-            let longestWord = cells
-                .flatMap { $0.split(separator: " ").map(String.init) }
-                .map { $0.boundingWidth(at: bodyFontSize) }
-                .max() ?? 0
-            return min(longestWord + 2, 160)
-        }
-        let available = max(0, UIScreen.main.bounds.width - 32 - 16 - CGFloat(minimums.count) * 8)
-        let share = available / CGFloat(max(1, columnCount))
-        let widths = minimums.map { $0 + share }
+        //
+        // The whole minimums computation ran per body evaluation on every
+        // visible table (an NSString.boundingRect per WORD per cell), and body
+        // evaluations fire on every playback progress tick. Cached per
+        // (table, font size) — the same bounded-map trick as the span cache.
+        let widths = cachedTableWidths(headers: headers, rows: rows, columnCount: columnCount)
 
         ScrollView(.horizontal, showsIndicators: false) {
-            Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: 6) {
+            Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: tableRowSpacing) {
                 GridRow {
                     ForEach(0..<columnCount, id: \.self) { index in
                         styledText(headers[safe: index] ?? "")
@@ -243,9 +257,36 @@ struct MarkdownPreviewView: View {
                     }
                 }
             }
-            .padding(8)
+            .padding(tableCellPadding)
             .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.08)))
         }
+    }
+
+    /// (headers + rows joined, font size) → column widths. Bounded like the
+    /// span cache; a clear-all on overflow is fine because rebuilding a
+    /// table's width list is a handful of boundingRect calls, not a parse.
+    private static var tableWidthCache: [String: [CGFloat]] = [:]
+    private static let tableWidthCacheLimit = 64
+
+    private func cachedTableWidths(headers: [String], rows: [[String]], columnCount: Int) -> [CGFloat] {
+        let key = "\(headers.joined(separator: "\u{1}"))\u{2}\(rows.map { $0.joined(separator: "\u{1}") }.joined(separator: "\u{2}"))\u{3}\(bodyFontSize)"
+        if let hit = Self.tableWidthCache[key] { return hit }
+        let minimums = (0..<columnCount).map { index -> CGFloat in
+            let cells = [headers[safe: index] ?? ""] + rows.compactMap { $0[safe: index] ?? "" }
+            let longestWord = cells
+                .flatMap { $0.split(separator: " ").map(String.init) }
+                .map { $0.boundingWidth(at: bodyFontSize) }
+                .max() ?? 0
+            return min(longestWord + 2, 160)
+        }
+        let available = max(0, UIScreen.main.bounds.width - 32 - 16 - CGFloat(minimums.count) * 8)
+        let share = available / CGFloat(max(1, columnCount))
+        let widths = minimums.map { $0 + share }
+        if Self.tableWidthCache.count >= Self.tableWidthCacheLimit {
+            Self.tableWidthCache.removeAll()
+        }
+        Self.tableWidthCache[key] = widths
+        return widths
     }
 
     // MARK: - Inline runs
@@ -310,8 +351,30 @@ struct MarkdownPreviewView: View {
     private enum SpanStyle { case plain, bold, italic, boldItalic, code, strike }
     private struct Span { let text: String; let style: SpanStyle }
 
+    /// Per-source-string span cache. The emphasis regex used to run once per
+    /// run per body evaluation, and body evaluations fire on every playback
+    /// progress tick (the player is a root environment object) — a table- or
+    /// paragraph-heavy note re-ran a full regex pass over its visible text
+    /// several times a second for output that never changed. Bounded to the
+    /// most recent 512 distinct strings so a long scroll can't grow it
+    /// without limit.
+    private static var spanCache: [String: [Span]] = [:]
+    private static let spanCacheLimit = 512
+
+    private static func cachedSpans(in string: String) -> [Span] {
+        if let hit = spanCache[string] { return hit }
+        let spans = emphasisSpans(in: string)
+        if spanCache.count >= spanCacheLimit {
+            // Cheap eviction — drop the whole map rather than track LRU
+            // order; rebuilding 512 short strings is microseconds.
+            spanCache.removeAll()
+        }
+        spanCache[string] = spans
+        return spans
+    }
+
     private func styledText(_ string: String) -> Text {
-        let spans = Self.emphasisSpans(in: string)
+        let spans = Self.cachedSpans(in: string)
         guard !spans.isEmpty else { return Text(string) }
         var composed = Text("")
         for span in spans {

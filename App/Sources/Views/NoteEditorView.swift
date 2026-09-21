@@ -65,8 +65,15 @@ struct NoteEditorView: View {
             && player.nowPlayingNoteId == noteId
     }
 
+    /// The note this editor is bound to. Cached in @State: the raw
+    /// `first(where:)` over the whole library ran on every body evaluation,
+    /// and body evaluations fire per playback progress tick (the player is a
+    /// root environment object). Refreshed when the store's version or the
+    /// note identity changes — a player tick alone does not.
+    @State private var cachedNote: Note?
+
     private var currentNote: Note? {
-        notes.notes.first { $0.id == noteId }
+        cachedNote ?? notes.notes.first { $0.id == noteId }
     }
 
     /// The text handed to the engine when markdown rendering is on: syntax
@@ -355,10 +362,21 @@ struct NoteEditorView: View {
         }
         .onAppear {
             guard !didLoad else { return }
+            cachedNote = notes.notes.first { $0.id == noteId }
             draft = currentNote?.text ?? ""
             titleDraft = currentNote?.explicitTitle ?? ""
             didLoad = true
             updateSpeechCaches()
+        }
+        // Keep the cached note fresh on real store mutations only — the
+        // player's progress ticks never reach this hook.
+        .onChange(of: notes.version) { _ in
+            let fresh = notes.notes.first { $0.id == noteId }
+            if fresh?.text != cachedNote?.text
+                || fresh?.explicitTitle != cachedNote?.explicitTitle
+                || (fresh == nil) != (cachedNote == nil) {
+                cachedNote = fresh
+            }
         }
         .onDisappear {
             draftSyncTask?.cancel()

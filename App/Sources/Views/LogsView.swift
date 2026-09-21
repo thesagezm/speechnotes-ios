@@ -4,6 +4,12 @@ struct LogsView: View {
     @ObservedObject private var logs = Log.shared
     var embedded: Bool = false
 
+    /// Observes the 1 Hz coalesced snapshot, not the raw entries array:
+    /// playback logs 1-3 lines per second (chunk lines, bookmark writes,
+    /// lock-screen publishes), and every line used to publish its own view
+    /// refresh. `snapshotVersion` is the store's coalesced counter.
+    @State private var renderedVersion: Int = -1
+
     var body: some View {
         Group {
             if logs.entries.isEmpty {
@@ -35,8 +41,20 @@ struct LogsView: View {
         .navigationTitle("Logs")
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
-                ShareLink(item: logs.exportText)
+                // exportText recomputes a joined string over the whole
+                // buffer; it must not rebuild per body evaluation, so the
+                // toolbar item reads the CACHED copy refreshed at 1 Hz.
+                ShareLink(item: cachedExportText)
             }
         }
+        .onChange(of: logs.snapshotVersion) { _ in refreshCaches() }
+        .onAppear { refreshCaches() }
+    }
+
+    @State private var cachedExportText: String = ""
+
+    private func refreshCaches() {
+        renderedVersion = logs.snapshotVersion
+        cachedExportText = logs.exportText
     }
 }

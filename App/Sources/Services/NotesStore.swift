@@ -12,6 +12,17 @@ final class NotesStore: ObservableObject {
     /// Active notes only — what the whole UI reads as `notes.notes`.
     var notes: [Note] { allNotes.filter { $0.deletedAt == nil } }
 
+    /// Monotonic counter, bumped on every mutation of `allNotes`. Lets views
+    /// memoize derived lists (filter + sort + section) against the store's
+    /// identity WITHOUT re-deriving on unrelated publishes: a view observing
+    /// `SpeechPlayer` (a root environment object) re-evaluates its body ~3×/s
+    /// during playback, and the list used to re-filter + re-sort the whole
+    /// library on every one of those invocations — the stutter users felt
+    /// while listening. Keying on this version makes a player tick a no-op.
+    private(set) var version: Int = 0
+
+    private func bumpVersion() { version += 1 }
+
     /// Binned notes, most recently deleted first.
     var deletedNotes: [Note] {
         allNotes
@@ -52,6 +63,7 @@ final class NotesStore: ObservableObject {
         var note = Note()
         note.notebookId = notebookId
         allNotes.insert(note, at: 0)
+        bumpVersion()  // list views memoize on `version`
         save()
         return note
     }
@@ -98,6 +110,7 @@ final class NotesStore: ObservableObject {
         var updated = note
         updated.updatedAt = Date()
         allNotes[index] = updated
+        bumpVersion()  // list views memoize on `version`
         rowMetadata.removeValue(forKey: note.id)
         scheduleSave()
     }
@@ -131,6 +144,7 @@ final class NotesStore: ObservableObject {
     /// Really deletes one binned note. No undo.
     func purge(noteId: UUID) {
         allNotes.removeAll { $0.id == noteId }
+        bumpVersion()  // list views memoize on `version`
         rowMetadata.removeValue(forKey: noteId)
         // The editor path cleans images at delete-confirm time; the bin's
         // purge paths are the only other exits — clean here too or the
@@ -144,6 +158,7 @@ final class NotesStore: ObservableObject {
     func emptyRecycleBin() {
         let purgedIds = allNotes.filter { $0.deletedAt != nil }.map(\.id)
         allNotes.removeAll { $0.deletedAt != nil }
+        bumpVersion()  // list views memoize on `version`
         for id in purgedIds {
             rowMetadata.removeValue(forKey: id)
             NoteImageStore.removeAllImages(for: id)
@@ -159,6 +174,7 @@ final class NotesStore: ObservableObject {
         let expired = allNotes.filter { ($0.deletedAt ?? .distantFuture) < cutoff }
         for note in expired { rowMetadata.removeValue(forKey: note.id) }
         allNotes.removeAll { ($0.deletedAt ?? .distantFuture) < cutoff }
+        bumpVersion()  // list views memoize on `version`
         if allNotes.count != before { save() }
     }
 
@@ -253,6 +269,7 @@ final class NotesStore: ObservableObject {
         guard FileManager.default.fileExists(atPath: fileURL.path) else { return }
         do {
             allNotes = try JSONDecoder().decode([Note].self, from: try Data(contentsOf: fileURL))
+            bumpVersion()  // list views memoize on `version`
         } catch {
             // A notes.json that fails to decode must never be silently
             // replaced by the next save — that turns one bad write into
@@ -265,6 +282,7 @@ final class NotesStore: ObservableObject {
                let recovered = try? JSONDecoder().decode([Note].self, from: backup),
                !recovered.isEmpty {
                 allNotes = recovered
+                bumpVersion()  // list views memoize on `version`
                 Log.shared.error("NotesStore: recovered \(recovered.count) note(s) from notes.backup.json")
             }
         }

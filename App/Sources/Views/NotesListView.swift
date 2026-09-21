@@ -23,6 +23,23 @@ struct NotesListView: View {
 
     @AppStorage("activeNotebookScope") private var activeScopeRaw = "all"
 
+    /// Memoized filtered + sectioned list. `SpeechPlayer` is a root
+    /// environment object, so every playback progress tick (~3.3 Hz during
+    /// speech) and every rate-slider tick (~30×/drag) re-evaluates this
+    /// view's body. The old code re-filtered, re-sorted and re-sectioned the
+    /// WHOLE library on each of those invocations — the main-thread cost the
+    /// user felt as stutter while listening. The memo now recomputes only
+    /// when a real input (notes, scope, search, sort) changes; a player tick
+    /// alone leaves it identical.
+    @State private var memoizedSections: [(title: String?, notes: [Note])] = []
+    @State private var memoKey: String = ""
+
+    /// The inputs the sectioned list actually depends on. A player publish is
+    /// deliberately NOT one of them.
+    private var sectionsKey: String {
+        "\(notes.version)|\(activeScopeRaw)|\(searchText)|\(sort.rawValue)"
+    }
+
     private var scope: Scope {
         if activeScopeRaw == "unfiled" { return .unfiled }
         if activeScopeRaw.hasPrefix("nb-"),
@@ -96,6 +113,11 @@ struct NotesListView: View {
     /// Date-era sections (Today / Yesterday / …) when sorted by edit date —
     /// a single anonymous section otherwise. Pinned notes (v1.4) float to
     /// their own "Pinned" section on top.
+    ///
+    /// This is the pure derivation. The body renders `memoizedSections`,
+    /// refreshed from here only when `sectionsKey` changes (see the
+    /// onChange hooks in `body`). Separating compute from render is what
+    /// makes a playback progress tick a no-op for the list.
     private var sectionedNotes: [(title: String?, notes: [Note])] {
         var sections: [(title: String?, notes: [Note])] = []
         let pinned = visibleNotes.filter { $0.isPinned }
@@ -121,9 +143,9 @@ struct NotesListView: View {
             Group {
                 if notes.notes.isEmpty {
                     emptyState
-                } else if visibleNotes.isEmpty && !searchText.isEmpty {
+                } else if memoizedSections.allSatisfy({ $0.notes.isEmpty }) && !searchText.isEmpty {
                     ContentUnavailableView.search(text: searchText)
-                } else if visibleNotes.isEmpty {
+                } else if memoizedSections.allSatisfy({ $0.notes.isEmpty }) {
                     scopeEmptyState
                 } else {
                     notesList
@@ -205,6 +227,22 @@ struct NotesListView: View {
         }
         .sheet(item: $sharingNote) { note in
             ShareSheet(items: [note.text])
+        }
+        // Refresh the sectioned-list memo when one of its REAL inputs
+        // changes. Engines of note: notes.version (any store mutation),
+        // scope, search text, sort. Deliberately absent: every SpeechPlayer
+        // publish — the player is a root environment object, so progress
+        // ticks and slider drags re-enter this body ~3×/s and 30×/drag, and
+        // the old inline derivation re-filtered + re-sorted + re-sectioned
+        // the whole library on each of those (the mid-listen stutter).
+        .onChange(of: sectionsKey) { _ in
+            memoizedSections = sectionedNotes
+        }
+        .onAppear {
+            if memoKey != sectionsKey {
+                memoKey = sectionsKey
+                memoizedSections = sectionedNotes
+            }
         }
         // Exports triggered from the list's swipe actions have no editor
         // alert to surface failures — the toast does it here.
@@ -290,7 +328,7 @@ struct NotesListView: View {
                     .listRowBackground(Color.clear)
             }
 
-            ForEach(sectionedNotes, id: \.title) { section in
+            ForEach(memoizedSections, id: \.title) { section in
                 Section {
                     ForEach(section.notes) { note in
                         NavigationLink(value: note.id) {

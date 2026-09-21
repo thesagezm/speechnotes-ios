@@ -224,6 +224,34 @@ final class SpeechPlayer: ObservableObject {
     struct NowPlayingPayload {
         var subtitle: String?
         var artworkPath: String?
+
+        /// Decoded cover for `artworkPath`, cached because the lock-screen
+        /// publish runs on every engine progress tick (~3.3 Hz during
+        /// playback). The old call site decoded the JPEG in the publish
+        /// call's ARGUMENT LIST — the throttle in NowPlayingCenter drops the
+        /// write but cannot drop a decode that already happened to build the
+        /// arguments (audit R18). Re-decoded only when the path changes.
+        var artworkImage: UIImage?
+
+        init(subtitle: String? = nil, artworkPath: String? = nil, artworkImage: UIImage? = nil) {
+            self.subtitle = subtitle
+            self.artworkPath = artworkPath
+            self.artworkImage = artworkImage
+        }
+
+        /// Decode on demand; the result is stored back so the next tick reuses
+        /// the same UIImage. Main-thread only — every caller is.
+        mutating func resolvedArtwork() -> UIImage? {
+            guard let artworkPath else { return nil }
+            if artworkImage == nil {
+                artworkImage = UIImage(contentsOfFile: artworkPath)
+            }
+            return artworkImage
+        }
+
+        mutating func invalidateArtwork() {
+            artworkImage = nil
+        }
     }
     var nowPlayingPayload = NowPlayingPayload()
 
@@ -882,10 +910,12 @@ final class SpeechPlayer: ObservableObject {
     var onNaturalFinish: (() -> Void)?
 
     private func nowPlayingSubtitle() -> String? { nowPlayingPayload.subtitle }
+    /// Cached cover decode — see NowPlayingPayload.resolvedArtwork(). The
+    /// old inline `UIImage(contentsOfFile:)` re-decoded the full-size cover
+    /// JPEG on every progress tick (~3.3 Hz) because it sat in the publish
+    /// call's argument list, past the throttle's reach (audit R18).
     private func nowPlayingArtworkImage() -> UIImage? {
-        guard let path = nowPlayingPayload.artworkPath,
-              let image = UIImage(contentsOfFile: path) else { return nil }
-        return image
+        nowPlayingPayload.resolvedArtwork()
     }
 
     /// Lock-screen Previous/Next — wired to BookPlaybackController's chapter

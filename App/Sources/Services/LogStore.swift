@@ -17,6 +17,14 @@ final class LogStore: ObservableObject {
     @Published private(set) var entries: [Entry] = []
     private let maxEntries = 500
 
+    /// Coalesced publish counter. `entries` above stays the ring buffer of
+    /// truth for the Logs view; this counter bumps at most 1×/second so a
+    /// burst of playback log lines (chunk lines, bookmarks, lock-screen
+    /// publishes — 1-3 Hz during speech) triggers ONE view refresh instead
+    /// of one per line. The Logs view observes THIS, not `entries`.
+    @Published private(set) var snapshotVersion: Int = 0
+    private var lastSnapshotBump = Date.distantPast
+
     /// Entries kept in the persistent on-disk log before roll-over.
     private static let persistedTailLimit = 300
     /// Roll the file once it grows past this.
@@ -51,12 +59,18 @@ final class LogStore: ObservableObject {
     private func append(_ level: String, _ message: String) {
         let dateStr = Self.formatter.string(from: Date())
         let entry = Entry(date: dateStr, level: level, message: message)
-        let line = "\(dateStr) [\(level)] \(message)\n"
+        let line = "\(dateStr) [\(level] \(message)\n"
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.entries.append(entry)
             if self.entries.count > self.maxEntries {
                 self.entries.removeFirst(self.entries.count - self.maxEntries)
+            }
+            // Coalesce the view-facing publish to 1 Hz — a burst of chunk
+            // lines during playback used to refresh the Logs view per line.
+            if Date().timeIntervalSince(self.lastSnapshotBump) >= 1.0 {
+                self.lastSnapshotBump = Date()
+                self.snapshotVersion += 1
             }
         }
         ioQueue.async { [weak self] in

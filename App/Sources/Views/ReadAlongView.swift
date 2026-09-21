@@ -51,7 +51,7 @@ struct ReadAlongView: View {
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 14) {
+                LazyVStack(alignment: .leading, spacing: ReaderSpacing.readAlongRow * theme.readerBlockSpacing) {
                     ForEach(paragraphs) { paragraph in
                         ReadAlongRow(
                             content: String(paragraph.content),

@@ -60,6 +60,34 @@ final class AppTheme: ObservableObject {
         didSet { UserDefaults.standard.set(previewTextScale, forKey: "previewTextScale") }
     }
 
+    // MARK: - Reader spacing (user-tunable, v1.6.3)
+    //
+    // Three multipliers over the ReaderSpacing base constants, so the reader
+    // can go from tight to airy without touching code. They ship at 1.0 over
+    // bases that already moved to roomier values than the old hardcoded ones
+    // (the "too crowded" report) — the sliders exist so the user can tune
+    // further in either direction. @Published + explicit UserDefaults sync
+    // (the same pattern as the accent: @AppStorage inside an ObservableObject
+    // does not publish).
+
+    /// Line spacing INSIDE paragraphs and quotes.
+    @Published var readerLineSpacing: Double {
+        didSet { UserDefaults.standard.set(readerLineSpacing, forKey: "readerLineSpacing") }
+    }
+
+    /// Space BETWEEN blocks — paragraph bottom padding, list row spacing,
+    /// heading clearance. The "sentences are too close" knob.
+    @Published var readerBlockSpacing: Double {
+        didSet { UserDefaults.standard.set(readerBlockSpacing, forKey: "readerBlockSpacing") }
+    }
+
+    /// Table room — row height and cell padding. Its own knob with a wider
+    /// range (up to 2×) because tables need visibly more air than paragraphs
+    /// before they stop looking cramped.
+    @Published var readerTableSpacing: Double {
+        didSet { UserDefaults.standard.set(readerTableSpacing, forKey: "readerTableSpacing") }
+    }
+
     enum AppearanceMode: String { case light = "light", dark = "dark", system = "system" }
 
     init() {
@@ -67,6 +95,17 @@ final class AppTheme: ObservableObject {
         accentChoice = AccentColorChoice(rawValue: defaults.string(forKey: "accentColorChoice") ?? "") ?? .system
         appearance = defaults.string(forKey: "appAppearance") ?? "system"
         previewTextScale = defaults.object(forKey: "previewTextScale") as? Double ?? 1.0
+        readerLineSpacing = defaults.object(forKey: "readerLineSpacing") as? Double ?? 1.0
+        readerBlockSpacing = defaults.object(forKey: "readerBlockSpacing") as? Double ?? 1.0
+        readerTableSpacing = defaults.object(forKey: "readerTableSpacing") as? Double ?? 1.0
+    }
+
+    /// Restores the three spacing knobs to their defaults (Appearance →
+    /// Reset spacing).
+    func resetReaderSpacing() {
+        readerLineSpacing = 1.0
+        readerBlockSpacing = 1.0
+        readerTableSpacing = 1.0
     }
 
     var accentColor: Color { accentChoice.color }
