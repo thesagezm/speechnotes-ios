@@ -1,4 +1,5 @@
 import Foundation
+import SpeechLogic
 import PDFKit
 import UIKit
 import UniformTypeIdentifiers

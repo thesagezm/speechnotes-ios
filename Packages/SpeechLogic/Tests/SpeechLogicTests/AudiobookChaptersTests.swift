@@ -28,9 +28,12 @@ final class AudiobookChaptersTests: XCTestCase {
         return payload
     }
 
-    /// FMLL: [4-byte size][4-byte type][payload]
+    /// An M4B-shaped file: ftyp, then moov, then mdat. `chpl` is a BOX inside
+    /// moov — [4-byte size][4-byte type][payload] — which is what real
+    /// encoders write; wrapping the raw chpl payload directly in moov is not a
+    /// valid file and no parser could read it.
     private func m4b(chapters: [(Int, String)]) -> Data {
-        let moov = box("moov", chpl(chapters))
+        let moov = box("moov", box("chpl", chpl(chapters)))
         let ftyp = box("ftyp", Array("M4B ".utf8) + be32(0) + Array("M4B ".utf8))
         let mdat = box("mdat", [UInt8](repeating: 0, count: 32))
         return Data(ftyp + moov + mdat)
@@ -94,8 +97,11 @@ final class AudiobookChaptersTests: XCTestCase {
     func testTruncatedChplStopsInsteadOfCrashing() {
         var payload = chpl([(0, "One"), (100, "Two")])
         payload.removeLast(4) // chop the last title
-        let data = Data(box("moov", payload))
-        _ = AudiobookChapters.chaptersFromMP4(data, totalSeconds: 200)
+        let data = Data(box("moov", box("chpl", payload)))
+        let chapters = AudiobookChapters.chaptersFromMP4(data, totalSeconds: 200)
+        // The first chapter survives; the truncated one is dropped, not
+        // guessed at, and nothing crashes.
+        XCTAssertEqual(chapters.map(\.title), ["One"])
     }
 
     // MARK: - ID3 CHAP

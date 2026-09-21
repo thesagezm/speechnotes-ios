@@ -1,4 +1,5 @@
 import SwiftUI
+import SpeechLogic
 
 /// Bottom-of-editor controls: voice chip, play/pause/stop, progress bar,
 /// speed slider. Extracted from NoteEditorView so that player state changes

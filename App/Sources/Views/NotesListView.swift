@@ -1,4 +1,5 @@
 import SwiftUI
+import SpeechLogic
 
 struct NotesListView: View {
     @EnvironmentObject private var notes: NotesStore
