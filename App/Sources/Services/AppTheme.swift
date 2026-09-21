@@ -92,6 +92,17 @@ final class AppTheme: ObservableObject {
         )
     }
 
+    /// Bottom-up variant for the landscape rail's vertical progress strip —
+    /// the strip fills from the bottom, so the fade runs the same way the
+    /// horizontal bars' does along their length.
+    var accentFadeVerticalGradient: LinearGradient {
+        LinearGradient(
+            colors: [accentColor, accentColor.opacity(0.5)],
+            startPoint: .bottom,
+            endPoint: .top
+        )
+    }
+
     var colorScheme: ColorScheme? {
         switch appearance {
         case AppearanceMode.light.rawValue: return .light

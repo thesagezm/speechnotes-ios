@@ -60,16 +60,94 @@ struct BookPDFReaderView: View {
         return chapters.firstIndex { currentPage >= $0.startPage && currentPage <= $0.endPage }
     }
 
-    var body: some View {
-        VStack(spacing: 0) {
-            readerSurface
-            pageBar
-            if hasChapters {
-                playerBar
+    @Environment(\.isLandscape) private var isLandscape
+
+    /// Reader + playback, arranged per orientation. Extracted from `body` so
+    /// the modifier chain stays lean (type-checker budget).
+    @ViewBuilder
+    private var readerLayout: some View {
+        if isLandscape, hasChapters {
+            HStack(spacing: 0) {
+                readerSurface
+                railPlayerBar
+            }
+            .overlay(alignment: .bottom) { pageBar }
+        } else {
+            VStack(spacing: 0) {
+                readerSurface
+                pageBar
+                if hasChapters {
+                    playerBar
+                }
             }
         }
-        .navigationTitle(book.title)
-        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    /// Trailing rail for landscape — PDF twin of the editor's rail, plus the
+    /// per-chapter export button the portrait bar carries.
+    private var railPlayerBar: some View {
+        PlaybackRail(
+            action: PlaybackRail.Action(
+                onChangeVoice: nil,
+                onTogglePlay: {
+                    Task {
+                        await BookPlaybackController.shared.togglePlay(
+                            book: book,
+                            chapterIndex: chapterForCurrentPage ?? 0
+                        )
+                    }
+                },
+                onStop: { player.stop() },
+                onToggleReadAlong: { readAlongEnabled.toggle() },
+                readAlongOn: readAlongEnabled,
+                rate: player.rateMultiplier,
+                onRateChange: { player.rateMultiplier = $0 }
+            ),
+            voiceLabel: player.currentVoiceDescription,
+            progress: player.progress,
+            isGenerating: chapterIsActive && player.state == .generating,
+            isPlayEnabled: true,
+            sessionActive: chapterIsActive
+                && (player.state == .speaking || player.state == .paused || player.state == .generating),
+            extraTrailing: AnyView(
+                Button {
+                    Haptics.tap()
+                    Task {
+                        await BookPlaybackController.shared.exportChapter(
+                            book: book,
+                            chapterIndex: chapterForCurrentPage ?? 0
+                        )
+                    }
+                } label: {
+                    if player.isExporting {
+                        ProgressView()
+                            .frame(width: 22, height: 22)
+                    } else {
+                        Image(systemName: "square.and.arrow.up")
+                            .font(.footnote)
+                            .foregroundStyle(Color.accentColor)
+                            .frame(width: 30, height: 30)
+                            .background(Circle().fill(Color.secondary.opacity(0.12)))
+                    }
+                }
+                .buttonStyle(.plain)
+                .disabled(player.isExporting)
+                .accessibilityLabel("Export chapter audio")
+            )
+        )
+    }
+
+    private var chapterIsActive: Bool {
+        player.nowPlayingBookId == book.id.uuidString
+    }
+
+    var body: some View {
+        // Landscape: PDF pages keep the leading width, playback moves to a
+        // trailing rail (per-chapter export rides along as the rail's extra
+        // button). The page bar stays at the bottom in both orientations.
+        readerLayout
+            .navigationTitle(book.title)
+            .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             if !outlineRows.isEmpty {
                 ToolbarItem(placement: .topBarTrailing) {

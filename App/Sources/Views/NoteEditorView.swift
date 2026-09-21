@@ -179,40 +179,102 @@ struct NoteEditorView: View {
                 && speechText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    var body: some View {
-        VStack(spacing: 0) {
-            if showsReadAlong {
-                ReadAlongView(
-                    text: player.activeSpeechText ?? "",
-                    activeRange: player.readAlongRange,
-                    textScale: theme.previewTextScale
+    /// iPhone-only target: compact vertical size class ⇔ landscape. Injected
+    /// once at the window root (OrientationState.landscapeAware()).
+    @Environment(\.isLandscape) private var isLandscape
+
+    /// Content + controls, arranged per orientation. Extracted from `body` so
+    /// the modifier chain above stays the same shape it had before landscape
+    /// support (the v1.2.0 type-checker war's lesson: keep body lean).
+    @ViewBuilder
+    private var editorLayout: some View {
+        if isLandscape {
+            HStack(spacing: 0) {
+                editorContent
+                editorRail
+            }
+        } else {
+            VStack(spacing: 0) {
+                editorContent
+                PlayerControlsBar(
+                    speechText: speechText,
+                    note: currentNote,
+                    onBeforeToggle: { updateSpeechCaches() }
                 )
-            } else if renderMarkdown && showPreview {
-                markdownPreview
-            } else {
-                editBody
             }
-            PlayerControlsBar(
-                speechText: speechText,
-                note: currentNote,
-                onBeforeToggle: { updateSpeechCaches() }
+        }
+    }
+
+    /// The editor's surface without controls attached — shared by both
+    /// orientations so read-along / preview / edit switching behaves the same.
+    @ViewBuilder
+    private var editorContent: some View {
+        if showsReadAlong {
+            ReadAlongView(
+                text: player.activeSpeechText ?? "",
+                activeRange: player.readAlongRange,
+                textScale: theme.previewTextScale
             )
+        } else if renderMarkdown && showPreview {
+            markdownPreview
+        } else {
+            editBody
         }
-        .navigationTitle("")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            // The title lives IN the nav bar — centered between the back
-            // button and the ⋯ menu — instead of occupying a content row
-            // (user request: more vertical space for the note itself).
-            ToolbarItem(placement: .principal) {
-                TextField("Title", text: titleBinding)
-                    .font(.headline)
-                    .multilineTextAlignment(.center)
-                    .submitLabel(.done)
-                    .onChange(of: titleDraft) { _ in scheduleDraftSync() }
+    }
+
+    /// Trailing rail carrying this note's playback controls in landscape.
+    private var editorRail: some View {
+        PlaybackRail(
+            action: PlaybackRail.Action(
+                onChangeVoice: {
+                    NotificationCenter.default.post(name: .requestVoicePicker, object: nil)
+                },
+                onTogglePlay: {
+                    // Speak-time flush — the same synchronous cache update the
+                    // portrait bar's onBeforeToggle performs, so the engine
+                    // hears edits made in the last 300 ms.
+                    updateSpeechCaches()
+                    player.togglePlay(SpeechText.forText(speechText), note: currentNote)
+                },
+                onStop: { player.stop() },
+                onToggleReadAlong: { readAlongEnabled.toggle() },
+                readAlongOn: readAlongEnabled,
+                rate: player.rateMultiplier,
+                onRateChange: { player.rateMultiplier = $0 }
+            ),
+            voiceLabel: player.currentVoiceDescription,
+            progress: player.progress,
+            isGenerating: player.state == .generating,
+            isPlayEnabled: !player.isExporting
+                && !(player.state == .idle
+                     && speechText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty),
+            sessionActive: player.state == .speaking
+                || player.state == .paused
+                || player.state == .generating
+        )
+    }
+
+    var body: some View {
+        // Landscape moves the playback controls to a trailing rail; portrait
+        // keeps the bottom PlayerControlsBar. Both drive the exact same player
+        // actions — only the placement differs (user request). The chrome
+        // (title, toolbar, sheets, lifecycle) is one shared chain either way.
+        editorLayout
+            .navigationTitle("")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                // The title lives IN the nav bar — centered between the back
+                // button and the ⋯ menu — instead of occupying a content row
+                // (user request: more vertical space for the note itself).
+                ToolbarItem(placement: .principal) {
+                    TextField("Title", text: titleBinding)
+                        .font(.headline)
+                        .multilineTextAlignment(.center)
+                        .submitLabel(.done)
+                        .onChange(of: titleDraft) { _ in scheduleDraftSync() }
+                }
+                editorToolbar
             }
-            editorToolbar
-        }
         // While THIS editor is on top and the speaking note is this note,
         // the editor's own PlayerControlsBar is the player UI — suppress the
         // global mini-player so the two never stack at the bottom.

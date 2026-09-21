@@ -53,13 +53,66 @@ struct BookReaderView: View {
         _totalChapters = State(initialValue: book.spineCount ?? 0)
     }
 
-    var body: some View {
-        VStack(spacing: 0) {
-            readerSurface
-            chapterBar
-            playerBar
+    @Environment(\.isLandscape) private var isLandscape
+
+    /// Reader surface + playback controls, arranged per orientation. Extracted
+    /// from `body` so the modifier chain stays lean (type-checker budget).
+    @ViewBuilder
+    private var readerLayout: some View {
+        if isLandscape {
+            HStack(spacing: 0) {
+                readerSurface
+                railPlayerBar
+            }
+            .overlay(alignment: .bottom) { chapterBar }
+        } else {
+            VStack(spacing: 0) {
+                readerSurface
+                chapterBar
+                playerBar
+            }
         }
-        .navigationTitle(book.title)
+    }
+
+    /// Trailing rail for landscape — the book twin of the note editor's rail.
+    private var railPlayerBar: some View {
+        PlaybackRail(
+            action: PlaybackRail.Action(
+                onChangeVoice: nil,
+                onTogglePlay: {
+                    Task {
+                        await BookPlaybackController.shared.togglePlay(
+                            book: book,
+                            chapterIndex: chapterIndex
+                        )
+                    }
+                },
+                onStop: { player.stop() },
+                onToggleReadAlong: { readAlongEnabled.toggle() },
+                readAlongOn: readAlongEnabled,
+                rate: player.rateMultiplier,
+                onRateChange: { player.rateMultiplier = $0 }
+            ),
+            voiceLabel: player.currentVoiceDescription,
+            progress: player.progress,
+            isGenerating: chapterIsActive && player.state == .generating,
+            isPlayEnabled: true,
+            sessionActive: chapterIsActive
+                && (player.state == .speaking || player.state == .paused || player.state == .generating)
+        )
+    }
+
+    private var chapterIsActive: Bool {
+        player.nowPlayingBookId == book.id.uuidString
+    }
+
+    var body: some View {
+        // Landscape: the reader keeps the leading width and the playback
+        // controls move to a trailing rail (user request — controls on the
+        // side, not top/bottom). The chapter stepper stays at the bottom in
+        // both orientations: it is navigation, not playback.
+        readerLayout
+            .navigationTitle(book.title)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {

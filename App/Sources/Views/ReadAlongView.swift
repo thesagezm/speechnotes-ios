@@ -25,6 +25,7 @@ struct ReadAlongView: View {
     let textScale: CGFloat
 
     @EnvironmentObject private var theme: AppTheme
+    @Environment(\.isLandscape) private var isLandscape
 
     /// One paragraph per `\n`-separated block, tracking its UTF-16 start so
     /// a global highlight range can be projected into it. Paragraphs double
@@ -63,7 +64,10 @@ struct ReadAlongView: View {
                         .id(paragraph.id)
                     }
                 }
-                .padding(16)
+                .padding(.leading, 16)
+                // In landscape the trailing playback rail owns ~78pt of the
+                // trailing edge; the text column must not run under it.
+                .padding(.trailing, isLandscape ? 92 : 16)
             }
             .onChange(of: activeRange?.lowerBound) { start in
                 guard let start else { return }

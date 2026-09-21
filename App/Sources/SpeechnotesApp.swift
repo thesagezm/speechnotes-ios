@@ -55,6 +55,10 @@ struct SpeechnotesApp: App {
             // very first layout pass — the confirmed launch crash
             // (device .ips 2026-09-05 17:39).
             .globalMiniPlayer()
+            // Landscape flag for the whole tree — drives the lateral playback
+            // rails. Placed after the mini-player so the overlay itself can
+            // read it; both sit inside the environmentObject injection below.
+            .landscapeAware()
             // Toast surface — no environment dependency (uses
             // ToastCenter.shared), so it can sit beside the mini-player.
             .appToasts()

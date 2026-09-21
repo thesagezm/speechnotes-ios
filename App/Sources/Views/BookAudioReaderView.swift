@@ -43,68 +43,36 @@ struct BookAudioReaderView: View {
         _chapterIndex = State(initialValue: book.position?.chapterIndex ?? 0)
     }
 
+    @Environment(\.isLandscape) private var isLandscape
+
     var body: some View {
-        VStack(spacing: 0) {
-            Spacer(minLength: 0)
+        // Landscape: the cover/title block keeps the leading width and the
+        // transport cluster (scrub + prev/play/next) moves to a trailing rail —
+        // the short axis is then all reading space (user request).
+        Group {
+            if isLandscape {
+                HStack(spacing: 0) {
+                    audioCoverBlock
+                    audioRail
+                }
+                .overlay(alignment: .bottom) {
+                    chapterBar.padding(.bottom, 8)
+                }
+            } else {
+                VStack(spacing: 0) {
+                    Spacer(minLength: 0)
 
-            VStack(spacing: 10) {
-                BookCoverView(book: book, height: 220)
-                Text(book.title)
-                    .font(.title3.weight(.semibold))
-                    .multilineTextAlignment(.center)
-                    .lineLimit(2)
-                if let author = book.author, !author.isEmpty {
-                    Text(author)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                    audioCoverBlock
+
+                    Spacer(minLength: 0)
+
+                    audioTransport
+                        .padding(.bottom, 12)
+
+                    chapterBar
+                        .padding(.bottom, 8)
                 }
             }
-
-            Spacer(minLength: 0)
-
-            VStack(spacing: 14) {
-                Slider(value: $progress, in: 0...1) { editing in
-                    if !editing { seekToProgress(progress) }
-                }
-                .padding(.horizontal, 24)
-
-                HStack(spacing: 28) {
-                    Button {
-                        Haptics.tap()
-                        stepChapter(-1)
-                    } label: {
-                        Image(systemName: "backward.fill")
-                            .font(.title2)
-                    }
-                    .disabled(chapterIndex <= 0)
-
-                    Button {
-                        Haptics.tap()
-                        togglePlayback()
-                    } label: {
-                        Image(systemName: isPlaying ? "pause.circle.fill" : "play.circle.fill")
-                            .font(.system(size: 56))
-                    }
-
-                    Button {
-                        Haptics.tap()
-                        stepChapter(1)
-                    } label: {
-                        Image(systemName: "forward.fill")
-                            .font(.title2)
-                    }
-                    .disabled(chapterIndex >= chapters.count - 1)
-                }
-                .foregroundStyle(Color.accentColor)
-
-                Text(timeLabel)
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
-            .padding(.bottom, 12)
-
-            chapterBar
-                .padding(.bottom, 8)
         }
         .navigationTitle(book.title)
         .navigationBarTitleDisplayMode(.inline)
@@ -142,6 +110,134 @@ struct BookAudioReaderView: View {
             NowPlayingCenter.shared.clear()
             NowPlayingCenter.shared.setChapterSkipEnabled(false)
         }
+    }
+
+    // MARK: - Layout pieces (portrait + landscape)
+
+    /// Cover + title + author — the reading surface in both orientations.
+    private var audioCoverBlock: some View {
+        VStack(spacing: 10) {
+            BookCoverView(book: book, height: isLandscape ? 150 : 220)
+            Text(book.title)
+                .font(.title3.weight(.semibold))
+                .multilineTextAlignment(.center)
+                .lineLimit(2)
+            if let author = book.author, !author.isEmpty {
+                Text(author)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    /// Portrait transport cluster: scrub slider, prev / play / next, times.
+    private var audioTransport: some View {
+        VStack(spacing: 14) {
+            Slider(value: $progress, in: 0...1) { editing in
+                if !editing { seekToProgress(progress) }
+            }
+            .padding(.horizontal, 24)
+
+            HStack(spacing: 28) {
+                Button {
+                    Haptics.tap()
+                    stepChapter(-1)
+                } label: {
+                    Image(systemName: "backward.fill")
+                        .font(.title2)
+                }
+                .disabled(chapterIndex <= 0)
+
+                Button {
+                    Haptics.tap()
+                    togglePlayback()
+                } label: {
+                    Image(systemName: isPlaying ? "pause.circle.fill" : "play.circle.fill")
+                        .font(.system(size: 56))
+                }
+
+                Button {
+                    Haptics.tap()
+                    stepChapter(1)
+                } label: {
+                    Image(systemName: "forward.fill")
+                        .font(.title2)
+                }
+                .disabled(chapterIndex >= chapters.count - 1)
+            }
+            .foregroundStyle(Color.accentColor)
+
+            Text(timeLabel)
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    /// Landscape transport rail: vertical progress strip, a 56pt play/pause,
+    /// chapter steps above and below it, and the time readout. The scrub
+    /// slider stays portrait-only — a horizontal slider is the wrong control
+    /// for a 110pt-tall slot, and the vertical strip already shows position.
+    private var audioRail: some View {
+        HStack(spacing: 0) {
+            // Vertical position strip (the rail twin of the scrub slider).
+            GeometryReader { proxy in
+                ZStack(alignment: .bottom) {
+                    Capsule()
+                        .fill(Color.secondary.opacity(0.25))
+                        .frame(width: 3)
+                    Capsule()
+                        .fill(theme.accentFadeVerticalGradient)
+                        .frame(width: 3, height: max(4, (proxy.size.height - 16) * progress))
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+            }
+            .frame(width: 3)
+            .padding(.vertical, 8)
+
+            VStack(spacing: 14) {
+                Button {
+                    Haptics.tap()
+                    stepChapter(-1)
+                } label: {
+                    Image(systemName: "backward.fill")
+                        .font(.title3)
+                        .foregroundStyle(Color.accentColor)
+                }
+                .disabled(chapterIndex <= 0)
+
+                Button {
+                    Haptics.tap()
+                    togglePlayback()
+                } label: {
+                    Image(systemName: isPlaying ? "pause.circle.fill" : "play.circle.fill")
+                        .font(.system(size: 46))
+                        .foregroundStyle(Color.accentColor)
+                }
+
+                Button {
+                    Haptics.tap()
+                    stepChapter(1)
+                } label: {
+                    Image(systemName: "forward.fill")
+                        .font(.title3)
+                        .foregroundStyle(Color.accentColor)
+                }
+                .disabled(chapterIndex >= chapters.count - 1)
+
+                Spacer(minLength: 0)
+
+                Text(timeLabel)
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 6)
+        }
+        .padding(.leading, 4)
+        .padding(.trailing, 8)
+        .frame(width: 78)
+        .frame(maxHeight: .infinity)
+        .background(.bar)
     }
 
     // MARK: - Chapter bar
