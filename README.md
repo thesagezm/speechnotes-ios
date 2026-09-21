@@ -3,10 +3,11 @@
 An offline, Speech Note (Linux)-style app for iPhone — built entirely from Linux,
 compiled on GitHub Actions macOS runners, sideloaded via SideStore + LiveContainer.
 
-**Current status: v1.5.0 — Books, complete: a Books library (EPUB + PDF with
-full TTS incl. real PDF chapters, Vision OCR for scans, two-column extraction,
-per-chapter export), three on-device engines, notebooks, read-along, slash
-menu, polished UI.** Pick an
+**Current status: v1.6.0 — Books complete (EPUB, PDF and audiobooks, with
+full TTS for the first two), a reader that scrolls like paper, tables that
+wrap, a photo-grade image viewer, per-notebook export, and a playback
+pipeline that skips a bad sentence with one soft tone instead of retrying
+into dead air.** Pick an
 engine in Speech Settings (listed worst → best), download
 its model once, and notes are spoken fully offline (airplane-mode tested):
 
@@ -23,6 +24,17 @@ same text fails the same way, and the wait for it is silence the listener pays
 for. Text is cleaned at import so the things that used to fail (soft hyphens,
 zero-width joiners, control bytes, embedded-font glyphs) never reach the model.
 
+Reader and reading surfaces, all reworked in v1.6.0 from device reports:
+
+- **The note scrolls like paper.** Overscroll is bounded to the ends, so a
+  short note sits fixed at rest instead of drifting past its edges.
+- **Tables wrap.** Columns take a fair share of the width with a floor at
+  their longest word, and long cells break across lines — the table only
+  scrolls sideways when even a fair share cannot fit.
+- **The image viewer is a real photo viewer.** Pinch-zoom decelerates and
+  anchors on the point under your fingers, double-tap zooms toward where you
+  tapped, and a tap while zoomed in zooms back out.
+
 Feature tour:
 
 - **Notes** — create/edit/delete, autosave (debounced, flushed on exit and
@@ -31,7 +43,8 @@ Feature tour:
 - **Notebooks & organization** (Joplin-style) — flat notebooks with a chip
   row for scoping, move notes between them, plus pin (Pinned section on top)
   and favorite (star). Titles auto-derive from the note's first sentence.
-- **Books** (complete in v1.5.0) — the Books tab: import EPUB, PDF and
+  Backup exports one notebook, the unfiled notes, or the whole library.
+- **Books** (complete in v1.6.0) — the Books tab: import EPUB, PDF and
   audiobooks (M4B / M4A / MP3, Files picker or Open-In) into a cover grid with
   search. An audiobook plays the audio it already contains, with the chapter
   list read from the file's own metadata (a `chpl` atom or ID3 `CHAP` frames)
