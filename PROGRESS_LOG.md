@@ -4,6 +4,39 @@ Format: newest first. Every critique round, merge, and escalation lands here.
 
 ---
 
+**Audiobooks + session robustness** (branch `batch-c-d-session`, 2026-09-21):
+- **No retry.** `generateWithRetry` is deleted from the streaming core. A chunk
+  that throws is logged once (with its index out of the total), sounded with
+  `BeepPlayer.playSkipTone()` and stepped over — for playback and WAV export
+  alike. This is the R8 anti-pattern (AP7, "error handling worse to experience
+  than the error") finally closed by removing the retry rather than tuning it.
+- **`SpeechSanitizer`** (SpeechLogic, new): `clean()` strips what a reader
+  cannot pronounce — C0/C1 controls, zero-width and bidi controls, variation
+  selectors, private-use glyphs — and normalises whitespace. Two rules the CI
+  loop forced: replace rather than delete (`exam\u{00AD}ple` must not become
+  `example`), and U+2028/U+2029 plus a lone CR are line breaks, not spaces.
+  Wired into `MarkdownText.plainText`, `XhtmlText.extract`,
+  `PdfText.normalize`, every note/book speak path through the new `SpeechText`
+  helper, `ImportService`, and the chapter cache write.
+- **`AudiobookChapters`** (SpeechLogic, new): reads `chpl` inside `moov` and
+  ID3v2.3/2.4 `CHAP` frames, bounded (an 8 MB head slice, never the whole
+  file). `Book` gains `.audio`, `BookAudioReaderView` + `AudioBookPlayer` play
+  it with no `SpeechPlayer` involvement, its own lock-screen surface, and
+  chapter resume.
+- Chunker hardening: a piece under 4 UTF-16 units with nothing to say is glued
+  onto the piece before it. Nothing is dropped — the reconstruct invariant
+  (chunks concatenate to the original) is what the read-along and resume index.
+- **CI loop history worth recording:** six red runs, every failure a real
+  defect rather than a typo — `Set<Unicode.Scalar>` array literals reject Int;
+  a dangling helper call; a fixture that wrapped `chpl` raw instead of as a
+  box; piece-dropping that broke reconstruct; U+2028 treated as a space; a
+  lone CR joining two lines; `[weak self]` in a struct. Full writeup in
+  `Docs/PLAN-AUDIOBOOKS.md`.
+- **Device test pending.** CI green (logic tests + unsigned IPA + all four
+  spikes); nothing merged to `sage-upgrades` and no release.
+
+---
+
 **Batch 5 — Accessibility sweep** (branch `fix/a11y-labels`, merged @ `4d83a3e`):
 - MarkdownFormattingBar's 13 icon buttons labeled; MiniPlayerBar play/stop; PlayerControlsBar play/stop/read-along + rate slider label + value.
 - No visual change; VoiceOver goes from "button" ×13 to named controls.

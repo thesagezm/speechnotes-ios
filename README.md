@@ -17,7 +17,11 @@ its model once, and notes are spoken fully offline (airplane-mode tested):
 | **Kokoro** (ONNX, CPU) | ~341 MB | 28 (US/UK, m/f) | Main engine — fp32 quality build |
 | **Supertonic** (ONNX, CPU) | ~399 MB | 10 styles × 31 languages | Multilingual — flow-matching TTS |
 
-Chunk generation retries on failure — one flaky chunk never ends a reading.
+A sentence the model cannot synthesize is skipped on the first attempt — one
+soft tone, then the next sentence. There is no retry: a second attempt at the
+same text fails the same way, and the wait for it is silence the listener pays
+for. Text is cleaned at import so the things that used to fail (soft hyphens,
+zero-width joiners, control bytes, embedded-font glyphs) never reach the model.
 
 Feature tour:
 
@@ -27,8 +31,11 @@ Feature tour:
 - **Notebooks & organization** (Joplin-style) — flat notebooks with a chip
   row for scoping, move notes between them, plus pin (Pinned section on top)
   and favorite (star). Titles auto-derive from the note's first sentence.
-- **Books** (complete in v1.5.0) — the Books tab: import EPUB and PDF (Files
-  picker or Open-In) into a cover grid with search. EPUBs render
+- **Books** (complete in v1.5.0) — the Books tab: import EPUB, PDF and
+  audiobooks (M4B / M4A / MP3, Files picker or Open-In) into a cover grid with
+  search. An audiobook plays the audio it already contains, with the chapter
+  list read from the file's own metadata (a `chpl` atom or ID3 `CHAP` frames)
+  and no synthesis at all. EPUBs render
   chapter-by-chapter in a real book reader (themes, text size, native table of
   contents, per-book position); PDFs open in a full-fidelity PDFKit viewer with
   an outline sidebar. Any book can be spoken: chapter narration with
