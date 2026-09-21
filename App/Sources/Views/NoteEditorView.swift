@@ -667,7 +667,7 @@ struct NoteEditorView: View {
                 if player.hasResumeOption(for: noteId, text: speechText) {
                     Button {
                         Haptics.tap()
-                        player.restartFromBeginning(speechText, note: currentNote)
+                        player.restartFromBeginning(SpeechText.forText(speechText), note: currentNote)
                     } label: {
                         Label("Restart from beginning", systemImage: "gobackward")
                     }
