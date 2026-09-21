@@ -30,37 +30,37 @@ public enum SpeechSanitizer {
     /// to a tokenizer. Soft hyphen (U+00AD) is included — it is a *layout*
     /// hyphen, so leaving it in makes the engine pronounce a hyphen that the
     /// page never showed.
-    private static let zeroWidth: Set<Unicode.Scalar> = [
-        0x00AD, // soft hyphen (layout hyphen)
-        0x200B, // zero width space
-        0x200C, // zero width non-joiner
-        0x200D, // zero width joiner
-        0x200E, // left-to-right mark
-        0x200F, // right-to-left mark
-        0x2060, // word joiner
-        0x2061, 0x2062, 0x2063, 0x2064, // invisible operators
-        0xFEFF, // BOM / zero width no-break space
+    private static let zeroWidth: [Unicode.Scalar] = [
+        "\u{00AD}", // soft hyphen (layout hyphen)
+        "\u{200B}", // zero width space
+        "\u{200C}", // zero width non-joiner
+        "\u{200D}", // zero width joiner
+        "\u{200E}", // left-to-right mark
+        "\u{200F}", // right-to-left mark
+        "\u{2060}", // word joiner
+        "\u{2061}", "\u{2062}", "\u{2063}", "\u{2064}", // invisible operators
+        "\u{FEFF}", // BOM / zero width no-break space
     ]
 
     /// Bidi embedding/override controls (U+202A–U+202E) and isolates
     /// (U+2066–U+2069). Not unpronounceable in principle, but an engine that
     /// honours them can reverse a line's phoneme order, and a document that
     /// carries them usually means them as layout.
-    private static let bidiControls: Set<Unicode.Scalar> = [
-        0x202A, 0x202B, 0x202C, 0x202D, 0x202E,
-        0x2066, 0x2067, 0x2068, 0x2069,
+    private static let bidiControls: [Unicode.Scalar] = [
+        "\u{202A}", "\u{202B}", "\u{202C}", "\u{202D}", "\u{202E}",
+        "\u{2066}", "\u{2067}", "\u{2068}", "\u{2069}",
     ]
 
     /// Variation selectors (emoji presentation, CJK ideographic variation).
-    private static let variationSelectors: ClosedRange<Unicode.Scalar> = 0xFE00...0xFE0F
-    private static let variationSelectorsSupplement: ClosedRange<Unicode.Scalar> = 0xE0100...0xE01EF
+    private static let variationSelectors: ClosedRange<Unicode.Scalar> = "\u{FE00}"..."\u{FE0F}"
+    private static let variationSelectorsSupplement: ClosedRange<Unicode.Scalar> = "\u{E0100}"..."\u{E01EF}"
 
     /// Private Use Area — glyphs from an embedded font with no agreed
     /// pronunciation anywhere (the "tofu box" of TTS).
     private static let privateUse: [ClosedRange<Unicode.Scalar>] = [
-        0xE000...0xF8FF,
-        0xF0000...0xFFFFD,
-        0x100000...0x10FFFD,
+        "\u{E000}"..."\u{F8FF}",
+        "\u{F0000}"..."\u{FFFFD}",
+        "\u{100000}"..."\u{10FFFD}",
     ]
 
     // MARK: - Public API
@@ -92,8 +92,10 @@ public enum SpeechSanitizer {
     /// convention (U+FFFD) is a better signal than a guess here.
     public static func isUnspeakable(_ scalar: Unicode.Scalar) -> Bool {
         switch scalar.value {
+        case 0x09, 0x0A, 0x0D:
+            return false // tab, LF, CR are real whitespace — keep them
         case 0x00:
-            return scalar != "\t" && scalar != "\n" && scalar != "\r"
+            return true // NUL never reaches a reader
         case 0x01...0x08, 0x0B, 0x0C, 0x0E...0x1F, 0x7F...0x9F:
             return true
         default:

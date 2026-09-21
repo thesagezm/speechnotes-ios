@@ -44,21 +44,22 @@ public enum AudiobookChapters {
 
     /// Chapters from an MP4-family container (`.m4b`, `.m4a`, `.mp4`).
     ///
-    /// Walks the top-level box tree looking for `moov`, then inside it for
-    /// `trak` → `tkhd` (in the chapter track's `mdia` → `hdlr` this is a text
-    /// track) and for the `chpl` atom. Falls back to `chpl` when there is no
-    /// usable chapter track, which is what most M4B encoders actually write.
+    /// Walks the top-level box tree looking for `moov`, then reads the `chpl`
+    /// atom inside it — the form most M4B encoders actually write, and the one
+    /// this parser implements. A full chapter *track* (a text `trak` with a
+    /// sample table) needs the entire sample table read and is NOT implemented:
+    /// `Docs/PLAN-AUDIOBOOKS.md` records that as the next step if a device report
+    /// turns up an M4B with a track and no `chpl`.
     public static func chaptersFromMP4(_ data: Data, totalSeconds: Double) -> [AudioChapter] {
         var found: [AudioChapter] = []
         forEachBox(in: data, range: 0..<data.count) { type, payload in
             guard type == "moov" else { return }
             found = chaptersFromMoov(data, range: payload) ?? []
         }
-        if let chapters = normalize(found, totalSeconds: totalSeconds), !chapters.isEmpty {
-            return chapters
+        guard let chapters = normalize(found, totalSeconds: totalSeconds), !chapters.isEmpty else {
+            return []
         }
-        let chpl = chaptersFromChpl(data)
-        return normalize(chpl, totalSeconds: totalSeconds) ?? []
+        return chapters
     }
 
     /// Chapters from ID3v2 `CHAP` frames (MP3). `CTOC` is read only to learn

@@ -21,8 +21,8 @@ final class SpeechSanitizerTests: XCTestCase {
     }
 
     func testCleanDropsControlBytesButKeepsTabAndNewline() {
-        let raw = "one\u{07}two\u{1B}[0m\nthree\tfour\r\nfive"
-        XCTAssertEqual(SpeechSanitizer.clean(raw), "onetwo[0m\nthree four\nfive")
+        let raw = "one\u{00}two\u{07}three\u{1B}[0m\nfour\tfive\r\nsix"
+        XCTAssertEqual(SpeechSanitizer.clean(raw), "onetwothree[0m\nfour five\nsix")
     }
 
     func testCleanCollapsesBlankLineRuns() {
