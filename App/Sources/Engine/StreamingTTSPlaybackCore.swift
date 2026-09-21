@@ -39,9 +39,10 @@ final class StreamingTTSPlaybackCore: NSObject {
 
     let config: Config
 
-    /// generateQueue-only: one chunk of text → mono Float samples. A throw
-    /// gets ONE retry in the core, then the chunk is skipped — no silence
-    /// insertion (it read as dead air at the retry boundary).
+    /// generateQueue-only: one chunk of text → mono Float samples. A throw is
+    /// reported once and the chunk is skipped — no retry and no pause, because
+    /// a sentence the model cannot say is a gap the listener hears once (with
+    /// a soft tone) rather than dead air they wait through.
     var generateChunk: (String) throws -> [Float] = { _ in
         throw StreamingCoreError.notConfigured
     }
@@ -265,16 +266,17 @@ final class StreamingTTSPlaybackCore: NSObject {
                     self.pacingGate?.wait()
                 }
                 guard self.playbackGeneration == generation else { return }
-                // A bad chunk once cost the listener a 30–90 s pause (3
-                // attempts × retry sleep, then a 0.5 s silence gap): one
-                // retry, then SKIP the chunk — continuity beats
-                // completeness when the alternative is dead air. The slot
-                // gets the skipped sentinel so the schedule cursor steps
-                // past it and the read-along char math still accounts for
-                // the text that won't sound.
+                // A chunk the model cannot synthesize is skipped on the FIRST
+                // failure. There is no retry: a second attempt at the same
+                // text fails the same way (the input is what is wrong — see
+                // SpeechSanitizer), and the wait for it is silence the
+                // listener pays for. The slot gets the skipped sentinel so the
+                // schedule cursor steps past it, the listener hears one soft
+                // tone, and the read-along char math still accounts for the
+                // text that will not sound.
                 do {
                     let generationStart = PlaybackMetrics.monotonicNow()
-                    let samples = try Self.generateWithRetry(self, chunk.text, attempts: 2)
+                    let samples = try self.generateChunk(chunk.text)
                     let outputRate = self.sampleRate
                     let buffer = Self.makeMonoBuffer(samples: samples, sampleRate: outputRate)
                     // Wall time the listener actually waits for this chunk —
@@ -306,7 +308,13 @@ final class StreamingTTSPlaybackCore: NSObject {
                         )
                     }
                 } catch {
-                    Log.shared.error("\(self.config.logPrefix) chunk \(index + 1) skipped (\(error)): «\(chunk.text.prefix(60))»")
+                    Log.shared.error("\(self.config.logPrefix) chunk \(index + 1) of \(allChunks.count) skipped (\(error)): «\(chunk.text.prefix(60))»")
+                    // The tone is the ONLY signal the listener gets, so it
+                    // is posted from here rather than from the main-queue
+                    // bookkeeping below: the queue hop is milliseconds either
+                    // way, and this keeps the sound tied to the failure that
+                    // caused it.
+                    BeepPlayer.playSkipTone()
                     DispatchQueue.main.async {
                         guard self.playbackGeneration == generation else { return }
                         self.bufferSlots[index] = Self.slotSkipped
@@ -563,6 +571,7 @@ final class StreamingTTSPlaybackCore: NSObject {
                 // accumulated every sample — a 200k-char chapter was ~1.1 GB.
                 let writer = try WAVWriter.StreamingWriter(url: url, sampleRate: Int(self.sampleRate))
                 var charsDone = 0
+                var failedChunks = 0
                 for (index, chunk) in renderChunks.enumerated() {
                     if index > 0, self.config.exportInterChunkSilence > 0 {
                         try writer.append([Float](
@@ -571,10 +580,18 @@ final class StreamingTTSPlaybackCore: NSObject {
                         ))
                     }
                     do {
-                        try writer.append(try Self.generateWithRetry(self, chunk.text, attempts: 3))
+                        try writer.append(try self.generateChunk(chunk.text))
                     } catch {
-                        Log.shared.error("\(self.config.logPrefix) export chunk failed after retries (\(error)): «\(chunk.text.prefix(60))» — silence inserted")
-                        try writer.append([Float](repeating: 0, count: Int(self.sampleRate) / 2))
+                        // Same policy as playback: one attempt, then move on.
+                        // The export stays a single pass over the chapter; a
+                        // failed chunk leaves a short silence in the file
+                        // rather than stalling the render on a retry that
+                        // cannot succeed (the input is what is wrong). No tone
+                        // — an export is silent by definition, and the count
+                        // lands in the log line below.
+                        failedChunks += 1
+                        Log.shared.error("\(self.config.logPrefix) export chunk \(index + 1) of \(renderChunks.count) failed (\(error)): «\(chunk.text.prefix(60))» — silence written")
+                        try writer.append([Float](repeating: 0, count: Int(self.sampleRate) / 4))
                     }
                     charsDone += chunk.length
                     let progress = min(1.0, Double(charsDone) / Double(total))
@@ -582,7 +599,11 @@ final class StreamingTTSPlaybackCore: NSObject {
                 }
                 try writer.close()
                 let seconds = Double(writer.sampleCount) / self.sampleRate
-                Log.shared.info("\(self.config.logPrefix) exported \(String(format: "%.1f", seconds))s of audio to \(url.lastPathComponent)")
+                if failedChunks > 0 {
+                    Log.shared.info("\(self.config.logPrefix) exported \(String(format: "%.1f", seconds))s of audio to \(url.lastPathComponent) with \(failedChunks) failed chunk(s) written as silence")
+                } else {
+                    Log.shared.info("\(self.config.logPrefix) exported \(String(format: "%.1f", seconds))s of audio to \(url.lastPathComponent)")
+                }
                 DispatchQueue.main.async { completion(.success(url)) }
             } catch {
                 Log.shared.error("\(self.config.logPrefix) export failed: \(error)")
@@ -601,27 +622,7 @@ final class StreamingTTSPlaybackCore: NSObject {
         return cleaned.isEmpty ? "Note" : cleaned
     }
 
-    // MARK: - Retry + buffers
-
-    /// Retries `generateChunk` — transient inference flakes (Kokoro's empty
-    /// output, Supertonic's zero-length duration prediction) usually succeed
-    /// on a second attempt.
-    private static func generateWithRetry(
-        _ core: StreamingTTSPlaybackCore,
-        _ text: String,
-        attempts: Int
-    ) throws -> [Float] {
-        var lastError: Error?
-        for attempt in 1...attempts {
-            do { return try core.generateChunk(text) }
-            catch {
-                lastError = error
-                Log.shared.info("\(core.config.logPrefix) chunk attempt \(attempt)/\(attempts) failed (\(error)) — «\(text.prefix(60))»")
-                Thread.sleep(forTimeInterval: 0.15 * Double(attempt))
-            }
-        }
-        throw lastError ?? StreamingCoreError.noOutput
-    }
+    // MARK: - Buffers
 
     private static func makeMonoBuffer(samples: [Float], sampleRate: Double) -> AVAudioPCMBuffer {
         let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1)!
