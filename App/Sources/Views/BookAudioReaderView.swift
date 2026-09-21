@@ -1,5 +1,6 @@
 import SwiftUI
 import AVFoundation
+import MediaPlayer
 import SpeechLogic
 
 /// The audiobook reader: an already-recorded audiobook file, played as audio
@@ -123,12 +124,15 @@ struct BookAudioReaderView: View {
         .onAppear {
             store.markOpened(book)
             audioPlayer.bind(to: book, startChapter: chapterIndex)
+            wireRemoteCommands()
             startProgressUpdates()
         }
         .onDisappear {
             progressTask?.cancel()
             progressTask = nil
             audioPlayer.stop()
+            NowPlayingCenter.shared.clear()
+            NowPlayingCenter.shared.setChapterSkipEnabled(false)
         }
     }
 
@@ -242,6 +246,7 @@ struct BookAudioReaderView: View {
                 let next = audioPlayer.chapterProgress
                 if abs(next - progress) > 0.005 {
                     progress = next
+                    publishNowPlaying()
                 }
                 if audioPlayer.chapterIsFinished, chapterIndex < chapters.count - 1 {
                     stepChapter(1)
@@ -257,6 +262,7 @@ struct BookAudioReaderView: View {
         } else {
             playChapter(chapterIndex)
         }
+        publishNowPlaying()
     }
 
     private func playChapter(_ index: Int) {
@@ -264,7 +270,76 @@ struct BookAudioReaderView: View {
         chapterIndex = index
         audioPlayer.play(book: book, chapterIndex: index)
         isPlaying = true
+        publishNowPlaying()
         persistPosition()
+    }
+
+    /// True once this reader has installed the remote-command handlers.
+    @State private var remoteWired = false
+
+    /// Installs the lock-screen play/pause/skip handlers. `SpeechPlayer` wires
+    /// its own on first note/book playback; an audiobook never goes through
+    /// the player, so without this the Control Center buttons would be
+    /// registered with no handler at all.
+    private func wireRemoteCommands() {
+        guard !remoteWired else { return }
+        remoteWired = true
+        NowPlayingCenter.shared.onCommand = { [weak self] command in
+            Task { @MainActor in
+                guard let self else { return }
+                switch command {
+                case .play, .toggle:
+                    if self.isPlaying {
+                        self.audioPlayer.pause()
+                        self.isPlaying = false
+                    } else {
+                        self.playChapter(self.chapterIndex)
+                    }
+                case .pause:
+                    self.audioPlayer.pause()
+                    self.isPlaying = false
+                case .stop:
+                    self.audioPlayer.stop()
+                    self.isPlaying = false
+                    NowPlayingCenter.shared.clear()
+                case .previousChapter:
+                    self.stepChapter(-1)
+                case .nextChapter:
+                    self.stepChapter(1)
+                }
+                self.publishNowPlaying()
+            }
+        }
+    }
+
+    /// Lock screen / Control Center, through the same NowPlayingCenter every
+    /// other playback path uses (single writer). An audiobook has real audio,
+    /// so the surface shows the book, the sounding chapter, and the artwork
+    /// when the file carries one.
+    private func publishNowPlaying() {
+        let chapterTitle = chapters.indices.contains(chapterIndex)
+            ? chapters[chapterIndex].title
+            : nil
+        let total = chapters.count > 1 ? "Chapter \(chapterIndex + 1) of \(chapters.count)" : nil
+        NowPlayingCenter.shared.publish(
+            title: book.title,
+            subtitle: [total, chapterTitle].compactMap { $0 }.joined(separator: " — "),
+            artwork: Self.loadArtwork(book: book),
+            isPlaying: isPlaying,
+            progress: nil,
+            rate: 1.0
+        )
+        // Chapter skip is real for an audiobook: the chapters are in the file.
+        NowPlayingCenter.shared.setChapterSkipEnabled(chapters.count > 1)
+    }
+
+    /// Reads the cover once off-main. Nil when the book has no embedded art
+    /// or no embedded art could be decoded — the surface then shows text only.
+    private static func loadArtwork(book: Book) -> UIImage? {
+        guard book.hasCover else { return nil }
+        let url = BooksStore.coverFileURL(book)
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return UIImage(data: data)
     }
 
     private func stepChapter(_ delta: Int) {
