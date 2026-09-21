@@ -82,10 +82,10 @@ public enum SpeechSanitizer {
             if isUnspeakable(scalar) {
                 // Replace rather than delete: "Body\u{07}text" must not become
                 // "Bodytext", or the engine hears one word the reader never
-                // saw. normalizeWhitespace collapses the runs this creates.
-                // Line separators become a newline so the chunker still sees a
-                // sentence boundary where the document had one.
-                out.append(Self.isLineBreak(scalar) ? "\n" : " ")
+                // saw. normalizeWhitespace collapses the runs this creates and
+                // owns every line-break normalisation (CRLF, lone CR, and the
+                // Unicode separators) in one place.
+                out.append(" ")
                 continue
             }
             out.append(scalar)
@@ -115,14 +115,6 @@ public enum SpeechSanitizer {
         if variationSelectorsSupplement.contains(scalar) { return true }
         for range in privateUse where range.contains(scalar) { return true }
         return false
-    }
-
-    /// True for the two Unicode line separators, which `Character.isWhitespace`
-    /// does not report (they are `Separator`s, not `Whitespace`) — the chunker
-    /// treats them as hard sentence boundaries, so they must survive cleaning
-    /// as a newline rather than a space.
-    static func isLineBreak(_ scalar: Unicode.Scalar) -> Bool {
-        scalar == "\u{2028}" || scalar == "\u{2029}"
     }
 
     /// Offset-preserving variant of `clean(_:)` for paths that index the
@@ -167,6 +159,11 @@ public enum SpeechSanitizer {
         let normalised = text
             .replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
+            // U+2028/U+2029 are line breaks that `isWhitespace` does not
+            // report, so they would otherwise survive into a line and be
+            // collapsed into a space by collapseSpaces — destroying the break.
+            .replacingOccurrences(of: "\u{2028}", with: "\n")
+            .replacingOccurrences(of: "\u{2029}", with: "\n")
         var lines: [String] = []
         lines.reserveCapacity(64)
         for rawLine in normalised.split(separator: "\n", omittingEmptySubsequences: false) {
