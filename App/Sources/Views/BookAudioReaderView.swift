@@ -127,6 +127,13 @@ struct BookAudioReaderView: View {
             wireRemoteCommands()
             startProgressUpdates()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .audioBookStopped)) { notification in
+            // The shelf deleted this file while its reader was open.
+            guard notification.object as? UUID == book.id else { return }
+            audioPlayer.stop()
+            isPlaying = false
+            NowPlayingCenter.shared.clear()
+        }
         .onDisappear {
             progressTask?.cancel()
             progressTask = nil

@@ -72,6 +72,9 @@ extension View {
 }
 
 extension Notification.Name {
+    /// Posted when an audiobook file is deleted while its reader is open —
+    /// the reader stops its own player so nothing plays a removed file.
+    static let audioBookStopped = Notification.Name("AudioBook.stopped")
     /// Posted by the global mini-player when the user taps the bar body.
     static let miniPlayerJumpToNote = Notification.Name("MiniPlayerBar.jumpToNote")
     /// v1.5: same tap while a BOOK speaks — object carries the book UUID string.

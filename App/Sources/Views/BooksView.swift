@@ -110,9 +110,15 @@ struct BooksView: View {
                 Button("Delete", role: .destructive) {
                     Haptics.press()
                     // Deleting a book that is speaking would leave a ghost
-                    // session narrating a removed file — stop it first.
+                    // session narrating a removed file — stop it first. A
+                    // synthesised book goes through the player; an audiobook
+                    // owns its own player, which the reader stops via this
+                    // notification.
                     if BookPlaybackController.shared.isBookActive(book) {
                         player.stop()
+                    }
+                    if book.format == .audio {
+                        NotificationCenter.default.post(name: .audioBookStopped, object: book.id)
                     }
                     store.delete(book)
                     bookToDelete = nil
