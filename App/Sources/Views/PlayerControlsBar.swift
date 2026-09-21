@@ -49,7 +49,7 @@ struct PlayerControlsBar: View {
             Button {
                 Haptics.tap()
                 onBeforeToggle?()
-                player.togglePlay(speechText, note: note)
+                player.togglePlay(SpeechText.forText(speechText), note: note)
             } label: {
                 Image(systemName: playIcon)
                     .font(.system(size: 13, weight: .bold))
@@ -114,7 +114,7 @@ struct PlayerControlsBar: View {
                 Button {
                     Haptics.tap()
                     onBeforeToggle?()
-                    player.togglePlay(speechText, note: note)
+                    player.togglePlay(SpeechText.forText(speechText), note: note)
                 } label: {
                     ZStack {
                         Circle()

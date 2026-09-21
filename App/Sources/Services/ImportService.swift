@@ -53,9 +53,19 @@ final class ImportService {
         let title = url.deletingPathExtension().lastPathComponent
         let kind = url.pathExtension.lowercased()
 
-        let text = kind == "pdf" ? pdfText(from: url) : plainText(from: url)
-        guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        let raw = kind == "pdf" ? pdfText(from: url) : plainText(from: url)
+        guard let raw, !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             Log.shared.error("ImportService: no extractable text in \(url.lastPathComponent)")
+            return nil
+        }
+        // Files arrive carrying whatever the producing app left in them — a
+        // soft hyphen from a wrapped line, zero-width joiners, control bytes
+        // from a broken export. Cleaning at import means the stored note is
+        // speakable from the moment it lands, and the reader says exactly what
+        // the user sees.
+        let text = SpeechSanitizer.clean(raw)
+        guard !text.isEmpty else {
+            Log.shared.error("ImportService: \(url.lastPathComponent) had no speakable text after cleaning")
             return nil
         }
         Log.shared.info("ImportService: imported \(url.lastPathComponent) (\(text.count) chars, \(kind.isEmpty ? "text" : kind))")

@@ -412,7 +412,7 @@ final class SpeechPlayer: ObservableObject {
         // bookmark for the editor's next tap. Key name shared with
         // NoteEditorView's @AppStorage("renderMarkdown").
         let renderMarkdown = UserDefaults.standard.bool(forKey: "renderMarkdown")
-        let speechText = renderMarkdown ? MarkdownText.plainText(note.text) : note.text
+        let speechText = SpeechText.forNote(note, renderMarkdown: renderMarkdown)
         togglePlay(speechText, note: note)
     }
 

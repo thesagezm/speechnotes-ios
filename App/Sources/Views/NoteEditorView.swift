@@ -83,7 +83,13 @@ struct NoteEditorView: View {
     private var speechText: String { cachedSpeechText }
 
     private func updateSpeechCaches() {
-        cachedSpeechText = renderMarkdown ? MarkdownText.plainText(draft) : draft
+        // Derived through SpeechText so the editor, the mini-player and any
+        // other playback entry point hand the engine the SAME string, and so
+        // the sanitizer runs here (once, off the play path) rather than at
+        // every play tap.
+        cachedSpeechText = renderMarkdown
+            ? SpeechText.forText(MarkdownText.plainText(draft))
+            : SpeechText.forText(draft)
         cachedWordCount = draft.split(whereSeparator: \.isWhitespace).count
     }
 
@@ -100,7 +106,8 @@ struct NoteEditorView: View {
             try? await Task.sleep(nanoseconds: 300_000_000)
             guard !Task.isCancelled else { return }
             let plainText = await Task.detached(priority: .userInitiated) {
-                render ? MarkdownText.plainText(draftCopy) : draftCopy
+                let spoken = render ? MarkdownText.plainText(draftCopy) : draftCopy
+                return SpeechSanitizer.clean(spoken)
             }.value
             let words = await Task.detached(priority: .userInitiated) {
                 draftCopy.split(whereSeparator: \.isWhitespace).count

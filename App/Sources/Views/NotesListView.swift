@@ -439,20 +439,20 @@ struct NotesListView: View {
                 }
             }
             Divider()
- Button {
- showingImporter = true
- } label: {
- Label("Import from Files…", systemImage: "folder")
- }
- Divider()
- Button {
- showingRecycleBin = true
- } label: {
- Label(
- "Recently Deleted\(!notes.deletedNotes.isEmpty ? " (\(notes.deletedNotes.count))" : "")",
- systemImage: "trash"
- )
- }
+            Button {
+                showingImporter = true
+            } label: {
+                Label("Import from Files…", systemImage: "folder")
+            }
+            Divider()
+            Button {
+                showingRecycleBin = true
+            } label: {
+                Label(
+                    "Recently Deleted\(!notes.deletedNotes.isEmpty ? " (\(notes.deletedNotes.count))" : "")",
+                    systemImage: "trash"
+                )
+            }
             // hasStrings is a cheap content-free check — reading .string here
             // would hit the (possibly remote) pasteboard on every render and
             // can trigger iOS paste prompts. Content is read on tap instead.
@@ -534,9 +534,20 @@ struct NotesListView: View {
     /// Imported text lands verbatim; the note's title derives from its first
     /// line like every other note.
     private func addNote(text: String) {
+        // Cleaning here covers every text that reaches the store — the Files
+        // importer, the clipboard entry, drop targets and the speechnotes://
+        // URL — because they all funnel through this one call. ImportService
+        // already cleans file reads; this is the second, idempotent pass that
+        // catches the paths that never touch a file.
+        let cleaned = SpeechText.forText(text)
+        guard !cleaned.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            Haptics.warning()
+            importErrorMessage = "That text has nothing to read aloud."
+            return
+        }
         let note = notes.createNote(notebookId: scopeNotebookId)
         var updated = note
-        updated.text = text
+        updated.text = cleaned
         notes.update(updated)
         path.append(note.id)
     }

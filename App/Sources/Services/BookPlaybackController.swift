@@ -221,7 +221,17 @@ final class BookPlaybackController: ObservableObject {
             }
             extracted = (result.text, result.pageOffsets)
         }
-        guard var text = extracted?.text, !text.isEmpty else { return nil }
+        guard let rawText = extracted?.text, !rawText.isEmpty else { return nil }
+        // Sanitised at this boundary, before the cache write, so the chapter
+        // text on disk is already speakable — every later read of it (resume,
+        // auto-advance, export, read-along) sees the same bytes, and a book
+        // imported yesterday is cleaned by the same pass that a book imported
+        // tomorrow gets.
+        var text = SpeechText.forText(rawText)
+        if text.isEmpty {
+            Log.shared.info("BookPlayback: ch\(chapterIndex) of \(book.title) has no speakable text after cleaning")
+            return nil
+        }
         if text.utf16.count > 200_000 {
             Log.shared.info("BookPlayback: ch\(chapterIndex) is \(text.utf16.count) chars — engines may take a while")
         }
