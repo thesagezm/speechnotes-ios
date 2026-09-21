@@ -359,7 +359,10 @@ public enum PdfText {
     /// NFKC maps ligatures (ﬁ → fi, ﬂ → fl) and other compatibility forms so
     /// the engine hears spelled-out text; hyphen-newline joins words split
     /// across lines ("exam-\nple" → "example"); CR/PDFKit line endings become
-    /// plain \n with blank runs collapsed to one paragraph break.
+    /// plain \n with blank runs collapsed to one paragraph break; and the
+    /// result is passed through `SpeechSanitizer.clean`, because a PDF's text
+    /// layer is full of soft hyphens, zero-width spaces and Private Use
+    /// glyphs from embedded fonts — all of which the engines choke on.
     public static func normalize(_ raw: String) -> String {
         var text = raw.precomposedStringWithCompatibilityMapping
         for hyphenBreak in ["-\r\n", "-\r", "-\n"] {
@@ -373,7 +376,7 @@ public enum PdfText {
         while text.contains("\n\n\n") {
             text = text.replacingOccurrences(of: "\n\n\n", with: "\n\n")
         }
-        return text
+        return SpeechSanitizer.clean(text)
     }
 
     // MARK: - Helpers

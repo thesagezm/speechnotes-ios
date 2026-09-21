@@ -118,7 +118,11 @@ public enum XhtmlText {
         parser.delegate = delegate
         parser.shouldResolveExternalEntities = false
         let completed = parser.parse()
-        return (delegate.paragraphText, completed)
+        // A real EPUB carries soft hyphens, zero-width joiners, bidi marks
+        // and the occasional stray control byte; every one of them is a
+        // synthesis failure waiting to happen. Cleaned at the source so the
+        // cached chapter text on disk is already speakable.
+        return (SpeechSanitizer.clean(delegate.paragraphText), completed)
     }
 
     /// Convenience for test authors and callers holding a String.

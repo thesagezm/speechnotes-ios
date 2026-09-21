@@ -127,6 +127,15 @@ public enum SentenceChunker {
 
         var result = [first]
         let maxBatchLength = max(1, batchMaxChars)
+        // Every piece after the first must clear this floor, because a stub
+        // piece is what the engines fail on: an empty or one-token tail makes
+        // Kokoro's two-row style lookup non-finite and Supertonic's duration
+        // predictor return nothing. A trailing fragment shorter than the floor
+        // is therefore appended to the piece before it (still bounded by
+        // `maxBatchLength + minPieceLength`), and a piece that is *entirely*
+        // non-sounding — a lone combining mark, a text-presentation modifier —
+        // is dropped rather than spoken.
+        let minPieceLength = min(maxBatchLength, max(8, maxBatchLength / 8))
         let utf16 = text.utf16
 
         var cursor = utf16.index(utf16.startIndex, offsetBy: first.length, limitedBy: utf16.endIndex) ?? utf16.endIndex
@@ -136,7 +145,23 @@ public enum SentenceChunker {
         var pieces: [(start: String.Index, end: String.Index)] = []
         while cursor < text.endIndex {
             let end = sentenceEnd(in: text, from: cursor, limit: text.endIndex) ?? text.endIndex
-            pieces.append(contentsOf: splitOversized(text, start: cursor, end: end, maxUtf16: maxBatchLength))
+            for piece in splitOversized(text, start: cursor, end: end, maxUtf16: maxBatchLength) {
+                // A piece with nothing a reader can sound is dropped; the
+                // remaining text is unaffected (this only skips it).
+                guard isSpeakable(text[piece.start..<piece.end]) else { continue }
+                // Too short to synthesize on its own: glue it to the
+                // previous piece so the engines never see a stub. The first
+                // piece is exempt — it is the fast-start sentence by design.
+                if let last = pieces.last {
+                    let lastLength = text[last.start..<last.end].utf16.count
+                    let pieceLength = text[piece.start..<piece.end].utf16.count
+                    if pieceLength < minPieceLength, lastLength + pieceLength <= maxBatchLength + minPieceLength {
+                        pieces[pieces.count - 1] = (last.start, piece.end)
+                        continue
+                    }
+                }
+                pieces.append(piece)
+            }
             cursor = end
         }
 
@@ -186,20 +211,29 @@ public enum SentenceChunker {
     /// offsets and read-along highlighting — do NOT use `chunks(for:)` for
     /// either: it packs consecutive sentences into batches, which made the
     /// highlight (and once the resume) jump across whole batches.
+    ///
+    /// A piece carries no boundary-byte information here — callers that paint
+    /// a highlight use the whole documented Range API — so this stays a pure
+    /// sentence walk. Its ONLY departure from `text`'s own structure is
+    /// dropping pieces with nothing pronounceable in them (whitespace-only,
+    /// punctuation-only), which would otherwise be handed to a synthesizer as
+    /// empty text. A dropped piece leaves a visible gap, not a shifted offset:
+    /// every returned offset is still an absolute UTF-16 position in `text`,
+    /// exactly as before.
     public static func sentencePieces(in text: String, maxChars: Int = 200) -> [(offset: Int, endOffset: Int)] {
         guard !text.isEmpty, text.contains(where: { !$0.isWhitespace }) else { return [] }
         var result: [(offset: Int, endOffset: Int)] = []
-        let utf16 = text.utf16
         var cursor = text.startIndex
         // Running UTF-16 offset — avoids recomputing `text[..<piece.start].utf16.count`
         // per piece, which was O(n²) on the resume/read-along hot path.
         var runningOffset = 0
-        let startIndex = text.startIndex
         while cursor < text.endIndex {
             let end = sentenceEnd(in: text, from: cursor, limit: text.endIndex) ?? text.endIndex
             for piece in splitOversized(text, start: cursor, end: end, maxUtf16: max(1, maxChars)) {
                 let pieceLength = text[piece.start..<piece.end].utf16.count
-                result.append((offset: runningOffset, endOffset: runningOffset + pieceLength))
+                if isSpeakable(text[piece.start..<piece.end]) {
+                    result.append((offset: runningOffset, endOffset: runningOffset + pieceLength))
+                }
                 runningOffset += pieceLength
             }
             cursor = end
@@ -243,6 +277,36 @@ public enum SentenceChunker {
     }
 
     // MARK: - Sentence scanning
+
+    /// True when a piece contains something a speech engine can pronounce.
+    ///
+    /// The bar is deliberately low — any letter, number, CJK ideograph, or
+    /// non-ASCII symbol counts, because this runs per piece on every play and
+    /// must never drop text the user wanted read. What it rejects is the
+    /// residue a document leaves behind: whitespace, punctuation-only lines
+    /// (`***`, `—`), and standalone combining marks or format characters,
+    /// none of which a reader ever voices and all of which make a chunker
+    /// emit a piece the synthesizer cannot turn into audio.
+    static func isSpeakable(_ piece: Substring) -> Bool {
+        for scalar in piece.unicodeScalars {
+            if scalar.properties.isWhitespace { continue }
+            switch scalar.properties.generalCategory {
+            case .uppercaseLetter, .lowercaseLetter, .titlecaseLetter,
+                 .modifierLetter, .otherLetter,
+                 .decimalNumber, .letterNumber, .otherNumber:
+                return true
+            case .mathSymbol, .currencySymbol, .modifierSymbol, .otherSymbol:
+                return true
+            default:
+                // Punctuation and marks are not speech *on their own*, but a
+                // non-ASCII one (CJK punctuation, an em dash in a word) is a
+                // strong signal of real text — only pure-ASCII punctuation is
+                // treated as droppable.
+                if scalar.value > 0x7F { return true }
+            }
+        }
+        return false
+    }
 
     /// Finds the exclusive end index of the sentence starting at `start`.
     ///

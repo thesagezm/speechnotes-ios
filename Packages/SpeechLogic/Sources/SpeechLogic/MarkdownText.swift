@@ -116,15 +116,22 @@ public enum MarkdownText {
     /// Markdown → plain text for speech + read-along. Derived from the same
     /// block scan as the preview. Task items read "To do: …" / "Done: …",
     /// tables read row-wise, code is kept verbatim.
+    ///
+    /// The result passes through `SpeechSanitizer.clean` last: a note carries
+    /// whatever a paste or an import brought in — soft hyphens from a copied
+    /// PDF line, zero-width joiners, control bytes — and the engines fail on
+    /// exactly those. Cleaning here rather than at the engine boundary keeps
+    /// the read-along rendering equal to what is spoken.
     public static func plainText(_ markdown: String) -> String {
         let refs = linkReferences(in: markdown)
         let parsed = blocks(markdown, references: refs)
-        return parsed
+        let spoken = parsed
             .compactMap { block -> String? in
                 let text = speechText(for: block, references: refs)
                 return text.isEmpty ? nil : text
             }
             .joined(separator: "\n\n")
+        return SpeechSanitizer.clean(spoken)
     }
 
     private static func speechText(for block: MarkdownBlock, references refs: [String: LinkReference]) -> String {
