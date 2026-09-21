@@ -147,10 +147,12 @@ final class AudiobookChaptersTests: XCTestCase {
                 frames += size + [0, 0] + payload + titleFrame
             }
 
-            // v2.3: 4-byte size INCLUDES itself. v2.4: sync-safe, EXCLUDES.
+            // v2.3: a plain 32-bit size that INCLUDES its own four bytes, so a
+            // 6-byte extended header is a size of 6. v2.4: a sync-safe size
+            // that EXCLUDES them, so a 4-byte extended header is a size of 0.
             let body: [UInt8] = major == 4
-                ? [0, 0, 0, 0, 0, 0] // 4 sync-safe size bytes (0) + flags + padding
-                : be32(6) + [0, 0]  // 6-byte body including its own size
+                ? [0, 0, 0, 0]        // sync-safe size 0, nothing else
+                : be32(6) + [0, 0]   // plain size 6, body is exactly those bytes
             let extended = body + frames
             let tagSize = extended.count
             let header: [UInt8] = [
