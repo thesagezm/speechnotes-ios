@@ -50,19 +50,9 @@ final class SystemEngine: NSObject, SpeechEngine {
 
     /// Session category is applied on first REAL speech, not at init —
     /// doing it pre-activate logged OSStatus -50 at every cold start.
-    private var audioSessionConfigured = false
     private func configureAudioSessionIfNeeded() {
-        guard !audioSessionConfigured else { return }
-        audioSessionConfigured = true
-        do {
-            try AVAudioSession.sharedInstance().setCategory(
-                .playback,
-                mode: .spokenAudio,
-                options: [.duckOthers, .allowBluetooth, .allowBluetoothA2DP]
-            )
-        } catch {
-            Log.shared.error("Audio session setup failed: \(error)")
-        }
+        // Same shared setup as the ONNX engines — see AudioSessionSetup.
+        AudioSessionSetup.configureIfNeeded(prefix: "SystemEngine")
     }
 
     override init() {

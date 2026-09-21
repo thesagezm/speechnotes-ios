@@ -136,19 +136,11 @@ final class StreamingTTSPlaybackCore: NSObject {
     /// Audio-session category applied lazily on first actual playback —
     /// configuring it in init landed an OSStatus -50 at every cold start
     /// (the session isn't attachable before the app is fully active).
-    private var audioSessionConfigured = false
     private func configureAudioSessionIfNeeded() {
-        guard !audioSessionConfigured else { return }
-        audioSessionConfigured = true
-        do {
-            try AVAudioSession.sharedInstance().setCategory(
-                .playback,
-                mode: .spokenAudio,
-                options: [.duckOthers, .allowBluetooth, .allowBluetoothA2DP]
-            )
-        } catch {
-            Log.shared.error("\(config.logPrefix) audio session setup failed: \(error)")
-        }
+        // Shared with the other engines: one category, applied lazily on the
+        // first real playback, with a fallback ladder for the routes that
+        // reject the preferred option set (the OSStatus -50 in the logs).
+        AudioSessionSetup.configureIfNeeded(prefix: config.logPrefix)
     }
 
     init(config: Config) {
