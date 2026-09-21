@@ -691,6 +691,84 @@ needs a product decision first).
 Golden rules unchanged. `sage-upgrades` is NOT merged to `v15-books-complete`
 yet — merge after the device round.
 
+## 2026-09-21 addendum #13 — v1.6.0 RELEASE (1.6.0/32)
+
+**User directive: "ONCE YOU ARE DONE WITH THESE FIXES AND COMMAND LINE IS
+GREEN YOU CAN PUSH THIS IT AS VERSION V1.6.0... (THIS VERSION IS NOT TACKLING
+ANY LANDSCAPE MODIFICATIONS)".** Landscape stays out of scope for this
+release, exactly as it has been since v1.2.0 — the two orientation keys are
+still what black-screened that build on device, and no device-tested route
+back has been established.
+
+Release contents (branch `batch-c-d-session`, off `fix/tts-v3-audit`):
+
+**Playback pipeline**
+- `generateWithRetry` DELETED. One attempt per sentence; on failure: one log
+  line with the chunk index out of the total, one soft tone
+  (`BeepPlayer.playSkipTone()`), skip and continue — for playback and for WAV
+  export alike. This closes R8/AP7 ("error handling worse to experience than
+  the error") by removal rather than tuning.
+- `BeepPlayer`: 0.18 s of 720 Hz at −22 dBFS with a raised-cosine envelope,
+  played from its own `AVAudioEngine`+node so it mixes under running speech
+  without touching the engines' audio graph. Best-effort: if it cannot play,
+  the skip still happens.
+- `SpeechSanitizer` (SpeechLogic, new): strips what a reader cannot
+  pronounce — C0/C1 controls, zero-width and bidi controls, variation
+  selectors, private-use glyphs — and normalises whitespace. Two rules the
+  CI loop forced: **replace, don't delete** (`exam\u{00AD}ple` must not
+  become `example`) and **line separators are breaks** (U+2028/U+2029 are
+  `Separator`s, not `Whitespace`, so `isWhitespace` misses them; a lone CR is
+  folded to LF before the split).
+- Chunker: a piece under 4 UTF-16 units with nothing to say is glued onto the
+  piece before it. **Nothing is dropped** — chunks must still concatenate to
+  the original text, which is what the read-along and resume offsets index.
+- Every note/book speak path derives its text through one helper
+  (`SpeechText`), so the editor, the mini-player, `resumeIfBookmarkPending`
+  and the book controller cannot hand the engine different strings.
+- `AudioSessionSetup` (new): the one place the category is set, with a
+  fallback ladder for the `OSStatus -50` that appeared on the first play of
+  every cold session — paramErr means the category/mode/options combination
+  was invalid for the route active at that moment.
+
+**Audiobooks**
+- `AudiobookChapters` (SpeechLogic, new): reads `chpl` inside `moov` and
+  ID3v2.3/2.4 `CHAP` frames, from a bounded 8 MB head slice. Both extended-
+  header forms skipped correctly.
+- `Book` gains `.audio`; `BookAudioReaderView` + `AudioBookPlayer` play it
+  with **no `SpeechPlayer` involvement**, its own lock-screen surface and
+  remote commands, chapter resume, and a delete-stops-playback path.
+
+**Reader surfaces (device reports, this release)**
+- **Image viewer rewritten** on `UIScrollView`. The old one drove
+  `scaleEffect`+`offset` from SwiftUI gestures: no inertia, and
+  `scaleEffect` scales around the CENTER so the point under the fingers
+  walked away. Now: decelerating zoom with a real anchor, double-tap toward
+  the tapped point, tap-while-zoomed zooms out, image centred in the viewport.
+- **Note scroll**: `.scrollBounceBehavior(.basedOnSize)` so a short note sits
+  fixed at rest.
+- **Tables**: the `Grid` sized every column to its widest cell, so one long
+  sentence stretched the table sideways. Columns now take a fair share with a
+  floor at their longest word and cells wrap.
+- **Per-notebook export**: Backup → Export has three scopes (Everything /
+  One notebook / Unfiled) with a summary line and a slug in the filename.
+
+**Instrumentation**
+- The session summary now prints the first-quartile mean RTF beside the
+  overall one and names thermal throttling when the overall mean is ≥35%
+  above it. The device log this release started from showed exactly that
+  signature: a session opening at RTF 0.47 and closing at 2.89.
+
+Release mechanics: four version fields bumped to 1.6.0/32 (project.yml only —
+golden rule kept), README refreshed, this addendum, `Docs/PLAN-AUDIOBOOKS.md`
+with the device checklist, CI green, tag `v1.6.0`, GitHub Release with the
+IPA from the green run.
+
+**Device test still pending** — the three reader-surface fixes are all
+feel-based and none of them can be verified on CI. `Docs/PLAN-AUDIOBOOKS.md`
+carries the checklist.
+
+---
+
 ## 2026-09-07 addendum #12 — v1.5.0 RELEASED (1.5.0/30)
 
 **User directive 2026-09-07: "release the current/latest version as v1.5.0"
