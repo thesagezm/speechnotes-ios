@@ -73,13 +73,19 @@ public enum AudiobookChapters {
         let size = syncSafeInt(bytes[6], bytes[7], bytes[8], bytes[9])
         let tagEnd = min(bytes.count, 10 + size)
         var cursor = 10
-        // v2.4 may carry an extended header, whose size field is itself
-        // sync-safe; skip it rather than misreading the first frame.
+        // An extended header, when the flag says there is one, must be skipped
+        // rather than misread as the first frame. v2.4's size is sync-safe and
+        // EXCLUDES its own four bytes; v2.3's is a plain 32-bit size that
+        // INCLUDES them. Both encodings exist in the wild.
         if bytes[5] & 0x40 != 0, cursor + 4 <= tagEnd {
-            let extended = major == 4
-                ? syncSafeInt(bytes[cursor + 2], bytes[cursor + 3], bytes[cursor + 4], bytes[cursor + 5])
-                : 0
-            cursor += 4 + extended
+            let extended: Int
+            if major == 4 {
+                extended = syncSafeInt(bytes[cursor + 2], bytes[cursor + 3], bytes[cursor + 4], bytes[cursor + 5])
+                cursor += 4 + extended
+            } else {
+                extended = Int(be32(bytes, cursor))
+                cursor += extended
+            }
         }
 
         var chapters: [AudioChapter] = []

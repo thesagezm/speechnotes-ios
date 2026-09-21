@@ -128,4 +128,39 @@ final class AudiobookChaptersTests: XCTestCase {
         let data = Data([0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A])
         XCTAssertTrue(AudiobookChapters.chaptersFromID3(data).isEmpty)
     }
+
+    /// The extended-header flag makes the first four bytes after the tag
+    /// header an extended header, not a frame. Both the v2.3 (plain 32-bit,
+    /// inclusive) and v2.4 (sync-safe, exclusive) forms must be skipped, or
+    /// the first real chapter is lost.
+    func testExtendedHeaderIsSkipped() {
+        for major in [3, 4] {
+            var frames: [UInt8] = []
+            for (elementId, start, end, title) in [("ch1", 0, 5000, "First")] {
+                let titleFrame = id3Frame("TIT2", [3] + Array(title.utf8), major: major)
+                var payload = Array(elementId.utf8) + [0]
+                payload += be32(start) + be32(end) + be32(0) + be32(0)
+                frames += Array("CHAP".utf8)
+                let size: [UInt8] = major == 4
+                    ? [0, 0, 0, UInt8((payload.count + titleFrame.count) & 0x7F)]
+                    : be32(payload.count + titleFrame.count)
+                frames += size + [0, 0] + payload + titleFrame
+            }
+
+            // v2.3: 4-byte size INCLUDES itself. v2.4: sync-safe, EXCLUDES.
+            let body: [UInt8] = major == 4
+                ? [0, 0, 0, 0, 0, 0] // 4 sync-safe size bytes (0) + flags + padding
+                : be32(6) + [0, 0]  // 6-byte body including its own size
+            let extended = body + frames
+            let tagSize = extended.count
+            let header: [UInt8] = [
+                0x49, 0x44, 0x33, UInt8(major), 0x40, 0,
+                UInt8((tagSize >> 21) & 0x7F), UInt8((tagSize >> 14) & 0x7F),
+                UInt8((tagSize >> 7) & 0x7F), UInt8(tagSize & 0x7F),
+            ]
+            let data = Data(header + extended + [UInt8](repeating: 0, count: 64))
+            let chapters = AudiobookChapters.chaptersFromID3(data)
+            XCTAssertEqual(chapters.map(\.title), ["First"], "major v2.\(major) lost the first chapter")
+        }
+    }
 }
