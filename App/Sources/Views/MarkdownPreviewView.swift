@@ -52,6 +52,12 @@ struct MarkdownPreviewView: View {
             // Muliply only Text-bearing content — code is monospaced already.
             .font(.system(size: bodyFontSize))
         }
+        // A reading surface should feel like paper, not like a rubber sheet.
+        // The default vertical bounce let a flick send the whole note drifting
+        // past its edges, which read as "the text is loose". `.basedOnSize`
+        // keeps a short note fixed at rest while a long one still gets the
+        // overscroll affordance at its ends.
+        .scrollBounceBehavior(.basedOnSize, axes: .vertical)
         .onAppear { refreshCaches() }
         .onChange(of: markdown) { _ in refreshCaches() }
         .sheet(item: $safariURL) { url in
@@ -192,19 +198,46 @@ struct MarkdownPreviewView: View {
         .padding(.bottom, 14)
     }
 
+    /// Tables. The old `Grid` gave every column the width of its WIDEST cell,
+    /// so one long sentence stretched the whole table sideways and pushed the
+    /// other columns off screen — and because the grid lived in a horizontal
+    /// ScrollView the reader had to pan to find them. What a reader expects is
+    /// a table that wraps: long cells break across lines, columns share the
+    /// width fairly, and the table only scrolls sideways when even a fair
+    /// share cannot fit (a genuinely wide table, not a long sentence).
     private func tableView(headers: [String], rows: [[String]]) -> some View {
+        let columnCount = max(headers.count, rows.map(\.count).max() ?? 0)
+        // A column's floor is the longest single WORD in it, because that is
+        // the narrowest it can ever be without clipping. Share whatever width
+        // is left over equally, so short columns stay tight and long ones get
+        // the room — then let cells wrap inside what they get.
+        let minimums = (0..<columnCount).map { index -> CGFloat in
+            let cells = [headers[safe: index] ?? ""] + rows.compactMap { $0[safe: index] ?? "" }
+            let longestWord = cells
+                .flatMap { $0.split(separator: " ").map(String.init) }
+                .map { $0.boundingWidth(at: bodyFontSize) }
+                .max() ?? 0
+            return min(longestWord + 2, 160)
+        }
+        let available = max(0, UIScreen.main.bounds.width - 32 - 16 - CGFloat(minimums.count) * 8)
+        let share = available / CGFloat(max(1, columnCount))
+        let widths = minimums.map { $0 + share }
+
         ScrollView(.horizontal, showsIndicators: false) {
-            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
+            Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: 6) {
                 GridRow {
-                    ForEach(Array(headers.enumerated()), id: \.offset) { _, cell in
-                        styledText(cell).bold()
+                    ForEach(0..<columnCount, id: \.self) { index in
+                        styledText(headers[safe: index] ?? "")
+                            .bold()
+                            .frame(width: widths[safe: index], alignment: .leading)
                     }
                 }
                 Divider()
                 ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
                     GridRow {
-                        ForEach(Array(row.enumerated()), id: \.offset) { _, cell in
-                            styledText(cell)
+                        ForEach(0..<columnCount, id: \.self) { index in
+                            styledText(row[safe: index] ?? "")
+                                .frame(width: widths[safe: index], alignment: .leading)
                         }
                     }
                 }
@@ -494,5 +527,26 @@ extension EnvironmentValues {
     var noteId: UUID? {
         get { self[NoteIdKey.self] }
         set { self[NoteIdKey.self] = newValue }
+    }
+}
+
+private extension Array {
+    /// Element at `index`, or nil — used for ragged table rows, where a row
+    /// may legitimately have fewer cells than the header.
+    subscript(safe index: Int) -> Element? {
+        indices.contains(index) ? self[index] : nil
+    }
+}
+
+private extension String {
+    /// Rendered width of the string at a font size. Used by the table layout
+    /// to find the narrowest width a column can take without clipping a word.
+    func boundingWidth(at fontSize: CGFloat) -> CGFloat {
+        (self as NSString).boundingRect(
+            with: CGSize(width: .greatestFiniteMagnitude, height: fontSize * 2),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: [.font: UIFont.systemFont(ofSize: fontSize)],
+            context: nil
+        ).width
     }
 }
