@@ -691,7 +691,7 @@ struct NoteEditorView: View {
                 // user action — one plainText walk at tap time is the same
                 // work the scheduled pass would do anyway).
                 updateSpeechCaches()
-                player.togglePlay(speechText, note: currentNote)
+                player.togglePlay(SpeechText.forText(speechText), note: currentNote)
             } label: {
                 Label(
                     player.state == .speaking ? "Pause" : "Speak",
