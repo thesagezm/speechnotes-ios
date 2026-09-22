@@ -53,26 +53,39 @@ struct BookReaderView: View {
         _totalChapters = State(initialValue: book.spineCount ?? 0)
     }
 
-    @Environment(\.isLandscape) private var isLandscape
     /// Tap-to-hide chrome — shared app-wide (ImmersiveBars.swift).
     @AppStorage("immersiveBarsEnabled") private var immersiveBarsHidden = false
 
-    /// Reader surface + playback controls, arranged per orientation. Extracted
-    /// from `body` so the modifier chain stays lean (type-checker budget).
+    /// Reader surface + playback controls, arranged per orientation.
+    ///
+    /// Rotation smoothness: the two arrangements share ONE GeometryReader and
+    /// ONE content identity — only the controls child and the chapter bar's
+    /// position change. The content (webview / read-along) never unmounts, so
+    /// it keeps its scroll position and its render; the controls cross-arrange
+    /// under an explicit animation instead of being rebuilt as a different
+    /// container type. (A VStack→HStack swap is a structural change SwiftUI
+    /// cannot interpolate — the janky rotation the device reported.)
     @ViewBuilder
     private var readerLayout: some View {
-        if isLandscape {
-            HStack(spacing: 0) {
-                readerSurface
-                railPlayerBar
+        GeometryReader { proxy in
+            let landscape = proxy.size.width > proxy.size.height
+            ZStack(alignment: .bottom) {
+                if landscape {
+                    HStack(spacing: 0) {
+                        readerSurface
+                        railPlayerBar
+                    }
+                    .transition(.opacity.combined(with: .move(edge: .trailing)))
+                } else {
+                    VStack(spacing: 0) {
+                        readerSurface
+                        chapterBar
+                        playerBar
+                    }
+                    .transition(.opacity)
+                }
             }
-            .overlay(alignment: .bottom) { chapterBar }
-        } else {
-            VStack(spacing: 0) {
-                readerSurface
-                chapterBar
-                playerBar
-            }
+            .animation(.easeInOut(duration: 0.22), value: landscape)
         }
     }
 

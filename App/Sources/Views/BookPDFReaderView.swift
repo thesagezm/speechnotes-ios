@@ -60,28 +60,35 @@ struct BookPDFReaderView: View {
         return chapters.firstIndex { currentPage >= $0.startPage && currentPage <= $0.endPage }
     }
 
-    @Environment(\.isLandscape) private var isLandscape
     /// Tap-to-hide chrome — shared app-wide (ImmersiveBars.swift).
     @AppStorage("immersiveBarsEnabled") private var immersiveBarsHidden = false
 
-    /// Reader + playback, arranged per orientation. Extracted from `body` so
-    /// the modifier chain stays lean (type-checker budget).
+    /// Reader + playback, arranged per orientation — same guided-rotation
+    /// shape as the EPUB reader: one GeometryReader, one content identity, an
+    /// explicit transition between the two arrangements.
     @ViewBuilder
     private var readerLayout: some View {
-        if isLandscape, hasChapters {
-            HStack(spacing: 0) {
-                readerSurface
-                railPlayerBar
-            }
-            .overlay(alignment: .bottom) { pageBar }
-        } else {
-            VStack(spacing: 0) {
-                readerSurface
-                pageBar
-                if hasChapters {
-                    playerBar
+        GeometryReader { proxy in
+            let landscape = proxy.size.width > proxy.size.height
+            ZStack(alignment: .bottom) {
+                if landscape, hasChapters {
+                    HStack(spacing: 0) {
+                        readerSurface
+                        railPlayerBar
+                    }
+                    .transition(.opacity.combined(with: .move(edge: .trailing)))
+                } else {
+                    VStack(spacing: 0) {
+                        readerSurface
+                        pageBar
+                        if hasChapters {
+                            playerBar
+                        }
+                    }
+                    .transition(.opacity)
                 }
             }
+            .animation(.easeInOut(duration: 0.22), value: landscape)
         }
     }
 

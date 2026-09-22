@@ -189,29 +189,39 @@ struct NoteEditorView: View {
                 && speechText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    /// iPhone-only target: compact vertical size class ⇔ landscape. Injected
-    /// once at the window root (OrientationState.landscapeAware()).
-    @Environment(\.isLandscape) private var isLandscape
-
-    /// Content + controls, arranged per orientation. Extracted from `body` so
-    /// the modifier chain above stays the same shape it had before landscape
-    /// support (the v1.2.0 type-checker war's lesson: keep body lean).
+    /// Content + controls, arranged per orientation.
+    ///
+    /// Guided rotation (same fix as the book readers): one GeometryReader, one
+    /// content identity, explicit transition. The editor / preview /
+    /// read-along child never unmounts, so the text, the caret and the scroll
+    /// position survive; only the control strip re-arranges, under an
+    /// animation, instead of being rebuilt as a different container type
+    /// (a VStack→HStack swap is structural, so SwiftUI cannot interpolate it
+    /// — that was the flicker).
     @ViewBuilder
     private var editorLayout: some View {
-        if isLandscape {
-            HStack(spacing: 0) {
-                editorContent
-                editorRail
+        GeometryReader { proxy in
+            let landscape = proxy.size.width > proxy.size.height
+            ZStack(alignment: .bottom) {
+                if landscape {
+                    HStack(spacing: 0) {
+                        editorContent
+                        editorRail
+                    }
+                    .transition(.opacity.combined(with: .move(edge: .trailing)))
+                } else {
+                    VStack(spacing: 0) {
+                        editorContent
+                        PlayerControlsBar(
+                            speechText: speechText,
+                            note: currentNote,
+                            onBeforeToggle: { updateSpeechCaches() }
+                        )
+                    }
+                    .transition(.opacity)
+                }
             }
-        } else {
-            VStack(spacing: 0) {
-                editorContent
-                PlayerControlsBar(
-                    speechText: speechText,
-                    note: currentNote,
-                    onBeforeToggle: { updateSpeechCaches() }
-                )
-            }
+            .animation(.easeInOut(duration: 0.22), value: landscape)
         }
     }
 

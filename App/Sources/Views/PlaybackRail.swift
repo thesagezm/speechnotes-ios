@@ -70,7 +70,6 @@ struct PlaybackRail: View {
     var extraTrailing: AnyView? = nil
 
     @EnvironmentObject private var theme: AppTheme
-    @Environment(\.isLandscape) private var isLandscape
 
     /// Matches the portrait PlayerControlsBar's play glyph logic exactly, so
     /// the same state reads the same in both orientations.

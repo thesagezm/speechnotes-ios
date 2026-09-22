@@ -25,7 +25,6 @@ struct ReadAlongView: View {
     let textScale: CGFloat
 
     @EnvironmentObject private var theme: AppTheme
-    @Environment(\.isLandscape) private var isLandscape
 
     /// One paragraph per `\n`-separated block, tracking its UTF-16 start so
     /// a global highlight range can be projected into it. Paragraphs double
@@ -48,9 +47,23 @@ struct ReadAlongView: View {
         UIFont.preferredFont(forTextStyle: .body).pointSize * textScale
     }
 
+    /// This view's own width — landscape is simply "wide" for the rail inset,
+    /// and reading it locally keeps the inset correct on rotation's first
+    /// frame instead of one frame behind the environment value.
+    @State private var proxyWidth: CGFloat = 0
+
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
+                Color.clear
+                    .frame(width: 0, height: 0)
+                    .background(
+                        GeometryReader { geo in
+                            Color.clear
+                                .onAppear { proxyWidth = geo.size.width }
+                                .onChange(of: geo.size.width) { proxyWidth = $0 }
+                        }
+                    )
                 LazyVStack(alignment: .leading, spacing: ReaderSpacing.readAlongRow * theme.readerBlockSpacing) {
                     ForEach(paragraphs) { paragraph in
                         ReadAlongRow(
@@ -66,8 +79,11 @@ struct ReadAlongView: View {
                 }
                 .padding(.leading, 16)
                 // In landscape the trailing playback rail owns ~78pt of the
-                // trailing edge; the text column must not run under it.
-                .padding(.trailing, isLandscape ? 92 : 16)
+                // trailing edge; the text column must not run under it. Read
+                // from the scroll view's own geometry so the inset is right on
+                // the very first frame of the new orientation (an environment
+                // value can arrive a frame late — the tab-rail bug).
+                .padding(.trailing, proxyWidth > 500 ? 92 : 16)
             }
             .onChange(of: activeRange?.lowerBound) { start in
                 guard let start else { return }

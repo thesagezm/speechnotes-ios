@@ -51,30 +51,37 @@ struct BookAudioReaderView: View {
         // Landscape: the cover/title block keeps the leading width and the
         // transport cluster (scrub + prev/play/next) moves to a trailing rail —
         // the short axis is then all reading space (user request).
-        Group {
-            if isLandscape {
-                HStack(spacing: 0) {
-                    audioCoverBlock
-                    audioRail
-                }
-                .overlay(alignment: .bottom) {
-                    chapterBar.padding(.bottom, 8)
-                }
-            } else {
-                VStack(spacing: 0) {
-                    Spacer(minLength: 0)
+        //
+        // Guided rotation (same fix as the EPUB/PDF readers): one
+        // GeometryReader, one content identity, explicit transition. The cover
+        // and chapter list stay mounted across the change.
+        GeometryReader { proxy in
+            let landscape = proxy.size.width > proxy.size.height
+            ZStack(alignment: .bottom) {
+                if landscape {
+                    HStack(spacing: 0) {
+                        audioCoverBlock
+                        audioRail
+                    }
+                    .transition(.opacity.combined(with: .move(edge: .trailing)))
+                } else {
+                    VStack(spacing: 0) {
+                        Spacer(minLength: 0)
 
-                    audioCoverBlock
+                        audioCoverBlock
 
-                    Spacer(minLength: 0)
+                        Spacer(minLength: 0)
 
-                    audioTransport
-                        .padding(.bottom, 12)
+                        audioTransport
+                            .padding(.bottom, 12)
 
-                    chapterBar
-                        .padding(.bottom, 8)
+                        chapterBar
+                            .padding(.bottom, 8)
+                    }
+                    .transition(.opacity)
                 }
             }
+            .animation(.easeInOut(duration: 0.22), value: landscape)
         }
         .navigationTitle(book.title)
         .navigationBarTitleDisplayMode(.inline)
