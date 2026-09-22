@@ -322,11 +322,25 @@ struct MarkdownPreviewView: View {
                 .max() ?? 0
             return min(longestWord + 2, 160)
         }
-        // Padding + inter-column gaps come off the top; the rest is shared.
+        // Joplin-style distribution: the leftover is shared by CONTENT
+        // WEIGHT, not equally. Equal shares give a one-word status chip as
+        // much room as a sentence-long description, which is what made the
+        // old layout look cramped. Weight = average cell text length per
+        // column, so prose columns grow and code columns stay tight.
         let chrome = 16 /*table cell padding both sides*/ + CGFloat(minimums.count + 1) * 8
         let available = max(0, availableWidth - chrome)
-        let share = available / CGFloat(max(1, columnCount))
-        let widths = minimums.map { $0 + share }
+        let weights: [Double] = (0..<columnCount).map { index in
+            let cells = [headers[safe: index] ?? ""] + rows.compactMap { $0[safe: index] ?? "" }
+            let longest = cells.map { $0.count }.max() ?? 1
+            return Double(max(1, longest))
+        }
+        let totalWeight = weights.reduce(0, +)
+        let widths: [CGFloat] = (0..<columnCount).map { index in
+            guard totalWeight > 0 else { return available / CGFloat(max(1, columnCount)) }
+            let share = available * CGFloat(weights[index] / totalWeight)
+            // Never below the word floor — a long word must not be clipped.
+            return max(minimums[index], minimums[index] + share * 0.85)
+        }
         if Self.tableWidthCache.count >= Self.tableWidthCacheLimit {
             Self.tableWidthCache.removeAll()
         }
