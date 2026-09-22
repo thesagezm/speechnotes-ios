@@ -10,8 +10,10 @@ struct SpeechnotesApp: App {
     /// the bar, then the notes list pushes the speaking note.
     @State private var selectedTab: Tab = .notes
 
-    private enum Tab: Hashable, CaseIterable {
+    private enum Tab: Hashable, CaseIterable, Identifiable {
         case notes, books, settings
+
+        var id: Self { self }
 
         var label: String {
             switch self {
