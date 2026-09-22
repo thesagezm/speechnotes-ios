@@ -196,15 +196,30 @@ final class SopranoSpikeTests: XCTestCase {
             let chunk = audioData.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
             samples.append(contentsOf: chunk)
 
-            // Temperature 0.3 / top_k 50 sampling from logits — the reference
-            // loop's numbers. Softmax then draw.
+            // Temperature 0.3 / top_k 50 sampling over the LAST position's
+            // logits — the graph returns [1, seqLen, vocab], so slice the
+            // final position before sampling.
             if step < maxTokens - 1 {
-                let nextToken = Self.sampleNextToken(
-                    logits: (outputs["logits"].map { try? $0.tensorData() as Data } ?? nil) ?? Data(),
-                    temperature: 0.3,
-                    topK: 50,
-                    rng: &rng
-                )
+                let logitsData = (try? outputs["logits"]?.tensorData() as Data) ?? Data()
+                let vocabCount = vocab?.count ?? 0
+                let nextToken: Int
+                if !logitsData.isEmpty, vocabCount > 0 {
+                    let allFloats = logitsData.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+                    let start = allFloats.count - vocabCount
+                    if start >= 0 {
+                        let lastPosition = allFloats[start...]
+                        nextToken = Self.sampleNextToken(
+                            logits: Data(bytes: lastPosition, count: lastPosition.count * MemoryLayout<Float>.size),
+                            temperature: 0.3,
+                            topK: 50,
+                            rng: &rng
+                        )
+                    } else {
+                        nextToken = stopID
+                    }
+                } else {
+                    nextToken = stopID
+                }
                 // The decoded token feeds back as the next input.
                 ids = [nextToken]
                 sequenceLen += 1
