@@ -96,7 +96,8 @@ final class SopranoSpikeTests: XCTestCase {
 
         let decoderSession = try ORTSession(env: env, modelPath: decoder, sessionOptions: options)
         let decoderInputs = (try? decoderSession.inputNames()) ?? []
-        print("SOPRANO-SPIKE decoder inputs: \(decoderInputs)")
+        let decoderOutputs = (try? decoderSession.outputNames()) ?? []
+        print("SOPRANO-SPIKE decoder inputs: \(decoderInputs) outputs: \(decoderOutputs)")
 
         // ---- Autoregressive loop ----
         // Total tokens to generate: the sentence is ~12 tokens, and the
@@ -135,10 +136,11 @@ final class SopranoSpikeTests: XCTestCase {
             }
 
             let stepStart = Date()
-            let outputs = try backboneSession.run(withInputs: inputs, outputNames: Set<String>(), runOptions: nil)
+            let outputs = try backboneSession.run(withInputs: inputs, outputNames: backboneOutputs, runOptions: nil)
             let stepSeconds = Date().timeIntervalSince(stepStart)
 
-            // Collect the refreshed caches.
+            // Collect the refreshed caches (the export names them
+            // present.N.key / present.N.value).
             pastKeys = []
             pastValues = []
             for name in backboneOutputs {
@@ -149,11 +151,15 @@ final class SopranoSpikeTests: XCTestCase {
             XCTAssertEqual(pastKeys.count, 17, "backbone did not return 17 keys at step \(step)")
             XCTAssertEqual(pastValues.count, 17, "backbone did not return 17 values at step \(step)")
 
-            // Hidden states: the output holding [1, 512, window]. The export
-            // names it exactly "hidden_states"; fall back to the last float
-            // output with 3 dimensions.
-            guard let hiddenValue = outputs["hidden_states"] else {
-                XCTFail("backbone has no hidden_states output — got \(backboneOutputs)")
+            // The export names the decoder-facing tensor
+            // `last_hidden_state` (config's typical_hidden_states naming).
+            // Accept either name, and fail loudly with the full output list
+            // if neither is present.
+            let hiddenName = backboneOutputs.contains("last_hidden_state")
+                ? "last_hidden_state"
+                : (backboneOutputs.contains("hidden_states") ? "hidden_states" : nil)
+            guard let hiddenName, let hiddenValue = outputs[hiddenName] else {
+                XCTFail("backbone has no hidden-state output — got \(backboneOutputs)")
                 return
             }
             let hiddenData = try hiddenValue.tensorData() as Data
@@ -168,7 +174,7 @@ final class SopranoSpikeTests: XCTestCase {
             }
             let decoderOutput = try decoderSession.run(
                 withInputs: ["hidden_states": try floatTensor(window, shape: [1, 512, 12])],
-                outputNames: Set<String>(),
+                outputNames: decoderOutputs,
                 runOptions: nil
             )
             guard let audioValue = decoderOutput.first(where: { $0.key != "hidden_states" })?.value
