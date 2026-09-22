@@ -200,26 +200,12 @@ final class SopranoSpikeTests: XCTestCase {
             // logits — the graph returns [1, seqLen, vocab], so slice the
             // final position before sampling.
             if step < maxTokens - 1 {
-                let logitsData = (try? outputs["logits"]?.tensorData() as Data) ?? Data()
-                let vocabCount = vocab?.count ?? 0
-                let nextToken: Int
-                if !logitsData.isEmpty, vocabCount > 0 {
-                    let allFloats = logitsData.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
-                    let start = allFloats.count - vocabCount
-                    if start >= 0 {
-                        let lastPosition = allFloats[start...]
-                        nextToken = Self.sampleNextToken(
-                            logits: Data(bytes: lastPosition, count: lastPosition.count * MemoryLayout<Float>.size),
-                            temperature: 0.3,
-                            topK: 50,
-                            rng: &rng
-                        )
-                    } else {
-                        nextToken = stopID
-                    }
-                } else {
-                    nextToken = stopID
-                }
+                let nextToken = Self.nextToken(
+                    logits: (try? outputs["logits"]?.tensorData() as Data) ?? Data(),
+                    vocabSize: vocab?.count ?? 0,
+                    fallback: stopID,
+                    rng: &rng
+                )
                 // The decoded token feeds back as the next input.
                 ids = [nextToken]
                 sequenceLen += 1
@@ -287,6 +273,37 @@ final class SopranoSpikeTests: XCTestCase {
         return ids
     }
 
+    /// Last position's logits slice -> sampled token. The graph returns
+    /// [1, seqLen, vocab]; take the final position's vocab-sized slice.
+    /// Kept as its own function so the call site stays a one-liner (a nested
+    /// withUnsafeBytes closure inside the loop tripped the type checker's
+    /// complexity budget in CI).
+    static func nextToken(
+        logits: Data,
+        vocabSize: Int,
+        fallback: Int,
+        rng: inout SystemRandomNumberGenerator
+    ) -> Int {
+        guard !logits.isEmpty, vocabSize > 0 else { return fallback }
+        let floats = Self.floats(from: logits)
+        let start = floats.count - vocabSize
+        guard start >= 0 else { return fallback }
+        let lastPosition = Array(floats[start...])
+        return sampleNextToken(
+            logits: Data(bytes: lastPosition, count: lastPosition.count * MemoryLayout<Float>.size),
+            temperature: 0.3,
+            topK: 50,
+            rng: &rng
+        )
+    }
+
+    static func floats(from data: Data) -> [Float] {
+        data.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress else { return [] }
+            return Array(UnsafeBufferPointer(start: base.assumingMemoryBound(to: Float.self), count: data.count / MemoryLayout<Float>.size))
+        }
+    }
+
     /// Temperature + top-k sampling over the last position's logits.
     static func sampleNextToken(
         logits: Data,
@@ -295,7 +312,7 @@ final class SopranoSpikeTests: XCTestCase {
         rng: inout SystemRandomNumberGenerator
     ) -> Int {
         guard !logits.isEmpty else { return 3 }
-        let values = logits.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+        let values = floats(from: logits)
         let vocabSize = values.count
         guard vocabSize > 0 else { return 3 }
         // Top-k indices.
