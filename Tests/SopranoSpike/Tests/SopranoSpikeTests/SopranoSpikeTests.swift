@@ -111,9 +111,9 @@ final class SopranoSpikeTests: XCTestCase {
         var lastHidden: [Float] = []
 
         for step in 0..<maxTokens {
-            let inputIDs = step == 0 ? ids : Array(repeating: stopID, count: 1) // pad token while decoding
+            let inputIDs: [Int64] = step == 0 ? ids.map(Int64.init) : [Int64(stopID)] // pad token while decoding
             let mask = Array(repeating: Int64(1), count: sequenceLen)
-            let positionIDs = Array(stride(from: step == 0 ? 0 : sequenceLen - 1, through: sequenceLen - 1, by: 1))
+            let positionIDs = Array(stride(from: step == 0 ? 0 : sequenceLen - 1, through: sequenceLen - 1, by: 1)).map(Int64.init)
 
             var inputs: [String: ORTValue] = [:]
             inputs["input_ids"] = try int64Tensor(inputIDs, shape: [1, NSNumber(value: inputIDs.count)])
@@ -135,7 +135,7 @@ final class SopranoSpikeTests: XCTestCase {
             }
 
             let stepStart = Date()
-            let outputs = try backboneSession.run(withInputs: inputs, outputNames: nil, runOptions: nil)
+            let outputs = try backboneSession.run(withInputs: inputs, outputNames: Set<String>(), runOptions: nil)
             let stepSeconds = Date().timeIntervalSince(stepStart)
 
             // Collect the refreshed caches.
@@ -220,7 +220,7 @@ final class SopranoSpikeTests: XCTestCase {
             // Zero-length tensors are valid (empty KV caches); ORT accepts a
             // non-nil empty buffer.
             return try ORTValue(
-                tensorData: NSMutable(),
+                tensorData: NSMutableData(),
                 elementType: .float,
                 shape: shape
             )
