@@ -8,11 +8,13 @@ struct VoicePickerSheet: View {
         case kokoro
         case kokoroSmall
         case supertonic
+        case soprano
 
         var engineKind: SpeechPlayer.EngineKind {
             switch self {
             case .kokoroSmall: return .kokoroSmall
             case .supertonic: return .supertonic
+            case .soprano: return .soprano
             case .kokoro: return .kokoroOnnx
             }
         }
@@ -21,6 +23,7 @@ struct VoicePickerSheet: View {
             switch self {
             case .kokoroSmall: return "Kokoro voice (small model)"
             case .supertonic: return "Supertonic voice"
+            case .soprano: return "Soprano voice"
             case .kokoro: return "Kokoro voice"
             }
         }
@@ -41,6 +44,7 @@ struct VoicePickerSheet: View {
         switch scope {
         case .kokoroSmall, .kokoro: return player.voice
         case .supertonic: return player.supertonicVoice
+        case .soprano: return "soprano"
         }
     }
 
@@ -48,6 +52,7 @@ struct VoicePickerSheet: View {
         switch scope {
         case .kokoroSmall: return models.smallIsReady
         case .supertonic: return models.supertonicIsReady
+        case .soprano: return models.sopranoIsReady
         case .kokoro: return models.isReady
         }
     }
@@ -72,6 +77,7 @@ struct VoicePickerSheet: View {
         switch scope {
         case .kokoroSmall: return "recentKokoroSmallVoices"
         case .supertonic: return "recentSupertonicVoices"
+        case .soprano: return "recentSopranoVoices"
         case .kokoro: return "recentKokoroVoices"
         }
     }
@@ -254,6 +260,7 @@ struct VoicePickerSheet: View {
         switch scope {
         case .kokoroSmall, .kokoro: player.voice = descriptor.id
         case .supertonic: player.supertonicVoice = descriptor.id
+        case .soprano: break // single voice — nothing to store
         }
         // An explicit pick during a sounding audition wins over the restore.
         player.cancelAuditionRestore()

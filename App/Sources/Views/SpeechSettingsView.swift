@@ -9,7 +9,8 @@ struct SpeechSettingsView: View {
     @AppStorage("renderMarkdown") private var renderMarkdown = false
 
     private var neuralEngineIsActive: Bool {
-        (player.engineKind == .kokoroOnnx || player.engineKind == .kokoroSmall || player.engineKind == .supertonic)
+        (player.engineKind == .kokoroOnnx || player.engineKind == .kokoroSmall
+            || player.engineKind == .supertonic || player.engineKind == .soprano)
             && !player.usingSystemFallback
     }
 
@@ -25,6 +26,7 @@ struct SpeechSettingsView: View {
         case .kokoroOnnx: return !models.isReady
         case .kokoroSmall: return !models.smallIsReady
         case .supertonic: return !models.supertonicIsReady
+        case .soprano: return !models.sopranoIsReady
         default: return false
         }
     }
@@ -33,6 +35,7 @@ struct SpeechSettingsView: View {
         switch player.engineKind {
         case .kokoroSmall: return .kokoroSmall
         case .supertonic: return .supertonic
+        case .soprano: return .soprano
         default: return .kokoro
         }
     }
@@ -41,6 +44,7 @@ struct SpeechSettingsView: View {
         switch player.engineKind {
         case .kokoroSmall, .kokoroOnnx: return "Kokoro voice"
         case .supertonic: return "Supertonic voice"
+        case .soprano: return "Soprano voice"
         default: return "Kokoro voice"
         }
     }
@@ -158,6 +162,26 @@ struct SpeechSettingsView: View {
                 }
             } header: { Text("Supertonic model") } footer: {
                 Text("Supertone supertonic-3 — flow-matching TTS with 31 languages and 10 voice styles. Large (~399 MB) and CPU-based; keep it as the optional multilingual engine alongside Kokoro.")
+            }
+
+            Section {
+                switch models.sopranoState {
+                case .notDownloaded:
+                    Button { models.startSopranoDownload() } label: {
+                        Label("Download Soprano model (~110 MB)", systemImage: "arrow.down.circle")
+                    }
+                case .downloading(let progress):
+                    ProgressView(value: progress) { Text("Downloading Soprano… \(Int(progress*100))%") }
+                case .failed(let message):
+                    Label("Soprano download failed: \(message)", systemImage: "exclamationmark.triangle")
+                        .font(.footnote)
+                    Button("Retry") { models.startSopranoDownload() }
+                case .ready:
+                    Label("Soprano model ready", systemImage: "checkmark.circle")
+                    Button("Delete Soprano model (frees ~110 MB)", role: .destructive) { models.deleteSopranoModels() }
+                }
+            } header: { Text("Soprano model") } footer: {
+                Text("ekwek/Soprano-1.1-80M (Apache-2.0) — a fast English voice: a Qwen3 backbone with a KV-cached audio decoder, running at roughly real time on the CPU. One voice, ~110 MB, the smallest neural engine here. Numbers and currency are read out as words before they reach the model.")
             }
 
             Section {

@@ -45,6 +45,12 @@ enum VoiceCatalog {
         )
     }
 
+    /// Soprano ships exactly ONE voice — the picker shows it as a single row
+    /// with no gender/accent split, and auditions use the same descriptor.
+    static let soprano: [VoiceDescriptor] = [
+        VoiceDescriptor(id: "soprano", displayName: "Soprano", accent: nil, gender: "Neutral")
+    ]
+
     /// The Supertonic pack — 10 voice styles (M1–M5 male, F1–F5 female),
     /// every one of them speaks all 31 languages.
     static let supertonic: [VoiceDescriptor] = ModelManager.supertonicVoices.map { id in
@@ -72,6 +78,7 @@ enum VoiceCatalog {
     static func descriptors(for kind: SpeechPlayer.EngineKind) -> [VoiceDescriptor] {
         switch kind {
         case .supertonic: return supertonic
+        case .soprano: return soprano
         default: return kokoro
         }
     }
