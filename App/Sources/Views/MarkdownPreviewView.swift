@@ -232,36 +232,58 @@ struct MarkdownPreviewView: View {
         // beside the playback rail), so the screen width over-allocates and
         // the table overflows sideways — which is exactly the "I can see two
         // columns in the other reader but have to pan here" complaint.
-        GeometryReader { proxy in
-            let widths = cachedTableWidths(
-                headers: headers,
-                rows: rows,
-                columnCount: columnCount,
-                availableWidth: proxy.size.width
-            )
+        //
+        // The width MUST come from a GeometryReader that only MEASURES — an
+        // outer GeometryReader wrapping the table collapses to its content's
+        // ideal height, which for a horizontally-scrollable table is zero,
+        // and the table then renders at zero height and overlaps the next
+        // paragraph (device report on the first build of this change). The
+        // reader instead passes its own measured width down, and the table's
+        // geometry reader is attached to the ROW so it measures the actual
+        // column width without affecting layout height.
+        VStack(alignment: .leading, spacing: 0) {
+            GeometryReader { proxy in
+                let widths = cachedTableWidths(
+                    headers: headers,
+                    rows: rows,
+                    columnCount: columnCount,
+                    availableWidth: proxy.size.width
+                )
+                tableGrid(headers: headers, rows: rows, columnCount: columnCount, widths: widths)
+                    .frame(width: proxy.size.width, alignment: .leading)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
 
-            ScrollView(.horizontal, showsIndicators: false) {
-                Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: tableRowSpacing) {
+    @ViewBuilder
+    private func tableGrid(
+        headers: [String],
+        rows: [[String]],
+        columnCount: Int,
+        widths: [CGFloat]
+    ) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: tableRowSpacing) {
+                GridRow {
+                    ForEach(0..<columnCount, id: \.self) { index in
+                        styledText(headers[safe: index] ?? "")
+                            .bold()
+                            .frame(width: widths[safe: index], alignment: .leading)
+                    }
+                }
+                Divider()
+                ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
                     GridRow {
                         ForEach(0..<columnCount, id: \.self) { index in
-                            styledText(headers[safe: index] ?? "")
-                                .bold()
+                            styledText(row[safe: index] ?? "")
                                 .frame(width: widths[safe: index], alignment: .leading)
                         }
                     }
-                    Divider()
-                    ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                        GridRow {
-                            ForEach(0..<columnCount, id: \.self) { index in
-                                styledText(row[safe: index] ?? "")
-                                    .frame(width: widths[safe: index], alignment: .leading)
-                            }
-                        }
-                    }
                 }
-                .padding(tableCellPadding)
-                .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.08)))
             }
+            .padding(tableCellPadding)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.08)))
         }
     }
 
