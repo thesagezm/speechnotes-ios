@@ -18,9 +18,15 @@ final class ModelManager: ObservableObject {
     @Published private(set) var state: State
     @Published private(set) var smallState: State
     @Published private(set) var supertonicState: State
+    @Published private(set) var sopranoState: State
 
     /// Called on the main actor when any model becomes ready.
     var onReady: (() -> Void)?
+
+    var sopranoIsReady: Bool {
+        if case .ready = sopranoState { return true }
+        return false
+    }
 
     /// The 28 voices shipped in the official voice bank (verified on CI).
     static let knownVoices: [String] = [
@@ -150,6 +156,58 @@ final class ModelManager: ObservableObject {
         return true
     }
 
+    // MARK: Soprano model set (v1.7.0 — English neural engine)
+
+    /// ekwek/Soprano-1.1-80M, Apache-2.0, via the community ONNX export
+    /// KevinAHM/soprano-1.1-onnx (Apache-2.0). Two int8 graphs plus the HF
+    /// tokenizer — ~110 MB total, the smallest neural engine in the app.
+    static let sopranoBaseURL = URL(string: "https://huggingface.co/KevinAHM/soprano-1.1-onnx/resolve/main")!
+
+    nonisolated static let sopranoOnnxFiles: [(name: String, bytes: Int64, from: Double)] = [
+        ("soprano_backbone_kv_int8.onnx", 80_939_000, 0.00),
+        ("soprano_decoder_int8.onnx", 30_793_000, 0.72),
+        ("tokenizer.json", 1_630_675, 0.99),
+        ("tokenizer_config.json", 1_366_848, 0.993),
+        ("special_tokens_map.json", 142, 0.996),
+        ("config.json", 1_117, 0.998),
+    ]
+
+    nonisolated static var sopranoDirectory: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Soprano")
+    }
+
+    nonisolated static var sopranoBackboneFileURL: URL {
+        sopranoDirectory.appendingPathComponent("soprano_backbone_kv_int8.onnx")
+    }
+
+    nonisolated static var sopranoDecoderFileURL: URL {
+        sopranoDirectory.appendingPathComponent("soprano_decoder_int8.onnx")
+    }
+
+    nonisolated static var sopranoTokenizerFileURL: URL {
+        sopranoDirectory.appendingPathComponent("tokenizer.json")
+    }
+
+    nonisolated static func sopranoFilesAreValid() -> Bool {
+        let fm = FileManager.default
+        func size(_ url: URL) -> Int64? {
+            (try? fm.attributesOfItem(atPath: url.path))?[.size] as? Int64
+        }
+        // The two graphs carry the whole model; the tokenizer must parse and
+        // carry a usable vocab (a >10 KB size check once rejected every
+        // successful download — validate by parsing, like the Kokoro one).
+        guard size(sopranoBackboneFileURL) ?? 0 > 60_000_000,
+              size(sopranoDecoderFileURL) ?? 0 > 20_000_000
+        else { return false }
+        guard let data = try? Data(contentsOf: sopranoTokenizerFileURL),
+              let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let vocab = (json["model"] as? [String: Any])?["vocab"] as? [String: Int],
+              vocab.count > 1_000
+        else { return false }
+        return true
+    }
+
     nonisolated static var onnxDirectory: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("KokoroOnnx")
@@ -224,6 +282,12 @@ final class ModelManager: ObservableObject {
             Log.shared.info("ModelManager: Supertonic model already present")
         } else {
             supertonicState = .notDownloaded
+        }
+        if Self.sopranoFilesAreValid() {
+            sopranoState = .ready
+            Log.shared.info("ModelManager: Soprano model already present")
+        } else {
+            sopranoState = .notDownloaded
         }
     }
 
@@ -339,6 +403,78 @@ final class ModelManager: ObservableObject {
                     Log.shared.error("ModelManager: Supertonic download failed: \(error)")
                 }
             }
+        }
+    }
+
+    func startSopranoDownload() {
+        if case .downloading = sopranoState { return }
+        guard !sopranoIsReady else { return }
+
+        // ~110 MB payload; 1.5x headroom (PocketPal lesson).
+        if let attrs = try? FileManager.default.attributesOfFileSystem(forPath: NSHomeDirectory()),
+           let free = attrs[.systemFreeSize] as? Int64,
+           free < 250_000_000 {
+            let message = "Not enough free space for Soprano (need ~250 MB, have \(free / 1_000_000) MB)"
+            sopranoState = .failed(message)
+            Log.shared.error("ModelManager: \(message)")
+            return
+        }
+
+        sopranoState = .downloading(progress: 0)
+        Log.shared.info("ModelManager: starting Soprano download (~110 MB)")
+
+        Task.detached { [weak self] in
+            do {
+                for index in 0..<Self.sopranoOnnxFiles.count {
+                    let file = Self.sopranoOnnxFiles[index]
+                    let upper = index + 1 < Self.sopranoOnnxFiles.count
+                        ? Self.sopranoOnnxFiles[index + 1].from
+                        : 1.0
+                    try await self?.download(
+                        from: Self.sopranoBaseURL.appendingPathComponent("onnx/\(file.name)"),
+                        to: Self.sopranoDirectory.appendingPathComponent(file.name),
+                        expectedBytes: file.bytes,
+                        progressRange: file.from...upper,
+                        publishingTo: { [weak self] value in self?.reportSopranoProgress(value) }
+                    )
+                }
+                await MainActor.run {
+                    guard let self else { return }
+                    if Self.sopranoFilesAreValid() {
+                        self.sopranoState = .ready
+                        Log.shared.info("ModelManager: Soprano download complete")
+                        self.onReady?()
+                    } else {
+                        self.sopranoState = .failed("Downloaded Soprano files failed validation")
+                        Log.shared.error("ModelManager: Soprano files failed validation after download")
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    guard let self else { return }
+                    self.sopranoState = .failed(error.localizedDescription)
+                    Log.shared.error("ModelManager: Soprano download failed: \(error)")
+                }
+            }
+        }
+    }
+
+    func deleteSopranoModels() {
+        try? FileManager.default.removeItem(at: Self.sopranoDirectory)
+        for file in Self.sopranoOnnxFiles {
+            let base = Self.sopranoDirectory.appendingPathComponent(file.name)
+            try? FileManager.default.removeItem(at: base.appendingPathExtension("part"))
+            try? FileManager.default.removeItem(at: base.appendingPathExtension("resumeData"))
+            try? FileManager.default.removeItem(at: base.appendingPathExtension("resumeSource"))
+        }
+        sopranoState = .notDownloaded
+        Log.shared.info("ModelManager: Soprano models deleted")
+    }
+
+    private func reportSopranoProgress(_ value: Double) {
+        Task { @MainActor in
+            guard case .downloading = self.sopranoState else { return }
+            self.sopranoState = .downloading(progress: value)
         }
     }
 
