@@ -35,16 +35,7 @@ struct SpeechnotesApp: App {
     /// Onboarding gate — true after the first-run flow finishes or is skipped.
     @AppStorage("hasOnboarded") private var hasOnboarded = false
 
-    /// iPhone-only target: compact vertical size class ⇔ landscape. Injected
-    /// once at the window root (OrientationState.landscapeAware()). Used by
-    /// the TabView so its own bar hides in landscape; the root's rail reads
-    /// the window's geometry directly (see `body`), which is the same signal
-    /// but cannot be missed if the environment value arrives a frame late.
-    @Environment(\.isLandscape) private var isLandscape
-
-    /// Portrait: the standard bottom TabView with labels. In landscape its own
-    /// tab bar hides so the lateral rail is the only destination chrome — no
-    /// two tab bars on screen at once.
+    /// The bottom TabView with labels — in BOTH orientations, by request.
     private var tabContent: some View {
         TabView(selection: $selectedTab) {
             NotesListView()
@@ -57,151 +48,88 @@ struct SpeechnotesApp: App {
                 .tag(Tab.settings)
                 .tabItem { Label("Settings", systemImage: "gearshape") }
         }
-        .toolbar(isLandscape ? .hidden : .visible, for: .tabBar)
-    }
-
-    /// Landscape: icon-only rail on the TRAILING edge — the same side as the
-    /// playback controls, so one thumb reach covers both and the reader keeps
-    /// the leading width. The TabView's own (portrait) bar hides in landscape
-    /// so there is only ever one tab bar. Each row is a 44×56 target with the
-    /// accent pill under the active tab, matching the portrait bar's
-    /// selection language.
-    private var landscapeTabRail: some View {
-        VStack(spacing: 4) {
-            ForEach(Tab.allCases) { tab in
-                Button {
-                    Haptics.tap()
-                    selectedTab = tab
-                } label: {
-                    Image(systemName: tab.icon)
-                        .font(.title3)
-                        .foregroundStyle(selectedTab == tab ? Color.accentColor : .secondary)
-                        .frame(width: 44, height: 56)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(tab.label)
-                // Active indicator — the portrait bar's equivalent, now a
-                // leading pill since the rail sits on the trailing edge.
-                .overlay(alignment: .leading) {
-                    if selectedTab == tab {
-                        Capsule()
-                            .fill(Color.accentColor)
-                            .frame(width: 2, height: 24)
-                    }
-                }
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(.top, 8)
-        .padding(.bottom, 8)
-        .padding(.trailing, 4)
-        .frame(width: 56)
-        .frame(maxHeight: .infinity)
-        .background(.regularMaterial)
-        .overlay(alignment: .leading) {
-            Divider()
-        }
     }
 
     var body: some Scene {
         WindowGroup {
-            GeometryReader { window in
-                let rootIsLandscape = window.size.width > window.size.height
-                // Landscape docks the tab bar to the LEADING edge with icons
-                // only (labels off) — the reading surface keeps every point of
-                // the short axis, and the three destinations stay one
-                // thumb-tap away (user request: "move the tabs lateral, icons
-                // without the words, use a bit more of the lateral space").
-                // Portrait keeps the bottom tab bar with labels, untouched.
-                ZStack(alignment: .trailing) {
-                    tabContent
-                    if rootIsLandscape {
-                        // Trailing, beside the playback rail — one thumb
-                        // reach for both. zIndex above the reader's own rail
-                        // is not needed: the tabs are the outer chrome and the
-                        // reader's rail lives inside the content column.
-                        landscapeTabRail
-                            .transition(.move(edge: .trailing).combined(with: .opacity))
-                            .zIndex(1)
+            // Bottom tab bar in both orientations (the lateral tab rail was
+            // removed by request). The playback controls stay lateral — that
+            // distinction is deliberate.
+            tabContent
+                .accentColor(theme.accentColor)
+                .preferredColorScheme(theme.colorScheme)
+                // Eager StateObject work (engine session setup,
+                // NowPlayingCenter) must NOT run during App.init or inside
+                // the first render transaction — HANDOVER: this is what
+                // crashed the app on launch in LiveContainer. Defer it
+                // past the first committed frame.
+                .onAppear {
+                    let notes = self.notes
+                    player.notesProvider = { [notes] id in
+                        notes.notes.first(where: { $0.id == id })
+                    }
+                    BookPlaybackController.shared.bind(to: player)
+                    Task { @MainActor in
+                        player.wirePlaybackOnce()
                     }
                 }
-                    .animation(.easeInOut(duration: 0.18), value: rootIsLandscape)
-                    .accentColor(theme.accentColor)
-                    .preferredColorScheme(theme.colorScheme)
-                    // Eager StateObject work (engine session setup,
-                    // NowPlayingCenter) must NOT run during App.init or inside
-                    // the first render transaction — HANDOVER: this is what
-                    // crashed the app on launch in LiveContainer. Defer it
-                    // past the first committed frame.
-                    .onAppear {
-                        let notes = self.notes
-                        player.notesProvider = { [notes] id in
-                            notes.notes.first(where: { $0.id == id })
-                        }
-                        BookPlaybackController.shared.bind(to: player)
-                        Task { @MainActor in
-                            player.wirePlaybackOnce()
-                        }
+                // One mini-player for the whole window; per-screen insets
+                // used to ride push/pop transitions and get stuck
+                // mid-screen.
+                // MUST stay ABOVE the .environmentObject(...) calls: a
+                // modifier attached outside the injection node cannot see
+                // the injected objects, and GlobalMiniPlayerOverlay's
+                // @EnvironmentObject player traps (EnvironmentObject.error
+                // → EXC_BREAKPOINT) on the very first layout pass — the
+                // confirmed launch crash (device .ips 2026-09-05 17:39).
+                .globalMiniPlayer()
+                // Landscape flag for the whole tree — drives the lateral
+                // playback rails inside the root size observer (both sit
+                // inside the environmentObject injection below).
+                .landscapeAware()
+                // Toast surface — no environment dependency (uses
+                // ToastCenter.shared), so it can sit beside the mini-player.
+                .appToasts()
+                .onReceive(NotificationCenter.default.publisher(for: .miniPlayerJumpToNote)) { _ in
+                    selectedTab = .notes
+                }
+                .onReceive(NotificationCenter.default.publisher(for: .miniPlayerJumpToBook)) { _ in
+                    // BooksView listens for the same notification and pushes
+                    // the playing book's reader.
+                    selectedTab = .books
+                }
+                // Saves are coalesced in NotesStore; the second the app
+                // could be suspended is the one moment a pending write must
+                // not be lost.
+                .onChange(of: scenePhase) { phase in
+                    if phase != .active {
+                        notes.flushNow()
+                        // Mid-speech: a bookmark lets playback resume where
+                        // it stopped if iOS suspends or kills the process.
+                        player.persistPlaybackBookmark()
                     }
-                    // One mini-player for the whole window; per-screen insets
-                    // used to ride push/pop transitions and get stuck
-                    // mid-screen.
-                    // MUST stay ABOVE the .environmentObject(...) calls: a
-                    // modifier attached outside the injection node cannot see
-                    // the injected objects, and GlobalMiniPlayerOverlay's
-                    // @EnvironmentObject player traps (EnvironmentObject.error
-                    // → EXC_BREAKPOINT) on the very first layout pass — the
-                    // confirmed launch crash (device .ips 2026-09-05 17:39).
-                    .globalMiniPlayer()
-                    // Landscape flag for the whole tree — drives the lateral
-                    // playback rails inside the root size observer (both sit
-                    // inside the environmentObject injection below).
-                    .landscapeAware()
-                    // Toast surface — no environment dependency (uses
-                    // ToastCenter.shared), so it can sit beside the mini-player.
-                    .appToasts()
-                    .onReceive(NotificationCenter.default.publisher(for: .miniPlayerJumpToNote)) { _ in
-                        selectedTab = .notes
+                    if phase == .active {
+                        // Returning from the app switcher / lock screen: if
+                        // iOS suspended us mid-speech, restart from the
+                        // bookmark.
+                        player.resumeIfBookmarkPending()
                     }
-                    .onReceive(NotificationCenter.default.publisher(for: .miniPlayerJumpToBook)) { _ in
-                        // BooksView listens for the same notification and pushes
-                        // the playing book's reader.
-                        selectedTab = .books
-                    }
-                    // Saves are coalesced in NotesStore; the second the app
-                    // could be suspended is the one moment a pending write must
-                    // not be lost.
-                    .onChange(of: scenePhase) { phase in
-                        if phase != .active {
-                            notes.flushNow()
-                            // Mid-speech: a bookmark lets playback resume where
-                            // it stopped if iOS suspends or kills the process.
-                            player.persistPlaybackBookmark()
-                        }
-                        if phase == .active {
-                            // Returning from the app switcher / lock screen: if
-                            // iOS suspended us mid-speech, restart from the
-                            // bookmark.
-                            player.resumeIfBookmarkPending()
-                        }
-                    }
-                    // Environment injection is attached LAST (outermost) so
-                    // every node below it — TabView content AND the mini-player
-                    // modifier — resolves @EnvironmentObject.
-                    .environmentObject(notes)
-                    .environmentObject(player)
-                    .environmentObject(theme)
-                    // First launch only — self-contained, no eager work
-                    // (LiveContainer launch hygiene).
-                    .fullScreenCover(isPresented: Binding(
-                        get: { !hasOnboarded },
-                        set: { if !$0 { hasOnboarded = true } }
-                    )) {
-                        OnboardingView { hasOnboarded = true }
-                            .interactiveDismissDisabled()
-                    }
-            }
+                }
+                // Environment injection is attached LAST (outermost) so
+                // every node below it — TabView content AND the mini-player
+                // modifier — resolves @EnvironmentObject.
+                .environmentObject(notes)
+                .environmentObject(player)
+                .environmentObject(theme)
+                // First launch only — self-contained, no eager work
+                // (LiveContainer launch hygiene).
+                .fullScreenCover(isPresented: Binding(
+                    get: { !hasOnboarded },
+                    set: { if !$0 { hasOnboarded = true } }
+                )) {
+                    OnboardingView { hasOnboarded = true }
+                        .interactiveDismissDisabled()
+                }
         }
     }
 }
