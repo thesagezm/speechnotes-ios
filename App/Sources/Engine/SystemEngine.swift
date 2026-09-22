@@ -130,6 +130,13 @@ final class SystemEngine: NSObject, SpeechEngine {
             self.state = .idle
         }
     }
+
+    /// AVSpeechSynthesizer's real liveness — see SpeechEngine.hasLiveSession.
+    /// Our own `state` is an approximation (it flips on delegate callbacks);
+    /// the synthesizer's flags are ground truth for the player's self-heal.
+    var hasLiveSession: Bool {
+        synthesizer.isSpeaking || synthesizer.isPaused
+    }
 }
 
 extension SystemEngine: AVSpeechSynthesizerDelegate {

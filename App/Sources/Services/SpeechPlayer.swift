@@ -715,8 +715,61 @@ final class SpeechPlayer: ObservableObject {
         }
     }
 
-    private func rebuildEngine() {
+    /// Ends a live session WITHOUT leaving the player wedged.
+    ///
+    /// The engine callbacks install an identity guard (`activeEngine ===
+    /// self.engine`) so a stale engine can't clobber live state. That guard
+    /// is right for stale engines and wrong for the CURRENT one being torn
+    /// down: its `.idle` publish is exactly the transition the player must
+    /// observe. So this method does the state reset itself — the same block
+    /// the callbacks run on `.idle` — and then stops the engine, which
+    /// publishes into a guard that now harmlessly fails.
+    ///
+    /// An abandoned session is a deliberate end, like an explicit stop: the
+    /// bookmark is cleared, NOT persisted, so the abandoned position never
+    /// auto-resumes on the next foreground (the user chose to leave it).
+    private func abandonLiveSession(reason: String) {
+        guard state != .idle else { return }
+        Log.shared.info("SpeechPlayer: abandoning live session (\(reason))")
+        onNaturalFinish = nil
+        clearBookmark()
         engine?.stop()
+        state = .idle
+        lastRawProgress = 0
+        resumeBaseFraction = 0
+        nowPlayingTitle = nil
+        nowPlayingNoteId = nil
+        nowPlayingBookId = nil
+        finishAuditionIfActive()
+        endReadAlong()
+        NowPlayingCenter.shared.clear()
+        NowPlayingCenter.shared.setChapterSkipEnabled(false)
+    }
+
+    /// Self-heal: a state that claims speech while no engine has a live
+    /// session is the wedge (a past rebuild path, a stale callback). The
+    /// engines know whether they are actually running, so ask them before
+    /// trusting our own state. Called at the top of togglePlay.
+    private func healStuckStateIfNeeded() {
+        guard state != .idle else { return }
+        if let engine, engine.hasLiveSession { return }
+        Log.shared.error("SpeechPlayer: state was \(state) with no live session — resetting to idle")
+        abandonLiveSession(reason: "self-heal")
+    }
+
+    private func rebuildEngine() {
+        // A live session belongs to the OLD engine. Stopping it makes that
+        // core publish .idle — but its onStateChanged closure fails the
+        // identity guard below (self.engine has already moved on), so
+        // SpeechPlayer.state would stay stuck at .speaking/.generating with
+        // nothing playing: the mini-player never hides, read-along never
+        // ends, and every later play tap lands on `case .speaking` and pauses
+        // the engine that never started. The user-reported wedge.
+        //
+        // Fix: tear the session down deliberately, THROUGH the same path the
+        // engine callbacks use, BEFORE the engine pointer moves.
+        abandonLiveSession(reason: "engine switch")
+
         scheduleSupertonicIdleUnload()
 
         // The Supertonic set is ~399 MB of resident sessions — release it as
@@ -962,6 +1015,12 @@ final class SpeechPlayer: ObservableObject {
             stop()
             return
         }
+        // Before anything else: if our state claims speech but no engine has
+        // a live session, reset through the same path an engine idle does.
+        // This is the belt to rebuildEngine's braces — even a future path
+        // that forgets the teardown can't wedge the player, because the very
+        // next tap heals it.
+        healStuckStateIfNeeded()
         // Anything that isn't a book speak ends book auto-advance and the
         // book's lock-screen dressing.
         if book == nil {
@@ -1029,13 +1088,19 @@ final class SpeechPlayer: ObservableObject {
         }
     }
 
+    /// An explicit stop is a deliberate end — do NOT let the idle callback
+    /// persist a bookmark (which resumeIfBookmarkPending would replay on the
+    /// next foreground), and do NOT auto-advance the book session.
     func stop() {
-        // An explicit stop is a deliberate end — do NOT let the idle callback
-        // persist a bookmark (which resumeIfBookmarkPending would replay on
-        // the next foreground), and do NOT auto-advance the book session.
         clearBookmark()
         onNaturalFinish = nil
         engine?.stop()
+        // Publish the idle transition directly. The engine's own idle
+        // callback fails the identity guard here (we are not swapping, but
+        // the same wedge mechanism applies when the engine reports idle for
+        // a session we already consider over), so the player's own state
+        // must not depend on it arriving.
+        abandonLiveSession(reason: "explicit stop")
     }
 
     // MARK: - Voice auditions
@@ -1104,14 +1169,28 @@ final class SpeechPlayer: ObservableObject {
 
     /// Idle transition hook — restores whatever the audition changed, unless
     /// the user selected a voice mid-audition.
+    /// Restores whatever the audition changed — but only when the engine is
+    /// STILL the audition's engine. An explicit engine switch made while the
+    /// sample was sounding must win: restoring the pre-audition kind would
+    /// bounce the engine back (another rebuildEngine, another chance to
+    /// wedge) after the user already chose. Only the voice assignments are
+    /// restored; the kind is left as the user set it.
     private func finishAuditionIfActive() {
         guard auditioningVoice != nil else { return }
         if let saved = preAuditionState {
             preAuditionState = nil
             auditioningVoice = nil
-            voice = saved.voice
-            supertonicVoice = saved.supertonicVoice
-            engineKind = saved.kind
+            switch saved.kind {
+            case .kokoroOnnx, .kokoroSmall:
+                voice = saved.voice
+            case .supertonic:
+                supertonicVoice = saved.supertonicVoice
+            case .system:
+                break
+            }
+            if engineKind == saved.kind {
+                engineKind = saved.kind
+            }
         } else {
             auditioningVoice = nil
         }

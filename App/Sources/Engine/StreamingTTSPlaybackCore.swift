@@ -452,6 +452,12 @@ final class StreamingTTSPlaybackCore: NSObject {
         state = .idle
     }
 
+    /// The core's own liveness — the player's self-heal checks this when its
+    /// state claims speech. A core in .idle with no session in flight is
+    /// exactly the "wedged player" signature (engine swap left the UI
+    /// claiming speech nothing was producing).
+    var hasLiveSession: Bool { state != .idle }
+
     // MARK: - Stall watchdog
 
     private func startStallWatchdog() {

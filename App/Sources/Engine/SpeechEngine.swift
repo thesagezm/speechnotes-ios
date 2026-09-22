@@ -32,6 +32,13 @@ protocol SpeechEngine: AnyObject {
     /// the next speak().
     var speed: Float { get set }
 
+    /// True while this engine actually has a session in flight (speaking,
+    /// paused mid-session, or generating). The player uses it to detect its
+    /// own wedged state — `state != .idle` while no engine reports a live
+    /// session means a stale callback or an engine swap left the UI claiming
+    /// speech that nothing is producing (the engine-switch wedge, v1.6.6).
+    var hasLiveSession: Bool { get }
+
     func speak(_ text: String, rateMultiplier: Double)
     func pause()
     func resume()
@@ -48,4 +55,8 @@ extension SpeechEngine {
         get { 1.0 }
         set {}
     }
+    /// Default for engines without an explicit notion of a session — the
+    /// protocol's own state is the only truth available. SystemEngine
+    /// overrides this with the synthesizer's real flags.
+    var hasLiveSession: Bool { true }
 }

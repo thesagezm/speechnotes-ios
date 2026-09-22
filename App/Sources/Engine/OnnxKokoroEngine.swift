@@ -119,6 +119,10 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
     func resume() { core.resume() }
     func stop() { core.stop() }
 
+    /// Core liveness — see SpeechEngine.hasLiveSession (the player's wedge
+    /// self-heal reads it).
+    var hasLiveSession: Bool { core.hasLiveSession }
+
     // MARK: - Model loading (generateQueue)
 
     private func loadModelIfNeeded() {

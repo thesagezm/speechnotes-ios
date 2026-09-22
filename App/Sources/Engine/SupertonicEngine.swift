@@ -147,6 +147,10 @@ final class SupertonicEngine: NSObject, SpeechEngine {
     func resume() { core.resume() }
     func stop() { core.stop() }
 
+    /// Core liveness — see SpeechEngine.hasLiveSession (the player's wedge
+    /// self-heal reads it).
+    var hasLiveSession: Bool { core.hasLiveSession }
+
     // MARK: - Synthesis (generateQueue)
 
     /// One Helper `call` per sentence chunk. `call`'s own internal chunker
