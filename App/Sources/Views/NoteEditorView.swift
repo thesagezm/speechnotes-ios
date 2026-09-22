@@ -606,6 +606,12 @@ struct NoteEditorView: View {
                 .onChange(of: draft) { _ in
                     scheduleDraftSync()
                     scheduleSpeechCacheUpdate()
+                    // Editing restores the hidden chrome — the toolbar and
+                    // title are needed to format and to reach the ⋯ menu.
+                    // Tied to a real edit, not to a caret move: a caret move
+                    // fires on entry to the editor and would cancel the tap
+                    // that just hid the bars.
+                    if immersiveBarsHidden { immersiveBarsHidden = false }
                 }
                 if slashTrigger != nil, !slashMatches.isEmpty {
                     slashMenuOverlay
@@ -636,11 +642,11 @@ struct NoteEditorView: View {
             if slashTrigger != nil { closeSlashMenu() }
             return
         }
-        // Entering the editor from an immersive (chrome-hidden) reading state
-        // restores the chrome: editing needs the toolbar (format bar, ⋯ menu,
-        // title) and restoring on the first caret move is the earliest signal
-        // that the user is editing, not reading.
-        if immersiveBarsHidden { immersiveBarsHidden = false }
+        // Restoring the chrome here would fight the immersive toggle: the
+        // caret moves on entry to the editor, immediately after a tap that
+        // just hid the bars. So the restore is tied to TYPING instead (see
+        // editBody's onChange of draft) — an edit needs the toolbar; a tap
+        // that hid the chrome must win.
         let caret = selectionUTF16?.lowerBound ?? draft.utf16.count
         guard let trigger = MarkdownSlashMenu.detect(in: draft, caretOffset: caret) else {
             if slashTrigger != nil { closeSlashMenu() }
