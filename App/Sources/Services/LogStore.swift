@@ -59,7 +59,7 @@ final class LogStore: ObservableObject {
     private func append(_ level: String, _ message: String) {
         let dateStr = Self.formatter.string(from: Date())
         let entry = Entry(date: dateStr, level: level, message: message)
-        let line = "\(dateStr) [\(level] \(message)\n"
+        let line = "\(dateStr) [\(level)] \(message)\n"
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.entries.append(entry)
