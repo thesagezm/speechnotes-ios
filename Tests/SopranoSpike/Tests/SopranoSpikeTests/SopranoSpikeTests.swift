@@ -163,23 +163,30 @@ final class SopranoSpikeTests: XCTestCase {
                 return
             }
             let hiddenData = try hiddenValue.tensorData() as Data
-            lastHidden = hiddenData.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
-            print("SOPRANO-SPIKE step \(step + 1)/\(maxTokens): \(lastHidden.count) hidden floats in \(String(format: "%.3f", stepSeconds))s")
+            let stepHidden = hiddenData.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+            print("SOPRANO-SPIKE step \(step + 1)/\(maxTokens): \(stepHidden.count) hidden floats in \(String(format: "%.3f", stepSeconds))s")
 
-            // ---- Decoder: a window of 12 hidden states -> audio ----
-            let window = Array(lastHidden.suffix(2048 * 12))
-            guard window.count == 2048 * 12 else {
-                print("SOPRANO-SPIKE window short (\(window.count) floats) — stopping at step \(step)")
-                break
+            // The export returns the FULL sequence's hidden states
+            // ([1, 512, seqLen]) on every step, so accumulate a rolling tail
+            // of the last (12 + 8) steps and take the most recent 12 x 512
+            // frames as the decoder's receptive-field window.
+            hiddenRing.append(stepHidden)
+            if hiddenRing.count > 20 { hiddenRing.removeFirst(hiddenRing.count - 20) }
+            let frames = hiddenRing.suffix(12)
+            let windowFrames = frames.reduce(into: [Float]()) { $0.append(contentsOf: $1) }
+            // Reference shape is [1, 512, 12] = 6144 floats; the export's
+            // frames are 512 wide (config hidden_size).
+            guard windowFrames.count == 512 * 12, let audioName = decoderOutputs.first else {
+                print("SOPRANO-SPIKE decoder window not ready (\(windowFrames.count) floats at step \(step)) — running backbone-only to warm the cache")
+                continue
             }
             let decoderOutput = try decoderSession.run(
-                withInputs: ["hidden_states": try floatTensor(window, shape: [1, 512, 12])],
+                withInputs: ["hidden_states": try floatTensor(windowFrames, shape: [1, 512, 12])],
                 outputNames: Set(decoderOutputs),
                 runOptions: nil
             )
-            guard let audioValue = decoderOutput.first(where: { $0.key != "hidden_states" })?.value
-                    ?? decoderOutput.values.first else {
-                XCTFail("decoder produced no output")
+            guard let audioValue = decoderOutput[audioName] else {
+                XCTFail("decoder produced no \(audioName) output — got \(decoderOutputs)")
                 return
             }
             let audioData = try audioValue.tensorData() as Data
