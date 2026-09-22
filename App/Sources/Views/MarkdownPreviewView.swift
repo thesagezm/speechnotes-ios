@@ -227,49 +227,66 @@ struct MarkdownPreviewView: View {
     @ViewBuilder
     private func tableView(headers: [String], rows: [[String]]) -> some View {
         let columnCount = max(headers.count, rows.map(\.count).max() ?? 0)
-        // A column's floor is the longest single WORD in it, because that is
-        // the narrowest it can ever be without clipping. Share whatever width
-        // is left over equally, so short columns stay tight and long ones get
-        // the room — then let cells wrap inside what they get.
-        //
-        // The whole minimums computation ran per body evaluation on every
-        // visible table (an NSString.boundingRect per WORD per cell), and body
-        // evaluations fire on every playback progress tick. Cached per
-        // (table, font size) — the same bounded-map trick as the span cache.
-        let widths = cachedTableWidths(headers: headers, rows: rows, columnCount: columnCount)
+        // Measure against the CONTAINER width, not UIScreen.main: the reader
+        // sits inside a scroll view's horizontal padding (and, in landscape,
+        // beside the playback rail), so the screen width over-allocates and
+        // the table overflows sideways — which is exactly the "I can see two
+        // columns in the other reader but have to pan here" complaint.
+        GeometryReader { proxy in
+            let widths = cachedTableWidths(
+                headers: headers,
+                rows: rows,
+                columnCount: columnCount,
+                availableWidth: proxy.size.width
+            )
 
-        ScrollView(.horizontal, showsIndicators: false) {
-            Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: tableRowSpacing) {
-                GridRow {
-                    ForEach(0..<columnCount, id: \.self) { index in
-                        styledText(headers[safe: index] ?? "")
-                            .bold()
-                            .frame(width: widths[safe: index], alignment: .leading)
-                    }
-                }
-                Divider()
-                ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+            ScrollView(.horizontal, showsIndicators: false) {
+                Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: tableRowSpacing) {
                     GridRow {
                         ForEach(0..<columnCount, id: \.self) { index in
-                            styledText(row[safe: index] ?? "")
+                            styledText(headers[safe: index] ?? "")
+                                .bold()
                                 .frame(width: widths[safe: index], alignment: .leading)
                         }
                     }
+                    Divider()
+                    ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                        GridRow {
+                            ForEach(0..<columnCount, id: \.self) { index in
+                                styledText(row[safe: index] ?? "")
+                                    .frame(width: widths[safe: index], alignment: .leading)
+                            }
+                        }
+                    }
                 }
+                .padding(tableCellPadding)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.08)))
             }
-            .padding(tableCellPadding)
-            .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.08)))
         }
     }
 
-    /// (headers + rows joined, font size) → column widths. Bounded like the
-    /// span cache; a clear-all on overflow is fine because rebuilding a
-    /// table's width list is a handful of boundingRect calls, not a parse.
+    /// (headers + rows joined, font size, available width) → column widths.
+    /// Bounded like the span cache; a clear-all on overflow is fine because
+    /// rebuilding a table's width list is a handful of boundingRect calls,
+    /// not a parse.
+    ///
+    /// The budget: a column gets its longest-word floor plus an equal share of
+    /// what is left. When the table genuinely cannot fit (a wide table), the
+    /// columns simply exceed the viewport and the horizontal ScrollView pans —
+    /// that case is rare by design (a long SENTENCE wraps; only a long WORD
+    /// pushes a column wide). The old code measured with UIScreen.main, which
+    /// is wrong in landscape and inside the reader's insets; it now uses the
+    /// container width passed in by the caller's GeometryReader.
     private static var tableWidthCache: [String: [CGFloat]] = [:]
     private static let tableWidthCacheLimit = 64
 
-    private func cachedTableWidths(headers: [String], rows: [[String]], columnCount: Int) -> [CGFloat] {
-        let key = "\(headers.joined(separator: "\u{1}"))\u{2}\(rows.map { $0.joined(separator: "\u{1}") }.joined(separator: "\u{2}"))\u{3}\(bodyFontSize)"
+    private func cachedTableWidths(
+        headers: [String],
+        rows: [[String]],
+        columnCount: Int,
+        availableWidth: CGFloat
+    ) -> [CGFloat] {
+        let key = "\(headers.joined(separator: "\u{1}"))\u{2}\(rows.map { $0.joined(separator: "\u{1}") }.joined(separator: "\u{2}"))\u{3}\(bodyFontSize)\u{4}\(availableWidth)"
         if let hit = Self.tableWidthCache[key] { return hit }
         let minimums = (0..<columnCount).map { index -> CGFloat in
             let cells = [headers[safe: index] ?? ""] + rows.compactMap { $0[safe: index] ?? "" }
@@ -279,7 +296,9 @@ struct MarkdownPreviewView: View {
                 .max() ?? 0
             return min(longestWord + 2, 160)
         }
-        let available = max(0, UIScreen.main.bounds.width - 32 - 16 - CGFloat(minimums.count) * 8)
+        // Padding + inter-column gaps come off the top; the rest is shared.
+        let chrome = 16 /*table cell padding both sides*/ + CGFloat(minimums.count + 1) * 8
+        let available = max(0, availableWidth - chrome)
         let share = available / CGFloat(max(1, columnCount))
         let widths = minimums.map { $0 + share }
         if Self.tableWidthCache.count >= Self.tableWidthCacheLimit {

@@ -329,3 +329,56 @@ final class MarkdownTextTests: XCTestCase {
         XCTAssertTrue(MarkdownSlashMenu.filter(prefix: "task").contains { $0.id == "todo" })
     }
 }
+
+    // MARK: - Emoji survival (device report: "notes cannot render emojis")
+
+    /// An emoji is just a character to the parser — it must survive every
+    /// block type verbatim. The preview composes `Text` from the block's
+    /// text, so anything the parser drops is a character the user never sees.
+    func testBlocksPreserveEmojiInParagraphs() {
+        let blocks = MarkdownText.blocks("Hello 🎉 world — café ☕ done ✅")
+        XCTAssertEqual(blocks, [.paragraph("Hello 🎉 world — café ☕ done ✅")])
+    }
+
+    func testBlocksPreserveEmojiInHeadingsListsQuotesAndTables() {
+        let heading = MarkdownText.blocks("# 🗓 Agenda")
+        XCTAssertEqual(heading, [.heading(level: 1, text: "🗓 Agenda")])
+
+        let list = MarkdownText.blocks("- ✅ done\n- 🚧 wip")
+        XCTAssertEqual(list, [
+            .bulletList(items: [
+                MarkdownText.ListItem(text: "✅ done"),
+                MarkdownText.ListItem(text: "🚧 wip"),
+            ])
+        ])
+
+        let quote = MarkdownText.blocks("> 💡 idea")
+        XCTAssertEqual(quote, [.quote("💡 idea")])
+
+        let table = MarkdownText.blocks("| a | b |\n|---|---|\n| 🎉 | ✅ |")
+        XCTAssertEqual(table, [.table(headers: ["a", "b"], rows: [["🎉", "✅"]])])
+    }
+
+    /// Inline runs split text on links/images; emoji must stay inside the
+    /// text runs unchanged (the preview renders runs as composed `Text`).
+    func testInlineRunsPreserveEmoji() {
+        let runs = MarkdownText.inlineRuns("✅ before [link](https://example.com) after 🎉")
+        let joined = runs.map { run -> String in
+            if case .text(let s) = run { return s }
+            return "<non-text>"
+        }.joined()
+        XCTAssertTrue(joined.contains("✅ before"), "emoji before a link lost: \(joined)")
+        XCTAssertTrue(joined.contains("after 🎉"), "emoji after a link lost: \(joined)")
+    }
+
+    /// Emphasis stripping runs several regex passes; a ZWJ-sequence emoji
+    /// (👨‍👩‍👧) contains a zero-width joiner that the speech sanitizer also
+    /// strips — the PREVIEW path must never go through the sanitizer.
+    func testSpeechInlineKeepsEmojiButSanitizerIsSpeechOnly() {
+        let spoken = MarkdownText.speechInline("Party 🎉 tonight")
+        XCTAssertEqual(spoken, "Party 🎉 tonight")
+        // plainText() runs the sanitizer (engines can't pronounce emoji) —
+        // that's expected and is why the preview must not use plainText.
+        let plain = MarkdownText.plainText("Party 🎉 tonight")
+        XCTAssertFalse(plain.contains("🎉"), "sanitizer should strip emoji from SPEECH text")
+    }
