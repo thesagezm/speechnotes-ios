@@ -171,8 +171,8 @@ final class SopranoSpikeTests: XCTestCase {
                 outputNames: Set<String>(),
                 runOptions: nil
             )
-            guard let audioValue = decoderOutput.values.first(where: { $0.key != "hidden_states" })?.value
-                    ?? decoderOutput.values.first?.value else {
+            guard let audioValue = decoderOutput.first(where: { $0.key != "hidden_states" })?.value
+                    ?? decoderOutput.values.first else {
                 XCTFail("decoder produced no output")
                 return
             }
