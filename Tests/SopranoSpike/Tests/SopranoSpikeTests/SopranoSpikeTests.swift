@@ -168,7 +168,7 @@ final class SopranoSpikeTests: XCTestCase {
             }
             let decoderOutput = try decoderSession.run(
                 withInputs: ["hidden_states": try floatTensor(window, shape: [1, 512, 12])],
-                outputNames: nil,
+                outputNames: Set<String>(),
                 runOptions: nil
             )
             guard let audioValue = decoderOutput.values.first(where: { $0.key != "hidden_states" })?.value
