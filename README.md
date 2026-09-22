@@ -3,11 +3,11 @@
 An offline, Speech Note (Linux)-style app for iPhone — built entirely from Linux,
 compiled on GitHub Actions macOS runners, sideloaded via SideStore + LiveContainer.
 
-**Current status: v1.6.0 — Books complete (EPUB, PDF and audiobooks, with
-full TTS for the first two), a reader that scrolls like paper, tables that
-wrap, a photo-grade image viewer, per-notebook export, and a playback
-pipeline that skips a bad sentence with one soft tone instead of retrying
-into dead air.** Pick an
+**Current status: v1.7.0 — Books complete (EPUB, PDF and audiobooks, with
+full TTS for the first two), landscape with the playback controls on a
+lateral rail, a reader that stays put when you open it, spacing you can
+tune, and a playback pipeline that skips a bad sentence with one soft tone
+instead of retrying into dead air.** Pick an
 engine in Speech Settings (listed worst → best), download
 its model once, and notes are spoken fully offline (airplane-mode tested):
 
@@ -15,6 +15,7 @@ its model once, and notes are spoken fully offline (airplane-mode tested):
 |---|---|---|---|
 | Apple (system) | 0 | all system voices | Instant, no download |
 | **Kokoro small** (ONNX, CPU) | ~177 MB | 28 (US/UK, m/f) | Lightweight uint8 tier |
+| **Soprano** (ONNX, CPU) | ~110 MB | 1 (English) | Fast English voice — KV-cached audio decoder, reads numbers/currency as words |
 | **Kokoro** (ONNX, CPU) | ~341 MB | 28 (US/UK, m/f) | Main engine — fp32 quality build |
 | **Supertonic** (ONNX, CPU) | ~399 MB | 10 styles × 31 languages | Multilingual — flow-matching TTS |
 
@@ -24,16 +25,29 @@ same text fails the same way, and the wait for it is silence the listener pays
 for. Text is cleaned at import so the things that used to fail (soft hyphens,
 zero-width joiners, control bytes, embedded-font glyphs) never reach the model.
 
-Reader and reading surfaces, all reworked in v1.6.0 from device reports:
+Reader and reading surfaces (v1.6.1→v1.7.0, all from device reports):
 
-- **The note scrolls like paper.** Overscroll is bounded to the ends, so a
-  short note sits fixed at rest instead of drifting past its edges.
-- **Tables wrap.** Columns take a fair share of the width with a floor at
-  their longest word, and long cells break across lines — the table only
-  scrolls sideways when even a fair share cannot fit.
+- **Landscape, controls on the side.** Rotate the phone: the playback
+  controls become a vertical rail on the trailing edge — voice, play/stop,
+  read-along, a top-down progress strip and the speed slider — leaving the
+  reading surface its full height in both orientations.
+- **Tap to hide the chrome.** One tap on a reading surface hides the nav bar
+  and title; another brings them back. Typing brings them back too, because
+  editing needs the toolbar.
+- **The note stays where you put it.** Scrolling still works; the text stops
+  dead at the ends instead of drifting past them.
+- **Spacing you can tune.** Appearance → Spacing has three sliders — line
+  spacing, space between blocks, and table room (up to 2×) — with the
+  defaults already roomier than the old hardcoded values.
+- **Tables wrap.** Columns take a fair share of the width (weighted by
+  content) with a floor at their longest word, and long cells break across
+  lines — the table only scrolls sideways when even a fair share cannot fit.
 - **The image viewer is a real photo viewer.** Pinch-zoom decelerates and
   anchors on the point under your fingers, double-tap zooms toward where you
   tapped, and a tap while zoomed in zooms back out.
+- **Rotation is smooth.** The reading surfaces hold one layout across
+  orientations and cross-arrange their controls, so the text, caret and
+  scroll position survive the change instead of being rebuilt.
 
 Feature tour:
 
@@ -154,6 +168,7 @@ inside LiveContainer.
 ## Licenses & credits
 
 - [Kokoro](https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX) — Apache-2.0 (model), voice bank from the KokoroTestApp project
+- [Soprano 1.1](https://huggingface.co/ekwek/Soprano-1.1-80M) — Apache-2.0 (Eugene Kwek); [ONNX export](https://huggingface.co/KevinAHM/soprano-1.1-onnx) Apache-2.0
 - [supertonic-3](https://huggingface.co/Supertone/supertonic-3) — Supertone; the vendored Swift Helper is MIT
 - ONNX Runtime (MIT), XcodeGen, and Apple's AVFoundation do the heavy lifting.
 
