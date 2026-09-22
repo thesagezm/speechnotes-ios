@@ -22,11 +22,15 @@ public enum SopranoTextNormalizer {
     /// yields the same string, so calling sites can be liberal.
     public static func normalize(_ text: String) -> String {
         var out = text
-        // Currency BEFORE numbers: its regex needs the digits intact ("$5"),
-        // and expandNumbers would already have rewritten them to "five".
+        // Currency first: its regex needs the digits intact ("$5"), which
+        // expandNumbers would otherwise rewrite to "five".
         out = expandCurrency(out)
-        out = expandNumbers(out)
+        // Ordinals BEFORE plain numbers: expandNumbers' digit pattern matches
+        // the "1" inside "1st" and rewrites it to "one", leaving an orphan
+        // "st" behind (the "onest" bug the tests caught). Expanding the
+        // ordinal first consumes digit + suffix as one unit.
         out = expandOrdinals(out)
+        out = expandNumbers(out)
         out = expandAbbreviations(out)
         out = tidy(out)
         return out
@@ -39,7 +43,10 @@ public enum SopranoTextNormalizer {
     /// reference does ("007" → "zero zero seven" — a leading-zero run is
     /// read digit by digit, which is what a listener expects from a code).
     public static func expandNumbers(_ text: String) -> String {
-        let pattern = #"\d+(?:,\d{3})*(?:\.\d+)?"#
+        // A digit run immediately followed by an ordinal suffix is an ordinal,
+        // not a number — leave it for expandOrdinals (otherwise "1st" loses
+        // its digits and keeps its suffix).
+        let pattern = #"\d+(?:,\d{3})*(?:\.\d+)?(?!(?:st|nd|rd|th)\b)"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return text }
         let ns = text as NSString
         var result = ""
