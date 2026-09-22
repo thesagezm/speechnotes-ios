@@ -32,6 +32,11 @@ struct MarkdownEditorView: UIViewRepresentable {
         tv.smartQuotesType = .no
         tv.smartInsertDeleteType = .no
         tv.keyboardDismissMode = .interactive
+        // No bounce in the editor either — the user asked for the note to feel
+        // static once open, and the editor is the same document. Scrolling
+        // still works; it just stops dead at the ends instead of drifting.
+        tv.alwaysBounceVertical = false
+        tv.bounces = false
         // Gutter inside the text container so text doesn't sit at the very
         // edge of the screen. lineFragmentPadding is the per-line horizontal
         // gutter (UIKit default is 5pt); textContainerInset is the outer

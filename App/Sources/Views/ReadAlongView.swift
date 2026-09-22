@@ -81,6 +81,9 @@ struct ReadAlongView: View {
             .onAppear { rebuildParagraphs() }
             .onChange(of: text) { _ in rebuildParagraphs() }
         }
+        // Static, like the note reader — scrolling works, the text stops dead
+        // at the ends instead of drifting past them (user request).
+        .scrollBounceBehavior(.basedOnSize, axes: [])
         .background(theme.colorScheme == .dark ? Color.black : Color(.systemBackground))
     }
 

@@ -70,12 +70,13 @@ struct MarkdownPreviewView: View {
             // Muliply only Text-bearing content — code is monospaced already.
             .font(.system(size: bodyFontSize))
         }
-        // A reading surface should feel like paper, not like a rubber sheet.
-        // The default vertical bounce let a flick send the whole note drifting
-        // past its edges, which read as "the text is loose". `.basedOnSize`
-        // keeps a short note fixed at rest while a long one still gets the
-        // overscroll affordance at its ends.
-        .scrollBounceBehavior(.basedOnSize, axes: .vertical)
+        // The note should not drift once you open it: vertical bounce is off
+        // entirely (user request — "once I open [a note] it's too easy to
+        // move, make it static"). Scrolling still works; a short note sits
+        // fixed at rest and a long one stops dead at its ends instead of
+        // rubber-banding past them. The pre-v1.6.0 `.basedOnSize` compromise
+        // still let a note drift, so it's gone.
+        .scrollBounceBehavior(.basedOnSize, axes: [])
         .onAppear { refreshCaches() }
         .onChange(of: markdown) { _ in refreshCaches() }
         .sheet(item: $safariURL) { url in
