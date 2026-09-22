@@ -204,6 +204,64 @@ jobs:
           path: supertonic-spike.log
           if-no-files-found: warn
 
+  soprano-spike:
+    name: Soprano spike (validates ONNX contract)
+    runs-on: macos-latest
+    timeout-minutes: 25
+    # Informative and non-blocking by design (matches the other spikes; the
+    # phone is the real bench) — but read this job's results before trusting
+    # the engine. It is the RSS/RTF gate for the A14 device.
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Soprano int8 ONNX assets
+        run: |
+          mkdir -p ~/soprano-spike
+          BASE="https://huggingface.co/KevinAHM/soprano-1.1-onnx/resolve/main"
+          for f in onnx/soprano_backbone_kv_int8.onnx onnx/soprano_decoder_int8.onnx tokenizer.json tokenizer_config.json special_tokens_map.json config.json; do
+            OUT=~/soprano-spike/$(basename "$f")
+            curl -L --retry 3 --progress-bar -o "$OUT" "$BASE/$f"
+          done
+          ls -lh ~/soprano-spike
+
+      - name: Run Soprano spike test
+        id: test
+        run: |
+          set -o pipefail
+          cd Tests/SopranoSpike
+          swift test 2>&1 | tee ../../soprano-spike.log
+
+      - name: Show failure summary
+        if: always()
+        run: |
+          grep -E "SOPRANO-SPIKE|error:|failed|Fatal|Crash|unexpected exit|Executed" soprano-spike.log \
+            | grep -vE "warning:" \
+            | tail -n 40 > soprano-summary.txt || true
+          echo "----- SOPRANO SPIKE SUMMARY -----"
+          cat soprano-summary.txt
+          echo "---------------------------------"
+          if [ -s soprano-summary.txt ] && [ "${{ steps.test.outcome }}" = "failure" ]; then
+            python3 -c "import pathlib; t = pathlib.Path('soprano-summary.txt').read_text()[:5500]; print('::error title=Soprano spike failure::' + t.replace('%', '%25').replace('%0D', '\r').replace('\n', '%0A'))"
+          fi
+
+      - name: Upload sample audio
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soprano-sample
+          path: ~/soprano-spike/sample.wav
+          if-no-files-found: warn
+
+      - name: Upload spike log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soprano-spike-log
+          path: soprano-spike.log
+          if-no-files-found: warn
+
   epub-spike:
     name: EPUB spike (ZipReader/EpubInfo vs real books)
     runs-on: macos-latest
