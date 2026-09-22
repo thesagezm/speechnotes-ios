@@ -136,7 +136,7 @@ final class SopranoSpikeTests: XCTestCase {
             }
 
             let stepStart = Date()
-            let outputs = try backboneSession.run(withInputs: inputs, outputNames: backboneOutputs, runOptions: nil)
+            let outputs = try backboneSession.run(withInputs: inputs, outputNames: Set(backboneOutputs), runOptions: nil)
             let stepSeconds = Date().timeIntervalSince(stepStart)
 
             // Collect the refreshed caches (the export names them
@@ -174,7 +174,7 @@ final class SopranoSpikeTests: XCTestCase {
             }
             let decoderOutput = try decoderSession.run(
                 withInputs: ["hidden_states": try floatTensor(window, shape: [1, 512, 12])],
-                outputNames: decoderOutputs,
+                outputNames: Set(decoderOutputs),
                 runOptions: nil
             )
             guard let audioValue = decoderOutput.first(where: { $0.key != "hidden_states" })?.value
