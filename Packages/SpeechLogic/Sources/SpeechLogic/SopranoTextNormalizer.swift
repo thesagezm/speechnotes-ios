@@ -159,13 +159,15 @@ public enum SopranoTextNormalizer {
     /// a global replace). So: convert the number, then swap its last word
     /// through a table.
     public static func expandOrdinals(_ text: String) -> String {
-        let pattern = #"(\d+)(st|nd|rd|th)\b"#
+        // Replace the WHOLE match (digits + suffix), not just the digits:
+        // appending the words while the suffix stays behind produces
+        // "onest" instead of "first" — the bug the tests caught.
+        let pattern = #"(\d+)(st|nd|rd|th)"#
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return text }
         let ns = text as NSString
         var result = ""
         var cursor = 0
         for match in regex.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
-            guard match.numberOfRanges >= 2 else { continue }
             if match.range.location > cursor {
                 result += ns.substring(with: NSRange(location: cursor, length: match.range.location - cursor))
             }
@@ -175,6 +177,7 @@ public enum SopranoTextNormalizer {
             } else {
                 result += ns.substring(with: match.range)
             }
+            // Consume the entire match (digits AND suffix).
             cursor = match.range.location + match.range.length
         }
         if cursor < ns.length {
@@ -261,7 +264,7 @@ public enum SopranoTextNormalizer {
         let centsText = parts[1].count >= 2 ? String(parts[1].prefix(2)) : parts[1] + "0"
         let cents = Int(centsText) ?? 0
         if cents == 0 { return "\(majorWords) \(majorUnit)" }
-        let minorUnit = (cents == 1) ? minor : minor + "s"
+        let minorUnit = (cents == 1) ? minor : minor
         if let centsWords = integerToWords(cents) {
             return "\(majorWords) \(majorUnit) \(centsWords) \(minorUnit)"
         }
