@@ -130,11 +130,22 @@ final class SopranoSpikeTests: XCTestCase {
                     inputs[name] = try floatTensor([], shape: [1, 1, 0, 128])
                 }
             } else {
-                for (index, name) in backboneInputs.enumerated() where name.contains(".key") {
-                    inputs[name] = pastKeys[index / 2]
-                }
-                for (index, name) in backboneInputs.enumerated() where name.contains(".value") {
-                    inputs[name] = pastValues[index / 2]
+                // Dedicated counters, NOT enumerate indices: the KV names sit
+                // after input_ids/attention_mask/position_ids, so dividing an
+                // absolute index by two walks off the end of the 17-element
+                // cache arrays (the crash the spike just hit).
+                var keyIndex = 0
+                var valueIndex = 0
+                for name in backboneInputs {
+                    if name.contains(".key") {
+                        guard keyIndex < pastKeys.count else { continue }
+                        inputs[name] = pastKeys[keyIndex]
+                        keyIndex += 1
+                    } else if name.contains(".value") {
+                        guard valueIndex < pastValues.count else { continue }
+                        inputs[name] = pastValues[valueIndex]
+                        valueIndex += 1
+                    }
                 }
             }
 
