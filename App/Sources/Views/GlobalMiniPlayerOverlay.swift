@@ -12,16 +12,14 @@ import SwiftUI
 /// Tapping the bar jumps to the speaking content: a playing BOOK routes to
 /// the Books tab (`.miniPlayerJumpToBook`, pushing the book's reader), a
 /// playing note routes to the Notes tab (`.miniPlayerJumpToNote`, where
-/// NotesListView pushes the note).
+/// NotesListView pushes the note). The layout is identical in both
+/// orientations — the tab bar it docks above is back in landscape.
 struct GlobalMiniPlayerOverlay: ViewModifier {
     @EnvironmentObject private var player: SpeechPlayer
     @AppStorage("miniPlayerCollapsed") private var miniPlayerCollapsed = false
-    /// Landscape docks the mini-player to the trailing edge — a bottom bar in
-    /// landscape would eat the short axis the playback rail is there to free.
-    @Environment(\.isLandscape) private var isLandscape
 
     func body(content: Content) -> some View {
-        ZStack(alignment: isLandscape ? .trailing : .bottom) {
+        ZStack(alignment: .bottom) {
             content
 
             // The animation scope wraps ONLY the conditional bar — never the
@@ -30,17 +28,10 @@ struct GlobalMiniPlayerOverlay: ViewModifier {
             // (iOS 26 / LiveContainer).
             Group {
                 if player.showMiniPlayer {
-                    if isLandscape {
-                        // Compact vertical strip: play/stop + progress, no
-                        // tap-to-jump body text — the screen is too short for
-                        // the bar's title row and the rail is already showing
-                        // the same session's state.
-                        MiniPlayerBubble()
-                            .padding(.top, 59)
-                            .padding(.trailing, 8)
-                            .transition(.scale.combined(with: .opacity))
-                            .zIndex(1)
-                    } else if miniPlayerCollapsed {
+                    // Same layout in both orientations now — the bottom tab bar
+                    // returns in landscape (user request), so the mini-player
+                    // keeps its original bottom-docked chrome everywhere.
+                    if miniPlayerCollapsed {
                         MiniPlayerBubble()
                             .frame(maxWidth: .infinity, alignment: .trailing)
                             .padding(.horizontal, 16)
@@ -61,7 +52,6 @@ struct GlobalMiniPlayerOverlay: ViewModifier {
             }
             .animation(.easeInOut(duration: 0.2), value: player.showMiniPlayer)
             .animation(.easeInOut(duration: 0.2), value: miniPlayerCollapsed)
-            .animation(.easeInOut(duration: 0.2), value: isLandscape)
         }
     }
 
