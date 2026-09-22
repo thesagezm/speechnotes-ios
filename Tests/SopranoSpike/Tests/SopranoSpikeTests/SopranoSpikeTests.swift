@@ -109,7 +109,10 @@ final class SopranoSpikeTests: XCTestCase {
         var samples: [Float] = []
         var sequenceLen = ids.count
         var rng = SystemRandomNumberGenerator()
-        var lastHidden: [Float] = []
+        /// Rolling tail of per-step hidden-state frames — the decoder wants the
+        /// last 12 consecutive frames, and the export returns the whole
+        /// sequence each step, so keep the frames and slice the window.
+        var hiddenRing: [[Float]] = []
 
         for step in 0..<maxTokens {
             let inputIDs: [Int64] = step == 0 ? ids.map(Int64.init) : [Int64(stopID)] // pad token while decoding
