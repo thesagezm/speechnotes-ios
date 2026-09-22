@@ -166,7 +166,7 @@ final class SopranoSpikeTests: XCTestCase {
                 return
             }
             let hiddenData = try hiddenValue.tensorData() as Data
-            let stepHidden = hiddenData.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+            let stepHidden = Self.floats(from: hiddenData)
             print("SOPRANO-SPIKE step \(step + 1)/\(maxTokens): \(stepHidden.count) hidden floats in \(String(format: "%.3f", stepSeconds))s")
 
             // The export returns the FULL sequence's hidden states
@@ -193,16 +193,24 @@ final class SopranoSpikeTests: XCTestCase {
                 return
             }
             let audioData = try audioValue.tensorData() as Data
-            let chunk = audioData.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+            let chunk = Self.floats(from: audioData)
             samples.append(contentsOf: chunk)
 
             // Temperature 0.3 / top_k 50 sampling over the LAST position's
             // logits — the graph returns [1, seqLen, vocab], so slice the
             // final position before sampling.
             if step < maxTokens - 1 {
+                let logitsValue: ORTValue? = outputs["logits"]
+                let logitsData: Data
+                if let logitsValue, let raw = try? logitsValue.tensorData() {
+                    logitsData = raw as Data
+                } else {
+                    logitsData = Data()
+                }
+                let vocabCount = vocab?.count ?? 0
                 let nextToken = Self.nextToken(
-                    logits: (try? outputs["logits"]?.tensorData() as Data) ?? Data(),
-                    vocabSize: vocab?.count ?? 0,
+                    logits: logitsData,
+                    vocabSize: vocabCount,
                     fallback: stopID,
                     rng: &rng
                 )
