@@ -16,6 +16,7 @@ final class SpeechPlayer: ObservableObject {
         case kokoroSmall
         case kokoroOnnx
         case supertonic
+        case soprano
 
         var id: String { rawValue }
 
@@ -25,6 +26,7 @@ final class SpeechPlayer: ObservableObject {
             case .system: return "Apple system voice"
             case .kokoroOnnx: return "Kokoro — on-device neural, 28 voices"
             case .supertonic: return "Supertonic — best quality, multilingual"
+            case .soprano: return "Soprano — fast English voice (~110 MB)"
             }
         }
     }
@@ -546,12 +548,17 @@ final class SpeechPlayer: ObservableObject {
             return usingSystemFallback
                 ? "Apple voice (model missing)"
                 : VoiceCatalog.subtitle(for: supertonicVoice, kind: .supertonic)
+        case .soprano:
+            return usingSystemFallback
+                ? "Apple voice (model missing)"
+                : VoiceCatalog.subtitle(for: "soprano", kind: .soprano)
         }
     }
 
     private var engine: (any SpeechEngine)?
     private var onnxEngine: OnnxKokoroEngine?
     private var supertonicEngine: SupertonicEngine?
+    private var sopranoEngine: SopranoEngine?
     private var systemEngine: SystemEngine?
 
     init() {
@@ -779,8 +786,20 @@ final class SpeechPlayer: ObservableObject {
         if engineKind != .supertonic {
             supertonicEngine = nil
         }
+        // Soprano's two int8 graphs are small enough to keep warm; only the
+        // Supertonic set is big enough to force an unload.
+        if engineKind != .soprano {
+            sopranoEngine = nil
+        }
 
-        if engineKind == .supertonic, ModelManager.shared.supertonicIsReady {
+        if engineKind == .soprano, ModelManager.shared.sopranoIsReady {
+            if sopranoEngine == nil {
+                sopranoEngine = SopranoEngine()
+            }
+            engine = sopranoEngine
+            usingSystemFallback = false
+            Log.shared.info("SpeechPlayer: engine → Soprano (English, single voice)")
+        } else if engineKind == .supertonic, ModelManager.shared.supertonicIsReady {
             if supertonicEngine == nil {
                 let supertonic = SupertonicEngine()
                 supertonic.voice = supertonicVoice
@@ -806,7 +825,7 @@ final class SpeechPlayer: ObservableObject {
             }
             systemEngine?.voiceIdentifier = systemVoiceIdentifier
             engine = systemEngine
-            usingSystemFallback = (engineKind == .kokoroOnnx || engineKind == .kokoroSmall || engineKind == .supertonic)
+            usingSystemFallback = (engineKind == .kokoroOnnx || engineKind == .kokoroSmall || engineKind == .supertonic || engineKind == .soprano)
             if usingSystemFallback {
                 Log.shared.info("SpeechPlayer: neural engine selected but model missing — system voice in use")
             }
@@ -1126,6 +1145,8 @@ final class SpeechPlayer: ObservableObject {
         let targetKind: EngineKind
         if ModelManager.supertonicVoices.contains(codename) {
             targetKind = .supertonic
+        } else if codename == "soprano" {
+            targetKind = .soprano
         } else if ModelManager.knownVoices.contains(codename) {
             targetKind = engineKind == .kokoroSmall ? .kokoroSmall : .kokoroOnnx
         } else {
@@ -1142,6 +1163,7 @@ final class SpeechPlayer: ObservableObject {
         switch targetKind {
         case .kokoroSmall: modelReady = ModelManager.shared.smallIsReady
         case .supertonic: modelReady = ModelManager.shared.supertonicIsReady
+        case .soprano: modelReady = ModelManager.shared.sopranoIsReady
         case .kokoroOnnx: modelReady = ModelManager.shared.isReady
         case .system: modelReady = false
         }
@@ -1153,7 +1175,7 @@ final class SpeechPlayer: ObservableObject {
         switch targetKind {
         case .supertonic: supertonicVoice = codename
         case .kokoroOnnx, .kokoroSmall: voice = codename
-        case .system: break
+        case .soprano, .system: break // single-voice engines need no assignment
         }
         auditioningVoice = codename
         let name = VoiceCatalog.shortName(for: codename, kind: targetKind)
@@ -1236,6 +1258,8 @@ final class SpeechPlayer: ObservableObject {
 
         if engineKind == .supertonic, let supertonicEngine {
             supertonicEngine.renderWAV(text: text, title: title, onChunkProgress: progress, completion: finish)
+        } else if engineKind == .soprano, let sopranoEngine {
+            sopranoEngine.renderWAV(text: text, title: title, onChunkProgress: progress, completion: finish)
         } else if let onnxEngine {
             onnxEngine.renderWAV(text: text, title: title, onChunkProgress: progress, completion: finish)
         } else {
