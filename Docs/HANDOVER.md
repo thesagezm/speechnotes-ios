@@ -1,3 +1,69 @@
+## 2026-09-23 addendum #14 — v1.7.0: landscape unlocked, spacing tunable, Soprano
+
+**The orientation question, settled.** `cdf61fd` re-added the two landscape
+plist keys ALONE (version bump only in the same commit) because the v1.2.0
+black screen was traced to exactly those keys and nothing had been allowed to
+ship with them since. CI green (35662428790), IPA verified to carry all three
+orientations, device: **launches clean.** Landscape is unblocked for the
+first time since v1.2.0.
+
+**Lateral playback controls.** PlaybackRail.swift — the trailing-edge rail
+(voice, play/stop, read-along, top-down progress strip, vertical rate
+slider) — in the note editor, EPUB/PDF/audiobook readers. Chapter/page
+steppers stay bottom (navigation, not playback).
+
+**Device-driven rounds, all shipped:**
+- Tap-to-hide chrome (immersive reading). The first restore hook fired on
+  caret placement, cancelling the tap that hid the bars — moved to real
+  edits.
+- A lateral tab rail was built, then REMOVED by request ("the bottom one is
+  just fine"). The playback rail stayed. The mini-player's landscape
+  special-case went with it.
+- Static scrolling: bounce off in the preview, the UITextView and read-along.
+- **Smooth rotation:** the jank was the VStack/HStack swap — structurally
+  different views, so SwiftUI rebuilt the tree and the content unmounted.
+  All four surfaces now measure their own geometry, hold one ZStack, one
+  content identity, cross-arranging controls under a transition.
+
+**Freeze fixes** (the "UI is sticking" report), five per-tick costs removed:
+notes-list memo on a new NotesStore.version counter (the old derivation ran
+on every player publish — progress ~3.3 Hz, slider ~30×/drag); the cover
+JPEG decoded inside NowPlayingCenter.publish's ARGUMENT list (R18, still
+live) now cached on the payload; LogStore's per-line publish coalesced to a
+1 Hz snapshotVersion (LogsView observes it); the editor's first(where:) note
+lookup cached; the preview's emphasis regex + per-word table width math
+cached.
+
+**The engine-switch wedge** (user: "I can't stop the player or do anything
+with TTS"). rebuildEngine() stopped the old engine first; its .idle publish
+failed the identity guard, so SpeechPlayer.state stayed .speaking with no
+audio — every control then operated on a session that never existed.
+abandonLiveSession() does the reset the player itself, and healStuck
+StateIfNeeded() (new SpeechEngine.hasLiveSession on all engines) self-heals
+the next tap, so no future path can wedge it.
+
+**Tables**: the width budget moved off UIScreen.main onto the container
+width measured by a .background GeometryReader (a FOREGROUND one collapses a
+horizontally-scrollable table to zero height — the "table overlaps the next
+paragraph" bug the device caught), and the leftover width is now shared by
+CONTENT WEIGHT instead of equally.
+
+**Soprano 1.1** (ekwek, Apache-2.0) via KevinAHM's ONNX export: two int8
+graphs (~110 MB), 32 kHz, English, one voice. SopranoTextNormalizer (pure,
+9 tests) expands numbers/currency/ordinals because the model has no
+phonemizer — CI caught three real ordering bugs there. SopranoEngine runs on
+StreamingTTSPlaybackCore against the contract the spike established. The
+spike is diagnostics, not a gate: it fails on the runner every time and the
+voice will be judged on device.
+
+Release: version fields → 1.7.0/37 (823813a), README refreshed (b3df12d),
+Docs/PLAN-V1.7.0-SOPRANO.md with the checklist (bdd4f63). **Device round
+pending; no tag, no GitHub Release without the user's say-so.**
+
+PocketTTS: still research-only. Its voices are pre-computed KV-cache states
+(expensive to build on device; the existing iOS ports are CoreML or
+Rust/Candle, not ONNX), and the user chose Soprano-first as the experiment.
+
 # HANDOVER — Speechnotes iOS markdown reader
 
 > **Status: bisect-f at commit `0785f1b` is the new base.**
