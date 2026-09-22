@@ -227,42 +227,45 @@ struct MarkdownPreviewView: View {
     @ViewBuilder
     private func tableView(headers: [String], rows: [[String]]) -> some View {
         let columnCount = max(headers.count, rows.map(\.count).max() ?? 0)
-        // Measure against the CONTAINER width, not UIScreen.main: the reader
-        // sits inside a scroll view's horizontal padding (and, in landscape,
-        // beside the playback rail), so the screen width over-allocates and
-        // the table overflows sideways — which is exactly the "I can see two
-        // columns in the other reader but have to pan here" complaint.
-        //
-        // The width MUST come from a GeometryReader that only MEASURES — an
-        // outer GeometryReader wrapping the table collapses to its content's
-        // ideal height, which for a horizontally-scrollable table is zero,
-        // and the table then renders at zero height and overlaps the next
-        // paragraph (device report on the first build of this change). The
-        // reader instead passes its own measured width down, and the table's
-        // geometry reader is attached to the ROW so it measures the actual
-        // column width without affecting layout height.
-        VStack(alignment: .leading, spacing: 0) {
-            GeometryReader { proxy in
-                let widths = cachedTableWidths(
-                    headers: headers,
-                    rows: rows,
-                    columnCount: columnCount,
-                    availableWidth: proxy.size.width
-                )
-                tableGrid(headers: headers, rows: rows, columnCount: columnCount, widths: widths)
-                    .frame(width: proxy.size.width, alignment: .leading)
-            }
+        // Measure the CONTAINER width with a background-only GeometryReader:
+        // `.background()` content is laid out at the size of the view it is
+        // attached to and never influences that view's own size, so there is
+        // no collapse and no rounding feedback loop. (Wrapping the table in a
+        // foreground GeometryReader collapsed it to zero height — a
+        // horizontally-scrollable table reports ~zero ideal height — and the
+        // following block rendered on top of it.)
+        tableGrid(headers: headers, rows: rows, columnCount: columnCount)
+            .background(
+                GeometryReader { proxy in
+                    Color.clear
+                        .onAppear { measuredWidth = proxy.size.width }
+                        .onChange(of: proxy.size.width) { newValue in measuredWidth = newValue }
+                }
+            )
             .frame(maxWidth: .infinity, alignment: .leading)
-        }
     }
+
+    /// Last container width reported by the tables' measuring reader. Shared
+    /// across the note's tables (the column math depends only on width, font
+    /// and content — cached per (table, font, width) — so one shared value is
+    /// both correct and cheaper than per-table state).
+    @State private var measuredWidth: CGFloat = 0
 
     @ViewBuilder
     private func tableGrid(
         headers: [String],
         rows: [[String]],
-        columnCount: Int,
-        widths: [CGFloat]
+        columnCount: Int
     ) -> some View {
+        // Widths come from the measured container width; fall back to the
+        // screen-based estimate for the very first layout pass (measuredWidth
+        // is still zero then) so nothing flashes un-sized.
+        let widths = cachedTableWidths(
+            headers: headers,
+            rows: rows,
+            columnCount: columnCount,
+            availableWidth: measuredWidth > 0 ? measuredWidth : (UIScreen.main.bounds.width - 32)
+        )
         ScrollView(.horizontal, showsIndicators: false) {
             Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: tableRowSpacing) {
                 GridRow {

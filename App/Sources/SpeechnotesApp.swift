@@ -60,47 +60,47 @@ struct SpeechnotesApp: App {
         .toolbar(isLandscape ? .hidden : .visible, for: .tabBar)
     }
 
-    /// Landscape: icon-only rail on the leading edge. The TabView keeps its
-    /// own (portrait) bar hidden underneath — `.toolbar(.hidden, for:
-    /// .tabBar)` — so the rail is the only destination chrome. Each row is a
-    /// 56pt full-height target with the accent under the active tab, matching
-    /// the portrait bar's selection language.
+    /// Landscape: icon-only rail on the TRAILING edge — the same side as the
+    /// playback controls, so one thumb reach covers both and the reader keeps
+    /// the leading width. The TabView's own (portrait) bar hides in landscape
+    /// so there is only ever one tab bar. Each row is a 44×56 target with the
+    /// accent pill under the active tab, matching the portrait bar's
+    /// selection language.
     private var landscapeTabRail: some View {
-        HStack(spacing: 0) {
-            VStack(spacing: 4) {
-                ForEach(Tab.allCases) { tab in
-                    Button {
-                        Haptics.tap()
-                        selectedTab = tab
-                    } label: {
-                        Image(systemName: tab.icon)
-                            .font(.title3)
-                            .foregroundStyle(selectedTab == tab ? Color.accentColor : .secondary)
-                            .frame(width: 56, height: 44)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(tab.label)
-                    // Active indicator — the portrait bar's equivalent.
-                    .overlay(alignment: .bottom) {
-                        if selectedTab == tab {
-                            Capsule()
-                                .fill(Color.accentColor)
-                                .frame(width: 24, height: 2)
-                        }
+        VStack(spacing: 4) {
+            ForEach(Tab.allCases) { tab in
+                Button {
+                    Haptics.tap()
+                    selectedTab = tab
+                } label: {
+                    Image(systemName: tab.icon)
+                        .font(.title3)
+                        .foregroundStyle(selectedTab == tab ? Color.accentColor : .secondary)
+                        .frame(width: 44, height: 56)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(tab.label)
+                // Active indicator — the portrait bar's equivalent, now a
+                // leading pill since the rail sits on the trailing edge.
+                .overlay(alignment: .leading) {
+                    if selectedTab == tab {
+                        Capsule()
+                            .fill(Color.accentColor)
+                            .frame(width: 2, height: 24)
                     }
                 }
-                Spacer(minLength: 0)
             }
-            .padding(.top, 8)
-            .padding(.bottom, 8)
-            .padding(.leading, 4)
-            .frame(width: 62)
-            .frame(maxHeight: .infinity)
-            .background(.regularMaterial)
-            .overlay(alignment: .trailing) {
-                Divider()
-            }
+            Spacer(minLength: 0)
+        }
+        .padding(.top, 8)
+        .padding(.bottom, 8)
+        .padding(.trailing, 4)
+        .frame(width: 56)
+        .frame(maxHeight: .infinity)
+        .background(.regularMaterial)
+        .overlay(alignment: .leading) {
+            Divider()
         }
     }
 
@@ -114,11 +114,15 @@ struct SpeechnotesApp: App {
                 // thumb-tap away (user request: "move the tabs lateral, icons
                 // without the words, use a bit more of the lateral space").
                 // Portrait keeps the bottom tab bar with labels, untouched.
-                ZStack(alignment: .leading) {
+                ZStack(alignment: .trailing) {
                     tabContent
                     if rootIsLandscape {
+                        // Trailing, beside the playback rail — one thumb
+                        // reach for both. zIndex above the reader's own rail
+                        // is not needed: the tabs are the outer chrome and the
+                        // reader's rail lives inside the content column.
                         landscapeTabRail
-                            .transition(.move(edge: .leading).combined(with: .opacity))
+                            .transition(.move(edge: .trailing).combined(with: .opacity))
                             .zIndex(1)
                     }
                 }
