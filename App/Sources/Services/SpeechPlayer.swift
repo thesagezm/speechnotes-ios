@@ -1207,7 +1207,7 @@ final class SpeechPlayer: ObservableObject {
                 voice = saved.voice
             case .supertonic:
                 supertonicVoice = saved.supertonicVoice
-            case .system:
+            case .soprano, .system:
                 break
             }
             if engineKind == saved.kind {

@@ -218,7 +218,7 @@ final class SopranoEngine: NSObject, SpeechEngine {
             let backboneInputNames = (try? backbone.inputNames()) ?? []
             if step == 0 {
                 for name in backboneInputNames where name.contains(".key") || name.contains(".value") {
-                    inputs[name] = try Self.floatTensor([], shape: [1, 1, 0, Self.hiddenSize])
+                    inputs[name] = try Self.floatTensor([], shape: [NSNumber(value: 1), NSNumber(value: 1), NSNumber(value: 0), NSNumber(value: Self.hiddenSize)])
                 }
             } else {
                 var keyIndex = 0
@@ -268,7 +268,7 @@ final class SopranoEngine: NSObject, SpeechEngine {
             let windowFrames = frames.reduce(into: [Float]()) { $0.append(contentsOf: $1) }
             if windowFrames.count == Self.hiddenSize * Self.decoderWindow {
                 let decoderOutput = try decoder.run(
-                    withInputs: ["hidden_states": try Self.floatTensor(windowFrames, shape: [1, Self.hiddenSize, Self.decoderWindow])],
+                    withInputs: ["hidden_states": try Self.floatTensor(windowFrames, shape: [NSNumber(value: 1), NSNumber(value: Self.hiddenSize), NSNumber(value: Self.decoderWindow)])],
                     outputNames: Self.decoderOutputNames(for: decoder),
                     runOptions: nil
                 )
