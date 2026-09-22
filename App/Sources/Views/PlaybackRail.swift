@@ -94,11 +94,12 @@ struct PlaybackRail: View {
     // MARK: - Progress strip
 
     /// Thin vertical strip on the rail's leading edge — the landscape twin of
-    /// the portrait bar's capsule, filling bottom-up so "more filled = further
-    /// along" reads the same way in both orientations.
+    /// the portrait bar's capsule, filling TOP-DOWN so "further along" runs in
+    /// the same direction a page fills (user request: top→bottom, not the
+    /// bottom-up fill a vertical progress bar would otherwise take).
     private var railProgressStrip: some View {
         GeometryReader { proxy in
-            ZStack(alignment: .bottom) {
+            ZStack(alignment: .top) {
                 Capsule()
                     .fill(Color.secondary.opacity(0.25))
                     .frame(width: 3)
@@ -108,7 +109,7 @@ struct PlaybackRail: View {
                         .frame(width: 3, height: max(4, (proxy.size.height - 16) * progress))
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
         .frame(width: 3)
         .padding(.vertical, 8)

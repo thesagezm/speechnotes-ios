@@ -131,14 +131,15 @@ final class AppTheme: ObservableObject {
         )
     }
 
-    /// Bottom-up variant for the landscape rail's vertical progress strip —
-    /// the strip fills from the bottom, so the fade runs the same way the
-    /// horizontal bars' does along their length.
+    /// Top-down variant for the landscape rail's vertical progress strip —
+    /// the strip fills from the TOP (progress runs the direction a page
+    /// fills), so the fade runs top→bottom. (The portrait bars keep the
+    /// left→right accentFadeGradient.)
     var accentFadeVerticalGradient: LinearGradient {
         LinearGradient(
             colors: [accentColor, accentColor.opacity(0.5)],
-            startPoint: .bottom,
-            endPoint: .top
+            startPoint: .top,
+            endPoint: .bottom
         )
     }
 

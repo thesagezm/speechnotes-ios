@@ -55,6 +55,9 @@ struct NoteEditorView: View {
     /// setting is on; opens in preview (reading) mode, double-tap to edit.
     @State private var showPreview = true
     @AppStorage("renderMarkdown") private var renderMarkdown = false
+    /// Tap-to-hide chrome (immersive reading). Shared app-wide so the note
+    /// reader, the book readers and this preview hide/show together.
+    @AppStorage("immersiveBarsEnabled") private var immersiveBarsHidden = false
     /// Read-along: while THIS note is being spoken, replace the editor with
     /// the sentence-highlighted reader. Toggleable live from the player bar.
     @AppStorage("readAlongEnabled") private var readAlongEnabled = true
@@ -216,16 +219,29 @@ struct NoteEditorView: View {
     /// orientations so read-along / preview / edit switching behaves the same.
     @ViewBuilder
     private var editorContent: some View {
-        if showsReadAlong {
-            ReadAlongView(
-                text: player.activeSpeechText ?? "",
-                activeRange: player.readAlongRange,
-                textScale: theme.previewTextScale
-            )
-        } else if renderMarkdown && showPreview {
-            markdownPreview
-        } else {
-            editBody
+        Group {
+            if showsReadAlong {
+                // Read-along is pure reading — tap toggles the immersive
+                // chrome, same as the preview and the book readers.
+                ReadAlongView(
+                    text: player.activeSpeechText ?? "",
+                    activeRange: player.readAlongRange,
+                    textScale: theme.previewTextScale
+                )
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    Haptics.tap()
+                    immersiveBarsHidden.toggle()
+                }
+            } else if renderMarkdown && showPreview {
+                markdownPreview
+            } else {
+                // Editing: a tap is caret placement, no gesture here — but the
+                // chrome still hides on the shared preference, set from a
+                // reading surface, so leaving reading mode doesn't slam the
+                // bars back. Entering edit mode restores them.
+                editBody
+            }
         }
     }
 
@@ -266,9 +282,16 @@ struct NoteEditorView: View {
         // keeps the bottom PlayerControlsBar. Both drive the exact same player
         // actions — only the placement differs (user request). The chrome
         // (title, toolbar, sheets, lifecycle) is one shared chain either way.
+        //
+        // Immersive chrome: while READING (preview / read-along) a single tap
+        // on the content hides the nav bar + title, another tap brings it
+        // back. The editing branch has no tap gesture — a tap there is caret
+        // placement — but still hides the same chrome when the preference is
+        // on, so leaving edit mode doesn't slam the bars back.
         editorLayout
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar(immersiveBarsHidden ? .hidden : .visible, for: .navigationBar)
             .toolbar {
                 // The title lives IN the nav bar — centered between the back
                 // button and the ⋯ menu — instead of occupying a content row
@@ -531,9 +554,14 @@ struct NoteEditorView: View {
                     Haptics.tap()
                     showPreview = false
                 }
-                // Single tap in preview: no-op — we don't want readers
-                // accidentally switching to edit mode while scrolling.
-                .onTapGesture(count: 1) {}
+                // Single tap in preview: toggles the immersive (tap-to-hide)
+                // chrome — the same gesture everywhere else. We don't want
+                // readers accidentally switching to edit mode while
+                // scrolling, so only the double-tap edits.
+                .onTapGesture(count: 1) {
+                    Haptics.tap()
+                    immersiveBarsHidden.toggle()
+                }
             // Reading-mode indicator with pencil affordance at the corner so
             // the editor hint is discoverable without a double-tap mystery.
             Image(systemName: "pencil.circle.fill")
@@ -608,6 +636,11 @@ struct NoteEditorView: View {
             if slashTrigger != nil { closeSlashMenu() }
             return
         }
+        // Entering the editor from an immersive (chrome-hidden) reading state
+        // restores the chrome: editing needs the toolbar (format bar, ⋯ menu,
+        // title) and restoring on the first caret move is the earliest signal
+        // that the user is editing, not reading.
+        if immersiveBarsHidden { immersiveBarsHidden = false }
         let caret = selectionUTF16?.lowerBound ?? draft.utf16.count
         guard let trigger = MarkdownSlashMenu.detect(in: draft, caretOffset: caret) else {
             if slashTrigger != nil { closeSlashMenu() }

@@ -44,6 +44,8 @@ struct BookAudioReaderView: View {
     }
 
     @Environment(\.isLandscape) private var isLandscape
+    /// Tap-to-hide chrome — shared app-wide (ImmersiveBars.swift).
+    @AppStorage("immersiveBarsEnabled") private var immersiveBarsHidden = false
 
     var body: some View {
         // Landscape: the cover/title block keeps the leading width and the
@@ -76,6 +78,13 @@ struct BookAudioReaderView: View {
         }
         .navigationTitle(book.title)
         .navigationBarTitleDisplayMode(.inline)
+        // Tap the cover to hide/show the title + toolbar (immersive reading).
+        .toolbar(immersiveBarsHidden ? .hidden : .visible, for: .navigationBar)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            Haptics.tap()
+            immersiveBarsHidden.toggle()
+        }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button {
@@ -175,14 +184,15 @@ struct BookAudioReaderView: View {
     }
 
     /// Landscape transport rail: vertical progress strip, a 56pt play/pause,
-    /// chapter steps above and below it, and the time readout. The scrub
-    /// slider stays portrait-only — a horizontal slider is the wrong control
-    /// for a 110pt-tall slot, and the vertical strip already shows position.
+    /// chapter steps above and below it, and the time readout. The strip fills
+    /// TOP-DOWN (same direction as the playback rails) and the scrub slider
+    /// stays portrait-only — a horizontal slider is the wrong control for a
+    /// 110pt-tall slot.
     private var audioRail: some View {
         HStack(spacing: 0) {
             // Vertical position strip (the rail twin of the scrub slider).
             GeometryReader { proxy in
-                ZStack(alignment: .bottom) {
+                ZStack(alignment: .top) {
                     Capsule()
                         .fill(Color.secondary.opacity(0.25))
                         .frame(width: 3)
@@ -190,7 +200,7 @@ struct BookAudioReaderView: View {
                         .fill(theme.accentFadeVerticalGradient)
                         .frame(width: 3, height: max(4, (proxy.size.height - 16) * progress))
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             }
             .frame(width: 3)
             .padding(.vertical, 8)

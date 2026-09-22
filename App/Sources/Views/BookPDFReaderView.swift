@@ -61,6 +61,8 @@ struct BookPDFReaderView: View {
     }
 
     @Environment(\.isLandscape) private var isLandscape
+    /// Tap-to-hide chrome — shared app-wide (ImmersiveBars.swift).
+    @AppStorage("immersiveBarsEnabled") private var immersiveBarsHidden = false
 
     /// Reader + playback, arranged per orientation. Extracted from `body` so
     /// the modifier chain stays lean (type-checker budget).
@@ -148,6 +150,13 @@ struct BookPDFReaderView: View {
         readerLayout
             .navigationTitle(book.title)
             .navigationBarTitleDisplayMode(.inline)
+        // Tap the page to hide/show the title + toolbar (immersive reading).
+        .toolbar(immersiveBarsHidden ? .hidden : .visible, for: .navigationBar)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            Haptics.tap()
+            immersiveBarsHidden.toggle()
+        }
         .toolbar {
             if !outlineRows.isEmpty {
                 ToolbarItem(placement: .topBarTrailing) {

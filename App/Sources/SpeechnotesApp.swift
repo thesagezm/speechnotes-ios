@@ -10,26 +10,111 @@ struct SpeechnotesApp: App {
     /// the bar, then the notes list pushes the speaking note.
     @State private var selectedTab: Tab = .notes
 
-    private enum Tab: Hashable {
+    private enum Tab: Hashable, CaseIterable {
         case notes, books, settings
+
+        var label: String {
+            switch self {
+            case .notes: return "Notes"
+            case .books: return "Books"
+            case .settings: return "Settings"
+            }
+        }
+
+        var icon: String {
+            switch self {
+            case .notes: return "note.text"
+            case .books: return "books.vertical"
+            case .settings: return "gearshape"
+            }
+        }
     }
 
     /// Onboarding gate — true after the first-run flow finishes or is skipped.
     @AppStorage("hasOnboarded") private var hasOnboarded = false
 
+    /// iPhone-only target: compact vertical size class ⇔ landscape. Injected
+    /// once at the window root (OrientationState.landscapeAware()).
+    @Environment(\.isLandscape) private var isLandscape
+
+    /// Portrait: the standard bottom TabView with labels. In landscape its own
+    /// tab bar hides so the lateral rail is the only destination chrome — no
+    /// two tab bars on screen at once.
+    private var tabContent: some View {
+        TabView(selection: $selectedTab) {
+            NotesListView()
+                .tag(Tab.notes)
+                .tabItem { Label("Notes", systemImage: "note.text") }
+            BooksView()
+                .tag(Tab.books)
+                .tabItem { Label("Books", systemImage: "books.vertical") }
+            SettingsTabView()
+                .tag(Tab.settings)
+                .tabItem { Label("Settings", systemImage: "gearshape") }
+        }
+        .toolbar(isLandscape ? .hidden : .visible, for: .tabBar)
+    }
+
+    /// Landscape: icon-only rail on the leading edge. The TabView keeps its
+    /// own (portrait) bar hidden underneath — `.toolbar(.hidden, for:
+    /// .tabBar)` — so the rail is the only destination chrome. Each row is a
+    /// 56pt full-height target with the accent under the active tab, matching
+    /// the portrait bar's selection language.
+    private var landscapeTabRail: some View {
+        HStack(spacing: 0) {
+            VStack(spacing: 4) {
+                ForEach(Tab.allCases) { tab in
+                    Button {
+                        Haptics.tap()
+                        selectedTab = tab
+                    } label: {
+                        Image(systemName: tab.icon)
+                            .font(.title3)
+                            .foregroundStyle(selectedTab == tab ? Color.accentColor : .secondary)
+                            .frame(width: 56, height: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(tab.label)
+                    // Active indicator — the portrait bar's equivalent.
+                    .overlay(alignment: .bottom) {
+                        if selectedTab == tab {
+                            Capsule()
+                                .fill(Color.accentColor)
+                                .frame(width: 24, height: 2)
+                        }
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.top, 8)
+            .padding(.bottom, 8)
+            .padding(.leading, 4)
+            .frame(width: 62)
+            .frame(maxHeight: .infinity)
+            .background(.regularMaterial)
+            .overlay(alignment: .trailing) {
+                Divider()
+            }
+        }
+    }
+
     var body: some Scene {
         WindowGroup {
-            TabView(selection: $selectedTab) {
-                NotesListView()
-                    .tag(Tab.notes)
-                    .tabItem { Label("Notes", systemImage: "note.text") }
-                BooksView()
-                    .tag(Tab.books)
-                    .tabItem { Label("Books", systemImage: "books.vertical") }
-                SettingsTabView()
-                    .tag(Tab.settings)
-                    .tabItem { Label("Settings", systemImage: "gearshape") }
+            // Landscape docks the tab bar to the LEADING edge with icons only
+            // (labels off) — the reading surface keeps every point of the short
+            // axis, and the three destinations stay one thumb-tap away
+            // (user request: "move the tabs lateral, icons without the words,
+            // use a bit more of the lateral space"). Portrait keeps the bottom
+            // tab bar with labels, untouched.
+            ZStack(alignment: .leading) {
+                tabContent
+                if isLandscape {
+                    landscapeTabRail
+                        .transition(.move(edge: .leading).combined(with: .opacity))
+                }
             }
+            .animation(.easeInOut(duration: 0.18), value: isLandscape)
             .accentColor(theme.accentColor)
             .preferredColorScheme(theme.colorScheme)
             // Eager StateObject work (engine session setup, NowPlayingCenter)
