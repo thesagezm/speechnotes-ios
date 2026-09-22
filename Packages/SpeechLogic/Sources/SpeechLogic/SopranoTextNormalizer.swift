@@ -22,9 +22,11 @@ public enum SopranoTextNormalizer {
     /// yields the same string, so calling sites can be liberal.
     public static func normalize(_ text: String) -> String {
         var out = text
+        // Currency BEFORE numbers: its regex needs the digits intact ("$5"),
+        // and expandNumbers would already have rewritten them to "five".
+        out = expandCurrency(out)
         out = expandNumbers(out)
         out = expandOrdinals(out)
-        out = expandCurrency(out)
         out = expandAbbreviations(out)
         out = tidy(out)
         return out
@@ -215,7 +217,7 @@ public enum SopranoTextNormalizer {
     public static func expandCurrency(_ text: String) -> String {
         var out = text
         out = replaceCurrency(out, symbol: "$", major: "dollar", minor: "cent")
-        out = replaceCurrency(out, symbol: "£", major: "pound", minor: "penny")
+        out = replaceCurrency(out, symbol: "£", major: "pound", minor: "pence")
         out = replaceCurrency(out, symbol: "€", major: "euro", minor: "cent")
         return out
     }

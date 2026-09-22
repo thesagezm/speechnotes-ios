@@ -51,7 +51,7 @@ final class SopranoTextNormalizerTests: XCTestCase {
     func testAbbreviations() {
         XCTAssertEqual(SopranoTextNormalizer.normalize("Dr. Smith said"), "Doctor Smith said")
         XCTAssertEqual(SopranoTextNormalizer.normalize("e.g. this"), "for example this")
-        XCTAssertEqual(SopranoTextNormalizer.normalize("cats, dogs, etc. here"), "cats, dogs, et cetera. here")
+        XCTAssertEqual(SopranoTextNormalizer.normalize("cats, dogs, etc. here"), "cats, dogs, et cetera here")
     }
 
     func testIdempotent() {
