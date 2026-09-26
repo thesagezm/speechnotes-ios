@@ -280,20 +280,13 @@ struct BookAudioReaderView: View {
     // MARK: - Chapter bar
 
     /// Chapter bar — visible in BOTH orientations at the bottom of the cover
-    /// column, and reachable while the nav bar (and its Chapters button) is
-    /// tap-hidden. Leading: the chapter list (TOC). Centre: position + title.
-    /// Trailing: chapter stepping, the semantic next/prev the ±15 s skips
-    /// deliberately are not.
+    /// column. The chapter LIST lives in the toolbar's Chapters button only
+    /// (round 5: the second entry point at the bottom was redundant — the
+    /// toolbar is the table of contents, one tap with the chrome visible).
+    /// Centre: position + title. Trailing: chapter stepping, the semantic
+    /// next/prev the ±15 s skips deliberately are not.
     private var chapterBar: some View {
         HStack(spacing: 16) {
-            Button {
-                Haptics.tap()
-                showingChapters = true
-            } label: {
-                Image(systemName: "list.number")
-            }
-            .accessibilityLabel("Chapter list")
-
             Spacer()
             Text(chapterLabel)
                 .font(.caption)

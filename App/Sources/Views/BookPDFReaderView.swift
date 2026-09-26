@@ -298,25 +298,12 @@ struct BookPDFReaderView: View {
 
     private var pageBar: some View {
         HStack {
-            Button {
-                Haptics.tap()
-                showingOutline = true
-            } label: {
-                Image(systemName: "list.bullet")
-            }
-            .accessibilityLabel("Contents")
             Spacer()
             Text(pageCount > 0 ? "Page \(currentPage + 1) of \(pageCount)" : "PDF")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
             Spacer()
-            // Symmetric ghost of the Contents button keeps the page count
-            // genuinely centered.
-            Image(systemName: "list.bullet")
-                .font(.body)
-                .foregroundStyle(.clear)
-                .accessibilityHidden(true)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
@@ -398,7 +385,7 @@ struct BookPDFReaderView: View {
                             Button {
                                 Haptics.tap()
                                 showingOutline = false
-                                pdfView?.go(to: row.destination)
+                                goToPage(row.pageIndex)
                             } label: {
                                 HStack {
                                     Text(row.label)
@@ -419,10 +406,7 @@ struct BookPDFReaderView: View {
                             Button {
                                 Haptics.tap()
                                 showingOutline = false
-                                if let pdfView, let document = pdfView.document,
-                                   let page = document.page(at: chapter.startPage) {
-                                    pdfView.go(to: page)
-                                }
+                                goToPage(chapter.startPage)
                             } label: {
                                 HStack {
                                     Text(chapter.label)
@@ -470,6 +454,22 @@ struct BookPDFReaderView: View {
         currentPage = pageIndex
         if pageCount > 0 { self.pageCount = pageCount }
         store.updatePosition(book, chapterIndex: pageIndex, chapterFraction: 0)
+    }
+
+    /// Navigates by PAGE INDEX, not by the outline's PDFDestination. The
+    /// sheet's rows were flattened against a DIFFERENT PDFDocument instance
+    /// (flattenOutline opens its own), and a destination whose page object
+    /// belongs to another document silently does nothing in PDFKit — the
+    /// round-5 "TOC taps don't go to the page, in-book links do" report. The
+    /// page index is instance-independent; resolving it in the reader's own
+    /// document always lands.
+    private func goToPage(_ index: Int) {
+        guard let pdfView, let document = pdfView.document,
+              index >= 0, index < document.pageCount,
+              let page = document.page(at: index) else { return }
+        pdfView.go(to: page)
+        currentPage = index
+        store.updatePosition(book, chapterIndex: index, chapterFraction: 0)
     }
 
     // MARK: - Read-along page tracking
