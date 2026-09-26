@@ -105,7 +105,6 @@ struct BookAudioReaderView: View {
                 } label: {
                     Label("Chapters", systemImage: "list.number")
                 }
-                .disabled(chapters.count <= 1)
             }
         }
         .sheet(isPresented: $showingChapters) {
@@ -162,7 +161,9 @@ struct BookAudioReaderView: View {
         .frame(maxWidth: .infinity)
     }
 
-    /// Portrait transport cluster: scrub slider, prev / play / next, times.
+    /// Portrait transport cluster: scrub slider, ±15 s skip around the play
+    /// button (the VLC/Apple-Books shape — chapter stepping lives in the
+    /// chapter bar below, which is visible with the chrome hidden too).
     private var audioTransport: some View {
         VStack(spacing: 14) {
             Slider(value: $progress, in: 0...1) { editing in
@@ -171,15 +172,14 @@ struct BookAudioReaderView: View {
             }
             .padding(.horizontal, 24)
 
-            HStack(spacing: 28) {
+            HStack(spacing: 40) {
                 Button {
                     Haptics.tap()
-                    stepChapter(-1)
+                    audioBook.seekBy(-15)
                 } label: {
-                    Image(systemName: "backward.fill")
-                        .font(.title2)
+                    Image(systemName: "gobackward.15")
+                        .font(.system(size: 30))
                 }
-                .disabled(chapterIndex <= 0)
 
                 Button {
                     Haptics.tap()
@@ -191,12 +191,11 @@ struct BookAudioReaderView: View {
 
                 Button {
                     Haptics.tap()
-                    stepChapter(1)
+                    audioBook.seekBy(15)
                 } label: {
-                    Image(systemName: "forward.fill")
-                        .font(.title2)
+                    Image(systemName: "goforward.15")
+                        .font(.system(size: 30))
                 }
-                .disabled(chapterIndex >= chapters.count - 1)
             }
             .foregroundStyle(Color.accentColor)
 
@@ -265,15 +264,20 @@ struct BookAudioReaderView: View {
 
     // MARK: - Chapter bar
 
+    /// Chapter bar — visible in BOTH orientations at the bottom of the cover
+    /// column, and reachable while the nav bar (and its Chapters button) is
+    /// tap-hidden. Leading: the chapter list (TOC). Centre: position + title.
+    /// Trailing: chapter stepping, the semantic next/prev the ±15 s skips
+    /// deliberately are not.
     private var chapterBar: some View {
         HStack(spacing: 16) {
             Button {
                 Haptics.tap()
-                stepChapter(-1)
+                showingChapters = true
             } label: {
-                Image(systemName: "chevron.left")
+                Image(systemName: "list.number")
             }
-            .disabled(chapterIndex <= 0)
+            .accessibilityLabel("Chapter list")
 
             Spacer()
             Text(chapterLabel)
@@ -284,11 +288,21 @@ struct BookAudioReaderView: View {
 
             Button {
                 Haptics.tap()
+                stepChapter(-1)
+            } label: {
+                Image(systemName: "chevron.left")
+            }
+            .disabled(chapterIndex <= 0)
+            .accessibilityLabel("Previous chapter")
+
+            Button {
+                Haptics.tap()
                 stepChapter(1)
             } label: {
                 Image(systemName: "chevron.right")
             }
             .disabled(totalChapters > 0 && chapterIndex >= totalChapters - 1)
+            .accessibilityLabel("Next chapter")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
@@ -373,6 +387,17 @@ struct BookAudioReaderView: View {
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { showingChapters = false }
+                }
+            }
+            .overlay {
+                // VLC's honesty rule: no chapters is a fact about the file,
+                // not a disabled button — say so where the list would be.
+                if chapters.isEmpty {
+                    ContentUnavailableView(
+                        "No chapter markers",
+                        systemImage: "list.number",
+                        description: Text("This audiobook file doesn't carry chapter metadata. Use the ±15 s skip buttons to move around.")
+                    )
                 }
             }
         }

@@ -41,6 +41,9 @@ final class AudioBookPlayer: ObservableObject {
     /// The loaded file's length in seconds — nil while nothing is loaded.
     var fileDuration: Double? { player?.duration }
 
+    /// Cover art for the mini-player thumbnail (loaded once per file).
+    var artworkImage: UIImage? { cachedArtwork }
+
     /// "Chapter 3 of 14 — The Reunion" for the mini-player's subtitle row.
     var chapterLabel: String? {
         guard activeBook != nil, chapters.indices.contains(chapterIndex) else { return nil }
@@ -185,6 +188,25 @@ final class AudioBookPlayer: ObservableObject {
         let target = max(0, min(chapters.count - 1, chapterIndex + delta))
         guard target != chapterIndex, let book = activeBook ?? boundBook else { return }
         play(book: book, chapterIndex: target)
+    }
+
+    /// VLC-style skip: ±N seconds from the playhead. The chapter index is
+    /// re-resolved for the new absolute position, so a skip across a
+    /// chapter boundary moves the chapter (and the lock-screen chapter
+    /// metadata) with it — the old chapter chevrons did nothing on files
+    /// without chapter metadata, which read as "navigation not working".
+    func seekBy(_ seconds: Double) {
+        guard let player else { return }
+        let target = min(max(0, player.currentTime + seconds), max(0, player.duration - 0.05))
+        if let index = chapters.firstIndex(where: { target >= $0.startSeconds && target < $0.endSeconds }) {
+            chapterIndex = index
+        }
+        userPaused = false
+        player.currentTime = target
+        chapterProgress = chapterProgressValue
+        // VLC's rule: republish the full surface right after a seek.
+        publishNowPlaying(force: true)
+        persistPosition(force: true)
     }
 
     /// Scrub to a 0…1 fraction of the CURRENT chapter — the reader's slider.

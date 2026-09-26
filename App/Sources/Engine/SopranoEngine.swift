@@ -265,6 +265,10 @@ final class SopranoEngine: NSObject, SpeechEngine {
         var chunkCounter = Self.decoderChunkFrames
         var decodeRuns = 0
         var prefillSeconds: TimeInterval = 0
+        /// Recent samples for the loop detector (see nextToken call site).
+        var recentTokens: [Int] = []
+        var lastLoopPattern: Set<Int>?
+        var loopBreaks = 0
 
         // Decode the current ring and append only the slice the reference
         // keeps. `tailTokens` = nil for a mid-stream window (fixed slice,
@@ -422,16 +426,35 @@ final class SopranoEngine: NSObject, SpeechEngine {
                     break
                 }
                 let logitsData: Data = try logitsValue.tensorData() as Data
+                // Sampling-loop insurance: the reference's repetition penalty
+                // is presence-based (a token in the set is penalized once,
+                // however often it repeats), so a 1-3-token cycle never
+                // escalates on its own. Detect the cycle and break it this
+                // step with an escalated penalty; top_p 0.95 (the model
+                // card's setting) additionally cuts the tail that feeds such
+                // loops.
+                let loopTokens = Self.loopPatternTokens(in: recentTokens)
+                if !loopTokens.isEmpty, loopTokens != lastLoopPattern {
+                    loopBreaks += 1
+                    Log.shared.warning("SopranoEngine: token loop #\(loopBreaks) — breaking repeated pattern \(loopTokens.sorted()) at step \(step)")
+                }
+                lastLoopPattern = loopTokens.isEmpty ? nil : loopTokens
                 let next = Self.nextToken(
                     logits: logitsData,
                     vocabSize: Self.vocabSize,
                     fallback: stopID,
                     temperature: 0.3,
                     topK: 50,
+                    topP: 0.95,
                     repetitionPenalty: 1.2,
+                    loopPenaltyTokens: loopTokens,
                     seenTokens: seenTokens,
                     rng: &rng
                 )
+                recentTokens.append(next)
+                if recentTokens.count > 16 {
+                    recentTokens.removeFirst(recentTokens.count - 16)
+                }
                 if next == stopID {
                     endReason = "[STOP]"
                     break
@@ -461,7 +484,7 @@ final class SopranoEngine: NSObject, SpeechEngine {
         let duration = Double(samples.count) / core.sampleRate
         let wall = Date().timeIntervalSince(started)
         let rtf = wall / max(duration, 0.01)
-        Log.shared.info("SopranoEngine: chunk done — \(String(format: "%.1f", duration))s audio in \(String(format: "%.2f", wall))s (RTF \(String(format: "%.1f", rtf)), prefill \(String(format: "%.0f", prefillSeconds * 1000)) ms, \(step) steps, \(decodeRuns) decodes, end: \(endReason))")
+        Log.shared.info("SopranoEngine: chunk done — \(String(format: "%.1f", duration))s audio in \(String(format: "%.2f", wall))s (RTF \(String(format: "%.1f", rtf)), prefill \(String(format: "%.0f", prefillSeconds * 1000)) ms, \(step) steps, \(decodeRuns) decodes, \(loopBreaks) loop breaks, end: \(endReason))")
         guard !samples.isEmpty else {
             Log.shared.error("SopranoEngine: chunk produced no audio (\(endReason)) — «\(text.prefix(60))»")
             throw SopranoEngineError.missingOutput
@@ -552,18 +575,22 @@ final class SopranoEngine: NSObject, SpeechEngine {
         return ids
     }
 
-    /// Temperature + top-k sampling over the LAST position's logits (the
-    /// graph returns [1, seqLen, vocab] with the model's vocab size as the
-    /// stride — never tokenIDs.count, which is smaller and produced the
-    /// out-of-bounds Gather crash). Repetition penalty follows the HF
-    /// convention the reference uses: seen logits are scaled, not masked.
+    /// Temperature + top-k + nucleus (top-p) sampling over the LAST
+    /// position's logits (the graph returns [1, seqLen, vocab] with the
+    /// model's vocab size as the stride — never tokenIDs.count, which is
+    /// smaller and produced the out-of-bounds Gather crash). Repetition
+    /// penalty follows the HF convention the reference uses: seen logits are
+    /// scaled, not masked. `loopPenaltyTokens` (a detected repeating cycle)
+    /// take an extra hard cut for this step only.
     static func nextToken(
         logits: Data,
         vocabSize: Int,
         fallback: Int,
         temperature: Double,
         topK: Int,
+        topP: Double = 1.0,
         repetitionPenalty: Double = 1.0,
+        loopPenaltyTokens: Set<Int> = [],
         seenTokens: Set<Int> = [],
         rng: inout SystemRandomNumberGenerator
     ) -> Int {
@@ -587,9 +614,38 @@ final class SopranoEngine: NSObject, SpeechEngine {
                 }
             }
         }
+        if !loopPenaltyTokens.isEmpty {
+            // Presence-based penalties never escalate on a cycle; this one
+            // does, for exactly one step.
+            for token in loopPenaltyTokens where token >= 0 && token < last.count {
+                last[token] /= 3
+            }
+        }
         let sorted = last.indices.sorted { last[$0] > last[$1] }
         let k = min(topK, last.count)
-        let top = Array(sorted.prefix(k))
+        var top = Array(sorted.prefix(k))
+        if topP < 1.0, !top.isEmpty {
+            // Nucleus filter (model card: top_p 0.95): keep the smallest
+            // prefix of the sorted candidates whose softmax mass reaches
+            // topP — the long tail that feeds degenerate loops is cut while
+            // expressiveness stays.
+            let scale = max(0.05, temperature)
+            let maxScaled = Double(last[top[0]]) / scale
+            let exps = top.map { Foundation.exp(Double(last[$0]) / scale - maxScaled) }
+            let total = exps.reduce(0, +)
+            if total > 0 {
+                var cumulative = 0.0
+                var cutoff = top.count
+                for (index, weight) in exps.enumerated() {
+                    cumulative += weight / total
+                    if cumulative >= topP {
+                        cutoff = index + 1
+                        break
+                    }
+                }
+                top = Array(top.prefix(max(1, cutoff)))
+            }
+        }
         let scaled = top.map { Double(last[$0]) / max(0.05, temperature) }
         let maxScaled = scaled.max() ?? 0
         let exps = scaled.map { Foundation.exp($0 - maxScaled) }
@@ -601,6 +657,30 @@ final class SopranoEngine: NSObject, SpeechEngine {
             if draw <= 0 { return top[index] }
         }
         return top[0]
+    }
+
+    /// The tokens of a 1-3-token pattern repeating 4× consecutively at the
+    /// end of the recent history — the fingerprint of a sampling loop. The
+    /// caller escalates their penalty for one step, which slides the pattern
+    /// out of the window naturally (or keeps it suppressed until it does).
+    static func loopPatternTokens(in recent: [Int]) -> Set<Int> {
+        for length in 1...3 {
+            let window = 4 * length
+            guard recent.count >= window else { continue }
+            let tail = Array(recent.suffix(window))
+            let pattern = Array(tail[(tail.count - length)...])
+            var isLoop = true
+            var offset = 0
+            while offset < tail.count {
+                if Array(tail[offset..<(offset + length)]) != pattern {
+                    isLoop = false
+                    break
+                }
+                offset += length
+            }
+            if isLoop { return Set(pattern) }
+        }
+        return []
     }
 }
 

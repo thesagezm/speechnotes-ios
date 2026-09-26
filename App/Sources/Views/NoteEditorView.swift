@@ -399,7 +399,13 @@ struct NoteEditorView: View {
             draft = currentNote?.text ?? ""
             titleDraft = currentNote?.explicitTitle ?? ""
             didLoad = true
-            updateSpeechCaches()
+            // Off-main, like the typed-path update below: a synchronous
+            // MarkdownText.plainText over a long draft ran during the push
+            // itself — the "a note takes a moment to open" report. The play
+            // path is safe: it re-derives the text if the cache is still
+            // empty, and a tap within the first fractions of a second is
+            // unreachable through the transition anyway.
+            scheduleSpeechCacheUpdate()
         }
         // Keep the cached note fresh on real store mutations only — the
         // player's progress ticks never reach this hook.

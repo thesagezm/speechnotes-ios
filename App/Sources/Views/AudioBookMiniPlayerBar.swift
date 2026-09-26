@@ -28,6 +28,23 @@ struct AudioBookMiniPlayerBar: View {
             .padding(.top, 10)
 
             HStack(spacing: 14) {
+                // Cover thumbnail — the VLC mini-player's anchor visual.
+                if let artwork = audioBooks.artworkImage {
+                    Image(uiImage: artwork)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: 40, height: 40)
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .accessibilityHidden(true)
+                } else {
+                    Image(systemName: "book.closed.fill")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 40, height: 40)
+                        .background(Circle().fill(Color.secondary.opacity(0.12)))
+                        .accessibilityHidden(true)
+                }
+
                 Button {
                     Haptics.tap()
                     audioBooks.togglePlay()

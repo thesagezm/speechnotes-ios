@@ -1,22 +1,36 @@
 import UIKit
 
-/// One-shot haptic feedback helpers. Fire-and-forget generators are fine at
-/// this app's frequency; no warm-up bookkeeping needed.
+/// Haptic feedback helpers.
+///
+/// Round-3 device feedback: "haptics are super laggy". The one-shot
+/// generators allocated a new `UIFeedbackGenerator` on EVERY call — allocation
+/// plus the first impact without a prepared generator is exactly the
+/// "half a mississippi" delay on device. The generators are now cached for
+/// the app's lifetime and `prepare()` fires before each impact so the Taptic
+/// engine is warm for the next tap too.
 @MainActor
 enum Haptics {
+    private static let light = UIImpactFeedbackGenerator(style: .light)
+    private static let medium = UIImpactFeedbackGenerator(style: .medium)
+    private static let notification = UINotificationFeedbackGenerator()
+
     static func tap() {
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        light.prepare()
+        light.impactOccurred()
     }
 
     static func press() {
-        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        medium.prepare()
+        medium.impactOccurred()
     }
 
     static func success() {
-        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        notification.prepare()
+        notification.notificationOccurred(.success)
     }
 
     static func warning() {
-        UINotificationFeedbackGenerator().notificationOccurred(.warning)
+        notification.prepare()
+        notification.notificationOccurred(.warning)
     }
 }
