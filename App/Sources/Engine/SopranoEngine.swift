@@ -437,7 +437,7 @@ final class SopranoEngine: NSObject, SpeechEngine {
                 let loopTokens = Self.loopPatternTokens(in: recentTokens)
                 if !loopTokens.isEmpty, loopTokens != lastLoopPattern {
                     loopBreaks += 1
-                    Log.shared.warning("SopranoEngine: token loop #\(loopBreaks) — breaking repeated pattern \(loopTokens.sorted()) at step \(step)")
+                    Log.shared.info("SopranoEngine: token loop #\(loopBreaks) — breaking repeated pattern \(loopTokens.sorted()) at step \(step)")
                 }
                 lastLoopPattern = loopTokens.isEmpty ? nil : loopTokens
                 let next = Self.nextToken(
@@ -543,7 +543,7 @@ final class SopranoEngine: NSObject, SpeechEngine {
             let seqLen = shape[2]
             if !loggedHiddenLayout {
                 loggedHiddenLayout = true
-                Log.shared.warning("SopranoEngine: hidden-state tensor is CHANNEL-first [1, \(hiddenSize), \(seqLen)] — every prior build sliced it wrong")
+                Log.shared.info("SopranoEngine: hidden-state tensor is CHANNEL-first [1, \(hiddenSize), \(seqLen)] — every prior build sliced it wrong")
             }
             var frame = [Float](repeating: 0, count: hiddenSize)
             for channel in 0..<hiddenSize {
