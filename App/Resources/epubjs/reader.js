@@ -93,6 +93,12 @@
       applyTheme(startTheme);
       applyFontSize(startFontSize);
 
+      // Chrome taps: every rendered section's iframe document gets a click
+      // listener (see attachChromeTap below the destroy() wiring).
+      rendition.on("rendered", function (section, view) {
+        attachChromeTap(view);
+      });
+
       rendition.on("relocated", function (location) {
         var start = location && location.start;
         post({
@@ -167,18 +173,30 @@
   };
 
   // --- chrome tap (immersive reading toggle) ---
-  // The reading surface is a WKWebView: it swallows the SwiftUI tap gesture
-  // the reader used to rely on, so a hidden title bar could never be brought
-  // back. A click inside the page that does not land on a link or a text
-  // selection is reported to native, which flips the per-reader chrome.
-  document.addEventListener("click", function (event) {
-    var node = event.target;
-    while (node && node !== document) {
-      if (node.tagName === "A") return;
-      node = node.parentElement;
+  // Book content lives INSIDE epub.js iframes, so a click listener on the
+  // shell document never sees page taps — the round-6 report: tap-to-hide
+  // dead in both orientations. Every rendered section's document gets its
+  // own click listener, which relays to the shell via postMessage (same
+  // origin), and the shell forwards to the native message channel. Taps on
+  // links and text selections stay out of the toggle.
+  function attachChromeTap(view) {
+    var doc = view && view.document;
+    if (!doc) return;
+    doc.addEventListener("click", function (event) {
+      var node = event.target;
+      while (node && node !== doc) {
+        if (node.tagName === "A") return;
+        node = node.parentElement;
+      }
+      var sel = doc.getSelection && doc.getSelection();
+      if (sel && !sel.isCollapsed && String(sel).length > 0) return;
+      try { window.parent.postMessage({ speechnotes: "chromeTap" }, "*"); } catch (e) { /* blocked */ }
+    }, false);
+  }
+
+  window.addEventListener("message", function (event) {
+    if (event.data && event.data.speechnotes === "chromeTap") {
+      post({ type: "chromeTap" });
     }
-    var sel = window.getSelection && window.getSelection();
-    if (sel && !sel.isCollapsed && String(sel).length > 0) return;
-    post({ type: "chromeTap" });
   }, false);
 })();

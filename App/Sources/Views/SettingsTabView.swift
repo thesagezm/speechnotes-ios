@@ -7,14 +7,14 @@ struct SettingsTabView: View {
     /// JEX import picker + result toast state.
     @State private var showingJexImporter = false
     @State private var jexImportMessage: String?
-    /// Navigation path — pushed programmatically when the mini-player asks
-    /// to open the Storage screen for a playing export (round 5).
-    @State private var path = NavigationPath()
+    /// Mini-player jump: push the Storage screen (the playing export's
+    /// player surface) programmatically.
+    @State private var pushStorageForExport = false
 
     private static let jexType = UTType(importedAs: "com.joplin.jex")
 
     var body: some View {
-        NavigationStack(path: $path) {
+        NavigationStack {
             Form {
                 Section("Speech") {
                     NavigationLink("Speech Settings") {
@@ -40,13 +40,14 @@ struct SettingsTabView: View {
                     }
                 }
                 Section("Storage") {
-                    NavigationLink(value: "storage") {
-                        Text("Storage")
-                    }
-                    .navigationDestination(for: String.self) { key in
-                        if key == "storage" {
-                            StorageSettingsView()
-                        }
+                    // Closure-based link (the value-based NavigationLink from
+                    // the first round-6 attempt never registered its
+                    // destination inside the lazy Form row on device — taps
+                    // highlighted and did nothing). The mini-player jump uses
+                    // navigationDestination(isPresented:) at the FORM level,
+                    // which registers reliably.
+                    NavigationLink("Storage") {
+                        StorageSettingsView()
                     }
                 }
                 Section("About") {
@@ -61,7 +62,10 @@ struct SettingsTabView: View {
             .navigationTitle("Settings")
             .onReceive(NotificationCenter.default.publisher(for: .miniPlayerJumpToExports)) { _ in
                 // Mini-player tap on a playing export → its player surface.
-                if path.isEmpty { path.append("storage") }
+                pushStorageForExport = true
+            }
+            .navigationDestination(isPresented: $pushStorageForExport) {
+                StorageSettingsView()
             }
             .fileImporter(
                 isPresented: $showingJexImporter,
