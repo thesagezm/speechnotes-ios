@@ -20,6 +20,16 @@ struct BookReaderView: View {
     @State private var toc: [BookTocEntry] = []
     /// Collapsed TOC row offsets (drop-down tree, round 6).
     @State private var collapsedTocRows: Set<Int> = []
+
+    /// One TOC row: the entry plus its offset in the full list (identity for
+    /// List, and the anchor the collapse state keys on). List needs
+    /// Identifiable data — the tuple I used first picked the wrong overload
+    /// and failed to compile on CI.
+    private struct TocRow: Identifiable {
+        let offset: Int
+        let entry: BookTocEntry
+        var id: Int { offset }
+    }
     @State private var showingTOC = false
     @State private var showingAppearance = false
     @State private var errorMessage: String?
@@ -380,36 +390,36 @@ struct BookReaderView: View {
             // rows with depth become a DROP-DOWN TREE — entries with children
             // fold their subtree behind a chevron (all expanded initially;
             // books whose toc predates depth render flat as before).
-            List(visibleTocRows) { entry in
+            List(visibleTocRows) { row in
                 HStack(spacing: 6) {
                     Button {
                         Haptics.tap()
                         showingTOC = false
-                        goToHref(entry.href)
+                        goToHref(row.entry.href)
                     } label: {
                         HStack {
-                            Text(entry.label)
+                            Text(row.entry.label)
                                 .font(.subheadline)
                                 .foregroundStyle(.primary)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }
-                        .padding(.leading, CGFloat(entry.depth ?? 0) * 14)
+                        .padding(.leading, CGFloat(row.entry.depth ?? 0) * 14)
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
 
-                    if tocHasChildren(entry) {
+                    if tocHasChildren(row) {
                         Button {
                             Haptics.tap()
                             withAnimation(.easeInOut(duration: 0.2)) {
-                                if collapsedTocRows.contains(entry.offset) {
-                                    collapsedTocRows.remove(entry.offset)
+                                if collapsedTocRows.contains(row.offset) {
+                                    collapsedTocRows.remove(row.offset)
                                 } else {
-                                    collapsedTocRows.insert(entry.offset)
+                                    collapsedTocRows.insert(row.offset)
                                 }
                             }
                         } label: {
-                            Image(systemName: collapsedTocRows.contains(entry.offset) ? "chevron.right" : "chevron.down")
+                            Image(systemName: collapsedTocRows.contains(row.offset) ? "chevron.right" : "chevron.down")
                                 .font(.caption.weight(.semibold))
                                 .foregroundStyle(.secondary)
                                 .frame(width: 26, height: 26)
@@ -439,11 +449,12 @@ struct BookReaderView: View {
         .presentationDetents([.medium, .large])
     }
 
-    /// TOC entry at `offset` has children when a following entry sits one
-    /// level deeper before anything at this level or shallower.
-    private func tocHasChildren(_ entry: (offset: Int, entry: BookTocEntry)) -> Bool {
-        guard let depth = entry.entry.depth else { return false }
-        var cursor = entry.offset + 1
+    /// TOC row has children when a following entry sits one level deeper
+    /// before anything at this level or shallower. Flat toc (no depths —
+    /// books parsed before round 6) never shows chevrons.
+    private func tocHasChildren(_ row: TocRow) -> Bool {
+        guard let depth = row.entry.depth else { return false }
+        var cursor = row.offset + 1
         while cursor < toc.count {
             guard let d = toc[cursor].depth else { return false }
             if d <= depth { return false }
@@ -455,9 +466,9 @@ struct BookReaderView: View {
 
     /// The toc minus every subtree under a collapsed row (same stack rule as
     /// the PDF outline tree).
-    private var visibleTocRows: [(offset: Int, entry: BookTocEntry)] {
+    private var visibleTocRows: [TocRow] {
         var collapsedDepths: [Int] = []
-        var out: [(offset: Int, entry: BookTocEntry)] = []
+        var out: [TocRow] = []
         for (offset, entry) in toc.enumerated() {
             let depth = entry.depth ?? 0
             while let top = collapsedDepths.last, depth <= top {
@@ -466,7 +477,7 @@ struct BookReaderView: View {
             if let top = collapsedDepths.last, depth > top {
                 continue
             }
-            out.append((offset, entry))
+            out.append(TocRow(offset: offset, entry: entry))
             if collapsedTocRows.contains(offset) {
                 collapsedDepths.append(depth)
             }

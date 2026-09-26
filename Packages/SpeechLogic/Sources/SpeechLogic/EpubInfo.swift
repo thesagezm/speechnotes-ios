@@ -371,7 +371,7 @@ public enum EpubParser {
                     // Collapses the whitespace runs multi-line labels accumulate.
                     .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
                 if let href = anchorHref, !href.isEmpty, !label.isEmpty, !navs.isEmpty {
-                    navs[navs.count - 1].append(EpubTocEntry(label: label, href: href, depth: olDepth))
+                    navs[navs.count - 1].append(EpubTocEntry(label: label, href: href, depth: max(0, olDepth - 1)))
                 }
             case "ol":
                 olDepth = max(0, olDepth - 1)

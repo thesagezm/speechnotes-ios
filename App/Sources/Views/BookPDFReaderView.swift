@@ -531,7 +531,6 @@ struct BookPDFReaderView: View {
             return
         }
         pdfView.go(to: page)
-        pdfView.currentPage = page
         currentPage = index
         store.updatePosition(book, chapterIndex: index, chapterFraction: 0)
         // A go(to:) issued while the Contents sheet is still animating away
