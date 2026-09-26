@@ -7,11 +7,14 @@ struct SettingsTabView: View {
     /// JEX import picker + result toast state.
     @State private var showingJexImporter = false
     @State private var jexImportMessage: String?
+    /// Navigation path — pushed programmatically when the mini-player asks
+    /// to open the Storage screen for a playing export (round 5).
+    @State private var path = NavigationPath()
 
     private static let jexType = UTType(importedAs: "com.joplin.jex")
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             Form {
                 Section("Speech") {
                     NavigationLink("Speech Settings") {
@@ -37,8 +40,13 @@ struct SettingsTabView: View {
                     }
                 }
                 Section("Storage") {
-                    NavigationLink("Storage") {
-                        StorageSettingsView()
+                    NavigationLink(value: "storage") {
+                        Text("Storage")
+                    }
+                    .navigationDestination(for: String.self) { key in
+                        if key == "storage" {
+                            StorageSettingsView()
+                        }
                     }
                 }
                 Section("About") {
@@ -51,6 +59,10 @@ struct SettingsTabView: View {
                 }
             }
             .navigationTitle("Settings")
+            .onReceive(NotificationCenter.default.publisher(for: .miniPlayerJumpToExports)) { _ in
+                // Mini-player tap on a playing export → its player surface.
+                if path.isEmpty { path.append("storage") }
+            }
             .fileImporter(
                 isPresented: $showingJexImporter,
                 allowedContentTypes: [.data, Self.jexType],

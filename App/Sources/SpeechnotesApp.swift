@@ -102,6 +102,12 @@ struct SpeechnotesApp: App {
                     // the playing book's reader.
                     selectedTab = .books
                 }
+                .onReceive(NotificationCenter.default.publisher(for: .miniPlayerJumpToExports)) { _ in
+                    // Playing export: the Storage screen is its player surface
+                    // (SettingsTabView listens for the same notification and
+                    // pushes Storage).
+                    selectedTab = .settings
+                }
                 // Saves are coalesced in NotesStore; the second the app
                 // could be suspended is the one moment a pending write must
                 // not be lost.
@@ -128,6 +134,7 @@ struct SpeechnotesApp: App {
                 .environmentObject(notes)
                 .environmentObject(player)
                 .environmentObject(audioBooks)
+                .environmentObject(WavPlayer.shared)
                 .environmentObject(theme)
                 // First launch only — self-contained, no eager work
                 // (LiveContainer launch hygiene).

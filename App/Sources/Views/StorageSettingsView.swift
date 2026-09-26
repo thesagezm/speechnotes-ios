@@ -7,7 +7,8 @@ import SpeechLogic
 /// Books library, so this screen is now the only home for that content.
 struct StorageSettingsView: View {
     @StateObject private var exports = ExportsStore()
-    @StateObject private var wavPlayer = WavPlayer()
+    /// Shared so the global mini-player and this screen observe ONE playhead.
+    @ObservedObject private var wavPlayer = WavPlayer.shared
     @EnvironmentObject private var player: SpeechPlayer
     @EnvironmentObject private var notes: NotesStore
     @State private var sharingURL: URL?
@@ -56,12 +57,18 @@ struct StorageSettingsView: View {
         }
         .navigationTitle("Storage")
         .refreshable { exports.refresh() }
-        .onAppear { exports.refresh() }
+        .onAppear {
+            exports.refresh()
+            wavPlayer.miniPlayerSuppressed = true
+        }
         .task { await loadUsage() }
         .sheet(item: $sharingURL) { url in
             ShareSheet(items: [url])
         }
-        .onDisappear { wavPlayer.stop() }
+        .onDisappear {
+            wavPlayer.miniPlayerSuppressed = false
+            wavPlayer.stop()
+        }
         .alert("Clear temporary files?", isPresented: $showingClearConfirm) {
             Button("Cancel", role: .cancel) {}
             Button("Clear", role: .destructive) {
@@ -179,6 +186,14 @@ struct StorageSettingsView: View {
                             .tint(.indigo)
                         }
                 }
+                // The playing export gets the full transport right where it
+                // was started — the "download the note in advance and play
+                // it as I read" surface (round 5). Elsewhere the global
+                // mini-player carries it.
+                if let url = wavPlayer.playingURL,
+                   let item = exports.exports.first(where: { $0.url == url }) {
+                    exportTransport(item)
+                }
                 if exports.exports.count > exportPreviewLimit {
                     Button {
                         withAnimation(.easeInOut(duration: 0.2)) {
@@ -200,6 +215,88 @@ struct StorageSettingsView: View {
                 Text("\(exports.exports.count) file(s) · \(ByteCountFormatter.string(fromByteCount: exports.totalBytes, countStyle: .file))")
             }
         }
+    }
+
+    /// Scrub slider, ±15 s skips and speed for the export currently playing.
+    private func exportTransport(_ item: ExportedAudio) -> some View {
+        VStack(spacing: 10) {
+            Slider(
+                value: Binding(
+                    get: { wavPlayer.progress ?? 0 },
+                    set: { wavPlayer.seek(toFraction: $0) }
+                )
+            )
+            HStack {
+                Text(timeLabel(wavPlayer.currentTime))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text(timeLabel(wavPlayer.duration))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 28) {
+                Button {
+                    Haptics.tap()
+                    wavPlayer.skip(by: -15)
+                } label: {
+                    Image(systemName: "gobackward.15")
+                        .font(.system(size: 22))
+                }
+                .accessibilityLabel("Back 15 seconds")
+
+                Button {
+                    Haptics.tap()
+                    wavPlayer.togglePlay()
+                } label: {
+                    Image(systemName: wavPlayer.isPaused ? "play.circle.fill" : "pause.circle.fill")
+                        .font(.system(size: 36))
+                }
+                .accessibilityLabel(wavPlayer.isPaused ? "Play" : "Pause")
+
+                Button {
+                    Haptics.tap()
+                    wavPlayer.skip(by: 15)
+                } label: {
+                    Image(systemName: "goforward.15")
+                        .font(.system(size: 22))
+                }
+                .accessibilityLabel("Forward 15 seconds")
+
+                Spacer(minLength: 0)
+
+                Menu {
+                    ForEach([0.75, 1.0, 1.25, 1.5, 1.75, 2.0], id: \.self) { value in
+                        Button {
+                            Haptics.tap()
+                            wavPlayer.rate = value
+                        } label: {
+                            if abs(wavPlayer.rate - value) < 0.001 {
+                                Label(String(format: "%.2f×", value), systemImage: "checkmark")
+                            } else {
+                                Text(String(format: "%.2f×", value))
+                            }
+                        }
+                    }
+                } label: {
+                    Text(String(format: "%.2f×", wavPlayer.rate))
+                        .font(.callout.monospacedDigit().weight(.medium))
+                        .foregroundStyle(Color.accentColor)
+                }
+                .accessibilityLabel("Playback speed")
+            }
+            .foregroundStyle(Color.accentColor)
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func timeLabel(_ seconds: TimeInterval) -> String {
+        let total = Int(seconds.rounded())
+        if total >= 3600 {
+            return String(format: "%d:%02d:%02d", total / 3600, (total / 60) % 60, total % 60)
+        }
+        return String(format: "%d:%02d", total / 60, total % 60)
     }
 
     private var visibleExports: [ExportedAudio] {

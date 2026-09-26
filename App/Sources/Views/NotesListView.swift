@@ -516,7 +516,9 @@ struct NotesListView: View {
 
     private func exportNote(_ note: Note) {
         Haptics.tap()
-        player.export(note.text)
+        // The file lands in Documents/Exports named for the TITLE — the old
+        // "Note-2026-…" told the user nothing two days later.
+        player.export(note.text, title: note.title)
     }
 
     private func jumpToPlayingNote() {

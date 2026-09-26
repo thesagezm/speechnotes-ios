@@ -17,7 +17,20 @@ import SwiftUI
 struct GlobalMiniPlayerOverlay: ViewModifier {
     @EnvironmentObject private var player: SpeechPlayer
     @EnvironmentObject private var audioBooks: AudioBookPlayer
+    @EnvironmentObject private var wav: WavPlayer
     @AppStorage("miniPlayerCollapsed") private var miniPlayerCollapsed = false
+
+    /// Which bar owns the dock right now — one at a time, audiobook first
+    /// (its whole point is surviving the reader), then a playing export,
+    /// then the speaking-note bar.
+    private var activeBar: Bar {
+        if audioBooks.showMiniBar { return .audioBook }
+        if wav.showMiniPlayer { return .export }
+        if player.showMiniPlayer { return .note }
+        return .none
+    }
+
+    private enum Bar { case audioBook, export, note, none }
 
     func body(content: Content) -> some View {
         ZStack(alignment: .bottom) {
@@ -28,51 +41,54 @@ struct GlobalMiniPlayerOverlay: ViewModifier {
             // toolbar items rasterize blurry until first interaction
             // (iOS 26 / LiveContainer).
             Group {
-                // An audiobook that is loaded (playing or paused) wins the
-                // dock: its reader left the screen and this bar is how the
-                // book keeps playing across tabs.
-                if audioBooks.showMiniBar {
+                if activeBar != .none {
                     if miniPlayerCollapsed {
-                        AudioBookMiniPlayerBubble()
+                        collapsedBar
                             .frame(maxWidth: .infinity, alignment: .trailing)
                             .padding(.horizontal, 16)
                             .padding(.bottom, 49 + 34 + 8)
                             .transition(.scale.combined(with: .opacity))
                             .zIndex(1)
                     } else {
-                        AudioBookMiniPlayerBar {
-                            jumpToPlayingContent()
-                        }
-                        .padding(.bottom, 49 + 34)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
-                        .zIndex(1)
-                    }
-                } else if player.showMiniPlayer {
-                    // Same layout in both orientations now — the bottom tab bar
-                    // returns in landscape (user request), so the mini-player
-                    // keeps its original bottom-docked chrome everywhere.
-                    if miniPlayerCollapsed {
-                        MiniPlayerBubble()
-                            .frame(maxWidth: .infinity, alignment: .trailing)
-                            .padding(.horizontal, 16)
-                            .padding(.bottom, 49 + 34 + 8)
-                            .transition(.scale.combined(with: .opacity))
+                        expandedBar
+                            .padding(.bottom, 49 + 34)
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
                             .zIndex(1)
-                    } else {
-                        MiniPlayerBar {
-                            jumpToPlayingContent()
-                        }
-                        // Standard tab bar (49pt) + safe-area bottom inset = lift
-                        // the mini player just above the Notes/Books/Settings tabs.
-                        .padding(.bottom, 49 + 34)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
-                        .zIndex(1)
                     }
                 }
             }
             .animation(.easeInOut(duration: 0.2), value: player.showMiniPlayer)
             .animation(.easeInOut(duration: 0.2), value: audioBooks.showMiniBar)
+            .animation(.easeInOut(duration: 0.2), value: wav.showMiniPlayer)
             .animation(.easeInOut(duration: 0.2), value: miniPlayerCollapsed)
+        }
+    }
+
+    @ViewBuilder private var expandedBar: some View {
+        switch activeBar {
+        case .audioBook:
+            AudioBookMiniPlayerBar {
+                jumpToPlayingContent()
+            }
+        case .export:
+            ExportMiniPlayerBar {
+                NotificationCenter.default.post(name: .miniPlayerJumpToExports, object: nil)
+            }
+        default:
+            MiniPlayerBar {
+                jumpToPlayingContent()
+            }
+        }
+    }
+
+    @ViewBuilder private var collapsedBar: some View {
+        switch activeBar {
+        case .audioBook:
+            AudioBookMiniPlayerBubble()
+        case .export:
+            ExportMiniPlayerBubble()
+        default:
+            MiniPlayerBubble()
         }
     }
 
@@ -108,4 +124,7 @@ extension Notification.Name {
     static let miniPlayerJumpToNote = Notification.Name("MiniPlayerBar.jumpToNote")
     /// v1.5: same tap while a BOOK speaks — object carries the book UUID string.
     static let miniPlayerJumpToBook = Notification.Name("MiniPlayerBar.jumpToBook")
+    /// Round 5: same tap while an EXPORT plays — Settings' Storage screen
+    /// opens (the export list is the player surface for downloaded audio).
+    static let miniPlayerJumpToExports = Notification.Name("MiniPlayerBar.jumpToExports")
 }
