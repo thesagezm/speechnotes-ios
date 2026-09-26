@@ -27,6 +27,14 @@ final class AudioBookPlayer: ObservableObject {
     @Published private(set) var chapterIndex = 0
     /// 0…1 inside the current chapter — the reader's slider value.
     @Published private(set) var chapterProgress: Double = 0
+    /// Absolute position in the FILE, in seconds, published per tick. The
+    /// reader's time readout binds to this: "am I an hour or ten hours in"
+    /// is a question about the file, and the old per-chapter math answered
+    /// it with zeros whenever the manifest's chapter table was degenerate.
+    @Published private(set) var elapsed: TimeInterval = 0
+    /// The loaded file's length, published once loaded and per tick (a
+    /// manifest with a missing/garbage duration still gets a real total).
+    @Published private(set) var totalDuration: TimeInterval = 0
     /// True while an audio reader is on screen — the global mini-player then
     /// yields (the reader has full controls; on tab switch onDisappear clears
     /// this and the mini-player takes over, which is exactly the ask).
@@ -102,7 +110,7 @@ final class AudioBookPlayer: ObservableObject {
         activeBook = book
         activeBookID = book.id
         userPaused = false
-        let url = BooksStore.originalFileURL(book)
+        let url = BooksStore.resolveAudioOriginalURL(book: book)
         do {
             // Same one-shot session configuration every engine runs on first
             // play — an AVAudioPlayer created with the session still in its
@@ -123,6 +131,8 @@ final class AudioBookPlayer: ObservableObject {
             player.play()
             isPlaying = true
             chapterProgress = chapterProgressValue
+            elapsed = player.currentTime
+            totalDuration = player.duration
             startTicker()
             wireRemoteCommandsOnce()
             NowPlayingCenter.shared.configure()
@@ -157,6 +167,8 @@ final class AudioBookPlayer: ObservableObject {
         activeBook = nil
         isPlaying = false
         chapterProgress = 0
+        elapsed = 0
+        totalDuration = 0
         NowPlayingCenter.shared.clear()
         NowPlayingCenter.shared.setChapterSkipEnabled(false)
     }
@@ -204,6 +216,7 @@ final class AudioBookPlayer: ObservableObject {
         userPaused = false
         player.currentTime = target
         chapterProgress = chapterProgressValue
+        elapsed = target
         // VLC's rule: republish the full surface right after a seek.
         publishNowPlaying(force: true)
         persistPosition(force: true)
@@ -219,6 +232,7 @@ final class AudioBookPlayer: ObservableObject {
         player.currentTime = min(max(0, chapter.startSeconds + value * span), max(0, end - 0.05))
         userPaused = false
         chapterProgress = chapterProgressValue
+        elapsed = player.currentTime
         // VLC's rule: republish the full surface right after a seek — iOS
         // extrapolates the in-between from rate + elapsed.
         publishNowPlaying(force: true)
@@ -303,6 +317,10 @@ final class AudioBookPlayer: ObservableObject {
         if isPlaying != playing { isPlaying = playing }
         let value = chapterProgressValue
         if chapterProgress != value { chapterProgress = value }
+        let now = player.currentTime
+        if elapsed != now { elapsed = now }
+        let duration = player.duration
+        if totalDuration != duration { totalDuration = duration }
 
         guard chapterIsFinished, !userPaused else {
             // Playing, mid-chapter: a slow-cadence refresh of the lock

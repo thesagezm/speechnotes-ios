@@ -327,21 +327,30 @@ struct BookAudioReaderView: View {
     }
 
     private var timeLabel: String {
+        // While this book is loaded, the readout reads the PLAYER's absolute
+        // position — file seconds, published per tick. Round 5: computing
+        // elapsed from the manifest's chapter table froze at 0:00:00 for
+        // books whose table was degenerate (one "Full audiobook" chapter
+        // with a zero/garbage end), so the counter under the controls never
+        // moved. The player is the ground truth; the manifest is only the
+        // chapter NAMES.
+        if isActive {
+            let total = audioBook.totalDuration
+            if showingBookRemaining {
+                guard total > 0 else { return Self.clock(audioBook.elapsed) }
+                return "\(Self.remainingClock(max(0, total - audioBook.elapsed))) left"
+            }
+            return "\(Self.clock(audioBook.elapsed)) / \(Self.clock(total))"
+        }
         guard chapters.indices.contains(chapterIndex) else { return "" }
         let chapter = chapters[chapterIndex]
         let elapsed = chapter.startSeconds + displayProgress * (chapter.endSeconds - chapter.startSeconds)
         if showingBookRemaining {
-            let total = book.audioDuration ?? (isActive ? audioBookFileDuration : 0)
+            let total = book.audioDuration ?? 0
             guard total > 0 else { return Self.clock(elapsed) }
             return "\(Self.remainingClock(max(0, total - elapsed))) left"
         }
         return "\(Self.clock(elapsed)) / \(Self.clock(chapter.endSeconds))"
-    }
-
-    /// Real file length while this book is loaded (legacy manifests can lack
-    /// `audioDuration`); zero when idle, which hides the remaining readout.
-    private var audioBookFileDuration: Double {
-        audioBook.fileDuration ?? 0
     }
 
     private static func clock(_ seconds: Double) -> String {

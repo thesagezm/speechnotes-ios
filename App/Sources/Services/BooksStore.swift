@@ -35,6 +35,38 @@ final class BooksStore: ObservableObject {
         bookDirectory(book.id).appendingPathComponent("original.\(book.format.rawValue)")
     }
 
+    /// The audio book's file, resolved to whatever name it actually carries.
+    /// New imports store `original.<true extension>` (AVURLAsset needs a real
+    /// container extension to read metadata/chapters/covers); books imported
+    /// before round 5 still have `original.audio`, which keeps playing but
+    /// parses as nothing. Probing is one small directory listing, only for
+    /// the audio format.
+    nonisolated static func resolveAudioOriginalURL(book: Book) -> URL {
+        let dir = bookDirectory(book.id)
+        for ext in ["m4b", "m4a", "mp3", "mp4"] where FileManager.default.fileExists(atPath: dir.appendingPathComponent("original.\(ext)").path) {
+            return dir.appendingPathComponent("original.\(ext)")
+        }
+        return dir.appendingPathComponent("original.audio")
+    }
+
+    /// Legacy `original.audio` → sniffed true extension (ID3 head → mp3,
+    /// otherwise the MPEG-4 family → m4b). Renames once, at the manifest
+    /// backfill, so AVURLAsset can actually read the file.
+    nonisolated private static func renameLegacyAudioFileIfNeeded(book: Book, directory: URL) {
+        let legacy = directory.appendingPathComponent("original.audio")
+        guard book.format == .audio, FileManager.default.fileExists(atPath: legacy.path) else { return }
+        guard let handle = try? FileHandle(forReadingFrom: legacy) else { return }
+        let head = handle.readData(ofLength: 16)
+        try? handle.close()
+        let isMP3 = head.starts(with: [0x49, 0x44, 0x33]) // "ID3"
+        let target = directory.appendingPathComponent("original.\(isMP3 ? "mp3" : "m4b")")
+        guard !FileManager.default.fileExists(atPath: target.path) else {
+            try? FileManager.default.removeItem(at: legacy)
+            return
+        }
+        try? FileManager.default.moveItem(at: legacy, to: target)
+    }
+
     nonisolated static func coverFileURL(_ book: Book) -> URL {
         bookDirectory(book.id).appendingPathComponent("cover.jpg")
     }
@@ -104,9 +136,14 @@ final class BooksStore: ObservableObject {
                 // the awaited-metadata cover fix need one re-read of their
                 // manifest — single-chapter audio with a "chpl" source that
                 // never had chpl, and cover-less M4Bs that do carry art.
+                // Round 5: also every audio book whose manifest was read from
+                // a file AVURLAsset could not parse (the .audio extension).
                 || (book.format == .audio && (!book.hasCover
+                    || book.audioChapterSource == nil
                     || book.audioChapterSource == "single"
-                    || book.audioChapterSource == "chpl"))
+                    || book.audioChapterSource == "chpl"
+                    || book.audioChapterSource == "mp4"
+                    || book.audioChapterSource == "id3"))
         }
         guard !pending.isEmpty else { return }
         didBackfillLegacyBooks = true
@@ -132,8 +169,13 @@ final class BooksStore: ObservableObject {
                         }
                     }
                 case .audio:
-                    // Re-read the manifest from the file — picks up the
-                    // chapter-TRACK parser and the awaited cover art.
+                    // Round 5: legacy books kept their file as original.audio
+                    // — an extension AVURLAsset cannot map to a container
+                    // parser, so title/chapters/duration/cover all read back
+                    // empty while playback (content-sniffing AVAudioPlayer)
+                    // kept working. Give the file its true extension, then
+                    // re-read the manifest from it.
+                    renameLegacyAudioFileIfNeeded(book: book, directory: dir)
                     let refreshed = Self.buildAudioManifest(book: book, directory: dir)
                     book = refreshed
                 case .epub:
@@ -194,7 +236,13 @@ final class BooksStore: ObservableObject {
         let dir = Self.bookDirectory(id)
         do {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            let destination = dir.appendingPathComponent("original.\(format.rawValue)")
+            // Audio books keep their TRUE extension (original.m4b, not
+            // original.audio): AVURLAsset maps a URL to its container parser
+            // largely by extension, and a file named .audio made every
+            // metadata/chapter/cover read come back empty (while AVAudioPlayer,
+            // which sniffs content, kept playing fine — hiding the damage).
+            let destinationExtension = format == .audio ? ext : format.rawValue
+            let destination = dir.appendingPathComponent("original.\(destinationExtension)")
             try FileManager.default.copyItem(at: sourceURL, to: destination)
         } catch {
             importError = "Could not copy \"\(sourceURL.lastPathComponent)\": \(error.localizedDescription)"
@@ -339,7 +387,7 @@ final class BooksStore: ObservableObject {
     /// from AVURLAsset, which reads the header rather than the samples.
     nonisolated private static func buildAudioManifest(book: Book, directory: URL) -> Book {
         var book = book
-        let original = directory.appendingPathComponent("original." + book.format.rawValue)
+        let original = resolveAudioOriginalURL(book: book)
         let asset = AVURLAsset(url: original, options: [AVURLAssetPreferPreciseDurationAndTimingKey: false])
         // Same awaited-load discipline as the metadata read below: the sync
         // `asset.duration` raced the async property load on device and could
@@ -375,25 +423,24 @@ final class BooksStore: ObservableObject {
         }
 
         if book.audioChapters == nil {
-            let fileSize = (try? original.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-            let headBytes = min(8 * 1024 * 1024, max(0, fileSize))
-            if headBytes > 0, let handle = try? FileHandle(forReadingFrom: original) {
-                let head = handle.readData(ofLength: Int(headBytes))
-                try? handle.close()
-
-                if head.starts(with: [0x49, 0x44, 0x33]) { // "ID3"
-                    let chapters = AudiobookChapters.chaptersFromID3(head)
-                    if !chapters.isEmpty {
-                        book.audioChapters = chapters
-                        book.audioChapterSource = "id3"
-                    }
+            // Full-file parse through a memory mapping (moov may sit at the
+            // END of the container — ffmpeg without +faststart puts it there,
+            // and the old 8 MB head slice never saw it; VLC reads the whole
+            // box tree, which is why those books showed chapters there and
+            // "Full audiobook" here). Mapped data costs no RAM to walk.
+            let chapters: [AudioChapter]
+            if book.format == .audio, let mapped = try? Data(contentsOf: original, options: .mappedIfSafe) {
+                if mapped.starts(with: [0x49, 0x44, 0x33]) {
+                    chapters = AudiobookChapters.chaptersFromID3(mapped)
                 } else {
-                    let chapters = AudiobookChapters.chaptersFromMP4(head, totalSeconds: book.audioDuration ?? 0)
-                    if !chapters.isEmpty {
-                        book.audioChapters = chapters
-                        book.audioChapterSource = "mp4"
-                    }
+                    chapters = AudiobookChapters.chaptersFromMP4(mapped, totalSeconds: book.audioDuration ?? 0)
                 }
+            } else {
+                chapters = []
+            }
+            if !chapters.isEmpty {
+                book.audioChapters = chapters
+                book.audioChapterSource = "mp4-full"
             }
         }
 
