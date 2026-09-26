@@ -73,7 +73,12 @@ final class SopranoEngine: NSObject, SpeechEngine {
     /// (Gather idx out of bounds at vocabSize=39) over exactly that mistake.
     private static let vocabSize = 8192
     private static let samplesPerToken = 2048
-    private static let chunkMaxChars = 200
+    /// 120, not 200: TTFA is the full autoregressive run of chunk 1 (the
+    /// core schedules nothing until generateChunk returns), and sentence-
+    /// bounded chunks of ~120 chars halve the steps before the first audio
+    /// while staying inside the 2–15 s sentence window the model card
+    /// recommends.
+    private static let chunkMaxChars = 120
 
     // Model state — the core's generateQueue only.
     private var ortEnv: ORTEnv?
@@ -196,18 +201,29 @@ final class SopranoEngine: NSObject, SpeechEngine {
 
     /// Text → normalise → tokenize → autoregressive backbone → decoder
     /// windows → samples. The live speed is read per chunk from the core.
+    ///
+    /// The decode schedule is the reference's (ekwek1/soprano `infer_stream`,
+    /// pinned here after the original web repo vanished): a `chunk_counter`
+    /// gates the decoder to run once every `decoderChunkFrames` decode-ready
+    /// steps, and each run keeps ONLY the `decoderChunkFrames` tokens that
+    /// just gained their receptive field of future context — emitted audio
+    /// lags the newest frame by RF − 1 tokens. The first version of this
+    /// loop decoded EVERY step and sliced an overlapping window, re-emitting
+    /// ~7 copies of each token's audio (the "repeats the same syllable"
+    /// device report) while spending ~8× the decoder time. Every exit path
+    /// ends with the reference's finish decode — (RF + counter − 2) tokens
+    /// of the final ring, exactly the frames no mid-stream window covered —
+    /// so nothing duplicates and nothing cuts off mid-word.
     private func generateChunk(_ text: String) throws -> [Float] {
         guard let backbone, let decoder else { throw SopranoEngineError.modelUnavailable }
         guard !tokenIDs.isEmpty else { throw SopranoEngineError.noVocab }
 
-        // The reference generation loop (KevinAHM/soprano-web-onnx, Apache-2.0):
-        // prompt = [STOP][TEXT] + tokens + [START] in ONE prefill, then one
-        // token per step. [STOP] also ENDS generation when the model emits it
-        // (it is the eos/pad token, id 3); the old loop fed it back as the
-        // decode "pad token" and generated 512 steps of junk. Numbers: the
-        // eos id is taken from the tokenizer's added_tokens so a re-export
-        // with different ids stays correct, and the STRIDE over the logits is
-        // the model's vocab size (8192), never tokenIDs.count.
+        // The reference generation loop: prompt = [STOP][TEXT] + tokens +
+        // [START] in ONE prefill, then one token per step. [STOP] also ENDS
+        // generation when the model emits it (it is the eos/pad token, id 3).
+        // Numbers: the eos id is taken from the tokenizer's added_tokens so a
+        // re-export with different ids stays correct, and the STRIDE over the
+        // logits is the model's vocab size (8192), never tokenIDs.count.
         let normalized = SopranoTextNormalizer.normalize(text)
         // The model's real BPE (vocab + merges); greedy longest-match is the
         // fallback when the merges didn't parse — it produces valid ids but
@@ -241,150 +257,196 @@ final class SopranoEngine: NSObject, SpeechEngine {
         let started = Date()
 
         var step = 0
-        var finished = false
+        var endReason = "maxTokens"
+        /// Reference chunk_counter: starts at `decoderChunkFrames` so the
+        /// first decode fires as soon as the ring holds RF + chunk frames,
+        /// then resets to 0 on every decode and ticks once per decode-ready
+        /// step — the decoder runs on every `decoderChunkFrames`-th step.
+        var chunkCounter = Self.decoderChunkFrames
+        var decodeRuns = 0
+        var prefillSeconds: TimeInterval = 0
+
+        // Decode the current ring and append only the slice the reference
+        // keeps. `tailTokens` = nil for a mid-stream window (fixed slice,
+        // lagging RF−1 tokens behind the frontier), or the token count for
+        // the finish decode (the reference's `audio[-((RF+counter−2)·T):]`).
+        func decodeRing(tailTokens: Int?) throws {
+            let frames = hiddenRing
+            guard !frames.isEmpty else { return }
+            let decodeStart = Date()
+            let windowFrames = frames.reduce(into: [Float]()) { $0.append(contentsOf: $1) }
+            let frameCount = frames.count
+            let decoderOutput = try decoder.run(
+                withInputs: ["hidden_states": try Self.floatTensor(
+                    windowFrames,
+                    shape: [NSNumber(value: 1), NSNumber(value: Self.hiddenSize), NSNumber(value: frameCount)]
+                )],
+                outputNames: Self.decoderOutputNames(for: decoder),
+                runOptions: nil
+            )
+            let audioName = ((try? decoder.outputNames()) ?? []).first ?? "audio"
+            guard let audioValue = decoderOutput[audioName] else {
+                throw SopranoEngineError.missingOutput
+            }
+            let audioData: Data = try audioValue.tensorData() as Data
+            let audio = Self.floats(from: audioData)
+            let kept: ArraySlice<Float>
+            if let tailTokens {
+                // Finish: keep everything the mid-stream windows have not
+                // emitted yet — the tail of the final window. A negative
+                // start clamps to 0 (the reference's python slice does).
+                let start = max(0, audio.count - tailTokens * Self.samplesPerToken)
+                kept = audio[start...]
+            } else {
+                // Mid-stream: keep the decoderChunkFrames tokens whose
+                // receptive field of future context just completed — the
+                // window's local [(RF+chunk−1) … (RF−1)] tokens from the end.
+                let start = audio.count - (Self.decoderReceptiveField + Self.decoderChunkFrames - 1) * Self.samplesPerToken
+                let end = audio.count - (Self.decoderReceptiveField - 1) * Self.samplesPerToken
+                if start >= 0, end > start, end <= audio.count {
+                    kept = audio[start..<end]
+                } else {
+                    // A decoder that returned fewer samples than its frames
+                    // imply has nothing safely sliceable — emit nothing
+                    // rather than a duplicate of the previous window.
+                    kept = audio[0..<0]
+                }
+            }
+            let keptArray = Array(kept)
+            decodeRuns += 1
+            samples.append(contentsOf: keptArray)
+            Log.shared.info("SopranoEngine: decode #\(decodeRuns) in \(String(format: "%.2f", Date().timeIntervalSince(decodeStart)))s: \(frameCount) frames → +\(keptArray.count) samples (\(String(format: "%.1f", Double(samples.count) / core.sampleRate))s total)")
+        }
+
         // The model's position window (config max_position_embeddings): the
         // rope table gathers at position_ids, so prompt + generated beyond
         // this throws mid-loop. Emit what we have instead of losing the chunk.
         let positionCeiling = 512
         do {
-        while step < maxTokens, !finished {
-            if sequenceLen >= positionCeiling {
-                Log.shared.info("SopranoEngine: chunk hit the \(positionCeiling)-position ceiling — emitting \(samples.count) samples early")
-                break
-            }
-            let inputIDs: [Int64] = step == 0 ? ids.map(Int64.init) : [Int64(ids[ids.count - 1])]
-            let mask = Array(repeating: Int64(1), count: sequenceLen)
-            let positionStart = step == 0 ? 0 : sequenceLen - 1
-            let positionIDs = Array(stride(from: positionStart, through: sequenceLen - 1, by: 1)).map(Int64.init)
-
-            var inputs: [String: ORTValue] = [:]
-            inputs["input_ids"] = try Self.int64Tensor(inputIDs, shape: [1, NSNumber(value: inputIDs.count)])
-            inputs["attention_mask"] = try Self.int64Tensor(mask, shape: [1, NSNumber(value: mask.count)])
-            inputs["position_ids"] = try Self.int64Tensor(positionIDs, shape: [1, NSNumber(value: positionIDs.count)])
-            let backboneInputNames = (try? backbone.inputNames()) ?? []
-            if step == 0 {
-                for name in backboneInputNames where name.contains(".key") || name.contains(".value") {
-                    inputs[name] = try Self.floatTensor([], shape: [NSNumber(value: 1), NSNumber(value: 1), NSNumber(value: 0), NSNumber(value: Self.kvDim)])
+            while step < maxTokens {
+                if sequenceLen >= positionCeiling {
+                    endReason = "positionCeiling"
+                    Log.shared.info("SopranoEngine: chunk hit the \(positionCeiling)-position ceiling after \(step) generated tokens")
+                    break
                 }
-            } else {
-                var keyIndex = 0
-                var valueIndex = 0
-                for name in backboneInputNames {
-                    if name.contains(".key"), keyIndex < pastKeys.count {
-                        inputs[name] = pastKeys[keyIndex]
-                        keyIndex += 1
-                    } else if name.contains(".value"), valueIndex < pastValues.count {
-                        inputs[name] = pastValues[valueIndex]
-                        valueIndex += 1
+                let inputIDs: [Int64] = step == 0 ? ids.map(Int64.init) : [Int64(ids[ids.count - 1])]
+                let mask = Array(repeating: Int64(1), count: sequenceLen)
+                let positionStart = step == 0 ? 0 : sequenceLen - 1
+                let positionIDs = Array(stride(from: positionStart, through: sequenceLen - 1, by: 1)).map(Int64.init)
+
+                var inputs: [String: ORTValue] = [:]
+                inputs["input_ids"] = try Self.int64Tensor(inputIDs, shape: [1, NSNumber(value: inputIDs.count)])
+                inputs["attention_mask"] = try Self.int64Tensor(mask, shape: [1, NSNumber(value: mask.count)])
+                inputs["position_ids"] = try Self.int64Tensor(positionIDs, shape: [1, NSNumber(value: positionIDs.count)])
+                let backboneInputNames = (try? backbone.inputNames()) ?? []
+                if step == 0 {
+                    for name in backboneInputNames where name.contains(".key") || name.contains(".value") {
+                        inputs[name] = try Self.floatTensor([], shape: [NSNumber(value: 1), NSNumber(value: 1), NSNumber(value: 0), NSNumber(value: Self.kvDim)])
+                    }
+                } else {
+                    var keyIndex = 0
+                    var valueIndex = 0
+                    for name in backboneInputNames {
+                        if name.contains(".key"), keyIndex < pastKeys.count {
+                            inputs[name] = pastKeys[keyIndex]
+                            keyIndex += 1
+                        } else if name.contains(".value"), valueIndex < pastValues.count {
+                            inputs[name] = pastValues[valueIndex]
+                            valueIndex += 1
+                        }
                     }
                 }
-            }
 
-            let backboneOutputNames = (try? backbone.outputNames()) ?? []
-            let outputs = try backbone.run(
-                withInputs: inputs,
-                outputNames: Set(backboneOutputNames),
-                runOptions: nil
-            )
-
-            // Refresh the caches (the export returns present.N.{key,value}).
-            pastKeys = []
-            pastValues = []
-            for name in backboneOutputNames {
-                guard let value = outputs[name] else { continue }
-                if name.contains(".key") { pastKeys.append(value) }
-                if name.contains(".value") { pastValues.append(value) }
-            }
-
-            guard let hiddenName = backboneOutputNames.contains("last_hidden_state")
-                    ? Optional("last_hidden_state")
-                    : (backboneOutputNames.contains("hidden_states") ? Optional("hidden_states") : nil),
-                  let hiddenValue = outputs[hiddenName] else {
-                throw SopranoEngineError.missingOutput
-            }
-            let hiddenData: Data = try hiddenValue.tensorData() as Data
-            let stepHidden = Self.floats(from: hiddenData)
-            // The graph returns the whole sequence's hidden states ([1,
-            // seqLen, 512]) every step — keep only the LAST position's frame,
-            // exactly like the reference's slice((seqLen-1)*512, seqLen*512).
-            guard stepHidden.count >= Self.hiddenSize else {
-                throw SopranoEngineError.missingOutput
-            }
-            let lastFrame = Array(stepHidden.suffix(Self.hiddenSize))
-            // The reference skips the prefill's own frame (i > 0) so the
-            // prompt never sounds; only generated-token frames reach the
-            // decoder.
-            if step > 0 {
-                hiddenRing.append(lastFrame)
-            }
-            let ringCapacity = 2 * Self.decoderReceptiveField + Self.decoderChunkFrames
-            if hiddenRing.count > ringCapacity {
-                hiddenRing.removeFirst(hiddenRing.count - ringCapacity)
-            }
-
-            // Decoder: once the ring holds receptive field + chunk frames,
-            // feed it all (shape [1, 512, frames]) and keep the slice the
-            // reference keeps — the last (RF + chunk − 1) tokens' worth minus
-            // the trailing RF tail, offset by one token so the edges line up.
-            if hiddenRing.count >= Self.decoderReceptiveField + Self.decoderChunkFrames {
-                let frames = hiddenRing
-                let windowFrames = frames.reduce(into: [Float]()) { $0.append(contentsOf: $1) }
-                let frameCount = frames.count
-                let decoderOutput = try decoder.run(
-                    withInputs: ["hidden_states": try Self.floatTensor(
-                        windowFrames,
-                        shape: [NSNumber(value: 1), NSNumber(value: Self.hiddenSize), NSNumber(value: frameCount)]
-                    )],
-                    outputNames: Self.decoderOutputNames(for: decoder),
+                let backboneOutputNames = (try? backbone.outputNames()) ?? []
+                let stepStart = Date()
+                let outputs = try backbone.run(
+                    withInputs: inputs,
+                    outputNames: Set(backboneOutputNames),
                     runOptions: nil
                 )
-                let audioName = ((try? decoder.outputNames()) ?? []).first ?? "audio"
-                guard let audioValue = decoderOutput[audioName] else {
+                if step == 0 {
+                    prefillSeconds = Date().timeIntervalSince(stepStart)
+                }
+
+                // Refresh the caches (the export returns present.N.{key,value}).
+                pastKeys = []
+                pastValues = []
+                for name in backboneOutputNames {
+                    guard let value = outputs[name] else { continue }
+                    if name.contains(".key") { pastKeys.append(value) }
+                    if name.contains(".value") { pastValues.append(value) }
+                }
+
+                guard let hiddenName = backboneOutputNames.contains("last_hidden_state")
+                        ? Optional("last_hidden_state")
+                        : (backboneOutputNames.contains("hidden_states") ? Optional("hidden_states") : nil),
+                      let hiddenValue = outputs[hiddenName] else {
                     throw SopranoEngineError.missingOutput
                 }
-                let audioData: Data = try audioValue.tensorData() as Data
-                var audio = Self.floats(from: audioData)
-                // Slice per the reference: keep [ (RF + chunk − 1) tokens in
-                // from the start, end RF tokens in from the end ] — a +1-token
-                // offset on both edges.
-                let startIdx = audio.count - (Self.decoderReceptiveField + Self.decoderChunkFrames - 1) * Self.samplesPerToken + Self.samplesPerToken
-                let endIdx = audio.count - Self.decoderReceptiveField * Self.samplesPerToken + Self.samplesPerToken
-                if startIdx >= 0, endIdx > startIdx, endIdx <= audio.count {
-                    audio = Array(audio[startIdx..<endIdx])
+                let hiddenData: Data = try hiddenValue.tensorData() as Data
+                let stepHidden = Self.floats(from: hiddenData)
+                // The graph returns the whole sequence's hidden states ([1,
+                // seqLen, 512]) every step — keep only the LAST position's
+                // frame, exactly like the reference's
+                // slice((seqLen-1)*512, seqLen*512).
+                guard stepHidden.count >= Self.hiddenSize else {
+                    throw SopranoEngineError.missingOutput
                 }
-                samples.append(contentsOf: audio)
-                // A finish-decode consumes the ring; a mid-stream chunk
-                // decode keeps the tail (the reference's chunkCounter carries
-                // the partial window into the next decode).
-                if finished {
-                    hiddenRing.removeAll(keepingCapacity: true)
+                let lastFrame = Array(stepHidden.suffix(Self.hiddenSize))
+                // The prefill's own frame (the [START] prompt position) never
+                // sounds — only generated-token frames reach the decoder.
+                if step > 0 {
+                    hiddenRing.append(lastFrame)
                 }
+                let ringCapacity = 2 * Self.decoderReceptiveField + Self.decoderChunkFrames
+                if hiddenRing.count > ringCapacity {
+                    hiddenRing.removeFirst(hiddenRing.count - ringCapacity)
+                }
+
+                // Reference decode gate — every decoderChunkFrames-th
+                // decode-ready step, NEVER every step.
+                if hiddenRing.count >= Self.decoderReceptiveField + Self.decoderChunkFrames {
+                    if chunkCounter == Self.decoderChunkFrames {
+                        try decodeRing(tailTokens: nil)
+                        chunkCounter = 0
+                    }
+                    chunkCounter += 1
+                }
+
+                // Next token from the last position's logits; [STOP] ends the
+                // chunk. Repetition penalty 1.2 over seen tokens (reference).
+                step += 1
+                if step >= maxTokens { break }
+                guard let logitsValue = outputs["logits"] else {
+                    endReason = "noLogits"
+                    break
+                }
+                let logitsData: Data = try logitsValue.tensorData() as Data
+                let next = Self.nextToken(
+                    logits: logitsData,
+                    vocabSize: Self.vocabSize,
+                    fallback: stopID,
+                    temperature: 0.3,
+                    topK: 50,
+                    repetitionPenalty: 1.2,
+                    seenTokens: seenTokens,
+                    rng: &rng
+                )
+                if next == stopID {
+                    endReason = "[STOP]"
+                    break
+                }
+                seenTokens.insert(next)
+                ids = [next]
+                sequenceLen += 1
             }
 
-            // Next token from the last position's logits; [STOP] ends the
-            // chunk. Repetition penalty 1.2 over seen tokens (reference).
-            step += 1
-            if step >= maxTokens { break }
-            guard let logitsValue = outputs["logits"] else { break }
-            let logitsData: Data = try logitsValue.tensorData() as Data
-            let next = Self.nextToken(
-                logits: logitsData,
-                vocabSize: Self.vocabSize,
-                fallback: stopID,
-                temperature: 0.3,
-                topK: 50,
-                repetitionPenalty: 1.2,
-                seenTokens: seenTokens,
-                rng: &rng
-            )
-            if next == stopID {
-                finished = true
-                break
+            // The reference's finish decode: emit the frames no mid-stream
+            // window covered — (RF + counter − 2) tokens of the final ring,
+            // exactly the stragglers past the last emitted slice.
+            if !hiddenRing.isEmpty {
+                try decodeRing(tailTokens: max(1, Self.decoderReceptiveField + chunkCounter - 2))
             }
-            seenTokens.insert(next)
-            ids = [next]
-            sequenceLen += 1
-        }
         } catch let sopranoError as SopranoEngineError {
             throw sopranoError
         } catch {
@@ -397,7 +459,13 @@ final class SopranoEngine: NSObject, SpeechEngine {
         }
 
         let duration = Double(samples.count) / core.sampleRate
-        Log.shared.info("SopranoEngine: \(String(format: "%.1f", duration))s audio in \(String(format: "%.2f", Date().timeIntervalSince(started)))s")
+        let wall = Date().timeIntervalSince(started)
+        let rtf = wall / max(duration, 0.01)
+        Log.shared.info("SopranoEngine: chunk done — \(String(format: "%.1f", duration))s audio in \(String(format: "%.2f", wall))s (RTF \(String(format: "%.1f", rtf)), prefill \(String(format: "%.0f", prefillSeconds * 1000)) ms, \(step) steps, \(decodeRuns) decodes, end: \(endReason))")
+        guard !samples.isEmpty else {
+            Log.shared.error("SopranoEngine: chunk produced no audio (\(endReason)) — «\(text.prefix(60))»")
+            throw SopranoEngineError.missingOutput
+        }
         return samples
     }
 
@@ -506,6 +574,10 @@ final class SopranoEngine: NSObject, SpeechEngine {
         var last = Array(values[start...])
         guard last.count >= vocabSize else { return fallback }
         last = Array(last.prefix(vocabSize))
+        // A NaN/Inf row (an ORT numerical hiccup) makes `sorted` undefined
+        // and the softmax total 0 — bail to the fallback token instead of
+        // looping on garbage.
+        guard last.allSatisfy({ $0.isFinite }) else { return fallback }
         if repetitionPenalty != 1.0 {
             for token in seenTokens where token >= 0 && token < last.count {
                 if last[token] < 0 {

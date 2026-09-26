@@ -78,7 +78,7 @@ struct SpeechSettingsView: View {
             } header: {
                 Text("Speech engine")
             } footer: {
-                Text("Listed worst to best. Supertonic sounds the best (10 voice styles, 31 languages). Kokoro uint8 (~177 MB) is the lightweight tier; Kokoro fp32 is the solid default. All use the same 28 voices.")
+                Text("Listed worst to best. Soprano (experimental, English only) is a research-grade 80M model — expect rougher pronunciation than the others. Supertonic sounds the best (10 voice styles, 31 languages). Kokoro uint8 (~177 MB) is the lightweight tier; Kokoro fp32 is the solid default. All use the same 28 voices.")
             }
 
             Section {
@@ -181,7 +181,7 @@ struct SpeechSettingsView: View {
                     Button("Delete Soprano model (frees ~110 MB)", role: .destructive) { models.deleteSopranoModels() }
                 }
             } header: { Text("Soprano model") } footer: {
-                Text("ekwek/Soprano-1.1-80M (Apache-2.0) — a fast English voice: a Qwen3 backbone with a KV-cached audio decoder, running at roughly real time on the CPU. One voice, ~110 MB, the smallest neural engine here. Numbers and currency are read out as words before they reach the model.")
+                Text("ekwek/Soprano-1.1-80M (Apache-2.0) — experimental. A tiny 80M English model (the authors trained it on ~1000 hours, so uncommon words can mispronounce); it generates token-by-token, so time-to-first-audio is seconds, not instant. One voice, ~110 MB, the smallest neural engine here. Numbers and currency are read out as words before they reach the model.")
             }
 
             Section {

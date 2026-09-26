@@ -26,7 +26,7 @@ final class SpeechPlayer: ObservableObject {
             case .system: return "Apple system voice"
             case .kokoroOnnx: return "Kokoro — on-device neural, 28 voices"
             case .supertonic: return "Supertonic — best quality, multilingual"
-            case .soprano: return "Soprano — fast English voice (~110 MB)"
+            case .soprano: return "Soprano — experimental, English (~110 MB)"
             }
         }
     }
