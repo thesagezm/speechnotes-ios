@@ -2,6 +2,7 @@ import SwiftUI
 
 struct AppearanceSettingsView: View {
     @EnvironmentObject private var theme: AppTheme
+    @AppStorage("renderMarkdown") private var renderMarkdown = false
 
     var body: some View {
         Form {
@@ -22,6 +23,15 @@ struct AppearanceSettingsView: View {
                 Text("Accent Color")
             } footer: {
                 Text("Used across notes, playback controls and highlights.")
+            }
+            Section {
+                // (v1.7 round 5: moved here from Speech Settings — rendering
+                // is how a note LOOKS, not how it speaks.)
+                Toggle("Render Markdown", isOn: $renderMarkdown)
+            } header: {
+                Text("Notes")
+            } footer: {
+                Text("When on, a note opens in reading mode (headings, emphasis and links rendered; eye button / double-tap to edit). Speech reads what you are looking at: rendered clean text in reading mode, the raw text while editing.")
             }
             Section("Appearance") {
                 Picker("Theme", selection: $theme.appearance) {

@@ -107,12 +107,21 @@ struct NoteEditorView: View {
 
     private var speechText: String { cachedSpeechText }
 
+    /// Whether speech reads the note CLEAN (markdown stripped) or RAW. Round
+    /// 5: follows the note's CURRENT view state, not just the setting —
+    /// reading preview → clean rendered text, editing → the raw draft
+    /// (hearing "hashtag heading" while editing the raw text is honest; the
+    /// old behavior stripped symbols even while the user was editing raw).
+    private var rendersForSpeech: Bool {
+        renderMarkdown && showPreview
+    }
+
     private func updateSpeechCaches() {
         // Derived through SpeechText so the editor, the mini-player and any
         // other playback entry point hand the engine the SAME string, and so
         // the sanitizer runs here (once, off the play path) rather than at
         // every play tap.
-        cachedSpeechText = renderMarkdown
+        cachedSpeechText = rendersForSpeech
             ? SpeechText.forText(MarkdownText.plainText(draft))
             : SpeechText.forText(draft)
         cachedWordCount = draft.split(whereSeparator: \.isWhitespace).count
@@ -126,7 +135,7 @@ struct NoteEditorView: View {
     private func scheduleSpeechCacheUpdate() {
         speechCacheTask?.cancel()
         let draftCopy = draft
-        let render = renderMarkdown
+        let render = rendersForSpeech
         speechCacheTask = Task {
             try? await Task.sleep(nanoseconds: 300_000_000)
             guard !Task.isCancelled else { return }
@@ -317,6 +326,10 @@ struct NoteEditorView: View {
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar(chromeHidden ? .hidden : .visible, for: .navigationBar)
+            // Switching between preview (speech reads clean) and edit (speech
+            // reads raw) changes what the engine should hear — refresh the
+            // speech cache for the new state.
+            .onChange(of: showPreview) { _ in scheduleSpeechCacheUpdate() }
             .toolbar {
                 // The title lives IN the nav bar — centered between the back
                 // button and the ⋯ menu — instead of occupying a content row

@@ -6,7 +6,6 @@ struct SpeechSettingsView: View {
     @ObservedObject private var models = ModelManager.shared
     @State private var systemVoices: [AVSpeechSynthesisVoice] = []
     @State private var showingVoicePicker = false
-    @AppStorage("renderMarkdown") private var renderMarkdown = false
 
     private var neuralEngineIsActive: Bool {
         (player.engineKind == .kokoroOnnx || player.engineKind == .kokoroSmall
@@ -51,13 +50,10 @@ struct SpeechSettingsView: View {
 
     var body: some View {
         Form {
-            Section {
-                Toggle("Render Markdown", isOn: $renderMarkdown)
-            } header: {
-                Text("Notes")
-            } footer: {
-                Text("When on, the editor gains a preview mode (eye button): headings, emphasis and links are rendered for reading, and speech reads the plain text without markdown symbols. Off keeps everything as raw text.")
-            }
+            // (Render Markdown moved to Appearance — it is a reading-appearance
+            // preference, not a speech one. The speech engine follows the
+            // note's CURRENT view state: reading preview → clean rendered
+            // text, edit mode → raw text.)
 
             Section {
                 Picker("Engine", selection: $player.engineKind) {
