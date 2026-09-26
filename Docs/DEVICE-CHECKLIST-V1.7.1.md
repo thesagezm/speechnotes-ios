@@ -96,3 +96,87 @@ commit + CI run id, not by version.
 5. JEX round-trip (from round 1, untested on device): export a notebook,
    import it back, expect duplicate notes with the same titles and intact
    images.
+
+---
+
+# Round 4 (device feedback 2026-09-26) — version fields stay frozen
+
+Identify builds by commit + CI run id. This round touched the audiobook
+player's ARCHITECTURE (playback ownership moved app-level), the Soprano
+inference loop (twice), haptics, and two readers — test in this order.
+
+## 1. Audiobooks — playback must survive leaving the reader
+
+- Play an audiobook, then switch to Notes, then back. Audio must NOT stop.
+- A mini-player bar (cover thumbnail, title, chapter, progress capsule)
+  docks above the tab bar while you're away; play/pause/stop work from it.
+- Tap the bar → lands back in the book's reader at the live playhead.
+- The chevron collapses the bar to a floating bubble (tap to expand).
+- Lock screen / Control Center: title + chapter + REAL elapsed time and
+  duration, chapter number where the file has chapters; the buttons work
+  (±chapter skip). Elapsed keeps ticking between refreshes (iOS
+  extrapolates from rate — it should never freeze for more than ~10 s).
+- Transport: ±15 s skip buttons flank play (gobackward.15/goforward.15);
+  they work even on files WITHOUT chapter metadata, and a skip across a
+  chapter boundary moves the chapter with it.
+- Chapter list (TOC): the list-number button in the bottom chapter bar
+  works even while the title bar is tap-hidden. Files with no chapter
+  metadata open a "No chapter markers — use the ±15 s skip" panel instead
+  of a dead button.
+- Reopening the book resumes INSIDE the chapter (not at the chapter start).
+- Deleting a playing book from the shelf stops it immediately.
+
+## 2. Soprano — three independent fixes are now stacked
+
+Prior rounds fixed the KV shape, then the decode schedule. The syllable
+repetition persisted, and a NEW prime suspect surfaced: the spike header
+and the slicing code disagreed about the hidden-state tensor layout
+([1, 512, seq] vs [1, seq, 512]). The wrong orientation feeds the vocoder
+channel slices as frames — structured garbage that sounds like syllables
+repeating with slight variation. The engine now reads the tensor's real
+shape at runtime and slices correctly either way.
+
+- Play the same text. The FIRST log lines to send back:
+  `hidden-state tensor is token-first [...]` or
+  `CHANNEL-first [...] — every prior build sliced it wrong` — that line
+  alone tells us whether this was the bug all along.
+- Also new: nucleus sampling (top_p 0.95, the model card's own setting),
+  a token-loop breaker with a `token loop #N` log line, and per-chunk
+  summaries (RTF, prefill ms, steps, decodes, loop breaks, end reason).
+- If it STILL repeats: paste `chunk done` lines — the honest call is then
+  that the model itself loops on-device and the engine goes experimental/
+  gets dropped (your "maybe I shouldn't have attempted it" — the decode
+  and layout bugs are now provably fixed, so the verdict will be clean).
+
+## 3. Haptics + note-open lag
+
+- Tap around (list rows, play buttons, tab switches) — the haptic should
+  land the same moment as the visual tap, not half a beat later.
+- Open a LONG note — the push should be as quick as a short one (the
+  markdown/sanitizer pass moved off the main thread).
+
+## 4. PDF Contents (the TOC ask)
+
+- Open a PDF WITH an outline: the list-number button in the bottom page
+  bar (and the toolbar's Contents) opens the outline — indented by depth,
+  page number right-aligned, the current entry highlighted and the list
+  scrolled to it on open. Tap jumps the reader.
+- Open a PDF WITHOUT an outline: the sheet lists the TTS chapter units
+  (headings or "Pages N–M") with page ranges — never a dead button.
+- Landscape: the page bar (and chapter bar in EPUB) are back at the
+  bottom; the TTS playback rail is now truly 78 pt wide — its controls sit
+  centered in the reserved column instead of hugging the right edge.
+
+## 5. Multi-notebook export
+
+- Settings → Backup → Export notes to Joplin (.jex) → "Selected
+  notebooks": tick any number (counts per row, Select all/Deselect all),
+  the summary line names what will be written, and the .jex carries all
+  ticked notebooks as separate folders in Joplin.
+
+## 6. Regression sweep (small)
+
+- Notes TTS: play/pause/read-along/mini-player unchanged (the haptics
+  change touches every tap; the rail width change touches the editor's
+  landscape rail).
+- EPUB reader in landscape: the chapter stepper bar overlays the bottom.
