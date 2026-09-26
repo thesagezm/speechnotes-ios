@@ -2,28 +2,31 @@ import SwiftUI
 import UniformTypeIdentifiers
 import SpeechLogic
 
-/// Export to Joplin (.jex) — the whole library, one notebook, or the
-/// unfiled notes. Independent JEX reimplementation (see
-/// SpeechLogic/JexExport.swift).
+/// Export to Joplin (.jex) — the whole library, any selection of notebooks
+/// (one or many), or the unfiled notes. Independent JEX reimplementation
+/// (see SpeechLogic/JexExport.swift).
 ///
 /// The original screen had one button that always exported everything. With
 /// notebooks in the app that is rarely what someone wants: exporting
-/// "Research" should not drag in every note that never got filed. Three
-/// scopes, and the summary line states exactly what will be written before
-/// the share sheet opens.
+/// "Research" should not drag in every note that never got filed. v1.7:
+/// the single-notebook picker became a multi-select (device request —
+/// "allow me to select one or three notebooks") — Joplin's format carries
+/// N folder entries per archive, and `JexExport.buildArchive` already took
+/// arrays, so the pipe needed no change. Three scopes, and the summary line
+/// states exactly what will be written before the share sheet opens.
 struct BackupExportView: View {
     @State private var exportDocument: JexDocument?
     @State private var isExporting = false
     @State private var errorMessage: String?
-    /// Which notebook is picked, when the scope is `.notebook`.
-    @State private var selectedNotebookID: UUID?
+    /// Multi-select for the `.selected` scope.
+    @State private var selectedNotebookIDs: Set<UUID> = []
 
     private let notes: [Note]
     private let notebooks: [Notebook]
 
     enum Scope: String, CaseIterable, Identifiable {
         case all
-        case notebook
+        case selected
         case unfiled
 
         var id: String { rawValue }
@@ -31,7 +34,7 @@ struct BackupExportView: View {
         var label: String {
             switch self {
             case .all: return "Everything"
-            case .notebook: return "One notebook"
+            case .selected: return "Selected notebooks"
             case .unfiled: return "Unfiled notes"
             }
         }
@@ -40,8 +43,8 @@ struct BackupExportView: View {
             switch self {
             case .all:
                 return "Every note and every notebook, with the folder structure Joplin needs to rebuild it."
-            case .notebook:
-                return "The notes in one notebook, plus that notebook so they land in the right place."
+            case .selected:
+                return "The notes in the notebooks you tick, plus those notebooks so they land in the right place."
             case .unfiled:
                 return "Every note that isn't in a notebook. No notebook folders are written."
             }
@@ -60,9 +63,11 @@ struct BackupExportView: View {
     private var scopedNotes: [Note] {
         switch scope {
         case .all: return notes
-        case .notebook:
-            guard let selectedNotebookID else { return [] }
-            return notes.filter { $0.notebookId == selectedNotebookID }
+        case .selected:
+            return notes.filter { note in
+                guard let id = note.notebookId else { return false }
+                return selectedNotebookIDs.contains(id)
+            }
         case .unfiled:
             return notes.filter { $0.notebookId == nil }
         }
@@ -71,22 +76,15 @@ struct BackupExportView: View {
     private var scopedNotebooks: [Notebook] {
         switch scope {
         case .all: return notebooks
-        // A single notebook's export carries that one container and nothing
-        // else — Joplin would otherwise create empty folders for notebooks
-        // whose notes weren't exported.
-        case .notebook:
-            guard let selectedNotebookID else { return [] }
-            return notebooks.filter { $0.id == selectedNotebookID }
+        // Only the ticked containers go out — Joplin would otherwise create
+        // empty folders for notebooks whose notes weren't exported.
+        case .selected: return notebooks.filter { selectedNotebookIDs.contains($0.id) }
         case .unfiled: return []
         }
     }
 
     /// Never offer an archive with nothing in it.
     private var canExport: Bool { !scopedNotes.isEmpty }
-
-    private var selectedNotebook: Notebook? {
-        notebooks.first { $0.id == selectedNotebookID }
-    }
 
     // MARK: - Body
 
@@ -106,24 +104,25 @@ struct BackupExportView: View {
                 Text(scope.detail)
             }
 
-            if scope == .notebook {
+            if scope == .selected {
                 Section {
-                    // Tag the selection with a String, not UUID? — SwiftUI's
-                    // Picker infers the tag type from the selection binding,
-                    // and an optional binding cannot be one. The bridge goes
-                    // through the uuid string.
-                    Picker(
-                        selection: Binding(
-                            get: { selectedNotebookID?.uuidString ?? "" },
-                            set: { selectedNotebookID = UUID(uuidString: $0) }
-                        ),
-                        content: {
-                            ForEach(notebooks) { notebook in
-                                Text(notebook.name).tag(notebook.id.uuidString)
+                    ForEach(notebooks) { notebook in
+                        notebookRow(notebook)
+                    }
+                    if notebooks.count > 1 {
+                        Button(selectedNotebookIDs.count == notebooks.count ? "Deselect all" : "Select all") {
+                            Haptics.tap()
+                            if selectedNotebookIDs.count == notebooks.count {
+                                selectedNotebookIDs = []
+                            } else {
+                                selectedNotebookIDs = Set(notebooks.map(\.id))
                             }
-                        },
-                        label: { Text("Notebook") }
-                    )
+                        }
+                    }
+                } header: {
+                    Text("Notebooks")
+                } footer: {
+                    Text("Pick any number — one, three, all of them. Each notebook becomes its own folder in Joplin.")
                 }
             }
 
@@ -151,13 +150,6 @@ struct BackupExportView: View {
             }
         }
         .navigationTitle("Export")
-        .onAppear {
-            // Default the picker to the first notebook, so "One notebook" is
-            // never selected with nothing chosen.
-            if selectedNotebookID == nil {
-                selectedNotebookID = notebooks.first?.id
-            }
-        }
         .fileExporter(
             isPresented: Binding(
                 get: { exportDocument != nil },
@@ -174,6 +166,31 @@ struct BackupExportView: View {
         }
     }
 
+    private func notebookRow(_ notebook: Notebook) -> some View {
+        let isSelected = selectedNotebookIDs.contains(notebook.id)
+        let noteCount = notes.filter { $0.notebookId == notebook.id }.count
+        return Button {
+            Haptics.tap()
+            if isSelected {
+                selectedNotebookIDs.remove(notebook.id)
+            } else {
+                selectedNotebookIDs.insert(notebook.id)
+            }
+        } label: {
+            HStack {
+                Text(notebook.name)
+                    .foregroundStyle(.primary)
+                Spacer()
+                Text("\(noteCount)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(isSelected ? Color.accentColor : .secondary)
+            }
+        }
+        .accessibilityLabel("\(notebook.name), \(noteCount) notes, \(isSelected ? "selected" : "not selected")")
+    }
+
     private var summaryLine: String {
         let noteCount = scopedNotes.count
         let notebookCount = scopedNotebooks.count
@@ -183,9 +200,19 @@ struct BackupExportView: View {
         }
         let scopeName: String
         switch scope {
-        case .all: scopeName = "your whole library"
-        case .notebook: scopeName = selectedNotebook.map { "\"\($0.name)\"" } ?? "the selected notebook"
-        case .unfiled: scopeName = "unfiled notes"
+        case .all:
+            scopeName = "your whole library"
+        case .selected:
+            let names = scopedNotebooks.map(\.name)
+            if names.isEmpty {
+                scopeName = "the ticked notebooks"
+            } else if names.count <= 2 {
+                scopeName = names.map { "\"\($0)\"" }.joined(separator: " and ")
+            } else {
+                scopeName = "\"\(names[0])\", \"\(names[1])\" and \(names.count - 2) more"
+            }
+        case .unfiled:
+            scopeName = "unfiled notes"
         }
         return "Exports \(parts.joined(separator: " and ")) from \(scopeName)."
     }
@@ -195,13 +222,13 @@ struct BackupExportView: View {
         let suffix: String
         switch scope {
         case .all: suffix = ""
-        case .notebook:
-            let name = selectedNotebook?.name ?? "notebook"
+        case .selected:
+            let name = scopedNotebooks.first?.name ?? "notebooks"
             let slug = name
                 .lowercased()
                 .replacingOccurrences(of: " ", with: "-")
                 .filter { $0.isLetter || $0.isNumber || $0 == "-" }
-            suffix = slug.isEmpty ? "-notebook" : "-" + slug
+            suffix = slug.isEmpty ? "-notebooks" : "-" + slug
         case .unfiled: suffix = "-unfiled"
         }
         return "speechnotes\(suffix)-\(stamp).jex"

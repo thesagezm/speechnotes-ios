@@ -83,9 +83,15 @@ struct PlaybackRail: View {
             railProgressStrip
             railControls
         }
-        .padding(.leading, 4)
-        .padding(.trailing, 6)
+        .padding(.horizontal, 4)
         .padding(.vertical, 8)
+        // The DOCUMENTED rail width — every layout partner (ReadAlongView's
+        // 92pt trailing inset, the audio reader's cover column) reserves
+        // 78pt for this rail. Without a fixed width the content-hugged rail
+        // came out ~63pt wide and its .bar background stopped short of the
+        // reserved column, leaving the controls hugging the trailing edge
+        // ("playback controls not centered in landscape").
+        .frame(width: 78)
         .frame(maxHeight: .infinity)
         .background(.bar)
     }
