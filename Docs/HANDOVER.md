@@ -82,6 +82,73 @@ no tag, no GitHub Release, no main merge without the user's say-so.**
 
 ---
 
+## 2026-09-26 addendum #16 — device round 2: the logs spoke, five fixes
+
+**User directive: "stop advancing the build names/numbers."** Version
+fields are back at 1.7.0/37 and stay there until the user says otherwise —
+addendum #15's 1.7.1/38 bump is reverted. Builds are identified by commit
++ CI run id. Also still standing: no tag, no GitHub Release, no main merge
+until the user confirms the fixes on device.
+
+Round 2 started from two pasted device logs (one Soprano, one Supertonic)
+plus four reports. What they showed and what changed:
+
+**Soprano played NOTHING — 1553 chunks, every one skipped
+(missingOutput) in ~10 ms.** Ten milliseconds per chunk means failing
+before any model compute, and the first ORT run fails instantly when an
+input shape is wrong. Found it: the engine passed the empty KV caches as
+[1, 1, 0, 512] — hidden_size — while the graph (and the reference, and our
+own CI spike) want [1, 1, 0, 128] — head_dim. ORT rejected step 0 on every
+chunk; the catch-all rethrew it as a bare "missingOutput" and the log was
+blind. Three fixes in SopranoEngine: kvDim = 128, the catch-all now logs
+the underlying error verbatim, and generation breaks cleanly at the
+model's 512-position ceiling instead of running past the rope table.
+Bonus: the engine now tokenizes with the model's REAL BPE (vocab + 135
+merges via SopranoBPETokenizer, fixtures generated from the reference
+algorithm pinned in SpeechLogicTests) instead of greedy longest-match.
+
+**Supertonic skipped ~20% of an EPUB (noOutput).** The pasted log's
+failed chunks clustered on dialogue with curly quotes, ellipses, table
+pipes. Three independent holes: (1) characters the unicode indexer maps to
+-1 (… " " ‹ › ≥ ≤ „) went into the duration predictor as -1 ids, which
+returned ≤ 0 s → skip; preprocessText now replaces them AND
+UnicodeProcessor maps any remaining negative/out-of-range scalar to the
+space id. (2) The vocoder's output is quantized to the latent chunk size
+and can come back a few hundred samples SHORT of the predicted length —
+the engine's strict `wav.count >= actualLen` check turned that into a
+skip; it now trims to what came back. (3) The duration ≤ 0 path logs the
+offending text so a future report pinpoints the input. (The "T2B SHORT —
+audible silence" lines in the same log are pacing, not skips: RTF ~0.85 at
+rate 1.2 on an A14 is barely real-time; that is a separate, slower problem.)
+
+**Audiobooks "nothing seems fixed".** Round 1's fixes targeted chpl +
+chapter tracks from bytes, but on device the report repeated. Round 2
+changed the trust order: AVFoundation's own chapter reader
+(chapterMetadataGroupsBestMatchingPreferredLanguages) runs FIRST — it
+understands chpl AND chapter tracks AND resolves titles — with the hand
+parsers as fallback; the player cross-checks the manifest against the
+file the player is actually playing (a legacy manifest could carry a
+single chapter ending at a raced ~2 s duration — the "plays two seconds"
+report — now it plays to the file's real end) and clamps chapter starts
+to the file; every import/re-read logs one summary line (duration,
+chapter count + source, cover) so the next report says which reader fired.
+
+**EPUB text disappeared after a tab switch.** onDisappear fires on EVERY
+tab switch and it called readerDestroy() — the rendition died with nothing
+to re-open it on return. The call is gone: WebKit reclaims the whole JS
+heap when the reader is popped, so the teardown bought nothing on the
+dismissal path and cost the book on the tab path.
+
+**Also from round 1, still awaiting device confirmation:** the Soprano
+download path fix (root vs onnx/), JEX import, the awaited
+duration/metadata reads.
+
+Release mechanics: version fields reverted to 1.7.0/37, README updated,
+Docs/DEVICE-CHECKLIST-V1.7.1.md carries the round-2 checklist. CI green
+required before handoff; no tag/release.
+
+---
+
 ## 2026-09-23 addendum #14 — v1.7.0: landscape unlocked, spacing tunable, Soprano
 
 **The orientation question, settled.** `cdf61fd` re-added the two landscape

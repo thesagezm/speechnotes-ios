@@ -308,6 +308,30 @@ final class BooksStore: ObservableObject {
         return book
     }
 
+    /// Chapters through AVFoundation's own reader. `timeRange` carries each
+    /// chapter's start AND duration, so ends are real, and the title comes
+    /// from the group's metadata. Empty (not an error) when the file carries
+    /// no chapter metadata AVFoundation understands.
+    nonisolated private static func chaptersFromAVFoundation(_ asset: AVURLAsset, totalSeconds: Double) -> [AudioChapter] {
+        // The sync accessor blocks until the metadata is loaded — exactly the
+        // awaited semantics the metadata read below needs, on a thread that
+        // may block (the detached manifest builder).
+        let groups = asset.chapterMetadataGroupsBestMatchingPreferredLanguages(Locale.preferredLanguages)
+        guard !groups.isEmpty else { return [] }
+        var chapters: [AudioChapter] = []
+        for group in groups {
+            let start = group.timeRange.start.seconds
+            let end = group.timeRange.end.seconds
+            let title = group.items.first(where: { $0.commonKey == .commonKeyTitle })?.stringValue ?? ""
+            guard start.isFinite, start >= 0, end.isFinite, end >= start else { continue }
+            chapters.append(AudioChapter(title: title, startSeconds: start, endSeconds: end))
+        }
+        guard let normalized = AudiobookChapters.normalize(chapters, totalSeconds: totalSeconds), !normalized.isEmpty else {
+            return []
+        }
+        return normalized
+    }
+
     /// Reads what an audiobook file says about itself: title/author from the
     /// tags, duration from the audio file, and the chapter list from the
     /// container's own metadata. All off-main (the caller detaches) and all
@@ -335,30 +359,40 @@ final class BooksStore: ObservableObject {
         let seconds = box.value.isValid ? box.value.seconds : asset.duration.seconds
         if seconds.isFinite, seconds > 0 { book.audioDuration = seconds }
 
-        // Chapters: read the head of the file. MP4 boxes need only the first
-        // few hundred KB for `chpl` (it sits inside moov, before mdat), but a
-        // real chapter TRACK keeps its text SAMPLES in moov too (tiny) while
-        // `stco` chunk offsets can point anywhere — the parser clamps them to
-        // the slice, so 8 MB covers every real-world layout. An ID3 tag
-        // lives at offset 0. A bounded slice keeps a 900 MB audiobook
-        // import cheap.
-        let fileSize = (try? original.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-        let headBytes = min(8 * 1024 * 1024, max(0, fileSize))
-        if headBytes > 0, let handle = try? FileHandle(forReadingFrom: original) {
-            let head = handle.readData(ofLength: Int(headBytes))
-            try? handle.close()
+        // Chapters, in order of trust:
+        //   1. AVFoundation's own chapter reader — it understands chpl atoms
+        //      AND QuickTime chapter tracks (the m4b-tool/ffmpeg form the
+        //      hand parser needs a full sample-table walk for) and resolves
+        //      titles. The first device round showed the byte parsers alone
+        //      leave real books with "Full audiobook" as the only chapter.
+        //   2. The hand parsers on the head slice (chpl / ID3 CHAP / chapter
+        //      track) — the fallback for files AVFoundation opens without
+        //      chapter metadata, and the unit-tested reference.
+        let avChapters = Self.chaptersFromAVFoundation(asset, totalSeconds: book.audioDuration ?? 0)
+        if !avChapters.isEmpty {
+            book.audioChapters = avChapters
+            book.audioChapterSource = "avfoundation"
+        }
 
-            if head.starts(with: [0x49, 0x44, 0x33]) { // "ID3"
-                let chapters = AudiobookChapters.chaptersFromID3(head)
-                if !chapters.isEmpty {
-                    book.audioChapters = chapters
-                    book.audioChapterSource = "id3"
-                }
-            } else {
-                let chapters = AudiobookChapters.chaptersFromMP4(head, totalSeconds: book.audioDuration ?? 0)
-                if !chapters.isEmpty {
-                    book.audioChapters = chapters
-                    book.audioChapterSource = "mp4"
+        if book.audioChapters == nil {
+            let fileSize = (try? original.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            let headBytes = min(8 * 1024 * 1024, max(0, fileSize))
+            if headBytes > 0, let handle = try? FileHandle(forReadingFrom: original) {
+                let head = handle.readData(ofLength: Int(headBytes))
+                try? handle.close()
+
+                if head.starts(with: [0x49, 0x44, 0x33]) { // "ID3"
+                    let chapters = AudiobookChapters.chaptersFromID3(head)
+                    if !chapters.isEmpty {
+                        book.audioChapters = chapters
+                        book.audioChapterSource = "id3"
+                    }
+                } else {
+                    let chapters = AudiobookChapters.chaptersFromMP4(head, totalSeconds: book.audioDuration ?? 0)
+                    if !chapters.isEmpty {
+                        book.audioChapters = chapters
+                        book.audioChapterSource = "mp4"
+                    }
                 }
             }
         }
@@ -414,6 +448,15 @@ final class BooksStore: ObservableObject {
             try? jpeg.write(to: directory.appendingPathComponent("cover.jpg"), options: [.atomic])
             book.hasCover = true
         }
+
+        // One line that says what the file actually gave us — the device
+        // round reports ("no thumbnail, no chapters") are unreadable without
+        // knowing which of the three readers fired and what they found.
+        Log.shared.info(
+            "AudioBook import: «\(book.title)» \(String(format: "%.1f", book.audioDuration ?? -1))s, " +
+            "\(book.audioChapters?.count ?? 0) chapter(s) via \(book.audioChapterSource ?? "?"), " +
+            "cover \(book.hasCover ? "found" : "none"), author \(book.author ?? "-")"
+        )
         return book
     }
 

@@ -204,8 +204,12 @@ struct BookReaderView: View {
         .onDisappear {
             player.miniPlayerSuppressed = false
             persistPosition()
-            // Tear the web book down so its parsed spine doesn't linger.
-            webView?.evaluateJavaScript("readerDestroy()", completionHandler: nil)
+            // Deliberately NO readerDestroy() here: onDisappear fires on every
+            // TAB SWITCH, and destroying the rendition blanked the book the
+            // moment the user left the tab (the "EPUB text disappears" report)
+            // with nothing to re-open it on return. The WKWebView and its whole
+            // JS heap are reclaimed when the reader is popped, so the explicit
+            // teardown bought nothing on the dismissal path either.
         }
     }
 

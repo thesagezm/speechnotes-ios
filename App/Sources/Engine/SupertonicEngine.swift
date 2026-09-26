@@ -165,13 +165,24 @@ final class SupertonicEngine: NSObject, SpeechEngine {
         }
         let started = Date()
         let result = try tts.call(text, lang, style, Self.totalStep, speed: core.speed, silenceDuration: 0.05)
-        let actualLen = Int(Float(tts.sampleRate) * result.duration)
-        guard actualLen > 0, result.wav.count >= actualLen else {
+        let predictedLen = Int(Float(tts.sampleRate) * result.duration)
+        if predictedLen <= 0 {
+            // The duration predictor returned nothing usable — log the text so
+            // a device report pinpoints the input instead of a bare skip.
+            Log.shared.error("SupertonicEngine: duration predictor returned \(result.duration)s for «\(text.prefix(60))»")
             throw SupertonicEngineError.noOutput
         }
-        let duration = Double(actualLen) / core.sampleRate
+        // The vocoder's output is quantized to the latent chunk size and can
+        // come back a few hundred samples SHORT of the predicted length; the
+        // first device round turned that into ~20% skipped sentences. Trim to
+        // whatever actually came back — shorter audio beats no audio.
+        let playableLen = min(predictedLen, result.wav.count)
+        guard playableLen > 0 else {
+            throw SupertonicEngineError.noOutput
+        }
+        let duration = Double(playableLen) / core.sampleRate
         Log.shared.info("SupertonicEngine: \(String(format: "%.1f", duration))s audio in \(String(format: "%.2f", Date().timeIntervalSince(started)))s (\(voice), \(lang))")
-        return Array(result.wav.prefix(actualLen))
+        return Array(result.wav.prefix(playableLen))
     }
 
     // MARK: - WAV export

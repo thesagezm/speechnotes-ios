@@ -513,8 +513,9 @@ public enum AudiobookChapters {
 
     /// Fills in missing end times (each chapter ends where the next starts),
     /// gives untitled chapters a positional name, and keeps only entries with
-    /// a real start. Returns nil when there is nothing usable.
-    private static func normalize(_ chapters: [AudioChapter], totalSeconds: Double?) -> [AudioChapter]? {
+    /// a real start. Returns nil when there is nothing usable. Also used by
+    /// the app to normalize AVFoundation's chapter groups.
+    public static func normalize(_ chapters: [AudioChapter], totalSeconds: Double?) -> [AudioChapter]? {
         let usable = chapters
             .filter { $0.startSeconds >= 0 }
             .sorted { $0.startSeconds < $1.startSeconds }

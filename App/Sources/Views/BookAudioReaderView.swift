@@ -524,7 +524,10 @@ final class AudioBookPlayer: ObservableObject {
             }
             guard let player else { return }
             let chapter = chapters[chapterIndex]
-            player.currentTime = chapter.startSeconds
+            // Clamp the start to the file: a garbage chapter start (legacy
+            // manifests) otherwise seeks past the end and the ticker pauses
+            // instantly.
+            player.currentTime = min(max(0, chapter.startSeconds), max(0, player.duration - 0.05))
             player.play()
             startTicker()
         } catch {
@@ -549,12 +552,31 @@ final class AudioBookPlayer: ObservableObject {
         player.currentTime = min(max(0, seconds), player.duration)
     }
 
+    /// The chapter's real end, cross-checked against the FILE the player is
+    /// actually playing. The manifest's chapter table is best-effort (an
+    /// import from before the chapter-track reader shipped a single chapter
+    /// whose end was a raced duration — sometimes ≈ 2 s — and the ticker
+    /// then paused two seconds into a ten-hour book). A chapter end that is
+    /// implausibly short (< 5 s of audio) or beyond the file plays to the
+    /// file's end instead; real chapter tables are unaffected.
+    private func effectiveChapterEnd(fileDuration: Double) -> Double? {
+        guard chapters.indices.contains(chapterIndex) else { return nil }
+        let chapter = chapters[chapterIndex]
+        var end = chapter.endSeconds
+        if fileDuration > 0, end > fileDuration { end = fileDuration }
+        guard end > chapter.startSeconds + 5 else {
+            return fileDuration > chapter.startSeconds ? fileDuration : nil
+        }
+        return end
+    }
+
     /// Seconds into the current chapter, 0…1 — the reader's slider value.
     var chapterProgress: Double {
         guard let player,
               chapters.indices.contains(chapterIndex) else { return 0 }
         let chapter = chapters[chapterIndex]
-        let span = chapter.endSeconds - chapter.startSeconds
+        guard let end = effectiveChapterEnd(fileDuration: player.duration) else { return 0 }
+        let span = end - chapter.startSeconds
         guard span > 0 else { return 0 }
         return min(1, max(0, (player.currentTime - chapter.startSeconds) / span))
     }
@@ -563,9 +585,9 @@ final class AudioBookPlayer: ObservableObject {
     /// advances. Checked by the reader's own ticker, which is why this is a
     /// var and not a callback: the reader owns chapter navigation.
     var chapterIsFinished: Bool {
-        guard let player,
-              chapters.indices.contains(chapterIndex) else { return false }
-        return player.currentTime >= chapters[chapterIndex].endSeconds
+        guard let player else { return false }
+        guard let end = effectiveChapterEnd(fileDuration: player.duration) else { return false }
+        return player.currentTime >= end - 0.05
     }
 
     // MARK: - Remote commands

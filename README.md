@@ -3,14 +3,16 @@
 An offline, Speech Note (Linux)-style app for iPhone — built entirely from Linux,
 compiled on GitHub Actions macOS runners, sideloaded via SideStore + LiveContainer.
 
-**Current status: v1.7.1 — Books complete (EPUB, PDF and audiobooks, with
+**Current status: v1.7.0 — Books complete (EPUB, PDF and audiobooks, with
 full TTS for the first two), landscape with the playback controls on a
-lateral rail, and the v1.7.0 device round's four bugs fixed: the Soprano
-download completes and validates (its config files were fetched from the
-wrong Hugging Face path and 404'd at 99%), JEX import exists (Settings →
-Backup → Import from Joplin), audiobooks read chapters from real chapter
-TRACKS as well as `chpl` atoms plus their embedded covers, and the Joplin
-round-trip is tested both ways.** Pick an
+lateral rail. The device rounds' reported bugs are being fixed on this
+branch WITHOUT version bumps: the Soprano download now completes and
+validates, Soprano's generation loop matches the reference (its KV-cache
+shape bug killed every chunk on device), Supertonic's epub skips are
+fixed at the unicode-indexer level, JEX import exists (Settings →
+Backup → Import from Joplin), audiobooks read chapters through
+AVFoundation plus the hand parsers, and the EPUB reader no longer blanks
+on tab switches.** Pick an
 engine in Speech Settings (listed worst → best), download
 its model once, and notes are spoken fully offline (airplane-mode tested):
 

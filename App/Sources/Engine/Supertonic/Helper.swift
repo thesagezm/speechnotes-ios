@@ -67,29 +67,36 @@ class UnicodeProcessor {
         for (i, text) in textList.enumerated() {
             processedTexts.append(try preprocessText(text, lang: langList[i]))
         }
-        
+
         // Use unicodeScalars.count for correct length after NFKD decomposition
         var textIdsLengths = [Int]()
         for text in processedTexts {
             textIdsLengths.append(text.unicodeScalars.count)
         }
-        
+
         let maxLen = textIdsLengths.max() ?? 0
-        
+        // Unmapped scalars used to reach the model as -1 ids: the duration
+        // predictor then returned garbage (≤ 0 s) and the chunk was skipped
+        // as "noOutput" (~20% of an EPUB's dialogue-heavy chunks on device).
+        // Unknown characters now read as the space id — the closest neutral
+        // the model knows.
+        let spaceID: Int64 = indexer.count > 32 ? indexer[32] : 0
+
         var textIds = [[Int64]]()
         for text in processedTexts {
             var row = Array(repeating: Int64(0), count: maxLen)
             let unicodeValues = Array(text.unicodeScalars.map { Int($0.value) })
             for (j, val) in unicodeValues.enumerated() {
                 if val < indexer.count {
-                    row[j] = indexer[val]
+                    let mapped = indexer[val]
+                    row[j] = mapped < 0 ? spaceID : mapped
                 } else {
-                    row[j] = -1
+                    row[j] = spaceID
                 }
             }
             textIds.append(row)
         }
-        
+
         let textMask = getTextMask(textIdsLengths)
         return (textIds, textMask)
     }
@@ -133,6 +140,21 @@ func preprocessText(_ text: String, lang: String) throws -> String {
         "[": " ",      // left bracket
         "]": " ",      // right bracket
         "|": " ",      // vertical bar
+        "…": "...",    // ellipsis (0x2026 maps to -1 in the unicode indexer —
+                       // unmapped ids made the duration predictor return ≤ 0
+                       // and the chunk was skipped)
+        "„": "\"",     // low-9 double quote (unmapped)
+        "‚": "'",      // low-9 single quote (unmapped)
+        "«": "\"",     // guillemet open — mapped, but read as a letter; a
+                       // quote reads better
+        "»": "\"",     // guillemet close
+        "‹": "'",      // single guillemet open (unmapped)
+        "›": "'",      // single guillemet close (unmapped)
+        "′": "'",      // prime (unmapped)
+        "≥": "at least ",   // unmapped — reads correctly
+        "≤": "at most ",    // unmapped
+        "−": "-",      // minus sign (mapped, but reads oddly)
+        "\u{FFFD}": "", // replacement char from a lossy decode
         "/": " ",      // slash
         "#": " ",      // hash
         "→": " ",      // right arrow

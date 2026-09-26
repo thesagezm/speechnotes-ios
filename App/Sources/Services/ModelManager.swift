@@ -216,10 +216,11 @@ final class ModelManager: ObservableObject {
         return Self.sopranoTokenizerVocabulary() != nil
     }
 
-    /// The engine needs ONE thing from the tokenizer JSON: the {token: id}
-    /// vocab. Parsing it here, in one place, means validation and loading
-    /// can't disagree about what "valid" means — and a vocab under 1,000
-    /// entries means the parse hit the wrong node, not a smaller model.
+    /// The engine needs TWO things from the tokenizer JSON: the {token: id}
+    /// vocab and the BPE merge pairs. Parsing both here, in one place, means
+    /// validation and loading can't disagree about what "valid" means — and
+    /// a vocab under 1,000 entries means the parse hit the wrong node, not a
+    /// smaller model.
     nonisolated static func sopranoTokenizerVocabulary() -> [String: Int]? {
         guard let data = try? Data(contentsOf: sopranoTokenizerFileURL),
               let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
@@ -227,6 +228,22 @@ final class ModelManager: ObservableObject {
               vocab.count > 1_000
         else { return nil }
         return vocab
+    }
+
+    /// The BPE merge pairs in rank order — HF writes them as ["a","b"] pairs
+    /// or legacy "a b" strings; both decode here.
+    nonisolated static func sopranoTokenizerMerges() -> [[String]] {
+        guard let data = try? Data(contentsOf: sopranoTokenizerFileURL),
+              let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let raw = (json["model"] as? [String: Any])?["merges"] as? Any
+        else { return [] }
+        if let pairs = raw as? [[String]] {
+            return pairs
+        }
+        if let strings = raw as? [String] {
+            return strings.map { $0.components(separatedBy: " ") }
+        }
+        return []
     }
 
     nonisolated static var onnxDirectory: URL {

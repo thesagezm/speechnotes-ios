@@ -55,6 +55,12 @@ final class SopranoEngine: NSObject, SpeechEngine {
     private var validationCalls = 0
 
     private static let hiddenSize = 512
+    /// Per-head KV dimension — config's head_dim (1 KV head × 128), NOT
+    /// hidden_size. The first device build passed [1, 1, 0, 512] empty KV
+    /// caches; ORT rejected the shape on step 0 and EVERY chunk died with a
+    /// masked "missingOutput" ~10 ms in (the "Soprano plays nothing" report;
+    /// the CI spike used 128 all along, which is why it stayed green).
+    private static let kvDim = 128
     /// Decoder receptive field — 4 in the reference loop, NOT 12 (12 came from
     /// misreading the decoder's input shape; the reference trims its buffer to
     /// 2*RF + chunk and slices RF + chunk frames out of it).
@@ -74,6 +80,10 @@ final class SopranoEngine: NSObject, SpeechEngine {
     private var backbone: ORTSession?
     private var decoder: ORTSession?
     private var tokenIDs: [String: Int] = [:]
+    /// The model's real BPE tokenizer (vocab + 135 merges from
+    /// tokenizer.json). Nil until load; generateChunk falls back to greedy
+    /// longest-match if the merges failed to parse.
+    private var bpeTokenizer: SopranoBPETokenizer?
     private var modelLoadAttempted = false
 
     override init() {
@@ -141,6 +151,10 @@ final class SopranoEngine: NSObject, SpeechEngine {
                 Log.shared.error("SopranoEngine: tokenizer.json has no usable vocab")
                 return
             }
+            bpeTokenizer = SopranoBPETokenizer(
+                vocab: tokenIDs,
+                merges: ModelManager.sopranoTokenizerMerges()
+            )
             // Only latch AFTER success — a transient ORT error (memory
             // pressure, file lock) must not brick the engine until relaunch.
             modelLoadAttempted = true
@@ -195,7 +209,15 @@ final class SopranoEngine: NSObject, SpeechEngine {
         // with different ids stays correct, and the STRIDE over the logits is
         // the model's vocab size (8192), never tokenIDs.count.
         let normalized = SopranoTextNormalizer.normalize(text)
-        var ids = Self.greedyEncode(normalized, vocab: tokenIDs)
+        // The model's real BPE (vocab + merges); greedy longest-match is the
+        // fallback when the merges didn't parse — it produces valid ids but
+        // sequences BPE would never build, which degrades the voice.
+        var ids: [Int]
+        if let bpeTokenizer {
+            ids = bpeTokenizer.encode(normalized)
+        } else {
+            ids = Self.greedyEncode(normalized, vocab: tokenIDs)
+        }
         guard !ids.isEmpty else { throw SopranoEngineError.tokenizationFailed }
         let stopID = Self.specialID(named: "[STOP]", in: tokenIDs) ?? 3
         let startID = Self.specialID(named: "[START]", in: tokenIDs) ?? 2
@@ -220,8 +242,16 @@ final class SopranoEngine: NSObject, SpeechEngine {
 
         var step = 0
         var finished = false
+        // The model's position window (config max_position_embeddings): the
+        // rope table gathers at position_ids, so prompt + generated beyond
+        // this throws mid-loop. Emit what we have instead of losing the chunk.
+        let positionCeiling = 512
         do {
         while step < maxTokens, !finished {
+            if sequenceLen >= positionCeiling {
+                Log.shared.info("SopranoEngine: chunk hit the \(positionCeiling)-position ceiling — emitting \(samples.count) samples early")
+                break
+            }
             let inputIDs: [Int64] = step == 0 ? ids.map(Int64.init) : [Int64(ids[ids.count - 1])]
             let mask = Array(repeating: Int64(1), count: sequenceLen)
             let positionStart = step == 0 ? 0 : sequenceLen - 1
@@ -234,7 +264,7 @@ final class SopranoEngine: NSObject, SpeechEngine {
             let backboneInputNames = (try? backbone.inputNames()) ?? []
             if step == 0 {
                 for name in backboneInputNames where name.contains(".key") || name.contains(".value") {
-                    inputs[name] = try Self.floatTensor([], shape: [NSNumber(value: 1), NSNumber(value: 1), NSNumber(value: 0), NSNumber(value: Self.hiddenSize)])
+                    inputs[name] = try Self.floatTensor([], shape: [NSNumber(value: 1), NSNumber(value: 1), NSNumber(value: 0), NSNumber(value: Self.kvDim)])
                 }
             } else {
                 var keyIndex = 0
@@ -358,9 +388,11 @@ final class SopranoEngine: NSObject, SpeechEngine {
         } catch let sopranoError as SopranoEngineError {
             throw sopranoError
         } catch {
-            // A chunk the model cannot synthesize is skipped upstream (the
-            // core logs, beeps once, and steps over it) — surface the failure
-            // as an ordinary error and let that machinery work.
+            // The core skips the chunk (one log, one beep) — but the REAL
+            // error must not die here: the first device round lost a whole
+            // engine to a masked ORT shape error ("missingOutput" on every
+            // chunk, no way to tell why). Log the underlying error verbatim.
+            Log.shared.error("SopranoEngine: chunk generation failed at step \(step): \(error)")
             throw SopranoEngineError.missingOutput
         }
 
