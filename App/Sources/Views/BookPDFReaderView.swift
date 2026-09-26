@@ -60,8 +60,10 @@ struct BookPDFReaderView: View {
         return chapters.firstIndex { currentPage >= $0.startPage && currentPage <= $0.endPage }
     }
 
-    /// Tap-to-hide chrome — shared app-wide (ImmersiveBars.swift).
-    @AppStorage("immersiveBarsEnabled") private var immersiveBarsHidden = false
+    /// Tap-to-hide chrome — PER-SURFACE storage (round 5): each reader hides
+    /// and shows its own title bar; the old app-wide key stranded hidden
+    /// bars across surfaces.
+    @AppStorage("immersiveBars.pdf") private var immersiveBarsHidden = false
 
     /// Reader + playback, arranged per orientation — same guided-rotation
     /// shape as the EPUB reader: one GeometryReader, one content identity, an

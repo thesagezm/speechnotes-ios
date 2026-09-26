@@ -165,4 +165,20 @@
     window.RENDITION = null;
     window.BOOK = null;
   };
+
+  // --- chrome tap (immersive reading toggle) ---
+  // The reading surface is a WKWebView: it swallows the SwiftUI tap gesture
+  // the reader used to rely on, so a hidden title bar could never be brought
+  // back. A click inside the page that does not land on a link or a text
+  // selection is reported to native, which flips the per-reader chrome.
+  document.addEventListener("click", function (event) {
+    var node = event.target;
+    while (node && node !== document) {
+      if (node.tagName === "A") return;
+      node = node.parentElement;
+    }
+    var sel = window.getSelection && window.getSelection();
+    if (sel && !sel.isCollapsed && String(sel).length > 0) return;
+    post({ type: "chromeTap" });
+  }, false);
 })();

@@ -23,6 +23,11 @@ struct BookWebView: UIViewRepresentable {
     var onError: (String) -> Void
     /// Hands the live WKWebView to the parent so it can evaluate commands.
     var onWebViewReady: (WKWebView) -> Void
+    /// Fired when the user taps the reading surface without hitting a link
+    /// or a text selection. The tap is detected IN the page (reader.js):
+    /// a WKWebView swallows SwiftUI gestures, so the reader's SwiftUI
+    /// .onTapGesture never fired and a hidden title bar was unreachable.
+    var onChromeTap: (() -> Void)? = nil
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -333,6 +338,8 @@ struct BookWebView: UIViewRepresentable {
                 parent.onTOC(entries)
             case "error":
                 parent.onError(body["message"] as? String ?? "Unknown reader error")
+            case "chromeTap":
+                parent.onChromeTap?()
             default:
                 break
             }

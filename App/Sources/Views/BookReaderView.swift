@@ -53,8 +53,12 @@ struct BookReaderView: View {
         _totalChapters = State(initialValue: book.spineCount ?? 0)
     }
 
-    /// Tap-to-hide chrome — shared app-wide (ImmersiveBars.swift).
-    @AppStorage("immersiveBarsEnabled") private var immersiveBarsHidden = false
+    /// Tap-to-hide chrome — PER-SURFACE storage (round 5): the epub webview
+    /// swallows SwiftUI taps, so this reader could never un-hide a bar that
+    /// another surface (note editor) had hidden under the old app-wide key.
+    /// The toggle now arrives from the webview's own JS (chromeTap) and this
+    /// state belongs to this reader alone.
+    @AppStorage("immersiveBars.epub") private var immersiveBarsHidden = false
 
     /// Reader surface + playback controls, arranged per orientation.
     ///
@@ -134,15 +138,11 @@ struct BookReaderView: View {
         readerLayout
             .navigationTitle(book.title)
         .navigationBarTitleDisplayMode(.inline)
-        // Tap the page to hide/show the title + toolbar (immersive reading,
-        // shared app-wide preference). A single tap on the webview content
-        // toggles it; epub.js keeps its own link handling underneath.
+        // Tap the page to hide/show the title + toolbar (immersive reading).
+        // The tap comes from the webview's JS (a WKWebView swallows SwiftUI
+        // gestures, which is exactly why the bar could never be un-hidden);
+        // epub.js link handling is untouched — taps on links never report.
         .toolbar(immersiveBarsHidden ? .hidden : .visible, for: .navigationBar)
-        .contentShape(Rectangle())
-        .onTapGesture {
-            Haptics.tap()
-            immersiveBarsHidden.toggle()
-        }
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
                 Button {
@@ -221,7 +221,9 @@ struct BookReaderView: View {
     // MARK: - Reader surface (read-along swap + webview + veil)
 
     /// While this book speaks with read-along on, the webview surface swaps
-    /// to the native ReadAlongView (the editor's exact pattern).
+    /// to the native ReadAlongView (the editor's exact pattern). The native
+    /// surface carries its own chrome toggle — the JS tap only covers the
+    /// webview.
     private var readerSurface: some View {
         Group {
             if showsReadAlong {
@@ -230,6 +232,11 @@ struct BookReaderView: View {
                     activeRange: player.readAlongRange,
                     textScale: appTheme.previewTextScale
                 )
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    Haptics.tap()
+                    immersiveBarsHidden.toggle()
+                }
             } else {
                 webSurface
             }
@@ -246,7 +253,11 @@ struct BookReaderView: View {
             onRelocated: handleRelocated,
             onTOC: { toc = $0 },
             onError: { errorMessage = $0 },
-            onWebViewReady: { webView = $0 }
+            onWebViewReady: { webView = $0 },
+            onChromeTap: {
+                Haptics.tap()
+                immersiveBarsHidden.toggle()
+            }
         )
         .overlay {
             if !bookLoaded {

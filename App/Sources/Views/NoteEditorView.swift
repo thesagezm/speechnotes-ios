@@ -55,9 +55,24 @@ struct NoteEditorView: View {
     /// setting is on; opens in preview (reading) mode, double-tap to edit.
     @State private var showPreview = true
     @AppStorage("renderMarkdown") private var renderMarkdown = false
-    /// Tap-to-hide chrome (immersive reading). Shared app-wide so the note
-    /// reader, the book readers and this preview hide/show together.
-    @AppStorage("immersiveBarsEnabled") private var immersiveBarsHidden = false
+    /// Tap-to-hide chrome (immersive reading). PER-SURFACE storage (v1.7
+    /// device round 5): the old single app-wide key meant hiding the title
+    /// bar in a note also hid it in the epub reader, where the webview
+    /// swallows the tap that would bring it back — the user was stranded.
+    /// Each reader now hides/shows its own bar independently.
+    @AppStorage("immersiveBars.editor") private var immersiveBarsHidden = false
+
+    /// The chrome only ever hides on a READING surface (preview / read-along).
+    /// Editing always shows the nav bar: its back button and ⋯ menu are the
+    /// only way out of the editor, and round-5 device testing showed a user
+    /// who hides the bar in preview and then enters edit mode had no way
+    /// back to the notes list until they happened to type (the draft-change
+    /// restore). Computing the hidden state off the surface makes the escape
+    /// deterministic — entering edit restores the chrome, typing or not.
+    private var chromeHidden: Bool {
+        guard immersiveBarsHidden else { return false }
+        return showsReadAlong || (renderMarkdown && showPreview)
+    }
     /// Read-along: while THIS note is being spoken, replace the editor with
     /// the sentence-highlighted reader. Toggleable live from the player bar.
     @AppStorage("readAlongEnabled") private var readAlongEnabled = true
@@ -301,7 +316,7 @@ struct NoteEditorView: View {
         editorLayout
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar(immersiveBarsHidden ? .hidden : .visible, for: .navigationBar)
+            .toolbar(chromeHidden ? .hidden : .visible, for: .navigationBar)
             .toolbar {
                 // The title lives IN the nav bar — centered between the back
                 // button and the ⋯ menu — instead of occupying a content row
@@ -569,6 +584,9 @@ struct NoteEditorView: View {
                 .onTapGesture(count: 2) {
                     Haptics.tap()
                     showPreview = false
+                    // Leaving the reading surface restores the chrome — the
+                    // edit surface never hides it (see chromeHidden).
+                    immersiveBarsHidden = false
                 }
                 // Single tap in preview: toggles the immersive (tap-to-hide)
                 // chrome — the same gesture everywhere else. We don't want
@@ -589,6 +607,7 @@ struct NoteEditorView: View {
                 .onTapGesture {
                     Haptics.tap()
                     showPreview = false
+                    immersiveBarsHidden = false
                 }
                 .accessibilityLabel("Switch to edit")
                 .accessibilityHint("Double-tap to switch to edit mode")

@@ -55,8 +55,10 @@ struct BookAudioReaderView: View {
     }
 
     @Environment(\.isLandscape) private var isLandscape
-    /// Tap-to-hide chrome — shared app-wide (ImmersiveBars.swift).
-    @AppStorage("immersiveBarsEnabled") private var immersiveBarsHidden = false
+    /// Tap-to-hide chrome — PER-SURFACE storage (round 5): each reader hides
+    /// and shows its own title bar; the old app-wide key stranded hidden
+    /// bars across surfaces.
+    @AppStorage("immersiveBars.audio") private var immersiveBarsHidden = false
 
     var body: some View {
         // Landscape: the cover/title/chapter block keeps the leading width
