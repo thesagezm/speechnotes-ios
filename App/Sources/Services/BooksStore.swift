@@ -175,7 +175,7 @@ final class BooksStore: ObservableObject {
                     // empty while playback (content-sniffing AVAudioPlayer)
                     // kept working. Give the file its true extension, then
                     // re-read the manifest from it.
-                    renameLegacyAudioFileIfNeeded(book: book, directory: dir)
+                    Self.renameLegacyAudioFileIfNeeded(book: book, directory: dir)
                     let refreshed = Self.buildAudioManifest(book: book, directory: dir)
                     book = refreshed
                 case .epub:
