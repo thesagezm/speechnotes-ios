@@ -436,7 +436,7 @@ struct BookAudioReaderView: View {
             ? displayProgress
             : nil
         audioBook.play(book: book, chapterIndex: index, withinChapterFraction: fraction)
-        progress = audioBook.chapterProgress
+        scrubValue = audioBook.chapterProgress
     }
 
     private func stepChapter(_ delta: Int) {
