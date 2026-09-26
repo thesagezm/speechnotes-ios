@@ -1,3 +1,87 @@
+## 2026-09-25 addendum #15 — v1.7.1: the device round's four bugs
+
+**User directive: "dont release v1.7 until these work or i confirm they
+work."** No tag, no GitHub Release, no main merge — v1.7.1 is pushed as a
+branch build for the device round only.
+
+**Soprano download stuck at 99% + "files failed validation" — root
+cause: four 404s.** The download list fetched all six files from
+`onnx/`, but only the two graphs live there; `tokenizer.json`,
+`tokenizer_config.json`, `special_tokens_map.json` and `config.json` sit
+at the REPO ROOT of KevinAHM/soprano-1.1-onnx. So the graphs downloaded
+(~72% + 27% of the bar), then each config 404'd; URLSession surfaces an
+HTTP 404 download as a COMPLETED transfer of the error page, which the
+delegate happily moved into place, validation parsed nothing and failed.
+The 99% stall was the same bug wearing a progress hat: expectedBytes were
+rounded (80_939_000 vs the real 80_938_986), so the last file's progress
+never reached its band top. Fixed: paths per file, real byte sizes, the
+failure message now names every file's on-disk size, and delete() cleans
+the six download names instead of relying on directory removal (a
+previous device round showed a user file imported into the model
+directory deleted by that path).
+
+**Soprano engine — three contract bugs against the reference loop
+(KevinAHM/soprano-web-onnx, Apache-2.0).**
+1. The logits stride was `tokenIDs.count` (the tokenizer dict skips ids,
+   ~7900 of them) instead of the model's vocab 8192 — sampling sliced the
+   wrong window and ORT's Gather walked out of bounds. This was also the
+   CI spike's crash ("idx=39 must be within [-39,38]").
+2. `[STOP]` (id 3, the eos/pad token per config.json) was fed back as a
+   decode pad token for 512 steps. The reference ENDS the chunk when the
+   model emits it.
+3. The decoder window was 12 frames (misread from the graph's input
+   shape) with no slicing; the reference uses receptive field 4 + chunk 8,
+   keeps only the LAST position's hidden frame per step, skips the
+   prefill's own frame, and slices the decoded audio to
+   `[audio.count - (RF+chunk)*2048 + 2048 ..< audio.count - RF*2048 + 2048]`
+   (finish: from `(RF+chunk-1)*2048 - 2048` to the end). Also added the
+   reference's repetition penalty 1.2 (HF-style scale over a seen-token
+   set). `[START]` fallback id corrected 4 → 2 (tokenizer_config.json).
+
+**The spike is GREEN.** Run 36208555022's Soprano spike passed on the
+macOS runner — 39-token prompt, [STOP] termination, real audio. That is
+the first green Soprano run on CI; the voice still needs device ears for
+quality, but the graph contract is now machine-verified end to end.
+
+**JEX import — it did not exist.** Settings only had an export. Built:
+- `SpeechLogic/JexImport` — tar reader (ustar + GNU + pax-size-tolerant)
+  and the Joplin metadata-block parser (type_ 1/2/4, resources/
+  binaries, ISO dates with ms, ms-since-epoch). A body-less metadata
+  block (resource files) is valid — the first round required a blank
+  line before the block and dropped every resource.
+- `App/JexImporter` — notebooks merge by name, notes keep their exported
+  UUID when free (a re-import duplicates ON PURPOSE), image links are
+  rewritten into speechnotes://note-image targets via NoteImageStore.
+- UI: Settings → Backup → "Import from Joplin (.jex)" (fileImporter +
+  result alert). Round-trip is tested: JexExport output must parse back.
+
+**Audiobooks — three bugs, one hard one soft.**
+1. HARD: chapters. The parser only read `chpl` atoms; m4b-tool/ffmpeg
+   M4Bs carry a real chapter TRACK (text hdlr + stts/stsz/stsc/stco
+   sample table). Full support added: mvhd/mdhd timescales, the soun
+   track is skipped, titles are 16-bit-BE-length QuickTime text samples
+   (a be32 read there swallowed the first two title bytes — the "no
+   chapter titles" symptom), stts-only fallback when chunk offsets
+   escape the 8 MB head slice. Two tests.
+2. SOFT: covers + tags. `asset.metadata` returns [] until its async
+   load finishes — the sync read raced it and titles/authors/covers
+   came back empty (title survived via the filename fallback, so it
+   looked like ONLY the thumbnail was broken). Both duration and
+   metadata now wait on `load(...)`, covers re-encode through UIImage
+   to a real JPEG.
+3. SOFT: playback. AudioBookPlayer never configured the AVAudioSession
+   (mute-switch-able ambient default). Now runs the same
+   AudioSessionSetup.configureIfNeeded as the engines, on first play.
+Legacy audio books re-read their manifest once on shelf refresh
+(source "single"/"chpl" with no real chapters, or coverless) — the
+user's already-imported books heal themselves.
+
+Release mechanics this round: four version fields → 1.7.1/38, README
+refreshed, CI green required before handoff. **Device round pending;
+no tag, no GitHub Release, no main merge without the user's say-so.**
+
+---
+
 ## 2026-09-23 addendum #14 — v1.7.0: landscape unlocked, spacing tunable, Soprano
 
 **The orientation question, settled.** `cdf61fd` re-added the two landscape
