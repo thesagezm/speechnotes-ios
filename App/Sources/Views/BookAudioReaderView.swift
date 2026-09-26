@@ -227,7 +227,72 @@ struct BookAudioReaderView: View {
     /// play, live file-position readouts). The content is centered; the
     /// vertical hairline strip is gone (it read as a rendering artifact at
     /// this width — the horizontal capsule carries the position instead).
+    /// Minimizes to a slim strip with the same app-wide preference as the
+    /// PlaybackRail (round 6).
+    @AppStorage("landscapeRailMinimized") private var railMinimized = false
+
     private var audioRail: some View {
+        Group {
+            if railMinimized {
+                minimizedAudioRail
+            } else {
+                fullAudioRail
+            }
+        }
+    }
+
+    private var minimizedAudioRail: some View {
+        HStack(spacing: 0) {
+            GeometryReader { proxy in
+                ZStack(alignment: .top) {
+                    Capsule()
+                        .fill(Color.secondary.opacity(0.25))
+                        .frame(width: 3)
+                    Capsule()
+                        .fill(theme.accentFadeVerticalGradient)
+                        .frame(width: 3, height: max(4, (proxy.size.height - 12) * displayProgress))
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            }
+            .frame(width: 3)
+            .padding(.vertical, 6)
+
+            VStack(spacing: 12) {
+                Button {
+                    Haptics.tap()
+                    railMinimized = false
+                } label: {
+                    Image(systemName: "chevron.compact.left")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 30, height: 30)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Expand playback rail")
+
+                Button {
+                    Haptics.tap()
+                    togglePlayback()
+                } label: {
+                    Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 30, height: 30)
+                        .background(Circle().fill(theme.accentGradient))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(isPlaying ? "Pause" : "Play")
+
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 3)
+        }
+        .frame(width: PlaybackRail.minimizedWidth)
+        .frame(maxHeight: .infinity)
+        .background(.bar)
+    }
+
+    private var fullAudioRail: some View {
         VStack(spacing: 14) {
             // File-position capsule — the rail twin of the portrait scrub
             // slider, filling LEFT→RIGHT like the redesigned PlaybackRail's.
