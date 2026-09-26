@@ -1063,3 +1063,30 @@ FROZEN at 1.7.0/37 per standing order — identify builds by commit + run id.
 Checklist: `Docs/DEVICE-CHECKLIST-V1.7.1.md` round-5 section. Golden rules
 unchanged: no merge to main, no tag, no release without the user's device
 confirmation.
+
+## 2026-09-26 addendum #18 — round 7: freeze fix, chpl SOLVED on the user's own file, floating rail, SOPRANO REMOVED
+
+Final batch before push (commits 66f16cf..8299a65, green run 36280646036).
+Checklist: Docs/DEVICE-CHECKLIST-V1.7.1.md round-7 section.
+
+- **Freeze (audiobook playing → open big PDF):** BookPDFReaderView.onAppear
+  ran flattenOutline synchronously (opens the document + walks its whole
+  outline). Detached — big textbooks no longer stall the main thread.
+- **Chapters — solved with the user's own file as ground truth.** The
+  supplied "When Breath Becomes Air" (MOODY) m4b carries ffmpeg's chpl
+  variant: version(1)+flags(3)+4 ZERO bytes+count(1 byte @8)+entries in
+  100-ns units, parsed identically to ffprobe (12/12 exact). Round 5/6 each
+  had HALF the layout right on different halves; parseChpl now tries the
+  Nero 4-byte count first, then the ffmpeg 1-byte form.
+- **Rail polish:** floating content-hugging panel (no more chrome-coupled
+  height); minimize collapses to the mini-player bubble's idiom (material
+  capsule + live progress ring + expand chevron). Audio reader matches.
+- **SOPRANO REMOVED ENTIRELY** (user order): engine, tokenizer/normalizer +
+  tests, CI spike job, ModelManager set/state, SpeechPlayer enum/rebuild/
+  audition/renderWAV, settings UI, VoiceCatalog entry. Stored "soprano"
+  preference migrates to kokoroOnnx (voice reset am_eric). CI is now 5
+  jobs + build + logic-tests.
+- **Lesson:** a marker-bounded deletion in ModelManager silently swallowed
+  non-soprano helpers that sat after the soprano block; `git show
+  a7d2f88:...` restored them. Diff a purge against the last commit that
+  hadn't touched the file.
