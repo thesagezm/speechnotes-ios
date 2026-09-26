@@ -3,6 +3,10 @@ import SwiftUI
 struct AppearanceSettingsView: View {
     @EnvironmentObject private var theme: AppTheme
     @AppStorage("renderMarkdown") private var renderMarkdown = false
+    @AppStorage("hapticsEnabled") private var hapticsEnabled = true
+    /// True = Automatic: a note's web images download to the cache on open.
+    /// False = Manual: images download only when actually displayed.
+    @AppStorage("imageCacheAutomatic") private var imageCacheAutomatic = true
 
     var body: some View {
         Form {
@@ -32,6 +36,26 @@ struct AppearanceSettingsView: View {
                 Text("Notes")
             } footer: {
                 Text("When on, a note opens in reading mode (headings, emphasis and links rendered; eye button / double-tap to edit). Speech reads what you are looking at: rendered clean text in reading mode, the raw text while editing.")
+            }
+
+            Section {
+                Toggle("Haptic feedback", isOn: $hapticsEnabled)
+            } header: {
+                Text("Feedback")
+            } footer: {
+                Text("The short vibration on taps and presses. Off silences all haptics; nothing else changes.")
+            }
+
+            Section {
+                Picker("Image caching", selection: $imageCacheAutomatic) {
+                    Text("Automatic").tag(true)
+                    Text("Manual").tag(false)
+                }
+                .pickerStyle(.menu)
+            } header: {
+                Text("Images")
+            } footer: {
+                Text("Automatic downloads every web image in a note to the cache as soon as you open it. Manual downloads an image only when you actually view it. Either way, Storage → Cached images can delete a single note's images, and permanently deleting a note from the recycle bin removes its web images with it.")
             }
             Section("Appearance") {
                 Picker("Theme", selection: $theme.appearance) {

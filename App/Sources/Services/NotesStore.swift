@@ -155,10 +155,16 @@ final class NotesStore: ObservableObject {
         allNotes.removeAll { $0.id == noteId }
         bumpVersion()  // list views memoize on `version`
         rowMetadata.removeValue(forKey: noteId)
-        // The editor path cleans images at delete-confirm time; the bin's
-        // purge paths are the only other exits — clean here too or the
-        // per-note image directory leaks forever.
+        // The bin's purge paths are where a note's images die: attached
+        // images (per-note directory) AND the web images its markdown
+        // downloaded, when no other note references them (round 5: the
+        // editor's soft delete no longer removes anything — a note sitting
+        // in the recycle bin keeps its images, so Recover restores it whole).
         NoteImageStore.removeAllImages(for: noteId)
+        let id = noteId
+        Task.detached(priority: .utility) {
+            RemoteImageStore.removeImages(for: id)
+        }
         NotificationCenter.default.post(name: .noteDeleted, object: noteId)
         save()
     }
@@ -171,6 +177,9 @@ final class NotesStore: ObservableObject {
         for id in purgedIds {
             rowMetadata.removeValue(forKey: id)
             NoteImageStore.removeAllImages(for: id)
+            Task.detached(priority: .utility) {
+                RemoteImageStore.removeImages(for: id)
+            }
         }
         save()
     }
@@ -181,7 +190,14 @@ final class NotesStore: ObservableObject {
         let cutoff = Date().addingTimeInterval(-Double(Note.recycleRetentionDays) * 24 * 3600)
         let before = allNotes.count
         let expired = allNotes.filter { ($0.deletedAt ?? .distantFuture) < cutoff }
-        for note in expired { rowMetadata.removeValue(forKey: note.id) }
+        for note in expired {
+            rowMetadata.removeValue(forKey: note.id)
+            NoteImageStore.removeAllImages(for: note.id)
+            let id = note.id
+            Task.detached(priority: .utility) {
+                RemoteImageStore.removeImages(for: id)
+            }
+        }
         allNotes.removeAll { ($0.deletedAt ?? .distantFuture) < cutoff }
         bumpVersion()  // list views memoize on `version`
         if allNotes.count != before { save() }

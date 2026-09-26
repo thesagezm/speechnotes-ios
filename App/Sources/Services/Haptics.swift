@@ -14,22 +14,32 @@ enum Haptics {
     private static let medium = UIImpactFeedbackGenerator(style: .medium)
     private static let notification = UINotificationFeedbackGenerator()
 
+    /// User-controlled kill switch (Appearance → Haptic feedback, v1.7 round
+    /// 5). Read per call — a toggle in Settings takes effect immediately.
+    private static var enabled: Bool {
+        UserDefaults.standard.object(forKey: "hapticsEnabled") as? Bool ?? true
+    }
+
     static func tap() {
+        guard enabled else { return }
         light.prepare()
         light.impactOccurred()
     }
 
     static func press() {
+        guard enabled else { return }
         medium.prepare()
         medium.impactOccurred()
     }
 
     static func success() {
+        guard enabled else { return }
         notification.prepare()
         notification.notificationOccurred(.success)
     }
 
     static func warning() {
+        guard enabled else { return }
         notification.prepare()
         notification.notificationOccurred(.warning)
     }

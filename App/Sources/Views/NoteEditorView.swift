@@ -132,6 +132,20 @@ struct NoteEditorView: View {
     /// keystroke blocked the main thread for long notes. Now we wait until
     /// ~300ms after typing stops, run the parse off-main, and hop back to
     /// update the cached values.
+    /// Automatic image caching (Appearance → Images): opening a note pulls
+    /// every web image it references into the disk cache in the background,
+    /// so scrolling the preview never waits on the network. Manual mode
+    /// leaves the fetch to the moment an image actually displays.
+    private func prefetchImagesIfAutomatic() {
+        guard UserDefaults.standard.object(forKey: "imageCacheAutomatic") as? Bool ?? true else { return }
+        let markdown = draft
+        Task.detached(priority: .utility) {
+            let urls = RemoteImageStore.remoteImageURLs(in: markdown)
+            guard !urls.isEmpty else { return }
+            RemoteImageStore.prefetch(urls)
+        }
+    }
+
     private func scheduleSpeechCacheUpdate() {
         speechCacheTask?.cancel()
         let draftCopy = draft
@@ -346,7 +360,10 @@ struct NoteEditorView: View {
         // While THIS editor is on top and the speaking note is this note,
         // the editor's own PlayerControlsBar is the player UI — suppress the
         // global mini-player so the two never stack at the bottom.
-        .onAppear { player.miniPlayerSuppressed = (player.nowPlayingNoteId == noteId) }
+        .onAppear {
+            player.miniPlayerSuppressed = (player.nowPlayingNoteId == noteId)
+            prefetchImagesIfAutomatic()
+        }
         .onDisappear { player.miniPlayerSuppressed = false }
         .onChange(of: player.nowPlayingNoteId) { _ in
             player.miniPlayerSuppressed = (player.nowPlayingNoteId == noteId)
@@ -362,7 +379,9 @@ struct NoteEditorView: View {
             Button("Delete note", role: .destructive) {
                 player.stop()
                 notes.delete(noteId: noteId)
-                NoteImageStore.removeAllImages(for: noteId)
+                // Images intentionally survive the soft delete: a note in
+                // the recycle bin can be recovered whole. They go with the
+                // note when the bin purges it (NotesStore.purge).
                 dismiss()
             }
             Button("Cancel", role: .cancel) {}

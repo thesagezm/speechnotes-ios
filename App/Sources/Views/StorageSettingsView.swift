@@ -9,6 +9,7 @@ struct StorageSettingsView: View {
     @StateObject private var exports = ExportsStore()
     @StateObject private var wavPlayer = WavPlayer()
     @EnvironmentObject private var player: SpeechPlayer
+    @EnvironmentObject private var notes: NotesStore
     @State private var sharingURL: URL?
     @State private var zoomedImage: CachedImageEntry?
     @State private var showingAllImages = false
@@ -32,11 +33,25 @@ struct StorageSettingsView: View {
         let imageBytes: Int64
     }
 
+    /// One note's slice of the web-image cache (round 5: per-note deletion —
+    /// "deleting cache for specific notes only, not every image").
+    struct NoteImageUsage: Identifiable {
+        let noteId: UUID
+        let title: String
+        let count: Int
+        let bytes: Int64
+        var id: UUID { noteId }
+    }
+    @State private var perNoteImages: [NoteImageUsage] = []
+
     var body: some View {
         Form {
             usageSection
             exportsSection
             imagesSection
+            if !perNoteImages.isEmpty {
+                perNoteImagesSection
+            }
             maintenanceSection
         }
         .navigationTitle("Storage")
@@ -59,7 +74,8 @@ struct StorageSettingsView: View {
     }
 
     private func loadUsage() async {
-        let (breakdown, images): (UsageBreakdown, [CachedImageEntry]) = await Task.detached(priority: .utility) {
+        let noteTitles = Dictionary(uniqueKeysWithValues: notes.notes.map { ($0.id, $0.title) })
+        let (breakdown, images, perNote): (UsageBreakdown, [CachedImageEntry], [NoteImageUsage]) = await Task.detached(priority: .utility) {
             let usage = UsageBreakdown(
                 notesBytes: NotesStoreSizeReader.notesBytes,
                 booksBytes: BooksStore.directorySize(),
@@ -75,11 +91,31 @@ struct StorageSettingsView: View {
             for entry in RemoteImageStore.allEntries() {
                 entries.append(CachedImageEntry(source: .web(entry)))
             }
-            return (usage, entries)
+            // Per-note usage from the preview's note→URL index, restricted to
+            // notes that still exist (purged notes' entries are swept by
+            // their purge path).
+            var perNote: [NoteImageUsage] = []
+            for (idString, urls) in RemoteImageStore.indexedNotes() {
+                guard let id = UUID(uuidString: idString), let title = noteTitles[id] else { continue }
+                var bytes: Int64 = 0
+                var count = 0
+                for string in urls {
+                    guard let url = URL(string: string) else { continue }
+                    let size = Int64((try? RemoteImageStore.fileURL(for: url).resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+                    guard size > 0 else { continue } // not actually cached
+                    bytes += size
+                    count += 1
+                }
+                guard count > 0 else { continue }
+                perNote.append(NoteImageUsage(noteId: id, title: title, count: count, bytes: bytes))
+            }
+            perNote.sort { $0.bytes > $1.bytes }
+            return (usage, entries, perNote)
         }.value
         await MainActor.run {
             self.usage = breakdown
             self.cachedImages = images
+            self.perNoteImages = perNote
         }
     }
 
@@ -382,6 +418,54 @@ struct StorageSettingsView: View {
             RemoteImageStore.remove(webEntry)
         }
         ImageCache.shared.remove(for: entry.memoryKey)
+        Task { await loadUsage() }
+    }
+
+    // MARK: - Per-note cached images
+
+    private var perNoteImagesSection: some View {
+        Section {
+            ForEach(perNoteImages) { item in
+                HStack {
+                    Image(systemName: "note.text")
+                        .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(item.title)
+                            .font(.subheadline.weight(.medium))
+                            .lineLimit(1)
+                        Text("\(item.count) web image(s)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Text(ByteCountFormatter.string(fromByteCount: item.bytes, countStyle: .file))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                    Button(role: .destructive) {
+                        deleteNoteImages(item)
+                    } label: {
+                        Label("Delete", systemImage: "trash")
+                    }
+                }
+            }
+        } header: {
+            Text("Per-note cached images")
+        } footer: {
+            Text("Web images each note has cached. Deleting one note's images keeps every other note's — an image two notes share stays until both are cleared. Purging a note from the recycle bin removes its images automatically.")
+        }
+    }
+
+    private func deleteNoteImages(_ item: NoteImageUsage) {
+        Haptics.press()
+        Task.detached(priority: .utility) {
+            let bytes = RemoteImageStore.removeImages(for: item.noteId)
+            await MainActor.run {
+                LogStore.shared.info("Deleted \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)) of cached images for “\(item.title)”")
+                Task { await loadUsage() }
+            }
+        }
     }
 
     /// Clears only the WEB image cache. Note-attached images are content,
