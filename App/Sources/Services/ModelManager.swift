@@ -174,6 +174,59 @@ final class ModelManager: ObservableObject {
         }
     }
 
+    nonisolated static var onnxDirectory: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("KokoroOnnx")
+    }
+
+    nonisolated static var onnxModelFileURL: URL {
+        onnxDirectory.appendingPathComponent("model.onnx")
+    }
+
+    nonisolated static var onnxTokenizerFileURL: URL {
+        onnxDirectory.appendingPathComponent("tokenizer.json")
+    }
+
+    nonisolated static var voicesFileURL: URL {
+        onnxDirectory.appendingPathComponent("voices.npz")
+    }
+
+    /// Voice bank + tokenizer are shared by BOTH Kokoro tiers — validated
+    /// once each so either tier's download can fill in a missing file.
+    nonisolated static func kokoroVoicesAreValid() -> Bool {
+        guard let voicesSize = (try? FileManager.default.attributesOfItem(atPath: voicesFileURL.path))?[.size] as? Int64,
+              voicesSize > 10_000_000 else { return false }
+        return true
+    }
+
+    /// tokenizer.json is tiny (~3.5 KB) — validate by parsing it the same
+    /// way the engine does, not by size. (A >10 KB size check once rejected
+    /// every successful download.)
+    nonisolated static func kokoroTokenizerIsValid() -> Bool {
+        guard let data = try? Data(contentsOf: onnxTokenizerFileURL),
+              let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let vocab = (json["model"] as? [String: Any])?["vocab"] as? [String: Int],
+              vocab.count > 100 else { return false }
+        return true
+    }
+
+    nonisolated static func onnxFilesAreValid() -> Bool {
+        let fm = FileManager.default
+        // Threshold rejects the old uint8 set (~177 MB model) so the fp32
+        // upgrade re-downloads.
+        guard let modelSize = (try? fm.attributesOfItem(atPath: onnxModelFileURL.path))?[.size] as? Int64,
+              modelSize > 200_000_000 else { return false }
+        return kokoroVoicesAreValid() && kokoroTokenizerIsValid()
+    }
+
+    /// ~341 MB payload (fp32 model + voices + tokenizer); require headroom
+    /// of roughly 1.5× (PocketPal lesson).
+    nonisolated static let requiredFreeBytes: Int64 = 520_000_000
+    /// Generous idle timeout — the GitHub media CDN can stall for minutes.
+    nonisolated static let requestTimeout: TimeInterval = 120
+    nonisolated static let resourceTimeout: TimeInterval = 7200
+    nonisolated static let downloadAttempts = 3
+
     // MARK: Legacy layout migration
 
     /// v0.6 and earlier kept the voice bank in Documents/Kokoro/ next to a
