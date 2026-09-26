@@ -60,7 +60,16 @@ final class NotesStore: ObservableObject {
 
     @discardableResult
     func createNote(notebookId: UUID? = nil) -> Note {
+        createNote(id: UUID(), notebookId: notebookId)
+    }
+
+    /// Fixed identity — the JEX import keeps exported UUIDs so a re-export
+    /// of the same library maps cleanly; clashing ids are resolved by the
+    /// CALLER before this runs (a fresh UUID is minted there).
+    @discardableResult
+    func createNote(id: UUID, notebookId: UUID? = nil) -> Note {
         var note = Note()
+        note.id = id
         note.notebookId = notebookId
         allNotes.insert(note, at: 0)
         bumpVersion()  // list views memoize on `version`

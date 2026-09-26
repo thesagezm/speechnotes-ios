@@ -55,9 +55,17 @@ final class SopranoEngine: NSObject, SpeechEngine {
     private var validationCalls = 0
 
     private static let hiddenSize = 512
-    /// Decoder receptive field: 12 consecutive hidden frames.
-    private static let decoderWindow = 12
-    /// Samples emitted per generated token.
+    /// Decoder receptive field — 4 in the reference loop, NOT 12 (12 came from
+    /// misreading the decoder's input shape; the reference trims its buffer to
+    /// 2*RF + chunk and slices RF + chunk frames out of it).
+    private static let decoderReceptiveField = 4
+    /// Hidden-state frames fed to the decoder per call (reference: 8).
+    private static let decoderChunkFrames = 8
+    /// The model's own vocab size (config.json) — logits are [1, seq, 8192].
+    /// tokenIDs.count is smaller than this (the dict skips gaps), so it must
+    /// NEVER be used as the logits stride: the CI spike crashed sampling
+    /// (Gather idx out of bounds at vocabSize=39) over exactly that mistake.
+    private static let vocabSize = 8192
     private static let samplesPerToken = 2048
     private static let chunkMaxChars = 200
 
@@ -126,20 +134,17 @@ final class SopranoEngine: NSObject, SpeechEngine {
             backbone = backboneSession
             decoder = decoderSession
 
-            let tokenizerData = try Data(contentsOf: ModelManager.sopranoTokenizerFileURL)
-            let json = try JSONSerialization.jsonObject(with: tokenizerData) as? [String: Any]
-            let vocab = (json?["model"] as? [String: Any])?["vocab"] as? [String: Int] ?? [:]
-            guard !vocab.isEmpty else {
+            tokenIDs = ModelManager.sopranoTokenizerVocabulary() ?? [:]
+            guard !tokenIDs.isEmpty else {
                 backbone = nil
                 decoder = nil
-                Log.shared.error("SopranoEngine: tokenizer.json has no vocab")
+                Log.shared.error("SopranoEngine: tokenizer.json has no usable vocab")
                 return
             }
-            tokenIDs = vocab
             // Only latch AFTER success — a transient ORT error (memory
             // pressure, file lock) must not brick the engine until relaunch.
             modelLoadAttempted = true
-            Log.shared.info("SopranoEngine: 2 sessions + \(vocab.count) vocab entries loaded in \(String(format: "%.1f", Date().timeIntervalSince(started)))s")
+            Log.shared.info("SopranoEngine: 2 sessions + \(tokenIDs.count) vocab entries loaded in \(String(format: "%.1f", Date().timeIntervalSince(started)))s")
         } catch {
             backbone = nil
             decoder = nil
@@ -181,13 +186,19 @@ final class SopranoEngine: NSObject, SpeechEngine {
         guard let backbone, let decoder else { throw SopranoEngineError.modelUnavailable }
         guard !tokenIDs.isEmpty else { throw SopranoEngineError.noVocab }
 
+        // The reference generation loop (KevinAHM/soprano-web-onnx, Apache-2.0):
+        // prompt = [STOP][TEXT] + tokens + [START] in ONE prefill, then one
+        // token per step. [STOP] also ENDS generation when the model emits it
+        // (it is the eos/pad token, id 3); the old loop fed it back as the
+        // decode "pad token" and generated 512 steps of junk. Numbers: the
+        // eos id is taken from the tokenizer's added_tokens so a re-export
+        // with different ids stays correct, and the STRIDE over the logits is
+        // the model's vocab size (8192), never tokenIDs.count.
         let normalized = SopranoTextNormalizer.normalize(text)
         var ids = Self.greedyEncode(normalized, vocab: tokenIDs)
         guard !ids.isEmpty else { throw SopranoEngineError.tokenizationFailed }
-        // Soprano's prompt format: [STOP] tokens [START]. Both markers exist in
-        // the export's tokenizer; fall back to the documented ids.
         let stopID = Self.specialID(named: "[STOP]", in: tokenIDs) ?? 3
-        let startID = Self.specialID(named: "[START]", in: tokenIDs) ?? 4
+        let startID = Self.specialID(named: "[START]", in: tokenIDs) ?? 2
         ids.insert(stopID, at: 0)
         ids.append(startID)
 
@@ -197,16 +208,21 @@ final class SopranoEngine: NSObject, SpeechEngine {
         let maxTokens = 512
         var pastKeys: [ORTValue] = []
         var pastValues: [ORTValue] = []
+        /// Rolling tail of hidden-state frames (last token's 512 floats per
+        /// step). The reference trims to 2*RF + chunk frames.
         var hiddenRing: [[Float]] = []
         var samples: [Float] = []
         var rng = SystemRandomNumberGenerator()
         var sequenceLen = ids.count
+        var seenTokens = Set<Int>()
+        seenTokens.formUnion(ids)
         let started = Date()
 
         var step = 0
+        var finished = false
         do {
-        while step < maxTokens {
-            let inputIDs: [Int64] = step == 0 ? ids.map(Int64.init) : [Int64(stopID)]
+        while step < maxTokens, !finished {
+            let inputIDs: [Int64] = step == 0 ? ids.map(Int64.init) : [Int64(ids[ids.count - 1])]
             let mask = Array(repeating: Int64(1), count: sequenceLen)
             let positionStart = step == 0 ? 0 : sequenceLen - 1
             let positionIDs = Array(stride(from: positionStart, through: sequenceLen - 1, by: 1)).map(Int64.init)
@@ -258,17 +274,37 @@ final class SopranoEngine: NSObject, SpeechEngine {
             }
             let hiddenData: Data = try hiddenValue.tensorData() as Data
             let stepHidden = Self.floats(from: hiddenData)
-            hiddenRing.append(stepHidden)
-            if hiddenRing.count > Self.decoderWindow + 8 {
-                hiddenRing.removeFirst(hiddenRing.count - (Self.decoderWindow + 8))
+            // The graph returns the whole sequence's hidden states ([1,
+            // seqLen, 512]) every step — keep only the LAST position's frame,
+            // exactly like the reference's slice((seqLen-1)*512, seqLen*512).
+            guard stepHidden.count >= Self.hiddenSize else {
+                throw SopranoEngineError.missingOutput
+            }
+            let lastFrame = Array(stepHidden.suffix(Self.hiddenSize))
+            // The reference skips the prefill's own frame (i > 0) so the
+            // prompt never sounds; only generated-token frames reach the
+            // decoder.
+            if step > 0 {
+                hiddenRing.append(lastFrame)
+            }
+            let ringCapacity = 2 * Self.decoderReceptiveField + Self.decoderChunkFrames
+            if hiddenRing.count > ringCapacity {
+                hiddenRing.removeFirst(hiddenRing.count - ringCapacity)
             }
 
-            // Decoder: the most recent 12 frames (512 wide each).
-            let frames = hiddenRing.suffix(Self.decoderWindow)
-            let windowFrames = frames.reduce(into: [Float]()) { $0.append(contentsOf: $1) }
-            if windowFrames.count == Self.hiddenSize * Self.decoderWindow {
+            // Decoder: once the ring holds receptive field + chunk frames,
+            // feed it all (shape [1, 512, frames]) and keep the slice the
+            // reference keeps — the last (RF + chunk − 1) tokens' worth minus
+            // the trailing RF tail, offset by one token so the edges line up.
+            if hiddenRing.count >= Self.decoderReceptiveField + Self.decoderChunkFrames {
+                let frames = hiddenRing
+                let windowFrames = frames.reduce(into: [Float]()) { $0.append(contentsOf: $1) }
+                let frameCount = frames.count
                 let decoderOutput = try decoder.run(
-                    withInputs: ["hidden_states": try Self.floatTensor(windowFrames, shape: [NSNumber(value: 1), NSNumber(value: Self.hiddenSize), NSNumber(value: Self.decoderWindow)])],
+                    withInputs: ["hidden_states": try Self.floatTensor(
+                        windowFrames,
+                        shape: [NSNumber(value: 1), NSNumber(value: Self.hiddenSize), NSNumber(value: frameCount)]
+                    )],
                     outputNames: Self.decoderOutputNames(for: decoder),
                     runOptions: nil
                 )
@@ -277,22 +313,45 @@ final class SopranoEngine: NSObject, SpeechEngine {
                     throw SopranoEngineError.missingOutput
                 }
                 let audioData: Data = try audioValue.tensorData() as Data
-                samples.append(contentsOf: Self.floats(from: audioData))
+                var audio = Self.floats(from: audioData)
+                // Slice per the reference: keep [ (RF + chunk − 1) tokens in
+                // from the start, end RF tokens in from the end ] — a +1-token
+                // offset on both edges.
+                let startIdx = audio.count - (Self.decoderReceptiveField + Self.decoderChunkFrames - 1) * Self.samplesPerToken + Self.samplesPerToken
+                let endIdx = audio.count - Self.decoderReceptiveField * Self.samplesPerToken + Self.samplesPerToken
+                if startIdx >= 0, endIdx > startIdx, endIdx <= audio.count {
+                    audio = Array(audio[startIdx..<endIdx])
+                }
+                samples.append(contentsOf: audio)
+                // A finish-decode consumes the ring; a mid-stream chunk
+                // decode keeps the tail (the reference's chunkCounter carries
+                // the partial window into the next decode).
+                if finished {
+                    hiddenRing.removeAll(keepingCapacity: true)
+                }
             }
 
-            // Next token from the last position's logits.
+            // Next token from the last position's logits; [STOP] ends the
+            // chunk. Repetition penalty 1.2 over seen tokens (reference).
             step += 1
             if step >= maxTokens { break }
             guard let logitsValue = outputs["logits"] else { break }
             let logitsData: Data = try logitsValue.tensorData() as Data
             let next = Self.nextToken(
                 logits: logitsData,
-                vocabSize: tokenIDs.count,
+                vocabSize: Self.vocabSize,
                 fallback: stopID,
                 temperature: 0.3,
                 topK: 50,
+                repetitionPenalty: 1.2,
+                seenTokens: seenTokens,
                 rng: &rng
             )
+            if next == stopID {
+                finished = true
+                break
+            }
+            seenTokens.insert(next)
             ids = [next]
             sequenceLen += 1
         }
@@ -394,20 +453,36 @@ final class SopranoEngine: NSObject, SpeechEngine {
     }
 
     /// Temperature + top-k sampling over the LAST position's logits (the
-    /// graph returns [1, seqLen, vocab]).
+    /// graph returns [1, seqLen, vocab] with the model's vocab size as the
+    /// stride — never tokenIDs.count, which is smaller and produced the
+    /// out-of-bounds Gather crash). Repetition penalty follows the HF
+    /// convention the reference uses: seen logits are scaled, not masked.
     static func nextToken(
         logits: Data,
         vocabSize: Int,
         fallback: Int,
         temperature: Double,
         topK: Int,
+        repetitionPenalty: Double = 1.0,
+        seenTokens: Set<Int> = [],
         rng: inout SystemRandomNumberGenerator
     ) -> Int {
         guard !logits.isEmpty, vocabSize > 0 else { return fallback }
         let values = floats(from: logits)
         let start = values.count - vocabSize
         guard start >= 0 else { return fallback }
-        let last = Array(values[start...])
+        var last = Array(values[start...])
+        guard last.count >= vocabSize else { return fallback }
+        last = Array(last.prefix(vocabSize))
+        if repetitionPenalty != 1.0 {
+            for token in seenTokens where token >= 0 && token < last.count {
+                if last[token] < 0 {
+                    last[token] *= Float(repetitionPenalty)
+                } else {
+                    last[token] /= Float(repetitionPenalty)
+                }
+            }
+        }
         let sorted = last.indices.sorted { last[$0] > last[$1] }
         let k = min(topK, last.count)
         let top = Array(sorted.prefix(k))

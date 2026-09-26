@@ -100,6 +100,13 @@ final class BooksStore: ObservableObject {
         let pending = books.filter { book in
             (book.format == .pdf && (!book.hasCover || book.pdfChapters == nil))
                 || (book.format == .epub && book.spine == nil)
+                // v1.7.1: books imported before the chapter-TRACK parser and
+                // the awaited-metadata cover fix need one re-read of their
+                // manifest — single-chapter audio with a "chpl" source that
+                // never had chpl, and cover-less M4Bs that do carry art.
+                || (book.format == .audio && (!book.hasCover
+                    || book.audioChapterSource == "single"
+                    || book.audioChapterSource == "chpl"))
         }
         guard !pending.isEmpty else { return }
         didBackfillLegacyBooks = true
@@ -125,10 +132,10 @@ final class BooksStore: ObservableObject {
                         }
                     }
                 case .audio:
-                    if book.audioChapters == nil {
-                        let refreshed = Self.buildAudioManifest(book: book, directory: dir)
-                        book = refreshed
-                    }
+                    // Re-read the manifest from the file — picks up the
+                    // chapter-TRACK parser and the awaited cover art.
+                    let refreshed = Self.buildAudioManifest(book: book, directory: dir)
+                    book = refreshed
                 case .epub:
                     guard let data = try? Data(contentsOf: dir.appendingPathComponent("original.epub"), options: .mappedIfSafe),
                           let info = try? EpubParser.parse(archive: data), !info.spine.isEmpty else { continue }
@@ -310,13 +317,28 @@ final class BooksStore: ObservableObject {
         var book = book
         let original = directory.appendingPathComponent("original." + book.format.rawValue)
         let asset = AVURLAsset(url: original, options: [AVURLAssetPreferPreciseDurationAndTimingKey: false])
-        let seconds = asset.duration.seconds
+        // Same awaited-load discipline as the metadata read below: the sync
+        // `asset.duration` raced the async property load on device and could
+        // come back 0 for files that play for hours (the last chapter then
+        // ended at start+1s — one more contributor to "it stops after two
+        // seconds").
+        let durationSem = DispatchSemaphore(value: 0)
+        var loadedDuration: CMTime = .invalid
+        asset.load(.duration) { duration, _ in
+            loadedDuration = duration
+            durationSem.signal()
+        }
+        _ = durationSem.wait(timeout: .now() + 5)
+        let seconds = loadedDuration.isValid ? loadedDuration.seconds : asset.duration.seconds
         if seconds.isFinite, seconds > 0 { book.audioDuration = seconds }
 
         // Chapters: read the head of the file. MP4 boxes need only the first
-        // few hundred KB (chpl sits inside moov, before mdat); an ID3 tag lives
-        // at offset 0. Reading a bounded slice rather than the whole file keeps
-        // a 900 MB audiobook import cheap.
+        // few hundred KB for `chpl` (it sits inside moov, before mdat), but a
+        // real chapter TRACK keeps its text SAMPLES in moov too (tiny) while
+        // `stco` chunk offsets can point anywhere — the parser clamps them to
+        // the slice, so 8 MB covers every real-world layout. An ID3 tag
+        // lives at offset 0. A bounded slice keeps a 900 MB audiobook
+        // import cheap.
         let fileSize = (try? original.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
         let headBytes = min(8 * 1024 * 1024, max(0, fileSize))
         if headBytes > 0, let handle = try? FileHandle(forReadingFrom: original) {
@@ -333,7 +355,7 @@ final class BooksStore: ObservableObject {
                 let chapters = AudiobookChapters.chaptersFromMP4(head, totalSeconds: book.audioDuration ?? 0)
                 if !chapters.isEmpty {
                     book.audioChapters = chapters
-                    book.audioChapterSource = "chpl"
+                    book.audioChapterSource = "mp4"
                 }
             }
         }
@@ -353,16 +375,34 @@ final class BooksStore: ObservableObject {
         // is created by asking the asset's metadata array for a key, not by
         // a static constructor — the asset loads its metadata lazily, so this
         // is a header read, not a whole-file scan.
-        let title = Self.metadataString(asset, key: AVMetadataKey.commonKeyTitle.rawValue)
-        if let title, !title.isEmpty { book.title = title }
-        let artist = Self.metadataString(asset, key: AVMetadataKey.commonKeyArtist.rawValue)
-        if let artist, !artist.isEmpty { book.author = artist }
-
         // Cover: MP4/M4B often embeds one. Without it the shelf shows the
         // format glyph, exactly as a cover-less PDF does.
-        if let artwork = Self.metadataData(asset, key: AVMetadataKey.commonKeyArtwork.rawValue),
-           !artwork.isEmpty {
-            try? artwork.write(to: directory.appendingPathComponent("cover.jpg"), options: [.atomic])
+        //
+        // The metadata read must go through `load(.metadata)` FIRST on a
+        // background thread: `asset.metadata` returns [] until the status
+        // becomes .loaded, and the sync getter raced that load on device —
+        // titles, authors AND covers all came back empty for files that
+        // plainly had them (the "no thumbnail" report; the title survived
+        // only because the filename fallback covered it).
+        let metadata: [AVMetadataItem]
+        let sem = DispatchSemaphore(value: 0)
+        asset.load(.metadata) { _, _ in sem.signal() }
+        _ = sem.wait(timeout: .now() + 5)
+        metadata = asset.metadata
+
+        let title = Self.metadataString(metadata, key: AVMetadataKey.commonKeyTitle.rawValue)
+        if let title, !title.isEmpty { book.title = title }
+        let artist = Self.metadataString(metadata, key: AVMetadataKey.commonKeyArtist.rawValue)
+        if let artist, !artist.isEmpty { book.author = artist }
+        if let artwork = Self.metadataData(metadata, key: AVMetadataKey.commonKeyArtwork.rawValue),
+           !artwork.isEmpty,
+           let image = UIImage(data: artwork),
+           let jpeg = image.jpegData(compressionQuality: 0.85) {
+            // Re-encode through UIImage: some M4B covers are PNG or odd-size
+            // HEIC payloads that a raw `.write` stores with a .jpg name the
+            // shelf's UIImage(data:) still decodes, but the FILES app and
+            // QuickLook reject. One normalized JPEG, always decodable.
+            try? jpeg.write(to: directory.appendingPathComponent("cover.jpg"), options: [.atomic])
             book.hasCover = true
         }
         return book
@@ -370,14 +410,14 @@ final class BooksStore: ObservableObject {
 
     /// One common metadata key as a string, or nil. Tolerant by design: an
     /// unreadable or missing tag is not an import failure.
-    nonisolated private static func metadataString(_ asset: AVURLAsset, key: String) -> String? {
-        guard let item = asset.metadata.first(where: { $0.commonKey?.rawValue == key }) else { return nil }
+    nonisolated private static func metadataString(_ items: [AVMetadataItem], key: String) -> String? {
+        guard let item = items.first(where: { $0.commonKey?.rawValue == key }) else { return nil }
         return item.stringValue
     }
 
     /// One common metadata key as data (the artwork path), or nil.
-    nonisolated private static func metadataData(_ asset: AVURLAsset, key: String) -> Data? {
-        guard let item = asset.metadata.first(where: { $0.commonKey?.rawValue == key }) else { return nil }
+    nonisolated private static func metadataData(_ items: [AVMetadataItem], key: String) -> Data? {
+        guard let item = items.first(where: { $0.commonKey?.rawValue == key }) else { return nil }
         return item.dataValue
     }
 

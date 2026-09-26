@@ -510,6 +510,12 @@ final class AudioBookPlayer: ObservableObject {
         self.chapterIndex = chapterIndex
         let url = BooksStore.originalFileURL(book)
         do {
+            // Same one-shot session configuration every engine runs on first
+            // play — an AVAudioPlayer created with the session still in its
+            // launch default (ambient/silent-switch-able) is silenced by the
+            // mute switch and pauses when the app backgrounds, which looks
+            // like "plays two seconds then dies" on device.
+            AudioSessionSetup.configureIfNeeded(prefix: "AudioBookPlayer")
             if loadedURL != url || player == nil {
                 let p = try AVAudioPlayer(contentsOf: url)
                 p.prepareToPlay()

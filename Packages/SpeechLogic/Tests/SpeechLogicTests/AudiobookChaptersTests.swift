@@ -167,4 +167,117 @@ final class AudiobookChaptersTests: XCTestCase {
             XCTAssertEqual(chapters.map(\.title), ["First"], "major v2.\(major) lost the first chapter")
         }
     }
+
+    // MARK: - MP4 chapter TRACK (no chpl) — the form the first device v1.6
+    // audiobook round turned up: m4b-tool/ffmpeg M4Bs carry chapters as a
+    // text trak with a sample table, and the chpl-only parser read none.
+
+    private func mvhd(timescale: Int) -> [UInt8] {
+        var payload: [UInt8] = [0]                    // version 0
+        payload += [0, 0, 0]                          // flags
+        payload += be32(0) + be32(0)                  // created/modified
+        payload += be32(timescale)                    // timescale
+        payload += be32(timescale * 600)              // duration (10 min)
+        return payload
+    }
+
+    /// A text chapter track: mdia{hdlr(text), mdhd, minf{stbl{stts, stsz,
+    /// stsc, stco}}} — sample payload offsets are absolute file offsets.
+    private func chapterTrak(
+        timescale: Int,
+        samples: [(offset: Int, delta: Int, size: Int, title: String)]
+    ) -> [UInt8] {
+        var sttsPayload: [UInt8] = [0, 0, 0, 0] + be32(samples.count)
+        for sample in samples {
+            sttsPayload += be32(1) + be32(sample.delta)
+        }
+        var stszPayload: [UInt8] = [0, 0, 0, 0] + be32(0) + be32(samples.count)
+        for sample in samples {
+            stszPayload += be32(sample.size)
+        }
+        // stsc: every chunk holds exactly 1 sample.
+        let stscPayload: [UInt8] = [0, 0, 0, 0] + be32(1) + be32(1) + be32(1)
+        var stcoPayload: [UInt8] = [0, 0, 0, 0] + be32(samples.count)
+        for sample in samples {
+            stcoPayload += be32(sample.offset)
+        }
+        let stbl = box("stbl",
+            box("stts", sttsPayload)
+                + box("stsz", stszPayload)
+                + box("stsc", stscPayload)
+                + box("stco", stcoPayload))
+        var hdlrPayload: [UInt8] = [0, 0, 0, 0, 0, 0, 0, 0] + Array("text".utf8)
+        hdlrPayload += [UInt8](repeating: 0, count: 12)
+        var mdhdPayload: [UInt8] = [0, 0, 0, 0]
+        mdhdPayload += be32(0) + be32(0)
+        mdhdPayload += be32(timescale)
+        mdhdPayload += be32(samples.reduce(0) { $0 + $1.delta })
+        let mdia = box("mdia",
+            box("hdlr", hdlrPayload)
+                + box("mdhd", mdhdPayload)
+                + box("minf", stbl))
+        return box("trak", mdia)
+    }
+
+    func testChapterTrackWithoutChplIsRead() {
+        let timescale = 1000
+        // Two tracks: the audio one (handler soun) and the chapter text
+        // track. The parser must skip the audio track's stbl and read only
+        // the text one.
+        var sounHdlr: [UInt8] = [0, 0, 0, 0, 0, 0, 0, 0] + Array("soun".utf8)
+        sounHdlr += [UInt8](repeating: 0, count: 12)
+        let audioTrak = box("trak", box("mdia",
+            box("hdlr", sounHdlr)
+                + box("mdhd", [0, 0, 0, 0] + be32(0) + be32(0) + be32(timescale) + be32(600_000))
+                + box("minf", box("stbl", box("stts", [0, 0, 0, 0] + be32(1) + be32(1024) + be32(600_000))))
+        ))
+        let ftyp = box("ftyp", Array("M4B ".utf8) + be32(0) + Array("M4B ".utf8))
+        let mvhdBox = box("mvhd", mvhd(timescale: timescale))
+
+        // Chapter sample payloads sit AFTER moov at absolute offsets, exactly
+        // like a real M4B interleaves them. Build the trak twice: once with
+        // placeholder offsets to learn moov's length, then for real.
+        let placeholder = chapterTrak(timescale: timescale, samples: [
+            (offset: 0, delta: 0, size: 0, title: ""),
+            (offset: 0, delta: 30_000, size: 0, title: ""),
+            (offset: 0, delta: 30_000, size: 0, title: ""),
+        ])
+        let provisionalMoov = box("moov", mvhdBox + audioTrak + placeholder)
+        let payloadStart = ftyp.count + provisionalMoov.count
+
+        let titles = ["The Beginning", "A Turn", "The End"]
+        var samples: [(offset: Int, delta: Int, size: Int, title: String)] = []
+        var payloads: [UInt8] = []
+        var cursor = payloadStart
+        for (index, title) in titles.enumerated() {
+            let raw: [UInt8] = [UInt8((Array(title.utf8).count >> 8) & 0xFF),
+                                UInt8(Array(title.utf8).count & 0xFF)] + Array(title.utf8)
+            let padded = raw + [UInt8](repeating: 0, count: (4 - raw.count % 4) % 4)
+            samples.append((offset: cursor, delta: index == 0 ? 0 : 30_000, size: padded.count, title: title))
+            payloads += padded
+            cursor += padded.count
+        }
+
+        let trak = chapterTrak(timescale: timescale, samples: samples)
+        let moov = box("moov", mvhdBox + audioTrak + trak)
+        let data = Data(ftyp + moov + payloads)
+
+        let chapters = AudiobookChapters.chaptersFromMP4(data, totalSeconds: 90)
+        XCTAssertEqual(chapters.map(\.title), ["The Beginning", "A Turn", "The End"])
+        XCTAssertEqual(chapters[0].startSeconds, 0, accuracy: 0.001)
+        XCTAssertEqual(chapters[1].startSeconds, 30, accuracy: 0.001)
+        XCTAssertEqual(chapters[2].startSeconds, 60, accuracy: 0.001)
+        // Ends filled from the next start; the last from the total.
+        XCTAssertEqual(chapters[2].endSeconds, 90, accuracy: 0.001)
+    }
+
+    func testChapterTrackMissingTablesFallsBackCleanly() {
+        // A trak with a text handler but no stbl must yield nothing, not crash.
+        var hdlrPayload: [UInt8] = [0, 0, 0, 0, 0, 0, 0, 0] + Array("text".utf8)
+        hdlrPayload += [UInt8](repeating: 0, count: 12)
+        let trak = box("trak", box("mdia", box("hdlr", hdlrPayload)))
+        let moov = box("moov", box("mvhd", mvhd(timescale: 1000)) + trak)
+        let data = Data(moov)
+        XCTAssertTrue(AudiobookChapters.chaptersFromMP4(data, totalSeconds: 10).isEmpty)
+    }
 }

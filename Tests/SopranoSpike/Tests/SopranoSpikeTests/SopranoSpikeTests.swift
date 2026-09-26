@@ -57,13 +57,14 @@ final class SopranoSpikeTests: XCTestCase {
 
         // Prompt format from the reference JS: "[STOP][TEXT]{batch}[START]".
         // Both markers are real tokens in this tokenizer; fall back to their
-        // ids if the special-tokens map names them.
+        // ids if the special-tokens map names them. [STOP] (id 3) is also the
+        // eos/pad token that ENDS generation — the config's eos_token_id.
         let specials = (tokenizerJSON?["added_tokens"] as? [[String: Any]]) ?? []
         func specialID(_ name: String) -> Int? {
             specials.first { ($0["content"] as? String) == name }?["id"] as? Int
         }
         let stopID = specialID("[STOP]") ?? 3
-        let startID = specialID("[START]") ?? 4
+        let startID = specialID("[START]") ?? 2
         let sentence = "This is the Soprano spike test, running fully offline."
         // Longest-match tokenization over the vocab — the app ships the real
         // pre-tokenizer; the spike only needs the encoded ids.
@@ -99,23 +100,31 @@ final class SopranoSpikeTests: XCTestCase {
         let decoderOutputs = (try? decoderSession.outputNames()) ?? []
         print("SOPRANO-SPIKE decoder inputs: \(decoderInputs) outputs: \(decoderOutputs)")
 
-        // ---- Autoregressive loop ----
-        // Total tokens to generate: the sentence is ~12 tokens, and the
-        // decoder emits 2048 samples per token, so 40 tokens ≈ 2.5 s of
-        // audio — comfortably above the "real speech" bar.
-        let maxTokens = 40
+        // ---- Autoregressive loop (mirrors KevinAHM/soprano-web-onnx) ----
+        // Reference constants: receptive field 4, decoder chunk 8 frames,
+        // 2048 samples/token, model vocab size 8192 (the logits stride —
+        // NEVER vocab.count, which is what crashed the runner with an
+        // out-of-bounds Gather), temperature 0.3 / topK 50 / rep penalty 1.2.
+        // [STOP] ends generation when the model emits it.
+        let maxTokens = 512
+        let receptiveField = 4
+        let chunkFrames = 8
+        let samplesPerToken = 2048
+        let modelVocabSize = 8192
         var pastKeys: [ORTValue] = []
         var pastValues: [ORTValue] = []
         var samples: [Float] = []
         var sequenceLen = ids.count
         var rng = SystemRandomNumberGenerator()
-        /// Rolling tail of per-step hidden-state frames — the decoder wants the
-        /// last 12 consecutive frames, and the export returns the whole
-        /// sequence each step, so keep the frames and slice the window.
+        var seenTokens = Set(ids)
+        /// Rolling tail of per-step hidden-state frames — the decoder wants a
+        /// window of consecutive frames and the export returns the whole
+        /// sequence each step, so keep only the LAST position's frame.
         var hiddenRing: [[Float]] = []
+        var finished = false
 
-        for step in 0..<maxTokens {
-            let inputIDs: [Int64] = step == 0 ? ids.map(Int64.init) : [Int64(stopID)] // pad token while decoding
+        for step in 0..<maxTokens where !finished {
+            let inputIDs: [Int64] = step == 0 ? ids.map(Int64.init) : [Int64(ids[ids.count - 1])]
             let mask = Array(repeating: Int64(1), count: sequenceLen)
             let positionIDs = Array(stride(from: step == 0 ? 0 : sequenceLen - 1, through: sequenceLen - 1, by: 1)).map(Int64.init)
 
@@ -178,38 +187,69 @@ final class SopranoSpikeTests: XCTestCase {
             }
             let hiddenData = try hiddenValue.tensorData() as Data
             let stepHidden = Self.floats(from: hiddenData)
-            print("SOPRANO-SPIKE step \(step + 1)/\(maxTokens): \(stepHidden.count) hidden floats in \(String(format: "%.3f", stepSeconds))s")
-
-            // The export returns the FULL sequence's hidden states
-            // ([1, 512, seqLen]) on every step, so accumulate a rolling tail
-            // of the last (12 + 8) steps and take the most recent 12 x 512
-            // frames as the decoder's receptive-field window.
-            hiddenRing.append(stepHidden)
-            if hiddenRing.count > 20 { hiddenRing.removeFirst(hiddenRing.count - 20) }
-            let frames = hiddenRing.suffix(12)
-            let windowFrames = frames.reduce(into: [Float]()) { $0.append(contentsOf: $1) }
-            // Reference shape is [1, 512, 12] = 6144 floats; the export's
-            // frames are 512 wide (config hidden_size).
-            guard windowFrames.count == 512 * 12, let audioName = decoderOutputs.first else {
-                print("SOPRANO-SPIKE decoder window not ready (\(windowFrames.count) floats at step \(step)) — running backbone-only to warm the cache")
-                continue
-            }
-            let decoderOutput = try decoderSession.run(
-                withInputs: ["hidden_states": try floatTensor(windowFrames, shape: [1, 512, 12])],
-                outputNames: Set(decoderOutputs),
-                runOptions: nil
-            )
-            guard let audioValue = decoderOutput[audioName] else {
-                XCTFail("decoder produced no \(audioName) output — got \(decoderOutputs)")
+            // Whole-sequence output ([1, seqLen, 512]) — keep only the last
+            // position's frame, like the reference's
+            // slice((seqLen-1)*hidden, seqLen*hidden). Skip the prefill's own
+            // frame so the prompt never sounds.
+            guard stepHidden.count >= 512 else {
+                XCTFail("hidden state smaller than one frame: \(stepHidden.count) floats")
                 return
             }
-            let audioData = try audioValue.tensorData() as Data
-            let chunk = Self.floats(from: audioData)
-            samples.append(contentsOf: chunk)
+            let lastFrame = Array(stepHidden.suffix(512))
+            if step > 0, !finished {
+                hiddenRing.append(lastFrame)
+            }
+            let ringCapacity = 2 * receptiveField + chunkFrames
+            if hiddenRing.count > ringCapacity {
+                hiddenRing.removeFirst(hiddenRing.count - ringCapacity)
+            }
+            print("SOPRANO-SPIKE step \(step + 1)/\(maxTokens): hidden frame ok in \(String(format: "%.3f", stepSeconds))s")
 
-            // Temperature 0.3 / top_k 50 sampling over the LAST position's
-            // logits — the graph returns [1, seqLen, vocab], so slice the
-            // final position before sampling.
+            // Decode when the ring holds receptive field + chunk frames
+            // (or on finish with whatever is left), feeding the decoder the
+            // whole ring as [1, 512, frames] and slicing out the audio the
+            // reference keeps. The ring is consumed after a finish-decode;
+            // between chunk decodes it keeps its tail (the reference's
+            // chunkCounter carries a partial window over).
+            if finished || hiddenRing.count >= receptiveField + chunkFrames {
+                let frames = hiddenRing
+                let frameCount = frames.count
+                let windowFrames = frames.reduce(into: [Float]()) { $0.append(contentsOf: $1) }
+                guard frameCount > 0, let audioName = decoderOutputs.first else { continue }
+                let decoderOutput = try decoderSession.run(
+                    withInputs: ["hidden_states": try floatTensor(windowFrames, shape: [1, 512, NSNumber(value: frameCount)])],
+                    outputNames: Set(decoderOutputs),
+                    runOptions: nil
+                )
+                guard let audioValue = decoderOutput[audioName] else {
+                    XCTFail("decoder produced no \(audioName) output — got \(decoderOutputs)")
+                    return
+                }
+                let audioData = try audioValue.tensorData() as Data
+                var audio = Self.floats(from: audioData)
+                if finished {
+                    let startIdx = audio.count - (receptiveField + chunkFrames - 1) * samplesPerToken + samplesPerToken
+                    if startIdx >= 0, startIdx < audio.count {
+                        audio = Array(audio[startIdx...])
+                    }
+                } else {
+                    let startIdx = audio.count - (receptiveField + chunkFrames) * samplesPerToken + samplesPerToken
+                    let endIdx = audio.count - receptiveField * samplesPerToken + samplesPerToken
+                    if startIdx >= 0, endIdx > startIdx, endIdx <= audio.count {
+                        audio = Array(audio[startIdx..<endIdx])
+                    }
+                }
+                samples.append(contentsOf: audio)
+                print("SOPRANO-SPIKE decoded \(frameCount) frames -> \(audio.count) samples (total \(samples.count))")
+                if finished {
+                    hiddenRing.removeAll(keepingCapacity: true)
+                }
+            }
+
+            // Temperature 0.3 / topK 50 / repetition penalty 1.2 sampling
+            // over the LAST position's logits — the graph returns
+            // [1, seqLen, 8192], so slice the final position with the MODEL
+            // vocab size as the stride. [STOP] ends generation.
             if step < maxTokens - 1 {
                 let logitsValue: ORTValue? = outputs["logits"]
                 let logitsData: Data
@@ -218,13 +258,22 @@ final class SopranoSpikeTests: XCTestCase {
                 } else {
                     logitsData = Data()
                 }
-                let vocabCount = vocab?.count ?? 0
                 let nextToken = Self.nextToken(
                     logits: logitsData,
-                    vocabSize: vocabCount,
+                    vocabSize: modelVocabSize,
                     fallback: stopID,
+                    temperature: 0.3,
+                    topK: 50,
+                    repetitionPenalty: 1.2,
+                    seenTokens: seenTokens,
                     rng: &rng
                 )
+                if nextToken == stopID {
+                    print("SOPRANO-SPIKE model emitted [STOP] at step \(step + 1) — chunk complete")
+                    finished = true
+                    continue
+                }
+                seenTokens.insert(nextToken)
                 // The decoded token feeds back as the next input.
                 ids = [nextToken]
                 sequenceLen += 1
@@ -293,7 +342,9 @@ final class SopranoSpikeTests: XCTestCase {
     }
 
     /// Last position's logits slice -> sampled token. The graph returns
-    /// [1, seqLen, vocab]; take the final position's vocab-sized slice.
+    /// [1, seqLen, 8192]; the stride is the MODEL's vocab size, never the
+    /// tokenizer dict's count (that mismatch was the CI crash: an
+    /// out-of-bounds Gather at idx 39 when the stride was taken as 39).
     /// Kept as its own function so the call site stays a one-liner (a nested
     /// withUnsafeBytes closure inside the loop tripped the type checker's
     /// complexity budget in CI).
@@ -301,17 +352,32 @@ final class SopranoSpikeTests: XCTestCase {
         logits: Data,
         vocabSize: Int,
         fallback: Int,
+        temperature: Double,
+        topK: Int,
+        repetitionPenalty: Double = 1.0,
+        seenTokens: Set<Int> = [],
         rng: inout SystemRandomNumberGenerator
     ) -> Int {
         guard !logits.isEmpty, vocabSize > 0 else { return fallback }
-        let floats = Self.floats(from: logits)
-        let start = floats.count - vocabSize
+        var values = Self.floats(from: logits)
+        let start = values.count - vocabSize
         guard start >= 0 else { return fallback }
-        let lastPosition = Array(floats[start...])
+        values = Array(values[start...])
+        guard values.count >= vocabSize else { return fallback }
+        values = Array(values.prefix(vocabSize))
+        if repetitionPenalty != 1.0 {
+            for token in seenTokens where token >= 0 && token < values.count {
+                if values[token] < 0 {
+                    values[token] *= Float(repetitionPenalty)
+                } else {
+                    values[token] /= Float(repetitionPenalty)
+                }
+            }
+        }
         return sampleNextToken(
-            logits: Data(bytes: lastPosition, count: lastPosition.count * MemoryLayout<Float>.size),
-            temperature: 0.3,
-            topK: 50,
+            logits: Data(bytes: values, count: values.count * MemoryLayout<Float>.size),
+            temperature: temperature,
+            topK: topK,
             rng: &rng
         )
     }
