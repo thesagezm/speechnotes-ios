@@ -335,7 +335,7 @@ public enum EpubParser {
         private var anchorBuffer = ""
         /// EPUB3 navs nest via <ol> inside <li> — the current ol depth is
         /// each link's TOC level.
-        private var olDepth = 0""
+        private var olDepth = 0
 
         func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?, qualifiedName qName: String?, attributes attributeDict: [String: String] = [:]) {
             let name = localName(qName ?? elementName)
