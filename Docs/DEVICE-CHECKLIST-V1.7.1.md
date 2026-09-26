@@ -180,3 +180,73 @@ shape at runtime and slices correctly either way.
   change touches every tap; the rail width change touches the editor's
   landscape rail).
 - EPUB reader in landscape: the chapter stepper bar overlays the bottom.
+
+---
+
+# Round 5 (2026-09-26, from 355abc8) — immersive chrome, audiobook metadata, export player, landscape rail
+
+## 1. Title-bar hide/show is per-surface, and the editor always lets you out
+
+- In a note's PREVIEW, tap once to hide the title bar, then enter edit mode
+  (double-tap or the pencil) — the bar must come BACK immediately: back
+  button and ⋯ menu reachable, no dead end (was the "trapped in the editor"
+  bug).
+- Hide the bar in a note, open an EPUB — its own bar is untouched; tap the
+  epub page to hide it, tap again to bring it back (the tap now comes from
+  inside the webview — this was impossible before).
+- Same independence for PDF and audiobooks.
+
+## 2. PDF Contents actually navigates
+
+- Outline sheet rows: tap → the reader jumps to that page (was a no-op;
+  in-book links already worked). Chapter-fallback rows too.
+
+## 3. Audiobooks: metadata + live clock
+
+- Re-open the shelf once (the manifest backfill runs on shelf open): the
+  m4b should now show its embedded ARTWORK (shelf, reader, mini-player,
+  lock screen) and its real chapter list — prologue/epilogue included, not
+  "Full audiobook". The import log line names the chapter count + source.
+- Time readout under the transport moves while playing, elapsed / total of
+  the FILE (tap flips to remaining). No more frozen 0:00:00.
+
+## 4. Redundant bottom TOC removed
+
+- PDF page bar: page count only. Audiobook chapter bar: position + prev/next
+  only. The toolbar's Contents/Chapters button is the one entry point.
+
+## 5. Settings moves
+
+- Appearance now has "Render Markdown" (Notes), "Haptic feedback" toggle,
+  and "Image caching" (Automatic/Manual) under Images. Speech Settings no
+  longer lists Render Markdown.
+- Speech follows what you SEE: play while in reading preview → clean text;
+  switch to edit while speaking → stop, play again → raw text.
+
+## 6. Haptics + image caching
+
+- Appearance → Haptic feedback OFF: no vibration anywhere, immediately.
+- Image caching Automatic: open a note with web images — they land in the
+  cache right away (scrolling never waits on the network). Manual: only
+  images you actually view.
+- Storage → "Per-note cached images": swipe-delete ONE note's web images.
+- Put a note in the recycle bin → its images remain; Delete Now / Empty →
+  its web images go too (images shared with another note stay until both).
+
+## 7. Exports are playable downloads
+
+- Export a note (list or editor): the file lands named after the TITLE.
+- Storage → Exported audio: tap a file — transport expands (scrub, ±15 s,
+  speed 0.5–2×, elapsed/total). Leave Storage while it plays → global mini
+  player (bar; collapse to bubble); tap the bar → back to the Storage
+  player.
+
+## 8. Landscape playback rail (the redesign)
+
+- Notes / EPUB / PDF in landscape: a 170 pt panel on the trailing edge with
+  voice chip + voice name, progress capsule + %, 52 pt play, read-along +
+  stop (+ PDF's export), horizontal rate slider + value. Everything the
+  portrait bar does, nothing cramped, no rotated fader.
+- Audiobook landscape: same width — ±15 s around a 52 pt play, position
+  capsule, live time readouts.
+- Read-along text must not run under the panel in landscape.
