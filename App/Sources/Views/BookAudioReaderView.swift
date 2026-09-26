@@ -9,38 +9,36 @@ import SpeechLogic
 /// What it deliberately does NOT do:
 ///  - run any TTS engine — the speech exists in the file;
 ///  - show text — there is none to show (an M4B/MP3 has chapters, not pages);
-///  - reuse the note/read-along path — `SpeechPlayer` owns the engines and the
-///    read-along, and an audiobook touches none of that.
-///
-/// What it does: play/pause/skip within and across the file's own chapters,
-/// keep the position so reopening resumes where the listener stopped, and
-/// drive the lock screen through the same `NowPlayingCenter` everything else
-/// uses (single writer, same as notes and books).
+///  - own the player — `AudioBookPlayer` is an app-level EnvironmentObject
+///    (v1.7 round 3): a view-owned player died on every tab switch, and the
+///    chapter ticker/persistence died with it. This view only binds, sends
+///    commands and renders whatever the player publishes.
 struct BookAudioReaderView: View {
     let book: Book
     let store: BooksStore
     @EnvironmentObject private var theme: AppTheme
-
-    /// Owns playback for this view. One instance per reader; a second reader
-    /// would stop the first, which is the correct single-slot behaviour.
-    @StateObject private var audioPlayer = AudioBookPlayer()
+    @EnvironmentObject private var audioBook: AudioBookPlayer
 
     @State private var chapterIndex: Int
-    @State private var isPlaying = false
     @State private var progress: Double = 0
+    /// While the user drags the scrubber the player's 2 Hz publication must
+    /// not fight the thumb.
+    @State private var scrubbing = false
     @State private var showingChapters = false
-    /// 2 Hz refresh of the slider from the player's playhead. The reader owns
-    /// it (not AudioBookPlayer) because the reader also advances chapters and
-    /// persists the position — one place decides what "now" means.
-    @State private var progressTask: Task<Void, Never>?
+    /// VLC-style: tap the time readout to flip between chapter position and
+    /// whole-book remaining.
+    @State private var showingBookRemaining = false
 
     private var chapters: [AudioChapter] { book.audioChapters ?? [] }
-
+    /// True when the app-level player is currently loaded with THIS book.
+    private var isActive: Bool { audioBook.activeBookID == book.id }
+    private var isPlaying: Bool { isActive && audioBook.isPlaying }
 
     init(book: Book, store: BooksStore) {
         self.book = book
         self.store = store
         _chapterIndex = State(initialValue: book.position?.chapterIndex ?? 0)
+        _progress = State(initialValue: book.position?.chapterFraction ?? 0)
     }
 
     @Environment(\.isLandscape) private var isLandscape
@@ -48,9 +46,11 @@ struct BookAudioReaderView: View {
     @AppStorage("immersiveBarsEnabled") private var immersiveBarsHidden = false
 
     var body: some View {
-        // Landscape: the cover/title block keeps the leading width and the
-        // transport cluster (scrub + prev/play/next) moves to a trailing rail —
-        // the short axis is then all reading space (user request).
+        // Landscape: the cover/title/chapter block keeps the leading width
+        // and the transport cluster (position strip + play) moves to a
+        // trailing rail — the short axis is then all reading space. Chapter
+        // stepping lives in the cover column's bottom bar (the "steppers
+        // stay bottom" rule), so the rail carries no duplicate chevrons.
         //
         // Guided rotation (same fix as the EPUB/PDF readers): one
         // GeometryReader, one content identity, explicit transition. The cover
@@ -60,7 +60,12 @@ struct BookAudioReaderView: View {
             ZStack(alignment: .bottom) {
                 if landscape {
                     HStack(spacing: 0) {
-                        audioCoverBlock
+                        VStack(spacing: 0) {
+                            Spacer(minLength: 0)
+                            audioCoverBlock
+                            Spacer(minLength: 0)
+                            chapterBar
+                        }
                         audioRail
                     }
                     .transition(.opacity.combined(with: .move(edge: .trailing)))
@@ -108,23 +113,33 @@ struct BookAudioReaderView: View {
         }
         .onAppear {
             store.markOpened(book)
-            audioPlayer.bind(to: book, startChapter: chapterIndex)
-            wireRemoteCommands()
-            startProgressUpdates()
+            audioBook.store = store
+            audioBook.bind(to: book)
+            // The player may already be playing THIS book (user left and came
+            // back) — mirror its live playhead instead of the saved one.
+            if audioBook.activeBookID == book.id {
+                chapterIndex = audioBook.chapterIndex
+                progress = audioBook.chapterProgress
+            }
+            audioBook.readerVisible = true
+        }
+        .onChange(of: audioBook.chapterProgress) { newValue in
+            guard isActive, !scrubbing else { return }
+            progress = newValue
+        }
+        .onChange(of: audioBook.chapterIndex) { newValue in
+            guard isActive else { return }
+            chapterIndex = newValue
         }
         .onReceive(NotificationCenter.default.publisher(for: .audioBookStopped)) { notification in
-            // The shelf deleted this file while its reader was open.
-            guard notification.object as? UUID == book.id else { return }
-            audioPlayer.stop()
-            isPlaying = false
-            NowPlayingCenter.shared.clear()
+            // The shelf deleted this book while its reader was open.
+            guard notification.object as? UUID == book.id, isActive else { return }
+            audioBook.stop()
         }
         .onDisappear {
-            progressTask?.cancel()
-            progressTask = nil
-            audioPlayer.stop()
-            NowPlayingCenter.shared.clear()
-            NowPlayingCenter.shared.setChapterSkipEnabled(false)
+            // Playback is app-level now: leaving (tab switch OR pop) must not
+            // stop the book — the global mini-player takes over from here.
+            audioBook.readerVisible = false
         }
     }
 
@@ -151,6 +166,7 @@ struct BookAudioReaderView: View {
     private var audioTransport: some View {
         VStack(spacing: 14) {
             Slider(value: $progress, in: 0...1) { editing in
+                scrubbing = editing
                 if !editing { seekToProgress(progress) }
             }
             .padding(.horizontal, 24)
@@ -184,17 +200,16 @@ struct BookAudioReaderView: View {
             }
             .foregroundStyle(Color.accentColor)
 
-            Text(timeLabel)
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
+            timeReadout
         }
     }
 
-    /// Landscape transport rail: vertical progress strip, a 56pt play/pause,
-    /// chapter steps above and below it, and the time readout. The strip fills
-    /// TOP-DOWN (same direction as the playback rails) and the scrub slider
-    /// stays portrait-only — a horizontal slider is the wrong control for a
-    /// 110pt-tall slot.
+    /// Landscape transport rail: vertical position strip, a 46pt play/pause
+    /// and the time readout. The strip fills TOP-DOWN (same direction as the
+    /// playback rails) and the scrub slider stays portrait-only — a
+    /// horizontal slider is the wrong control for a 110pt-tall slot. The
+    /// content is centered inside the documented 78pt column (round 3: the
+    /// old asymmetric paddings hugged everything to the trailing edge).
     private var audioRail: some View {
         HStack(spacing: 0) {
             // Vertical position strip (the rail twin of the scrub slider).
@@ -215,16 +230,6 @@ struct BookAudioReaderView: View {
             VStack(spacing: 14) {
                 Button {
                     Haptics.tap()
-                    stepChapter(-1)
-                } label: {
-                    Image(systemName: "backward.fill")
-                        .font(.title3)
-                        .foregroundStyle(Color.accentColor)
-                }
-                .disabled(chapterIndex <= 0)
-
-                Button {
-                    Haptics.tap()
                     togglePlayback()
                 } label: {
                     Image(systemName: isPlaying ? "pause.circle.fill" : "play.circle.fill")
@@ -232,29 +237,30 @@ struct BookAudioReaderView: View {
                         .foregroundStyle(Color.accentColor)
                 }
 
-                Button {
-                    Haptics.tap()
-                    stepChapter(1)
-                } label: {
-                    Image(systemName: "forward.fill")
-                        .font(.title3)
-                        .foregroundStyle(Color.accentColor)
-                }
-                .disabled(chapterIndex >= chapters.count - 1)
-
                 Spacer(minLength: 0)
 
-                Text(timeLabel)
+                timeReadout
                     .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.secondary)
             }
             .padding(.horizontal, 6)
         }
-        .padding(.leading, 4)
-        .padding(.trailing, 8)
         .frame(width: 78)
         .frame(maxHeight: .infinity)
         .background(.bar)
+    }
+
+    /// Elapsed/chapter position — tap flips to whole-book remaining.
+    private var timeReadout: some View {
+        Text(timeLabel)
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .minimumScaleFactor(0.6)
+            .onTapGesture {
+                Haptics.tap()
+                showingBookRemaining.toggle()
+            }
+            .accessibilityLabel(showingBookRemaining ? "Time remaining" : "Chapter position")
     }
 
     // MARK: - Chapter bar
@@ -302,12 +308,32 @@ struct BookAudioReaderView: View {
         guard chapters.indices.contains(chapterIndex) else { return "" }
         let chapter = chapters[chapterIndex]
         let elapsed = chapter.startSeconds + progress * (chapter.endSeconds - chapter.startSeconds)
+        if showingBookRemaining {
+            let total = book.audioDuration ?? (isActive ? audioBookFileDuration : 0)
+            guard total > 0 else { return Self.clock(elapsed) }
+            return "\(Self.remainingClock(max(0, total - elapsed))) left"
+        }
         return "\(Self.clock(elapsed)) / \(Self.clock(chapter.endSeconds))"
+    }
+
+    /// Real file length while this book is loaded (legacy manifests can lack
+    /// `audioDuration`); zero when idle, which hides the remaining readout.
+    private var audioBookFileDuration: Double {
+        audioBook.fileDuration ?? 0
     }
 
     private static func clock(_ seconds: Double) -> String {
         let total = Int(seconds.rounded())
         return String(format: "%d:%02d:%02d", total / 3600, (total / 60) % 60, total % 60)
+    }
+
+    /// Remaining-time readout: H:MM:SS once hours are involved, M:SS below.
+    private static func remainingClock(_ seconds: Double) -> String {
+        let total = Int(seconds.rounded())
+        if total >= 3600 {
+            return String(format: "%d:%02d:%02d", total / 3600, (total / 60) % 60, total % 60)
+        }
+        return String(format: "%d:%02d", total / 60, total % 60)
     }
 
     // MARK: - Chapters sheet
@@ -355,114 +381,24 @@ struct BookAudioReaderView: View {
 
     // MARK: - Playback
 
-    /// Mirrors the player's playhead into the slider and advances at the
-    /// chapter end. 2 Hz is enough for a slider and cheap next to the 0.3 s
-    /// heartbeat the note read-along already runs.
-    private func startProgressUpdates() {
-        progressTask?.cancel()
-        progressTask = Task { @MainActor in
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 500_000_000)
-                guard !Task.isCancelled else { return }
-                let next = audioPlayer.chapterProgress
-                if abs(next - progress) > 0.005 {
-                    progress = next
-                    publishNowPlaying()
-                }
-                if isPlaying != audioPlayer.isPlaying {
-                    isPlaying = audioPlayer.isPlaying
-                }
-                if audioPlayer.chapterIsFinished, chapterIndex < chapters.count - 1 {
-                    stepChapter(1)
-                }
-            }
-        }
-    }
-
     private func togglePlayback() {
-        if audioPlayer.isPlaying {
-            audioPlayer.pause()
+        if isPlaying {
+            audioBook.pause()
         } else {
             playChapter(chapterIndex)
         }
-        isPlaying = audioPlayer.isPlaying
-        publishNowPlaying()
     }
 
     private func playChapter(_ index: Int) {
         guard chapters.indices.contains(index) else { return }
         chapterIndex = index
-        audioPlayer.play(book: book, chapterIndex: index)
-        isPlaying = audioPlayer.isPlaying
-        publishNowPlaying()
-        persistPosition()
-    }
-
-    /// True once this reader has installed the remote-command handlers.
-    @State private var remoteWired = false
-
-    /// Installs the lock-screen play/pause/skip handlers. `SpeechPlayer` wires
-    /// its own on first note/book playback; an audiobook never goes through
-    /// the player, so without this the Control Center buttons would be
-    /// registered with no handler at all.
-    private func wireRemoteCommands() {
-        guard !remoteWired else { return }
-        remoteWired = true
-        // A View is a struct, so [weak self] is not available — and this
-        // closure is long-lived (the shared NowPlayingCenter outlives the
-        // view). The handler therefore lives on the @StateObject player,
-        // which is a class the closure can hold weakly.
-        audioPlayer.remoteHandler = { [weak audioPlayer] command in
-            Task { @MainActor in
-                guard let audioPlayer else { return }
-                switch command {
-                case .play, .toggle:
-                    if audioPlayer.isPlaying {
-                        audioPlayer.pause()
-                    } else {
-                        audioPlayer.resumeCurrent()
-                    }
-                case .pause:
-                    audioPlayer.pause()
-                case .stop:
-                    audioPlayer.stop()
-                case .previousChapter:
-                    audioPlayer.stepChapter(-1)
-                case .nextChapter:
-                    audioPlayer.stepChapter(1)
-                }
-            }
-        }
-    }
-
-    /// Lock screen / Control Center, through the same NowPlayingCenter every
-    /// other playback path uses (single writer). An audiobook has real audio,
-    /// so the surface shows the book, the sounding chapter, and the artwork
-    /// when the file carries one.
-    private func publishNowPlaying() {
-        let chapterTitle = chapters.indices.contains(chapterIndex)
-            ? chapters[chapterIndex].title
+        // Resume where the playhead is: a fresh chapter start only when the
+        // user picked a DIFFERENT chapter or the playhead sits at zero.
+        let fraction = (index == audioBook.chapterIndex && progress > 0.005 && !audioBook.isPlaying)
+            ? progress
             : nil
-        let total = chapters.count > 1 ? "Chapter \(chapterIndex + 1) of \(chapters.count)" : nil
-        NowPlayingCenter.shared.publish(
-            title: book.title,
-            subtitle: [total, chapterTitle].compactMap { $0 }.joined(separator: " — "),
-            artwork: Self.loadArtwork(book: book),
-            isPlaying: isPlaying,
-            progress: nil,
-            rate: 1.0
-        )
-        // Chapter skip is real for an audiobook: the chapters are in the file.
-        NowPlayingCenter.shared.setChapterSkipEnabled(chapters.count > 1)
-    }
-
-    /// Reads the cover once off-main. Nil when the book has no embedded art
-    /// or no embedded art could be decoded — the surface then shows text only.
-    private static func loadArtwork(book: Book) -> UIImage? {
-        guard book.hasCover else { return nil }
-        let url = BooksStore.coverFileURL(book)
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        return UIImage(data: data)
+        audioBook.play(book: book, chapterIndex: index, withinChapterFraction: fraction)
+        progress = audioBook.chapterProgress
     }
 
     private func stepChapter(_ delta: Int) {
@@ -473,168 +409,7 @@ struct BookAudioReaderView: View {
 
     private func seekToProgress(_ value: Double) {
         guard chapters.indices.contains(chapterIndex) else { return }
-        let chapter = chapters[chapterIndex]
-        audioPlayer.seek(to: chapter.startSeconds + value * (chapter.endSeconds - chapter.startSeconds))
-        persistPosition()
-    }
-
-    private func persistPosition() {
-        store.updatePosition(book, chapterIndex: chapterIndex, chapterFraction: progress, cfi: nil)
-    }
-}
-
-/// Plays an audiobook file's chapter range. One `AVAudioPlayer` per chapter
-/// seek (a player is bound to the file, and a chapter is a time range inside
-/// it), which is why the URL is loaded once and the position is set on seek.
-@MainActor
-final class AudioBookPlayer: ObservableObject {
-    private var player: AVAudioPlayer?
-    private var ticker: Timer?
-    /// The file currently loaded — reload only when it actually changes.
-    private var loadedURL: URL?
-    private var book: Book?
-    private var chapters: [AudioChapter] = []
-    private var chapterIndex = 0
-
-    func bind(to book: Book, startChapter: Int) {
-        guard self.book?.id != book.id else { return }
-        self.book = book
-        self.chapters = book.audioChapters ?? []
-        self.chapterIndex = min(max(0, startChapter), max(0, chapters.count - 1))
-        loadedURL = nil
-    }
-
-    func play(book: Book, chapterIndex: Int) {
-        self.book = book
-        self.chapters = book.audioChapters ?? []
-        self.chapterIndex = chapterIndex
-        let url = BooksStore.originalFileURL(book)
-        do {
-            // Same one-shot session configuration every engine runs on first
-            // play — an AVAudioPlayer created with the session still in its
-            // launch default (ambient/silent-switch-able) is silenced by the
-            // mute switch and pauses when the app backgrounds, which looks
-            // like "plays two seconds then dies" on device.
-            AudioSessionSetup.configureIfNeeded(prefix: "AudioBookPlayer")
-            if loadedURL != url || player == nil {
-                let p = try AVAudioPlayer(contentsOf: url)
-                p.prepareToPlay()
-                player = p
-                loadedURL = url
-            }
-            guard let player else { return }
-            let chapter = chapters[chapterIndex]
-            // Clamp the start to the file: a garbage chapter start (legacy
-            // manifests) otherwise seeks past the end and the ticker pauses
-            // instantly.
-            player.currentTime = min(max(0, chapter.startSeconds), max(0, player.duration - 0.05))
-            player.play()
-            startTicker()
-        } catch {
-            Log.shared.error("AudioBookPlayer: cannot play \(url.lastPathComponent): \(error)")
-        }
-    }
-
-    func pause() {
-        player?.pause()
-        stopTicker()
-    }
-
-    func stop() {
-        player?.stop()
-        player = nil
-        loadedURL = nil
-        stopTicker()
-    }
-
-    func seek(to seconds: Double) {
-        guard let player else { return }
-        player.currentTime = min(max(0, seconds), player.duration)
-    }
-
-    /// The chapter's real end, cross-checked against the FILE the player is
-    /// actually playing. The manifest's chapter table is best-effort (an
-    /// import from before the chapter-track reader shipped a single chapter
-    /// whose end was a raced duration — sometimes ≈ 2 s — and the ticker
-    /// then paused two seconds into a ten-hour book). A chapter end that is
-    /// implausibly short (< 5 s of audio) or beyond the file plays to the
-    /// file's end instead; real chapter tables are unaffected.
-    private func effectiveChapterEnd(fileDuration: Double) -> Double? {
-        guard chapters.indices.contains(chapterIndex) else { return nil }
-        let chapter = chapters[chapterIndex]
-        var end = chapter.endSeconds
-        if fileDuration > 0, end > fileDuration { end = fileDuration }
-        guard end > chapter.startSeconds + 5 else {
-            return fileDuration > chapter.startSeconds ? fileDuration : nil
-        }
-        return end
-    }
-
-    /// Seconds into the current chapter, 0…1 — the reader's slider value.
-    var chapterProgress: Double {
-        guard let player,
-              chapters.indices.contains(chapterIndex) else { return 0 }
-        let chapter = chapters[chapterIndex]
-        guard let end = effectiveChapterEnd(fileDuration: player.duration) else { return 0 }
-        let span = end - chapter.startSeconds
-        guard span > 0 else { return 0 }
-        return min(1, max(0, (player.currentTime - chapter.startSeconds) / span))
-    }
-
-    /// True when the playhead has passed the chapter's end — the reader
-    /// advances. Checked by the reader's own ticker, which is why this is a
-    /// var and not a callback: the reader owns chapter navigation.
-    var chapterIsFinished: Bool {
-        guard let player else { return false }
-        guard let end = effectiveChapterEnd(fileDuration: player.duration) else { return false }
-        return player.currentTime >= end - 0.05
-    }
-
-    // MARK: - Remote commands
-
-    /// Lock-screen / Control Center handler. Installed by the reader (which
-    /// owns the NowPlayingCenter surface) and held here because a View is a
-    /// struct and cannot be captured weakly by a long-lived closure.
-    var remoteHandler: ((NowPlayingCenter.Command) -> Void)?
-
-    /// Whether audio is currently sounding — the reader mirrors this so its
-    /// icon, the lock screen and the remote handler never disagree.
-    var isPlaying: Bool { player?.isPlaying ?? false }
-
-    /// Resumes the chapter the reader last started, or the bound start
-    /// chapter on first use. The remote play button has no chapter index of
-    /// its own; with nothing bound there is nothing to resume and it no-ops.
-    func resumeCurrent() {
-        guard let book else { return }
-        if player == nil {
-            play(book: book, chapterIndex: chapterIndex)
-        } else {
-            player?.play()
-        }
-    }
-
-    /// Chapter step for the remote skip buttons.
-    func stepChapter(_ delta: Int) {
-        let target = max(0, min(chapters.count - 1, chapterIndex + delta))
-        guard target != chapterIndex, let book else { return }
-        play(book: book, chapterIndex: target)
-    }
-
-
-    private func startTicker() {
-        stopTicker()
-        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                guard let self, let player = self.player else { return }
-                if self.chapterIsFinished { self.pause() }
-            }
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        ticker = timer
-    }
-
-    private func stopTicker() {
-        ticker?.invalidate()
-        ticker = nil
+        audioBook.seek(toFraction: value)
+        progress = value
     }
 }

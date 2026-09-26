@@ -34,6 +34,20 @@ final class NowPlayingCenter {
     /// Set by SpeechPlayer once — decides what each remote command does.
     var onCommand: ((Command) -> Void)?
 
+    /// Set by AudioBookPlayer on its first play and never removed. Returns
+    /// true when it consumed the command (an audiobook is the active
+    /// playback), false to let the command fall through to `onCommand`. A
+    /// router rather than a steal: SpeechPlayer's handler assignment stays
+    /// untouched, so TTS playback regains the buttons the moment no
+    /// audiobook is loaded — reassigning `onCommand` from two owners would
+    /// leave whichever wired second in permanent control.
+    var audioBookHandler: ((Command) -> Bool)?
+
+    private func dispatch(_ command: Command) {
+        if let audioBookHandler, audioBookHandler(command) { return }
+        onCommand?(command)
+    }
+
     /// Set by SpeechPlayer/BookPlaybackController when a book chapter starts
     /// — subtitle (e.g. "Ch 12 — The Reunion") and cover go out on every
     /// publish until another book/none takes over.
@@ -73,34 +87,34 @@ final class NowPlayingCenter {
         commands.nextTrackCommand.isEnabled = true
 
         commands.previousTrackCommand.addTarget { [weak self] _ in
-            guard let handler = self?.onCommand else { return .commandFailed }
-            handler(.previousChapter)
+            guard let self else { return .commandFailed }
+            self.dispatch(.previousChapter)
             return .success
         }
         commands.nextTrackCommand.addTarget { [weak self] _ in
-            guard let handler = self?.onCommand else { return .commandFailed }
-            handler(.nextChapter)
+            guard let self else { return .commandFailed }
+            self.dispatch(.nextChapter)
             return .success
         }
 
         commands.togglePlayPauseCommand.addTarget { [weak self] _ in
-            guard let handler = self?.onCommand else { return .commandFailed }
-            handler(.toggle)
+            guard let self else { return .commandFailed }
+            self.dispatch(.toggle)
             return .success
         }
         commands.playCommand.addTarget { [weak self] _ in
-            guard let handler = self?.onCommand else { return .commandFailed }
-            handler(.play)
+            guard let self else { return .commandFailed }
+            self.dispatch(.play)
             return .success
         }
         commands.pauseCommand.addTarget { [weak self] _ in
-            guard let handler = self?.onCommand else { return .commandFailed }
-            handler(.pause)
+            guard let self else { return .commandFailed }
+            self.dispatch(.pause)
             return .success
         }
         commands.stopCommand.addTarget { [weak self] _ in
-            guard let handler = self?.onCommand else { return .commandFailed }
-            handler(.stop)
+            guard let self else { return .commandFailed }
+            self.dispatch(.stop)
             return .success
         }
     }
@@ -112,18 +126,32 @@ final class NowPlayingCenter {
     /// mode contract. `subtitle` shows as the artist row (book chapter,
     /// e.g. "Ch 12 — The Reunion"); `artwork` is a pre-rendered UIImage
     /// (book cover) that lands as the lock-screen thumbnail.
+    ///
+    /// `elapsedSeconds`/`durationSeconds` (audiobook path): absolute player
+    /// position and file length — published directly instead of the
+    /// wall-clock bank / progress-derived estimate, and the bank resyncs so
+    /// a later TTS session starts from a sane elapsed.
     func publish(
         title: String?,
         subtitle: String? = nil,
         artwork: UIImage? = nil,
         isPlaying: Bool,
         progress: Double?,
-        rate: Float
+        rate: Float,
+        elapsedSeconds: TimeInterval? = nil,
+        durationSeconds: TimeInterval? = nil,
+        chapterCount: Int? = nil,
+        chapterNumber: Int? = nil
     ) {
         let now = Date()
 
         // Bank playing time; pause/resume no longer loses elapsed seconds.
-        if isPlaying {
+        if let elapsedSeconds {
+            // Absolute position from the player: the bank takes the value
+            // and restarts its wall-clock accumulation from here.
+            elapsed = elapsedSeconds
+            playStartedAt = isPlaying ? now : nil
+        } else if isPlaying {
             if let started = playStartedAt {
                 elapsed += now.timeIntervalSince(started)
             }
@@ -157,9 +185,18 @@ final class NowPlayingCenter {
         }
         // Derive a plausibly-stable total duration from progress. Only
         // publish once progress has meaningfully advanced — the early
-        // estimates jump around visibly in Control Center.
-        if let progress, progress > 0.05 {
+        // estimates jump around visibly in Control Center. An explicit
+        // duration (real file length) always wins.
+        if let durationSeconds {
+            info[MPMediaItemPropertyPlaybackDuration] = durationSeconds
+        } else if let progress, progress > 0.05 {
             info[MPMediaItemPropertyPlaybackDuration] = elapsed / progress
+        }
+        if let chapterCount {
+            info[MPNowPlayingInfoPropertyChapterCount] = chapterCount
+        }
+        if let chapterNumber {
+            info[MPNowPlayingInfoPropertyChapterNumber] = chapterNumber
         }
         infoCenter.nowPlayingInfo = info
     }

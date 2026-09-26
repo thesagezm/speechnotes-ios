@@ -16,6 +16,7 @@ import SwiftUI
 /// orientations — the tab bar it docks above is back in landscape.
 struct GlobalMiniPlayerOverlay: ViewModifier {
     @EnvironmentObject private var player: SpeechPlayer
+    @EnvironmentObject private var audioBooks: AudioBookPlayer
     @AppStorage("miniPlayerCollapsed") private var miniPlayerCollapsed = false
 
     func body(content: Content) -> some View {
@@ -27,7 +28,26 @@ struct GlobalMiniPlayerOverlay: ViewModifier {
             // toolbar items rasterize blurry until first interaction
             // (iOS 26 / LiveContainer).
             Group {
-                if player.showMiniPlayer {
+                // An audiobook that is loaded (playing or paused) wins the
+                // dock: its reader left the screen and this bar is how the
+                // book keeps playing across tabs.
+                if audioBooks.showMiniBar {
+                    if miniPlayerCollapsed {
+                        AudioBookMiniPlayerBubble()
+                            .frame(maxWidth: .infinity, alignment: .trailing)
+                            .padding(.horizontal, 16)
+                            .padding(.bottom, 49 + 34 + 8)
+                            .transition(.scale.combined(with: .opacity))
+                            .zIndex(1)
+                    } else {
+                        AudioBookMiniPlayerBar {
+                            jumpToPlayingContent()
+                        }
+                        .padding(.bottom, 49 + 34)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                        .zIndex(1)
+                    }
+                } else if player.showMiniPlayer {
                     // Same layout in both orientations now — the bottom tab bar
                     // returns in landscape (user request), so the mini-player
                     // keeps its original bottom-docked chrome everywhere.
@@ -51,15 +71,20 @@ struct GlobalMiniPlayerOverlay: ViewModifier {
                 }
             }
             .animation(.easeInOut(duration: 0.2), value: player.showMiniPlayer)
+            .animation(.easeInOut(duration: 0.2), value: audioBooks.showMiniBar)
             .animation(.easeInOut(duration: 0.2), value: miniPlayerCollapsed)
         }
     }
 
     private func jumpToPlayingContent() {
-        if let bookId = player.nowPlayingBookId {
+        // The bar that is visible decides the jump target.
+        if audioBooks.showMiniBar, let bookId = audioBooks.activeBookID {
             // The pending slot makes the jump survive the tab-switch race:
             // the notification fires before BooksView installs its listener,
             // so the view also consumes the slot in onAppear.
+            player.pendingBookJumpId = bookId.uuidString
+            NotificationCenter.default.post(name: .miniPlayerJumpToBook, object: bookId.uuidString)
+        } else if let bookId = player.nowPlayingBookId {
             player.pendingBookJumpId = bookId
             NotificationCenter.default.post(name: .miniPlayerJumpToBook, object: bookId)
         } else {

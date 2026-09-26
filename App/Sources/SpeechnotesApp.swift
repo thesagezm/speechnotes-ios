@@ -4,6 +4,10 @@ import SwiftUI
 struct SpeechnotesApp: App {
     @StateObject private var notes = NotesStore()
     @StateObject private var player = SpeechPlayer()
+    /// App-level audiobook playback — owns the AVAudioPlayer for .audio
+    /// books so playback survives tab switches (the reader only binds and
+    /// renders). Injected below like the other stores.
+    @StateObject private var audioBooks = AudioBookPlayer()
     @StateObject private var theme = AppTheme()
     @Environment(\.scenePhase) private var scenePhase
     /// Selected tab — the global mini-player jumps here when the user taps
@@ -107,6 +111,9 @@ struct SpeechnotesApp: App {
                         // Mid-speech: a bookmark lets playback resume where
                         // it stopped if iOS suspends or kills the process.
                         player.persistPlaybackBookmark()
+                        // Audiobook playhead → the book manifest, so a
+                        // suspension or kill resumes within the chapter.
+                        audioBooks.persistNow()
                     }
                     if phase == .active {
                         // Returning from the app switcher / lock screen: if
@@ -120,6 +127,7 @@ struct SpeechnotesApp: App {
                 // modifier — resolves @EnvironmentObject.
                 .environmentObject(notes)
                 .environmentObject(player)
+                .environmentObject(audioBooks)
                 .environmentObject(theme)
                 // First launch only — self-contained, no eager work
                 // (LiveContainer launch hygiene).

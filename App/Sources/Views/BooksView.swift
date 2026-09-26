@@ -18,6 +18,7 @@ struct BooksView: View {
 
     @StateObject private var store = BooksStore()
     @EnvironmentObject private var player: SpeechPlayer
+    @EnvironmentObject private var audioBooks: AudioBookPlayer
     @State private var showingImporter = false
     @State private var bookToDelete: Book?
     @State private var searchText = ""
@@ -109,15 +110,17 @@ struct BooksView: View {
             ) { book in
                 Button("Delete", role: .destructive) {
                     Haptics.press()
-                    // Deleting a book that is speaking would leave a ghost
-                    // session narrating a removed file — stop it first. A
-                    // synthesised book goes through the player; an audiobook
-                    // owns its own player, which the reader stops via this
-                    // notification.
+                    // Deleting a book that is playing would leave a ghost
+                    // session playing a removed file — stop it first. A
+                    // synthesised book goes through SpeechPlayer; an
+                    // audiobook lives in the app-level AudioBookPlayer,
+                    // which can stop from here (no reader needs to be open
+                    // any more — playback survives tab switches now).
                     if BookPlaybackController.shared.isBookActive(book) {
                         player.stop()
                     }
                     if book.format == .audio {
+                        audioBooks.stopIfPlaying(book)
                         NotificationCenter.default.post(name: .audioBookStopped, object: book.id)
                     }
                     store.delete(book)
