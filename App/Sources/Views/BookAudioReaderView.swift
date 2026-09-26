@@ -20,9 +20,11 @@ struct BookAudioReaderView: View {
     @EnvironmentObject private var audioBook: AudioBookPlayer
 
     @State private var chapterIndex: Int
-    @State private var progress: Double = 0
-    /// While the user drags the scrubber the player's 2 Hz publication must
-    /// not fight the thumb.
+    /// The scrub thumb's local value while dragging; NOT the playhead — the
+    /// live playhead is read straight from the player's published chapter
+    /// progress (an onChange sync proved too indirect on device: the time
+    /// readouts under the slider froze while the audio moved).
+    @State private var scrubValue: Double = 0
     @State private var scrubbing = false
     @State private var showingChapters = false
     /// VLC-style: tap the time readout to flip between chapter position and
@@ -38,7 +40,18 @@ struct BookAudioReaderView: View {
         self.book = book
         self.store = store
         _chapterIndex = State(initialValue: book.position?.chapterIndex ?? 0)
-        _progress = State(initialValue: book.position?.chapterFraction ?? 0)
+        _scrubValue = State(initialValue: book.position?.chapterFraction ?? 0)
+    }
+
+    /// The playhead the UI renders: the player's published value while this
+    /// book is loaded and the user isn't dragging, the local thumb while
+    /// scrubbing, the persisted fraction when idle. Read DIRECTLY in body so
+    /// every player tick re-renders the slider, the rail strip and the time
+    /// readouts — no sync task, no onChange hop.
+    private var displayProgress: Double {
+        if scrubbing { return scrubValue }
+        if isActive { return audioBook.chapterProgress }
+        return book.position?.chapterFraction ?? 0
     }
 
     @Environment(\.isLandscape) private var isLandscape
@@ -115,16 +128,13 @@ struct BookAudioReaderView: View {
             audioBook.store = store
             audioBook.bind(to: book)
             // The player may already be playing THIS book (user left and came
-            // back) — mirror its live playhead instead of the saved one.
+            // back) — follow its live chapter, and start the thumb at the
+            // live playhead so a first drag doesn't snap.
             if audioBook.activeBookID == book.id {
                 chapterIndex = audioBook.chapterIndex
-                progress = audioBook.chapterProgress
+                scrubValue = audioBook.chapterProgress
             }
             audioBook.readerVisible = true
-        }
-        .onChange(of: audioBook.chapterProgress) { newValue in
-            guard isActive, !scrubbing else { return }
-            progress = newValue
         }
         .onChange(of: audioBook.chapterIndex) { newValue in
             guard isActive else { return }
@@ -166,10 +176,13 @@ struct BookAudioReaderView: View {
     /// chapter bar below, which is visible with the chrome hidden too).
     private var audioTransport: some View {
         VStack(spacing: 14) {
-            Slider(value: $progress, in: 0...1) { editing in
+            Slider(value: Binding(
+                get: { displayProgress },
+                set: { scrubValue = $0 }
+            ), onEditingChanged: { editing in
                 scrubbing = editing
-                if !editing { seekToProgress(progress) }
-            }
+                if !editing { seekToProgress(scrubValue) }
+            })
             .padding(.horizontal, 24)
 
             HStack(spacing: 40) {
@@ -219,7 +232,7 @@ struct BookAudioReaderView: View {
                         .frame(width: 3)
                     Capsule()
                         .fill(theme.accentFadeVerticalGradient)
-                        .frame(width: 3, height: max(4, (proxy.size.height - 16) * progress))
+                        .frame(width: 3, height: max(4, (proxy.size.height - 16) * displayProgress))
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             }
@@ -321,7 +334,7 @@ struct BookAudioReaderView: View {
     private var timeLabel: String {
         guard chapters.indices.contains(chapterIndex) else { return "" }
         let chapter = chapters[chapterIndex]
-        let elapsed = chapter.startSeconds + progress * (chapter.endSeconds - chapter.startSeconds)
+        let elapsed = chapter.startSeconds + displayProgress * (chapter.endSeconds - chapter.startSeconds)
         if showingBookRemaining {
             let total = book.audioDuration ?? (isActive ? audioBookFileDuration : 0)
             guard total > 0 else { return Self.clock(elapsed) }
@@ -419,8 +432,8 @@ struct BookAudioReaderView: View {
         chapterIndex = index
         // Resume where the playhead is: a fresh chapter start only when the
         // user picked a DIFFERENT chapter or the playhead sits at zero.
-        let fraction = (index == audioBook.chapterIndex && progress > 0.005 && !audioBook.isPlaying)
-            ? progress
+        let fraction = (index == audioBook.chapterIndex && displayProgress > 0.005 && !audioBook.isPlaying)
+            ? displayProgress
             : nil
         audioBook.play(book: book, chapterIndex: index, withinChapterFraction: fraction)
         progress = audioBook.chapterProgress
@@ -435,6 +448,5 @@ struct BookAudioReaderView: View {
     private func seekToProgress(_ value: Double) {
         guard chapters.indices.contains(chapterIndex) else { return }
         audioBook.seek(toFraction: value)
-        progress = value
     }
 }

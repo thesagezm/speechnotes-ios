@@ -24,7 +24,9 @@ import SpeechLogic
 ///                    + past_key_values.0..16.{key,value} (float [1,1,0,128]
 ///                    on the first step)
 ///   backbone outputs logits, present.0..16.{key,value},
-///                    last_hidden_state ([1, 512, seqLen])
+///                    last_hidden_state ([1, 512, seqLen] or [1, seqLen, 512]
+///                    — the export never pinned it; the layout is read from
+///                    the tensor's own shape at runtime and logged once)
 ///   decoder          hidden_states [1, 512, 12] → audio (float32 @ 32 kHz)
 final class SopranoEngine: NSObject, SpeechEngine {
     let name = "Soprano (CPU)"
@@ -388,15 +390,14 @@ final class SopranoEngine: NSObject, SpeechEngine {
                     throw SopranoEngineError.missingOutput
                 }
                 let hiddenData: Data = try hiddenValue.tensorData() as Data
-                let stepHidden = Self.floats(from: hiddenData)
-                // The graph returns the whole sequence's hidden states ([1,
-                // seqLen, 512]) every step — keep only the LAST position's
-                // frame, exactly like the reference's
-                // slice((seqLen-1)*512, seqLen*512).
-                guard stepHidden.count >= Self.hiddenSize else {
-                    throw SopranoEngineError.missingOutput
-                }
-                let lastFrame = Array(stepHidden.suffix(Self.hiddenSize))
+                // The export's layout was never pinned (the spike header and
+                // the old slicing code contradict each other) — read the
+                // tensor's actual shape and take the last position's frame
+                // in whichever orientation it really is.
+                let lastFrame = try lastHiddenFrame(
+                    tensorData: hiddenData,
+                    shape: ((try? hiddenValue.tensorTypeAndShapeInfo())?.shape ?? []).map { $0.intValue }
+                )
                 // The prefill's own frame (the [START] prompt position) never
                 // sounds — only generated-token frames reach the decoder.
                 if step > 0 {
@@ -508,6 +509,52 @@ final class SopranoEngine: NSObject, SpeechEngine {
     }
 
     // MARK: - Static helpers
+
+    /// True once the hidden-state tensor layout was logged this session.
+    private var loggedHiddenLayout = false
+
+    /// The LAST position's hidden frame, respecting the tensor's actual
+    /// layout. The spike header claimed `last_hidden_state` is
+    /// [1, 512, seqLen] (channel-first) while the old slicing code assumed
+    /// [1, seqLen, 512] (token-first) — the two contradict, and the wrong
+    /// assumption feeds the vocoder CHANNEL SLICES as if they were frames:
+    /// structured garbage that sounds like syllables repeated with slight
+    /// variation. The layout is read from the value itself and logged once.
+    private func lastHiddenFrame(tensorData: Data, shape: [Int]) throws -> [Float] {
+        let values = Self.floats(from: tensorData)
+        let hiddenSize = Self.hiddenSize
+        guard shape.count == 3, shape[0] == 1, values.count == shape[1] * shape[2] else {
+            Log.shared.error("SopranoEngine: hidden-state shape unreadable (\(shape), \(values.count) floats) — assuming token-first")
+            guard values.count >= hiddenSize else { throw SopranoEngineError.missingOutput }
+            return Array(values.suffix(hiddenSize))
+        }
+        if shape[2] == hiddenSize {
+            // [1, seqLen, hidden] — token-first: frames are contiguous.
+            let seqLen = shape[1]
+            if !loggedHiddenLayout {
+                loggedHiddenLayout = true
+                Log.shared.info("SopranoEngine: hidden-state tensor is token-first [1, \(seqLen), \(hiddenSize)]")
+            }
+            return Array(values[(seqLen - 1) * hiddenSize..<(seqLen * hiddenSize)])
+        }
+        if shape[1] == hiddenSize {
+            // [1, hidden, seqLen] — channel-first: the last position is a
+            // strided gather (element [c, seq-1] lives at c*seqLen + seq-1).
+            let seqLen = shape[2]
+            if !loggedHiddenLayout {
+                loggedHiddenLayout = true
+                Log.shared.warning("SopranoEngine: hidden-state tensor is CHANNEL-first [1, \(hiddenSize), \(seqLen)] — every prior build sliced it wrong")
+            }
+            var frame = [Float](repeating: 0, count: hiddenSize)
+            for channel in 0..<hiddenSize {
+                frame[channel] = values[channel * seqLen + seqLen - 1]
+            }
+            return frame
+        }
+        Log.shared.error("SopranoEngine: unexpected hidden-state shape \(shape) — assuming token-first")
+        guard values.count >= hiddenSize else { throw SopranoEngineError.missingOutput }
+        return Array(values.suffix(hiddenSize))
+    }
 
     private static func decoderOutputNames(for session: ORTSession) -> Set<String> {
         Set((try? session.outputNames()) ?? [])

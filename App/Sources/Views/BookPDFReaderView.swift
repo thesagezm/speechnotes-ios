@@ -72,9 +72,15 @@ struct BookPDFReaderView: View {
             let landscape = proxy.size.width > proxy.size.height
             ZStack(alignment: .bottom) {
                 if landscape, hasChapters {
-                    HStack(spacing: 0) {
-                        readerSurface
-                        railPlayerBar
+                    // The page bar returns to the bottom in landscape too
+                    // ("steppers stay bottom") — it overlays the lower edge
+                    // of the page surface.
+                    ZStack(alignment: .bottom) {
+                        HStack(spacing: 0) {
+                            readerSurface
+                            railPlayerBar
+                        }
+                        pageBar
                     }
                     .transition(.opacity.combined(with: .move(edge: .trailing)))
                 } else {
@@ -165,14 +171,12 @@ struct BookPDFReaderView: View {
             immersiveBarsHidden.toggle()
         }
         .toolbar {
-            if !outlineRows.isEmpty {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        Haptics.tap()
-                        showingOutline = true
-                    } label: {
-                        Label("Outline", systemImage: "sidebar.leading")
-                    }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    Haptics.tap()
+                    showingOutline = true
+                } label: {
+                    Label("Contents", systemImage: "sidebar.leading")
                 }
             }
         }
@@ -292,40 +296,60 @@ struct BookPDFReaderView: View {
 
     private var pageBar: some View {
         HStack {
+            Button {
+                Haptics.tap()
+                showingOutline = true
+            } label: {
+                Image(systemName: "list.bullet")
+            }
+            .accessibilityLabel("Contents")
             Spacer()
             Text(pageCount > 0 ? "Page \(currentPage + 1) of \(pageCount)" : "PDF")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
             Spacer()
+            // Symmetric ghost of the Contents button keeps the page count
+            // genuinely centered.
+            Image(systemName: "list.bullet")
+                .font(.body)
+                .foregroundStyle(.clear)
+                .accessibilityHidden(true)
         }
+        .padding(.horizontal, 16)
         .padding(.vertical, 8)
         .background(.bar)
     }
 
-    // MARK: - Outline
+    // MARK: - Contents (outline + chapter fallback)
 
     private struct OutlineRow: Identifiable {
         let id: Int
         let label: String
         let depth: Int
         let destination: PDFDestination
+        /// 0-based page the entry points at, resolved at flatten time so
+        /// rows can show their page number and highlight the current one.
+        let pageIndex: Int
     }
 
     /// Flattens the PDF outline tree depth-first. Runs once per open; big
     /// outlines are rare and cheap compared to the document itself. Walks
     /// via numberOfChildren/child(at:) — this SDK's PDFOutline has no
-    /// `children` array (CI-caught).
+    /// `children` array (CI-caught). Entries whose destination does not
+    /// resolve to a page are skipped: every row must be navigable.
     private static func flattenOutline(book: Book) -> [OutlineRow] {
-        guard let root = PDFDocument(url: BooksStore.originalFileURL(book))?.outlineRoot else { return [] }
+        guard let document = PDFDocument(url: BooksStore.originalFileURL(book)),
+              let root = document.outlineRoot else { return [] }
         var rows: [OutlineRow] = []
         func walk(_ outline: PDFOutline, depth: Int) {
-            if let dest = outline.destination {
+            if let dest = outline.destination, let page = dest.page {
                 rows.append(OutlineRow(
                     id: rows.count,
                     label: outline.label ?? "Untitled",
                     depth: depth,
-                    destination: dest
+                    destination: dest,
+                    pageIndex: document.index(for: page)
                 ))
             }
             for index in 0..<outline.numberOfChildren {
@@ -342,22 +366,94 @@ struct BookPDFReaderView: View {
         return rows
     }
 
+    /// The row the reader should open scrolled to and highlight — the last
+    /// entry at or before the visible page (readest's activeHref equivalent,
+    /// keyed by page because PDF destinations are the only address we have).
+    private var currentOutlineRowID: Int? {
+        guard !outlineRows.isEmpty else { return nil }
+        let beforeOrAt = outlineRows.prefix { $0.pageIndex <= currentPage }
+        guard let last = beforeOrAt.last else { return outlineRows.first?.id }
+        return last.id
+    }
+
+    /// The manifest chapter the visible page sits in — the fallback list's
+    /// highlight (and the same data TTS speaks).
+    private var currentChapterID: Int? {
+        guard let chapters = book.pdfChapters else { return nil }
+        return chapters.firstIndex { currentPage >= $0.startPage && currentPage <= $0.endPage }
+    }
+
+    /// The Contents sheet: the PDF's own outline with depth indentation and
+    /// page numbers (what readest/anx-reader show), highlighted and
+    /// auto-scrolled to the current position; for PDFs without an outline,
+    /// the resolved TTS chapter list takes its place — never a dead button.
     private var outlineSheet: some View {
         NavigationStack {
-            List(outlineRows) { row in
-                Button {
-                    Haptics.tap()
-                    showingOutline = false
-                    pdfView?.go(to: row.destination)
-                } label: {
-                    Text(row.label)
-                        .font(.subheadline)
-                        .foregroundStyle(.primary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.leading, CGFloat(row.depth) * 14)
+            ScrollViewReader { proxy in
+                Group {
+                    if !outlineRows.isEmpty {
+                        List(outlineRows) { row in
+                            Button {
+                                Haptics.tap()
+                                showingOutline = false
+                                pdfView?.go(to: row.destination)
+                            } label: {
+                                HStack {
+                                    Text(row.label)
+                                        .font(.subheadline)
+                                        .fontWeight(row.id == currentOutlineRowID ? .semibold : .regular)
+                                        .foregroundStyle(row.id == currentOutlineRowID ? Color.accentColor : .primary)
+                                        .multilineTextAlignment(.leading)
+                                    Spacer(minLength: 8)
+                                    Text("\(row.pageIndex + 1)")
+                                        .font(.caption2.monospacedDigit())
+                                        .foregroundStyle(.secondary)
+                                }
+                                .padding(.leading, CGFloat(row.depth) * 14)
+                            }
+                        }
+                    } else if let chapters = book.pdfChapters, !chapters.isEmpty {
+                        List(Array(chapters.enumerated()), id: \.offset) { index, chapter in
+                            Button {
+                                Haptics.tap()
+                                showingOutline = false
+                                if let pdfView, let document = pdfView.document,
+                                   let page = document.page(at: chapter.startPage) {
+                                    pdfView.go(to: page)
+                                }
+                            } label: {
+                                HStack {
+                                    Text(chapter.label)
+                                        .font(.subheadline)
+                                        .fontWeight(index == currentChapterID ? .semibold : .regular)
+                                        .foregroundStyle(index == currentChapterID ? Color.accentColor : .primary)
+                                        .lineLimit(1)
+                                    Spacer(minLength: 8)
+                                    Text(chapter.endPage > chapter.startPage
+                                         ? "pp. \(chapter.startPage + 1)–\(chapter.endPage + 1)"
+                                         : "p. \(chapter.startPage + 1)")
+                                        .font(.caption2.monospacedDigit())
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                    } else {
+                        List {
+                            Text("This PDF has no outline or chapters.")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .onAppear {
+                    // Open scrolled to where the reader is (readest centers
+                    // the active row; the anchor picks whichever is closer).
+                    if let id = currentOutlineRowID {
+                        proxy.scrollTo(id, anchor: .center)
+                    }
                 }
             }
-            .navigationTitle("Outline")
+            .navigationTitle("Contents")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {

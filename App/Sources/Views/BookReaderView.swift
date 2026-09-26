@@ -71,9 +71,14 @@ struct BookReaderView: View {
             let landscape = proxy.size.width > proxy.size.height
             ZStack(alignment: .bottom) {
                 if landscape {
-                    HStack(spacing: 0) {
-                        readerSurface
-                        railPlayerBar
+                    // The chapter stepper stays at the bottom in landscape
+                    // too — it overlays the lower edge of the reading surface.
+                    ZStack(alignment: .bottom) {
+                        HStack(spacing: 0) {
+                            readerSurface
+                            railPlayerBar
+                        }
+                        chapterBar
                     }
                     .transition(.opacity.combined(with: .move(edge: .trailing)))
                 } else {
