@@ -78,12 +78,13 @@ struct ReadAlongView: View {
                     }
                 }
                 .padding(.leading, 16)
-                // In landscape the trailing playback rail owns ~78pt of the
-                // trailing edge; the text column must not run under it. Read
-                // from the scroll view's own geometry so the inset is right on
-                // the very first frame of the new orientation (an environment
-                // value can arrive a frame late — the tab-rail bug).
-                .padding(.trailing, proxyWidth > 500 ? 92 : 16)
+                // In landscape the trailing playback panel owns its documented
+                // width (PlaybackRail.idealWidth) plus breathing room; the
+                // text column must not run under it. Read from the scroll
+                // view's own geometry so the inset is right on the very first
+                // frame of the new orientation (an environment value can
+                // arrive a frame late — the tab-rail bug).
+                .padding(.trailing, proxyWidth > 500 ? PlaybackRail.idealWidth + 14 : 16)
             }
             .onChange(of: activeRange?.lowerBound) { start in
                 guard let start else { return }

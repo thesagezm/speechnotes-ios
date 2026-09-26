@@ -1,25 +1,34 @@
 import SwiftUI
 
-/// Lateral playback controls for landscape: a vertical rail pinned to the
-/// trailing edge, with the playback surface kept to its leading side.
+/// Lateral playback controls for landscape: a panel pinned to the trailing
+/// edge, with the playback surface kept to its leading side.
 ///
 /// Why the side (user request, and the v1.2-era plan already agreed): in
 /// landscape the screen is short, so a bottom bar eats the reading height and a
-/// top bar fights the navigation bar. A 78 pt rail leaves the text column tall
-/// and clean, and every control stays in thumb reach either handheld or on a
-/// desk.
+/// top bar fights the navigation bar. The rail is deliberately parameterized
+/// rather than copy-pasted per surface: the note editor, the EPUB reader and
+/// the PDF reader all need the same five actions (voice, play/pause, stop,
+/// read-along, rate) and the same progress readout, differing only in what the
+/// buttons call. `PlaybackRail.Action` carries those closures; `extraTrailing`
+/// covers the one surface-specific button (the PDF reader's per-chapter
+/// export).
 ///
-/// The rail is deliberately parameterized rather than copy-pasted per surface:
-/// the note editor, the EPUB reader, the PDF reader and the audiobook reader
-/// all need the same five actions (voice, play/pause, stop, read-along, rate)
-/// and the same vertical progress strip, differing only in what the buttons
-/// call. `PlaybackRail.Action` carries those closures; `extraTrailing` covers
-/// the one surface-specific button (the PDF reader's per-chapter export).
+/// Round-5 redesign (user: "poorly done and unprofessional" at 78 pt): the
+/// narrow column with its rotated fader was rebuilt as a PROPER PANEL that
+/// mirrors the portrait PlayerControlsBar feature-for-feature — voice chip
+/// with the live voice description, progress capsule with percentage, the
+/// same 52 pt play button, read-along/stop/(export) controls, and a NORMAL
+/// horizontal rate slider (there is width for one now; the rotated fader is
+/// gone). Every control the portrait bar has, the rail has.
 ///
 /// Type-checker budget (the v1.2 lesson): the rail is its own file and every
 /// sub-view is a small private computed property, so adding it cannot push an
 /// existing body over Swift's expression limit.
 struct PlaybackRail: View {
+    /// The documented rail width — every layout partner reserves this
+    /// (ReadAlongView's trailing inset, the HStacks that host the rail).
+    static let idealWidth: CGFloat = 170
+
     /// What the rail's buttons do. Every surface fills this in with its own
     /// calls — the rail itself holds no playback knowledge.
     struct Action {
@@ -53,11 +62,11 @@ struct PlaybackRail: View {
     }
 
     let action: Action
-    /// Shown under the play button — engine + voice, so the user can see what
-    /// is speaking without leaving the reader.
+    /// Shown in the voice chip — engine + voice, so the user can see what is
+    /// speaking without leaving the reader.
     var voiceLabel: String = ""
-    /// Progress 0…1 while speaking; nil shows nothing (the strip degrades to a
-    /// hairline, matching the portrait bar's behaviour).
+    /// Progress 0…1 while speaking; nil shows nothing (the strip degrades to
+    /// a hairline, matching the portrait bar's behaviour).
     var progress: Double?
     /// True while the engine is generating the first chunk — the play button
     /// shows an hourglass instead of the glyph.
@@ -66,7 +75,7 @@ struct PlaybackRail: View {
     var isPlayEnabled: Bool = true
     /// Stop/read-along show only while a session is live.
     var sessionActive: Bool = false
-    /// Surface-specific trailing button (PDF per-chapter export).
+    /// Surface-specific extra button (PDF per-chapter export).
     var extraTrailing: AnyView? = nil
 
     @EnvironmentObject private var theme: AppTheme
@@ -79,110 +88,82 @@ struct PlaybackRail: View {
     }
 
     var body: some View {
-        HStack(spacing: 0) {
-            railProgressStrip
-            railControls
+        VStack(spacing: 12) {
+            progressStrip
+            voiceChip
+            Spacer(minLength: 0)
+            playButton
+            if sessionActive {
+                controlsRow
+            }
+            Spacer(minLength: 0)
+            rateSection
         }
-        .padding(.horizontal, 4)
-        .padding(.vertical, 8)
-        // The DOCUMENTED rail width — every layout partner (ReadAlongView's
-        // 92pt trailing inset, the audio reader's cover column) reserves
-        // 78pt for this rail. Without a fixed width the content-hugged rail
-        // came out ~63pt wide and its .bar background stopped short of the
-        // reserved column, leaving the controls hugging the trailing edge
-        // ("playback controls not centered in landscape").
-        .frame(width: 78)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .frame(width: Self.idealWidth)
         .frame(maxHeight: .infinity)
         .background(.bar)
     }
 
-    // MARK: - Progress strip
+    // MARK: - Progress
 
-    /// Thin vertical strip on the rail's leading edge — the landscape twin of
-    /// the portrait bar's capsule, filling TOP-DOWN so "further along" runs in
-    /// the same direction a page fills (user request: top→bottom, not the
-    /// bottom-up fill a vertical progress bar would otherwise take).
-    private var railProgressStrip: some View {
-        GeometryReader { proxy in
-            ZStack(alignment: .top) {
-                Capsule()
-                    .fill(Color.secondary.opacity(0.25))
-                    .frame(width: 3)
-                if let progress, progress > 0 {
-                    Capsule()
-                        .fill(theme.accentFadeVerticalGradient)
-                        .frame(width: 3, height: max(4, (proxy.size.height - 16) * progress))
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        }
-        .frame(width: 3)
-        .padding(.vertical, 8)
-    }
-
-    // MARK: - Control column
-
-    private var railControls: some View {
-        VStack(spacing: 10) {
-            voiceButton
-            playButton
-
-            if sessionActive {
-                if let onStop = action.onStop {
-                    stopButton(onStop)
-                }
-                if let onToggleReadAlong = action.onToggleReadAlong {
-                    readAlongButton(onToggleReadAlong)
-                }
-                if let extraTrailing {
-                    extraTrailing
-                }
-            }
-
-            Spacer(minLength: 0)
-
-            rateLabel
-
-            // Vertical slider: lay the slider out horizontally at the slot's
-            // HEIGHT, then rotate the visual 90° counter-clockwise around its
-            // center (hit-testing follows the rotation). Min lands at the
-            // bottom — slower down, faster up, like a mixing-desk fader.
+    /// Horizontal capsule across the panel's top — the landscape twin of the
+    /// portrait bar's progress capsule, with the live percentage beside it.
+    private var progressStrip: some View {
+        VStack(spacing: 5) {
             GeometryReader { proxy in
-                Slider(
-                    value: Binding(
-                        get: { action.rate },
-                        set: { action.onRateChange($0) }
-                    ),
-                    in: 0.5...2.0,
-                    step: 0.05
-                )
-                .rotationEffect(.degrees(-90))
-                .frame(width: proxy.size.height)
-                .position(x: proxy.size.width / 2, y: proxy.size.height / 2)
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.secondary.opacity(0.25))
+                    if let progress, progress > 0 {
+                        Capsule()
+                            .fill(theme.accentFadeGradient)
+                            .frame(width: max(4, proxy.size.width * progress))
+                    }
+                }
             }
-            .frame(width: 34, height: 110)
+            .frame(height: 4)
+            if let progress {
+                Text("\(Int((progress * 100).rounded()))%")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
         }
-        .padding(.horizontal, 2)
     }
 
-    private var voiceButton: some View {
+    // MARK: - Voice chip
+
+    /// Same chip as the portrait bar: engine + voice, one tap to the picker.
+    private var voiceChip: some View {
         Group {
             if let onChangeVoice = action.onChangeVoice {
                 Button {
                     Haptics.tap()
                     onChangeVoice()
                 } label: {
-                    Image(systemName: "person.wave.2.fill")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 34, height: 34)
-                        .background(Circle().fill(Color.secondary.opacity(0.12)))
+                    HStack(spacing: 6) {
+                        Image(systemName: "person.wave.2.fill")
+                            .font(.caption)
+                        Text(voiceLabel)
+                            .font(.caption.weight(.medium))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(Capsule().fill(Color.secondary.opacity(0.12)))
+                    .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Change voice")
             }
         }
     }
+
+    // MARK: - Transport
 
     private var playButton: some View {
         Button {
@@ -198,50 +179,79 @@ struct PlaybackRail: View {
                         .tint(.white)
                 } else {
                     Image(systemName: playIcon)
-                        .font(.body.bold())
+                        .font(.title2.bold())
                         .foregroundStyle(.white)
                 }
             }
-            .frame(width: 46, height: 46)
+            .frame(width: 52, height: 52)
         }
         .buttonStyle(.plain)
         .disabled(!isPlayEnabled)
         .accessibilityLabel(sessionActive ? "Pause" : "Play")
     }
 
-    private func stopButton(_ onStop: @escaping () -> Void) -> some View {
-        Button {
-            Haptics.press()
-            onStop()
-        } label: {
-            Image(systemName: "stop.fill")
-                .font(.footnote.weight(.bold))
-                .foregroundStyle(.red)
-                .frame(width: 30, height: 30)
-                .background(Circle().fill(Color.red.opacity(0.12)))
+    /// Read-along, stop and the surface's extra button — the same trio row
+    /// the portrait bar shows while a session is live.
+    private var controlsRow: some View {
+        HStack(spacing: 14) {
+            if let onToggleReadAlong = action.onToggleReadAlong {
+                Button {
+                    Haptics.press()
+                    onToggleReadAlong()
+                } label: {
+                    Image(systemName: action.readAlongOn ? "book.pages.fill" : "book.pages")
+                        .font(.footnote.weight(.medium))
+                        .foregroundStyle(action.readAlongOn ? Color.accentColor : .secondary)
+                        .frame(width: 36, height: 36)
+                        .background(Circle().fill(Color.secondary.opacity(0.12)))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(action.readAlongOn ? "Read-along on" : "Read-along off")
+            }
+
+            if let onStop = action.onStop {
+                Button {
+                    Haptics.press()
+                    onStop()
+                } label: {
+                    Image(systemName: "stop.fill")
+                        .font(.footnote.weight(.bold))
+                        .foregroundStyle(.red)
+                        .frame(width: 36, height: 36)
+                        .background(Circle().fill(Color.red.opacity(0.12)))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Stop playback")
+            }
+
+            if let extraTrailing {
+                extraTrailing
+            }
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Stop playback")
     }
 
-    private func readAlongButton(_ onToggle: @escaping () -> Void) -> some View {
-        Button {
-            Haptics.press()
-            onToggle()
-        } label: {
-            Image(systemName: action.readAlongOn ? "book.pages.fill" : "book.pages")
-                .font(.footnote.weight(.medium))
-                .foregroundStyle(action.readAlongOn ? Color.accentColor : .secondary)
-                .frame(width: 30, height: 30)
-                .background(Circle().fill(Color.secondary.opacity(0.12)))
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(action.readAlongOn ? "Read-along on" : "Read-along off")
-    }
+    // MARK: - Rate
 
-    private var rateLabel: some View {
-        Text(String(format: "%.2f×", action.rate))
-            .font(.caption2.monospacedDigit())
-            .foregroundStyle(.secondary)
+    /// Horizontal rate slider — the portrait bar's exact control. (The old
+    /// rail rotated a slider 90° into a 34×110 slot: it fought the thumb,
+    /// looked improvised, and there was never a reason to given the panel's
+    /// width.)
+    private var rateSection: some View {
+        VStack(spacing: 4) {
+            Slider(
+                value: Binding(
+                    get: { action.rate },
+                    set: { action.onRateChange($0) }
+                ),
+                in: 0.5...2.0,
+                step: 0.05
+            )
+            .frame(height: 44)
+            .accessibilityLabel("Speech rate")
+            .accessibilityValue(String(format: "%.2f times", action.rate))
+            Text(String(format: "%.2f×", action.rate))
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
     }
 }

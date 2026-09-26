@@ -218,47 +218,67 @@ struct BookAudioReaderView: View {
         }
     }
 
-    /// Landscape transport rail: vertical position strip, a 46pt play/pause
-    /// and the time readout. The strip fills TOP-DOWN (same direction as the
-    /// playback rails) and the scrub slider stays portrait-only — a
-    /// horizontal slider is the wrong control for a 110pt-tall slot. The
-    /// content is centered inside the documented 78pt column (round 3: the
-    /// old asymmetric paddings hugged everything to the trailing edge).
+    /// Landscape transport panel — the audiobook twin of the redesigned
+    /// `PlaybackRail`: same documented width, same professional shape, with
+    /// the controls the audiobook actually has (±15 s skips around a 52 pt
+    /// play, live file-position readouts). The content is centered; the
+    /// vertical hairline strip is gone (it read as a rendering artifact at
+    /// this width — the horizontal capsule carries the position instead).
     private var audioRail: some View {
-        HStack(spacing: 0) {
-            // Vertical position strip (the rail twin of the scrub slider).
+        VStack(spacing: 14) {
+            // File-position capsule — the rail twin of the portrait scrub
+            // slider, filling LEFT→RIGHT like the redesigned PlaybackRail's.
             GeometryReader { proxy in
-                ZStack(alignment: .top) {
+                ZStack(alignment: .leading) {
                     Capsule()
                         .fill(Color.secondary.opacity(0.25))
-                        .frame(width: 3)
                     Capsule()
-                        .fill(theme.accentFadeVerticalGradient)
-                        .frame(width: 3, height: max(4, (proxy.size.height - 16) * displayProgress))
+                        .fill(theme.accentFadeGradient)
+                        .frame(width: max(4, proxy.size.width * displayProgress))
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             }
-            .frame(width: 3)
-            .padding(.vertical, 8)
+            .frame(height: 4)
 
-            VStack(spacing: 14) {
+            Spacer(minLength: 0)
+
+            HStack(spacing: 18) {
+                Button {
+                    Haptics.tap()
+                    audioBook.seekBy(-15)
+                } label: {
+                    Image(systemName: "gobackward.15")
+                        .font(.system(size: 22))
+                }
+                .accessibilityLabel("Back 15 seconds")
+
                 Button {
                     Haptics.tap()
                     togglePlayback()
                 } label: {
                     Image(systemName: isPlaying ? "pause.circle.fill" : "play.circle.fill")
-                        .font(.system(size: 46))
-                        .foregroundStyle(Color.accentColor)
+                        .font(.system(size: 52))
                 }
+                .accessibilityLabel(isPlaying ? "Pause" : "Play")
 
-                Spacer(minLength: 0)
-
-                timeReadout
-                    .font(.caption2.monospacedDigit())
+                Button {
+                    Haptics.tap()
+                    audioBook.seekBy(15)
+                } label: {
+                    Image(systemName: "goforward.15")
+                        .font(.system(size: 22))
+                }
+                .accessibilityLabel("Forward 15 seconds")
             }
-            .padding(.horizontal, 6)
+            .foregroundStyle(Color.accentColor)
+
+            Spacer(minLength: 0)
+
+            timeReadout
+                .font(.caption.monospacedDigit())
         }
-        .frame(width: 78)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .frame(width: PlaybackRail.idealWidth)
         .frame(maxHeight: .infinity)
         .background(.bar)
     }
