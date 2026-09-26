@@ -425,7 +425,7 @@ struct BookReaderView: View {
                                 .frame(width: 26, height: 26)
                         }
                         .buttonStyle(.plain)
-                        .accessibilityLabel(collapsedTocRows.contains(entry.offset) ? "Expand section" : "Collapse section")
+                        .accessibilityLabel(collapsedTocRows.contains(row.offset) ? "Expand section" : "Collapse section")
                     }
                 }
             }
