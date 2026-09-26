@@ -61,7 +61,7 @@ public enum AudiobookChapters {
         var found: [AudioChapter] = []
         forEachBox(in: data, range: 0..<data.count) { type, payload in
             guard type == "moov" else { return }
-            found = chaptersFromMoov(data, range: payload) ?? []
+            found = chaptersFromMoov(data, range: payload, totalSeconds: totalSeconds) ?? []
         }
         guard let chapters = normalize(found, totalSeconds: totalSeconds), !chapters.isEmpty else {
             return []
@@ -152,18 +152,27 @@ public enum AudiobookChapters {
         }
     }
 
-    private static func chaptersFromMoov(_ data: Data, range: Range<Int>) -> [AudioChapter]? {
+    private static func chaptersFromMoov(_ data: Data, range: Range<Int>, totalSeconds: Double) -> [AudioChapter]? {
         // `chpl` is the simple, widely written form — prefer it when present.
+        // It lives UNDER `udta` (moov/udta/chpl) in every real file; a few
+        // writers place it directly in moov, so both levels are scanned. The
+        // round-6 device round found real M4Bs unreadable because this scan
+        // only looked at moov's DIRECT children.
         var chplPayload: Range<Int>?
         var mvhdPayload: Range<Int>?
         var traks: [Range<Int>] = []
         forEachBox(in: data, range: range) { type, payload in
             if type == "chpl" { chplPayload = payload }
+            if type == "udta" {
+                forEachBox(in: data, range: payload) { type, inner in
+                    if type == "chpl" { chplPayload = inner }
+                }
+            }
             if type == "mvhd" { mvhdPayload = payload }
             if type == "trak" { traks.append(payload) }
         }
         if let chplPayload {
-            let chapters = parseChpl(Array(data[chplPayload]))
+            let chapters = parseChpl(Array(data[chplPayload]), totalSeconds: totalSeconds)
             if !chapters.isEmpty { return chapters }
         }
         // No `chpl` (or it was empty): try a real chapter track — a `trak`
@@ -431,18 +440,33 @@ public enum AudiobookChapters {
     /// `chpl` payload: version+flags (4), reserved (4), chapter count (1),
     /// then per chapter an 8-byte start (in the movie timescale, usually
     /// 1/100 s but read from `mvhd` when we can) and a Pascal string title.
-    private static func parseChpl(_ bytes: [UInt8]) -> [AudioChapter] {
-        guard bytes.count >= 9 else { return [] }
-        let count = Int(bytes[8])
-        var cursor = 9
-        var chapters: [AudioChapter] = []
+    /// `chpl` (Nero chapters) payload — THE standard layout, the one
+    /// mp4chaps/ffmpeg/VLC write and read:
+    ///   version(1) flags(3) chapterCount(4, BE) then per chapter:
+    ///   startTime(8, 100-NANOSECOND units) nameLength(1) name(UTF-8)
+    ///
+    /// The round-5 parser matched a synthetic fixture instead of this spec —
+    /// it read a 1-byte count at offset 8 (the first byte of the first
+    /// chapter's start time, i.e. 0x00 whenever chapter 1 starts at 0) and
+    /// divided timestamps by 100. Real files therefore always came back
+    /// EMPTY: chapters that VLC/PocketCasts show, we collapsed to "Full
+    /// audiobook". Both errors are fixed here, with one tolerance: a few
+    /// writers use milliseconds instead of 100 ns — when the parsed starts
+    /// overflow the known duration, the millisecond reading is used.
+    private static func parseChpl(_ bytes: [UInt8], totalSeconds: Double?) -> [AudioChapter] {
+        guard bytes.count >= 8 else { return [] }
+        let count = Int(be32(bytes, 4))
+        guard count > 0, count < 10_000 else { return [] } // sanity: chpl counts are small
+        var cursor = 8
+        var rawStarts: [Int] = []
+        var titles: [String] = []
         for _ in 0..<count {
             guard cursor + 9 <= bytes.count else { break }
-            let rawStart = Int(bytes[cursor]) << 56 | Int(bytes[cursor + 1]) << 48
-                | Int(bytes[cursor + 2]) << 40 | Int(bytes[cursor + 3]) << 32
-                | Int(bytes[cursor + 4]) << 24 | Int(bytes[cursor + 5]) << 16
-                | Int(bytes[cursor + 6]) << 8 | Int(bytes[cursor + 7])
-            cursor += 8
+            var start = 0
+            for shift in stride(from: 56, through: 0, by: -8) {
+                start |= Int(bytes[cursor]) << shift
+                cursor += 1
+            }
             let titleLength = Int(bytes[cursor])
             cursor += 1
             guard cursor + titleLength <= bytes.count else { break }
@@ -451,9 +475,40 @@ public enum AudiobookChapters {
                 encoding: .utf8
             ) ?? ""
             cursor += titleLength
+            rawStarts.append(start)
+            titles.append(title.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        guard !rawStarts.isEmpty else { return [] }
+
+        // 100-ns units are the spec (divisor 10_000_000). A few writers use
+        // milliseconds. With a known duration, pick the reading that is both
+        // plausible (within the book's length) and CLOSEST to it — a 900,000
+        // raw start is 0.09 s under the spec reading and 900 s under ms, and
+        // a 9-hour book is obviously the second one.
+        let maxStart = rawStarts.max() ?? 0
+        let divisor: Double
+        if let total = totalSeconds, total > 0 {
+            let specSeconds = Double(maxStart) / 10_000_000
+            let msSeconds = Double(maxStart) / 1000
+            let specFits = specSeconds <= total * 2
+            let msFits = msSeconds <= total * 2
+            switch (specFits, msFits) {
+            case (true, true):
+                divisor = abs(specSeconds - total) <= abs(msSeconds - total) ? 10_000_000 : 1000
+            case (false, true):
+                divisor = 1000
+            default:
+                divisor = 10_000_000
+            }
+        } else {
+            divisor = 10_000_000
+        }
+        var chapters: [AudioChapter] = []
+        chapters.reserveCapacity(rawStarts.count)
+        for (index, raw) in rawStarts.enumerated() {
             chapters.append(AudioChapter(
-                title: title.trimmingCharacters(in: .whitespacesAndNewlines),
-                startSeconds: Double(rawStart) / 100.0,
+                title: titles[index],
+                startSeconds: Double(raw) / divisor,
                 endSeconds: 0
             ))
         }

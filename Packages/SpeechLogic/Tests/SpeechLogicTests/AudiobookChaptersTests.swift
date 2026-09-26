@@ -13,30 +13,46 @@ final class AudiobookChaptersTests: XCTestCase {
         be32(payload.count + 8) + Array(type.utf8) + payload
     }
 
+    /// Standard Nero `chpl` payload: version(1) flags(3) count(4 BE), then
+    /// per chapter: start(8, 100-NANOSECOND units) nameLen(1) name.
+    /// (Round 5's fixture invented a different layout — reserved field +
+    /// 1-byte count + hundredth-second starts — which is why the parser
+    /// matched it and read NO real file. This builder now matches the spec
+    /// VLC/mp4chaps/ffmpeg write.)
     private func chpl(_ entries: [(Int, String)]) -> [UInt8] {
         var payload: [UInt8] = [0, 0, 0, 0]      // version + flags
-        payload += [0, 0, 0, 0]                  // reserved
-        payload += [UInt8(entries.count)]        // chapter count
+        payload += be32(entries.count)           // chapter count, 4 bytes
         for (start, title) in entries {
-            payload += [UInt8((start >> 56) & 0xFF), UInt8((start >> 48) & 0xFF),
-                        UInt8((start >> 40) & 0xFF), UInt8((start >> 32) & 0xFF),
-                        UInt8((start >> 24) & 0xFF), UInt8((start >> 16) & 0xFF),
-                        UInt8((start >> 8) & 0xFF), UInt8(start & 0xFF)]
+            // 100-ns units: seconds × 10_000_000.
+            let raw = start * 10_000_000
+            payload += [UInt8((raw >> 56) & 0xFF), UInt8((raw >> 48) & 0xFF),
+                        UInt8((raw >> 40) & 0xFF), UInt8((raw >> 32) & 0xFF),
+                        UInt8((raw >> 24) & 0xFF), UInt8((raw >> 16) & 0xFF),
+                        UInt8((raw >> 8) & 0xFF), UInt8(raw & 0xFF)]
             let bytes = Array(title.utf8)
             payload += [UInt8(bytes.count)] + bytes
         }
         return payload
     }
 
-    /// An M4B-shaped file: ftyp, then moov, then mdat. `chpl` is a BOX inside
-    /// moov — [4-byte size][4-byte type][payload] — which is what real
-    /// encoders write; wrapping the raw chpl payload directly in moov is not a
-    /// valid file and no parser could read it.
+    /// An M4B-shaped file: ftyp, then moov, then mdat. Real encoders put
+    /// `chpl` UNDER moov/udta — the round-6 root cause was a parser that
+    /// only scanned moov's direct children. (The old fixture wrapped chpl
+    /// directly in moov, hiding that bug.)
     private func m4b(chapters: [(Int, String)]) -> Data {
-        let moov = box("moov", box("chpl", chpl(chapters)))
+        let moov = box("moov", box("udta", box("chpl", chpl(chapters))))
         let ftyp = box("ftyp", Array("M4B ".utf8) + be32(0) + Array("M4B ".utf8))
         let mdat = box("mdat", [UInt8](repeating: 0, count: 32))
         return Data(ftyp + moov + mdat)
+    }
+
+    /// Same book with moov at the END (ffmpeg without +faststart) — the
+    /// whole-container parse must still find it.
+    private func m4bMoovAtEnd(chapters: [(Int, String)]) -> Data {
+        let moov = box("moov", box("udta", box("chpl", chpl(chapters))))
+        let ftyp = box("ftyp", Array("M4B ".utf8) + be32(0) + Array("M4B ".utf8))
+        let mdat = box("mdat", [UInt8](repeating: 0, count: 4096))
+        return Data(ftyp + mdat + moov)
     }
 
     private func id3Frame(_ id: String, _ payload: [UInt8], major: Int) -> [UInt8] {
@@ -70,16 +86,48 @@ final class AudiobookChaptersTests: XCTestCase {
     // MARK: - MP4 / chpl
 
     func testChplChaptersAreRead() {
-        // Starts are in hundredths of a second.
+        // Starts are SECONDS (the fixture converts to 100-ns units, the
+        // spec's on-disk unit).
         let data = m4b(chapters: [(0, "Opening"), (1234, "The Middle"), (2500, "The End")])
         let chapters = AudiobookChapters.chaptersFromMP4(data, totalSeconds: 3000)
         XCTAssertEqual(chapters.map(\.title), ["Opening", "The Middle", "The End"])
         XCTAssertEqual(chapters[0].startSeconds, 0, accuracy: 0.001)
-        XCTAssertEqual(chapters[1].startSeconds, 12.34, accuracy: 0.001)
-        XCTAssertEqual(chapters[2].startSeconds, 25.0, accuracy: 0.001)
+        XCTAssertEqual(chapters[1].startSeconds, 1234, accuracy: 0.001)
+        XCTAssertEqual(chapters[2].startSeconds, 2500, accuracy: 0.001)
         // Missing ends are filled from the next start, and the last from the total.
-        XCTAssertEqual(chapters[0].endSeconds, 12.34, accuracy: 0.001)
+        XCTAssertEqual(chapters[0].endSeconds, 1234, accuracy: 0.001)
         XCTAssertEqual(chapters[2].endSeconds, 3000, accuracy: 0.001)
+    }
+
+    func testMoovAtEndIsRead() {
+        // ffmpeg without +faststart puts moov after mdat — the form VLC
+        // reads and the old 8 MB head slice never saw.
+        let data = m4bMoovAtEnd(chapters: [(0, "Prologue"), (600, "Epilogue")])
+        let chapters = AudiobookChapters.chaptersFromMP4(data, totalSeconds: 1000)
+        XCTAssertEqual(chapters.map(\.title), ["Prologue", "Epilogue"])
+        XCTAssertEqual(chapters[1].startSeconds, 600, accuracy: 0.001)
+    }
+
+    func testMillisecondChplFallsBackWhenSpecReadingOverflows() {
+        // A writer that stored MILLISECONDS instead of 100-ns units: the
+        // spec reading overflows the duration by ~10,000×, the ms reading
+        // fits — the parser must pick ms.
+        var payload: [UInt8] = [0, 0, 0, 0]
+        payload += be32(2)
+        for (ms, title) in [(0, "One"), (900_000, "Two")] {
+            let raw = ms
+            payload += [UInt8((raw >> 56) & 0xFF), UInt8((raw >> 48) & 0xFF),
+                        UInt8((raw >> 40) & 0xFF), UInt8((raw >> 32) & 0xFF),
+                        UInt8((raw >> 24) & 0xFF), UInt8((raw >> 16) & 0xFF),
+                        UInt8((raw >> 8) & 0xFF), UInt8(raw & 0xFF)]
+            let bytes = Array(title.utf8)
+            payload += [UInt8(bytes.count)] + bytes
+        }
+        let moov = box("moov", box("udta", box("chpl", payload)))
+        let data = Data(box("ftyp", Array("M4B ".utf8) + be32(0) + Array("M4B ".utf8)) + moov)
+        let chapters = AudiobookChapters.chaptersFromMP4(data, totalSeconds: 1000)
+        XCTAssertEqual(chapters.map(\.title), ["One", "Two"])
+        XCTAssertEqual(chapters[1].startSeconds, 900, accuracy: 0.001)
     }
 
     func testUntitledChaptersGetPositionalNames() {
