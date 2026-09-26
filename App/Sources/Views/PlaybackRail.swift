@@ -27,7 +27,8 @@ import SwiftUI
 struct PlaybackRail: View {
     /// The documented rail width — every layout partner reserves this
     /// (ReadAlongView's trailing inset, the HStacks that host the rail).
-    static let idealWidth: CGFloat = 170
+    /// Round 6: 150 (user liked the panel, asked for it slightly smaller).
+    static let idealWidth: CGFloat = 150
 
     /// What the rail's buttons do. Every surface fills this in with its own
     /// calls — the rail itself holds no playback knowledge.
@@ -88,22 +89,47 @@ struct PlaybackRail: View {
     }
 
     var body: some View {
-        VStack(spacing: 12) {
-            progressStrip
-            voiceChip
-            Spacer(minLength: 0)
-            playButton
-            if sessionActive {
-                controlsRow
-            }
-            Spacer(minLength: 0)
+        VStack(spacing: 0) {
+            // Three pinned zones; the middle one centers ITSELF in the space
+            // between them. Round 6: the old two-Spacer stack let the play
+            // button drift whenever an optional row appeared (voice chip,
+            // controls trio) or the chrome hid — the user saw the controls
+            // "disperse in an uneven uncentered way" with the title bar
+            // hidden. Now the top/bottom blocks never move and the play
+            // cluster is always optically centered in the leftover space,
+            // regardless of session state or chrome.
+            topGroup
+                .padding(.bottom, 10)
+            middleGroup
             rateSection
+                .padding(.top, 10)
         }
-        .padding(.horizontal, 14)
+        .padding(.horizontal, 12)
         .padding(.vertical, 12)
         .frame(width: Self.idealWidth)
         .frame(maxHeight: .infinity)
         .background(.bar)
+    }
+
+    // MARK: - Zones
+
+    /// Progress capsule + voice chip — pinned to the panel's top.
+    private var topGroup: some View {
+        VStack(spacing: 10) {
+            progressStrip
+            voiceChip
+        }
+    }
+
+    /// Play + the read-along/stop/extra trio — one unit, always centered.
+    private var middleGroup: some View {
+        VStack(spacing: 14) {
+            playButton
+            if sessionActive {
+                controlsRow
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
     }
 
     // MARK: - Progress

@@ -25,6 +25,9 @@ struct BookPDFReaderView: View {
     @State private var pdfView: PDFView?
     @State private var outlineRows: [OutlineRow] = []
     @State private var showingOutline = false
+    /// Collapsed outline row ids (round 6: the TOC is a drop-down tree —
+    /// entries with children get a chevron and fold their subtree).
+    @State private var collapsedOutlineRows: Set<Int> = []
     /// Page whose text was last sounding during read-along — applied to the
     /// PDFView when read-along ends (the surface is swapped out while active,
     /// so there is nothing to scroll under the text).
@@ -74,15 +77,13 @@ struct BookPDFReaderView: View {
             let landscape = proxy.size.width > proxy.size.height
             ZStack(alignment: .bottom) {
                 if landscape, hasChapters {
-                    // The page bar returns to the bottom in landscape too
-                    // ("steppers stay bottom") — it overlays the lower edge
-                    // of the page surface.
-                    ZStack(alignment: .bottom) {
-                        HStack(spacing: 0) {
-                            readerSurface
-                            railPlayerBar
-                        }
-                        pageBar
+                    // Round 6: the bottom page-number band is GONE in
+                    // landscape — it covered the page it named (user
+                    // request). The toolbar and the TOC carry navigation;
+                    // the rail carries playback.
+                    HStack(spacing: 0) {
+                        readerSurface
+                        railPlayerBar
                     }
                     .transition(.opacity.combined(with: .move(edge: .trailing)))
                 } else {
@@ -365,6 +366,40 @@ struct BookPDFReaderView: View {
         return last.id
     }
 
+    /// True when the row has direct children (depth + 1) before the next
+    /// sibling — drives the drop-down chevron.
+    private func outlineHasChildren(_ id: Int) -> Bool {
+        guard let index = outlineRows.firstIndex(where: { $0.id == id }) else { return false }
+        let depth = outlineRows[index].depth
+        var cursor = index + 1
+        while cursor < outlineRows.count, outlineRows[cursor].depth > depth {
+            if outlineRows[cursor].depth == depth + 1 { return true }
+            cursor += 1
+        }
+        return false
+    }
+
+    /// The outline minus every subtree under a collapsed row. A stack of
+    /// collapsed depths: a row is hidden while it sits strictly deeper than
+    /// any still-collapsed ancestor.
+    private var visibleOutlineRows: [OutlineRow] {
+        var collapsedDepths: [Int] = []
+        var out: [OutlineRow] = []
+        for row in outlineRows {
+            while let top = collapsedDepths.last, row.depth <= top {
+                collapsedDepths.removeLast()
+            }
+            if let top = collapsedDepths.last, row.depth > top {
+                continue // under a collapsed ancestor
+            }
+            out.append(row)
+            if collapsedOutlineRows.contains(row.id) {
+                collapsedDepths.append(row.depth)
+            }
+        }
+        return out
+    }
+
     /// The manifest chapter the visible page sits in — the fallback list's
     /// highlight (and the same data TTS speaks).
     private var currentChapterID: Int? {
@@ -372,33 +407,59 @@ struct BookPDFReaderView: View {
         return chapters.firstIndex { currentPage >= $0.startPage && currentPage <= $0.endPage }
     }
 
-    /// The Contents sheet: the PDF's own outline with depth indentation and
-    /// page numbers (what readest/anx-reader show), highlighted and
-    /// auto-scrolled to the current position; for PDFs without an outline,
-    /// the resolved TTS chapter list takes its place — never a dead button.
+    /// The Contents sheet: the PDF's own outline as a DROP-DOWN TREE —
+    /// entries with children carry a chevron and fold their subtree (user
+    /// request; every desktop reader shows outlines this way). All levels
+    /// start expanded; depth indentation + page numbers + current highlight
+    /// stay. For PDFs without an outline, the resolved TTS chapter list
+    /// takes its place — never a dead button.
     private var outlineSheet: some View {
         NavigationStack {
             ScrollViewReader { proxy in
                 Group {
                     if !outlineRows.isEmpty {
-                        List(outlineRows) { row in
-                            Button {
-                                Haptics.tap()
-                                showingOutline = false
-                                goToPage(row.pageIndex)
-                            } label: {
-                                HStack {
-                                    Text(row.label)
-                                        .font(.subheadline)
-                                        .fontWeight(row.id == currentOutlineRowID ? .semibold : .regular)
-                                        .foregroundStyle(row.id == currentOutlineRowID ? Color.accentColor : .primary)
-                                        .multilineTextAlignment(.leading)
-                                    Spacer(minLength: 8)
-                                    Text("\(row.pageIndex + 1)")
-                                        .font(.caption2.monospacedDigit())
-                                        .foregroundStyle(.secondary)
+                        List(visibleOutlineRows) { row in
+                            HStack(spacing: 6) {
+                                Button {
+                                    Haptics.tap()
+                                    showingOutline = false
+                                    goToPage(row.pageIndex)
+                                } label: {
+                                    HStack {
+                                        Text(row.label)
+                                            .font(.subheadline)
+                                            .fontWeight(row.id == currentOutlineRowID ? .semibold : .regular)
+                                            .foregroundStyle(row.id == currentOutlineRowID ? Color.accentColor : .primary)
+                                            .multilineTextAlignment(.leading)
+                                        Spacer(minLength: 8)
+                                        Text("\(row.pageIndex + 1)")
+                                            .font(.caption2.monospacedDigit())
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    .padding(.leading, CGFloat(row.depth) * 14)
+                                    .contentShape(Rectangle())
                                 }
-                                .padding(.leading, CGFloat(row.depth) * 14)
+                                .buttonStyle(.plain)
+
+                                if outlineHasChildren(row.id) {
+                                    Button {
+                                        Haptics.tap()
+                                        withAnimation(.easeInOut(duration: 0.2)) {
+                                            if collapsedOutlineRows.contains(row.id) {
+                                                collapsedOutlineRows.remove(row.id)
+                                            } else {
+                                                collapsedOutlineRows.insert(row.id)
+                                            }
+                                        }
+                                    } label: {
+                                        Image(systemName: collapsedOutlineRows.contains(row.id) ? "chevron.right" : "chevron.down")
+                                            .font(.caption.weight(.semibold))
+                                            .foregroundStyle(.secondary)
+                                            .frame(width: 26, height: 26)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .accessibilityLabel(collapsedOutlineRows.contains(row.id) ? "Expand section" : "Collapse section")
+                                }
                             }
                         }
                     } else if let chapters = book.pdfChapters, !chapters.isEmpty {
@@ -450,8 +511,7 @@ struct BookPDFReaderView: View {
         .presentationDetents([.medium, .large])
     }
 
-    private func handlePageChange(pageIndex: Int, pageCount: Int) {
-        currentPage = pageIndex
+    private func handlePageChange(pageIndex: Int, pageCount: Int) {        currentPage = pageIndex
         if pageCount > 0 { self.pageCount = pageCount }
         store.updatePosition(book, chapterIndex: pageIndex, chapterFraction: 0)
     }
@@ -466,10 +526,22 @@ struct BookPDFReaderView: View {
     private func goToPage(_ index: Int) {
         guard let pdfView, let document = pdfView.document,
               index >= 0, index < document.pageCount,
-              let page = document.page(at: index) else { return }
+              let page = document.page(at: index) else {
+            Log.shared.info("PDFContents: cannot jump — page \(index + 1) of \(book.pageCount ?? 0) not resolvable")
+            return
+        }
         pdfView.go(to: page)
+        pdfView.currentPage = page
         currentPage = index
         store.updatePosition(book, chapterIndex: index, chapterFraction: 0)
+        // A go(to:) issued while the Contents sheet is still animating away
+        // can be dropped by PDFKit (the landscape half of the round-6
+        // report). Re-issue once the transition has settled — a no-op if the
+        // first jump landed.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak pdfView] in
+            guard let pdfView, pdfView.window != nil, pdfView.currentPage != page else { return }
+            pdfView.go(to: page)
+        }
     }
 
     // MARK: - Read-along page tracking

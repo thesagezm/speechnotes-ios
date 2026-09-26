@@ -85,8 +85,8 @@ final class EpubInfoTests: XCTestCase {
         XCTAssertEqual(info.coverPath, "OEBPS/cover.jpg")
         // TOC via toc.ncx (the spine's toc= target).
         XCTAssertEqual(info.toc, [
-            EpubTocEntry(label: "Chapter One", href: "OEBPS/chap1.xhtml"),
-            EpubTocEntry(label: "Chapter Two", href: "OEBPS/chap2.xhtml"),
+            EpubTocEntry(label: "Chapter One", href: "OEBPS/chap1.xhtml", depth: 0),
+            EpubTocEntry(label: "Chapter Two", href: "OEBPS/chap2.xhtml", depth: 0),
         ])
     }
 
@@ -102,8 +102,8 @@ final class EpubInfoTests: XCTestCase {
         // nav.xhtml picked over any other <nav>; whitespace runs in multi-line
         // labels collapse; hrefs resolve relative to text/.
         XCTAssertEqual(info.toc, [
-            EpubTocEntry(label: "The Beginning", href: "OEBPS/text/chap1.xhtml"),
-            EpubTocEntry(label: "The Middle Years", href: "OEBPS/text/chap2.xhtml"),
+            EpubTocEntry(label: "The Beginning", href: "OEBPS/text/chap1.xhtml", depth: 0),
+            EpubTocEntry(label: "The Middle Years", href: "OEBPS/text/chap2.xhtml", depth: 0),
         ])
         // Cover bytes round-trip through the resolved subdirectory path.
         let cover = try ZipReader.readEntry(info.coverPath!, in: fixture("sample-epub3"))

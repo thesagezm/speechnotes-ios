@@ -132,6 +132,12 @@ final class BooksStore: ObservableObject {
         let pending = books.filter { book in
             (book.format == .pdf && (!book.hasCover || book.pdfChapters == nil))
                 || (book.format == .epub && book.spine == nil)
+                // Round 6: epubs with a FLAT toc (every depth nil — parsed
+                // before the drop-down TOC existed) get one re-parse so the
+                // tree can render.
+                || (book.format == .epub && book.spine != nil
+                    && !(book.toc ?? []).isEmpty
+                    && (book.toc ?? []).allSatisfy { $0.depth == nil })
                 // v1.7.1: books imported before the chapter-TRACK parser and
                 // the awaited-metadata cover fix need one re-read of their
                 // manifest — single-chapter audio with a "chpl" source that
@@ -183,7 +189,7 @@ final class BooksStore: ObservableObject {
                           let info = try? EpubParser.parse(archive: data), !info.spine.isEmpty else { continue }
                     book.spine = info.spine
                     book.spineCount = info.spine.count
-                    if book.toc == nil, !info.toc.isEmpty {
+                    if book.toc?.contains(where: { $0.depth != nil }) != true, !info.toc.isEmpty {
                         let indexByHref = Dictionary(info.spine.enumerated().map { ($1, $0) },
                                                      uniquingKeysWith: { first, _ in first })
                         book.toc = info.toc.map { entry in

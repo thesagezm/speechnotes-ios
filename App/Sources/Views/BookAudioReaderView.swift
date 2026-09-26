@@ -75,11 +75,14 @@ struct BookAudioReaderView: View {
             ZStack(alignment: .bottom) {
                 if landscape {
                     HStack(spacing: 0) {
+                        // Round 6: no chapter bar in landscape — the band at
+                        // the bottom covered the cover art for no gain (the
+                        // toolbar's Chapters button + the rail's transport
+                        // carry everything it did).
                         VStack(spacing: 0) {
                             Spacer(minLength: 0)
                             audioCoverBlock
                             Spacer(minLength: 0)
-                            chapterBar
                         }
                         audioRail
                     }

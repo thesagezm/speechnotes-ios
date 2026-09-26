@@ -31,6 +31,9 @@ struct BookTocEntry: Codable, Equatable, Hashable {
     var href: String
     /// Index into the book's spine when it could be resolved.
     var spineIndex: Int?
+    /// Nesting level for the drop-down TOC tree (0 = top). Optional so
+    /// manifests written before round 6 keep decoding.
+    var depth: Int?
 }
 
 /// The library's manifest record — ONE manifest.json per book directory.

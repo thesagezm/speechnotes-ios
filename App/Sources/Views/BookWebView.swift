@@ -333,7 +333,7 @@ struct BookWebView: UIViewRepresentable {
                 let entries = items.compactMap { item -> BookTocEntry? in
                     guard let label = item["label"] as? String,
                           let href = item["href"] as? String else { return nil }
-                    return BookTocEntry(label: label, href: href, spineIndex: nil)
+                    return BookTocEntry(label: label, href: href, spineIndex: nil, depth: (item["depth"] as? NSNumber)?.intValue)
                 }
                 parent.onTOC(entries)
             case "error":

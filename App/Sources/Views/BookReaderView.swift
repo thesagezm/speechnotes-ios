@@ -18,6 +18,8 @@ struct BookReaderView: View {
     @State private var chapterFraction: Double
     @State private var totalChapters: Int
     @State private var toc: [BookTocEntry] = []
+    /// Collapsed TOC row offsets (drop-down tree, round 6).
+    @State private var collapsedTocRows: Set<Int> = []
     @State private var showingTOC = false
     @State private var showingAppearance = false
     @State private var errorMessage: String?
@@ -75,14 +77,13 @@ struct BookReaderView: View {
             let landscape = proxy.size.width > proxy.size.height
             ZStack(alignment: .bottom) {
                 if landscape {
-                    // The chapter stepper stays at the bottom in landscape
-                    // too — it overlays the lower edge of the reading surface.
-                    ZStack(alignment: .bottom) {
-                        HStack(spacing: 0) {
-                            readerSurface
-                            railPlayerBar
-                        }
-                        chapterBar
+                    // Round 6: the bottom chapter band is GONE in landscape —
+                    // it covered the page it named (user request). Stepping
+                    // and the TOC live in the toolbar; the rail carries
+                    // playback.
+                    HStack(spacing: 0) {
+                        readerSurface
+                        railPlayerBar
                     }
                     .transition(.opacity.combined(with: .move(edge: .trailing)))
                 } else {
@@ -199,6 +200,10 @@ struct BookReaderView: View {
         }
         .onAppear {
             store.markOpened(book)
+            // The manifest TOC (parsed from the epub's own nav/NCX) carries
+            // nesting DEPTH for the drop-down tree; the epub.js webview toc
+            // is flat. Seed from the manifest and keep it when present.
+            if toc.isEmpty { toc = book.toc ?? [] }
             // The reader shows its own player bar — the global mini-player
             // yields while THIS book is the one speaking (editor pattern).
             player.miniPlayerSuppressed = player.nowPlayingBookId == book.id.uuidString
@@ -251,7 +256,11 @@ struct BookReaderView: View {
             startFontSize: Int(fontSize),
             startCFI: book.position?.cfi,
             onRelocated: handleRelocated,
-            onTOC: { toc = $0 },
+            onTOC: { entries in
+                // Manifest toc wins (it has depth); webview toc is the
+                // fallback for books imported before the manifest carried one.
+                if (book.toc ?? []).isEmpty { toc = entries }
+            },
             onError: { errorMessage = $0 },
             onWebViewReady: { webView = $0 },
             onChromeTap: {
@@ -367,17 +376,47 @@ struct BookReaderView: View {
     private var tocSheet: some View {
         NavigationStack {
             // Keyed by index, not href: real books point several TOC rows at
-            // the same spine file (pg1342's first two entries do).
-            List(Array(toc.enumerated()), id: \.offset) { _, entry in
-                Button {
-                    Haptics.tap()
-                    showingTOC = false
-                    goToHref(entry.href)
-                } label: {
-                    Text(entry.label)
-                        .font(.subheadline)
-                        .foregroundStyle(.primary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+            // the same spine file (pg1342's first two entries do). Round 6:
+            // rows with depth become a DROP-DOWN TREE — entries with children
+            // fold their subtree behind a chevron (all expanded initially;
+            // books whose toc predates depth render flat as before).
+            List(visibleTocRows) { entry in
+                HStack(spacing: 6) {
+                    Button {
+                        Haptics.tap()
+                        showingTOC = false
+                        goToHref(entry.href)
+                    } label: {
+                        HStack {
+                            Text(entry.label)
+                                .font(.subheadline)
+                                .foregroundStyle(.primary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .padding(.leading, CGFloat(entry.depth ?? 0) * 14)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+
+                    if tocHasChildren(entry) {
+                        Button {
+                            Haptics.tap()
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                if collapsedTocRows.contains(entry.offset) {
+                                    collapsedTocRows.remove(entry.offset)
+                                } else {
+                                    collapsedTocRows.insert(entry.offset)
+                                }
+                            }
+                        } label: {
+                            Image(systemName: collapsedTocRows.contains(entry.offset) ? "chevron.right" : "chevron.down")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 26, height: 26)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(collapsedTocRows.contains(entry.offset) ? "Expand section" : "Collapse section")
+                    }
                 }
             }
             .navigationTitle("Contents")
@@ -398,6 +437,41 @@ struct BookReaderView: View {
             }
         }
         .presentationDetents([.medium, .large])
+    }
+
+    /// TOC entry at `offset` has children when a following entry sits one
+    /// level deeper before anything at this level or shallower.
+    private func tocHasChildren(_ entry: (offset: Int, entry: BookTocEntry)) -> Bool {
+        guard let depth = entry.entry.depth else { return false }
+        var cursor = entry.offset + 1
+        while cursor < toc.count {
+            guard let d = toc[cursor].depth else { return false }
+            if d <= depth { return false }
+            if d == depth + 1 { return true }
+            cursor += 1
+        }
+        return false
+    }
+
+    /// The toc minus every subtree under a collapsed row (same stack rule as
+    /// the PDF outline tree).
+    private var visibleTocRows: [(offset: Int, entry: BookTocEntry)] {
+        var collapsedDepths: [Int] = []
+        var out: [(offset: Int, entry: BookTocEntry)] = []
+        for (offset, entry) in toc.enumerated() {
+            let depth = entry.depth ?? 0
+            while let top = collapsedDepths.last, depth <= top {
+                collapsedDepths.removeLast()
+            }
+            if let top = collapsedDepths.last, depth > top {
+                continue
+            }
+            out.append((offset, entry))
+            if collapsedTocRows.contains(offset) {
+                collapsedDepths.append(depth)
+            }
+        }
+        return out
     }
 
     // MARK: - Appearance sheet

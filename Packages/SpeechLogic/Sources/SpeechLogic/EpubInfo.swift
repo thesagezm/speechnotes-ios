@@ -5,6 +5,9 @@ import Foundation
 public struct EpubTocEntry: Equatable {
     public let label: String
     public let href: String
+    /// Nesting level from the TOC document (navPoint/ol nesting; 0 = top).
+    /// The reader renders the TOC as a drop-down tree from it.
+    public let depth: Int
 }
 
 /// What the library list + reader need to know about an EPUB without ever
@@ -102,7 +105,7 @@ public enum EpubParser {
                     // (usually the same as the OPF's, but never assume).
                     let navDir = directory(of: navPath)
                     return entries.map { entry in
-                        EpubTocEntry(label: entry.label, href: resolve(entry.href, relativeTo: navDir))
+                        EpubTocEntry(label: entry.label, href: resolve(entry.href, relativeTo: navDir), depth: entry.depth)
                     }
                 }
             }
@@ -115,7 +118,7 @@ public enum EpubParser {
         }
         let ncxDir = directory(of: resolve(ncxHref, relativeTo: opfDir))
         return NcxDelegate.run(ncxData).map { entry in
-            EpubTocEntry(label: entry.label, href: resolve(entry.href, relativeTo: ncxDir))
+            EpubTocEntry(label: entry.label, href: resolve(entry.href, relativeTo: ncxDir), depth: entry.depth)
         }
     }
 
@@ -262,7 +265,7 @@ public enum EpubParser {
     // MARK: - EPUB2 toc.ncx
 
     private final class NcxDelegate: NSObject, XMLParserDelegate {
-        static func run(_ data: Data) -> [(label: String, href: String)] {
+        static func run(_ data: Data) -> [(label: String, href: String, depth: Int)] {
             let delegate = NcxDelegate()
             let parser = XMLParser(data: data)
             parser.delegate = delegate
@@ -271,7 +274,7 @@ public enum EpubParser {
             return delegate.entries
         }
 
-        private var entries: [(label: String, href: String)] = []
+        private var entries: [(label: String, href: String, depth: Int)] = []
         private var labelBuffers: [String] = []
         private var pendingHrefs: [String?] = [nil]
 
@@ -301,8 +304,12 @@ public enum EpubParser {
             guard localName(qName ?? elementName) == "navPoint", !labelBuffers.isEmpty else { return }
             let label = labelBuffers.removeLast().trimmingCharacters(in: .whitespacesAndNewlines)
             let href = pendingHrefs.removeLast()
+            // The label/href stacks mirror the navPoint nesting: whatever
+            // remains is this point's ancestry, so its depth is the stack it
+            // just left.
+            let depth = labelBuffers.count
             if let href, !href.isEmpty, !label.isEmpty {
-                entries.append((label: label, href: href))
+                entries.append((label: label, href: href, depth: depth))
             }
         }
     }
@@ -326,6 +333,9 @@ public enum EpubParser {
         private var navIsToc = false
         private var anchorHref: String?
         private var anchorBuffer = ""
+        /// EPUB3 navs nest via <ol> inside <li> — the current ol depth is
+        /// each link's TOC level.
+        private var olDepth = 0""
 
         func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?, qualifiedName qName: String?, attributes attributeDict: [String: String] = [:]) {
             let name = localName(qName ?? elementName)
@@ -334,6 +344,8 @@ public enum EpubParser {
                 let type = attributeDict["epub:type"] ?? attributeDict["type"] ?? ""
                 navIsToc = type.split(separator: " ").contains("toc")
                 navs.append([])
+            case "ol":
+                olDepth += 1
             case "a":
                 anchorHref = attributeDict["href"]
                 anchorBuffer = ""
@@ -359,8 +371,10 @@ public enum EpubParser {
                     // Collapses the whitespace runs multi-line labels accumulate.
                     .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
                 if let href = anchorHref, !href.isEmpty, !label.isEmpty, !navs.isEmpty {
-                    navs[navs.count - 1].append(EpubTocEntry(label: label, href: href))
+                    navs[navs.count - 1].append(EpubTocEntry(label: label, href: href, depth: olDepth))
                 }
+            case "ol":
+                olDepth = max(0, olDepth - 1)
                 anchorHref = nil
             default:
                 break
