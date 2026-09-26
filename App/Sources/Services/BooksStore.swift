@@ -316,7 +316,7 @@ final class BooksStore: ObservableObject {
         // The sync accessor blocks until the metadata is loaded — exactly the
         // awaited semantics the metadata read below needs, on a thread that
         // may block (the detached manifest builder).
-        let groups = asset.chapterMetadataGroupsBestMatchingPreferredLanguages(Locale.preferredLanguages)
+        let groups = asset.chapterMetadataGroups(bestMatchingPreferredLanguages: Locale.preferredLanguages)
         guard !groups.isEmpty else { return [] }
         var chapters: [AudioChapter] = []
         for group in groups {
