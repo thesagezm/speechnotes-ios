@@ -1016,3 +1016,50 @@ Post-release: the mage audit (2026-09-07) swept every file in the repo — all
 new findings are folded into `Docs/MASTER-CATALOG.md` (new Tier-0 bug batch +
 tier additions). Upgrade batches land on `sage-upgrades` AFTER this release
 tag, so v1.5.0 remains the clean, known-CI-green baseline.
+
+## 2026-09-26 addendum #17 — round 5 on `batch-c-d-session`: per-surface chrome, audiobook metadata root cause, export player, landscape rail redesign
+
+Ten-item device round. Commits 355abc8…(this tip). Version fields stay
+FROZEN at 1.7.0/37 per standing order — identify builds by commit + run id.
+
+1. **Immersive chrome is per-surface** (`immersiveBars.editor/.epub/.pdf/.audio`).
+   The old single key let a note hide the epub's bar, and the epub webview
+   swallowed the SwiftUI tap that should have un-hidden it — stranded. The
+   epub toggle now arrives through reader.js's `chromeTap` bridge (skips
+   links/selections). The note editor computes `chromeHidden` off the
+   SURFACE: reading surfaces can hide the bar, edit mode never does.
+2. **PDF Contents navigated by page index** — the outline sheet used a
+   PDFDestination from a DIFFERENT PDFDocument instance; PDFKit silently
+   ignores foreign destinations. Rows resolve `document.page(at:)` in the
+   reader's own document now.
+3. **Audiobook metadata root cause: books were stored as `original.audio`.**
+   AVURLAsset maps containers by extension → every metadata/chapter/cover/
+   duration read came back empty while AVAudioPlayer (content-sniffing)
+   played fine, hiding the damage. Imports keep the true extension;
+   backfill renames legacy files (ID3→mp3, else m4b) and re-reads; the MP4
+   chapter fallback parses the whole mapped container (moov-at-end files —
+   the ones VLC showed chapters for). Reader time readouts bind to the
+   player's published absolute elapsed/total.
+4. **Bottom TOC entries removed** (PDF page bar, audiobook chapter bar) —
+   the toolbar is the one entry point.
+5. **Render Markdown → Appearance**; speech follows the note's view state
+   (preview = clean, edit = raw) via `rendersForSpeech`.
+6. **Haptics toggle + image cache mode** (Appearance): `hapticsEnabled` kill
+   switch read per call; `imageCacheAutomatic` prefetches a note's web
+   images on open when on. RemoteImageStore gained a note→URL index →
+   Storage's per-note image deletion, and purge/empty/retention sweeps now
+   remove the purged note's web images (shared URLs survive; soft delete
+   no longer strips images — Recover restores whole).
+7. **Exports playable**: WavPlayer is a shared singleton with scrub/±15s/
+   0.5–2×/live time; Storage expands a full transport under the playing
+   file; a global mini bar/bubble carries it elsewhere (tap → Storage
+   player). List exports now name files after the note title.
+8. **Landscape rail redesigned**: 170pt `PlaybackRail.idealWidth` panel
+   with every portrait control (voice chip, progress + %, 52pt play,
+   read-along/stop/extra, horizontal rate slider — fader gone). The
+   audiobook transport matches the same width with ±15s + capsule.
+   ReadAlongView's trailing inset keys off the constant.
+
+Checklist: `Docs/DEVICE-CHECKLIST-V1.7.1.md` round-5 section. Golden rules
+unchanged: no merge to main, no tag, no release without the user's device
+confirmation.
