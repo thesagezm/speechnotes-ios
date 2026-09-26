@@ -169,9 +169,8 @@ enum RemoteImageStore {
         for string in strings where !referencedElsewhere.contains(string) {
             guard let url = URL(string: string) else { continue }
             let file = fileURL(for: url)
-            if let bytes = Int64((try? file.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0) {
-                freed += bytes
-            }
+            let bytes = Int64((try? file.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+            freed += bytes
             try? FileManager.default.removeItem(at: file)
             try? FileManager.default.removeItem(at: sidecarURL(for: file))
         }

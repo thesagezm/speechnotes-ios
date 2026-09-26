@@ -103,6 +103,7 @@ struct MarkdownPreviewView: View {
         }
         let targets = collectImageTargets(from: parsedCache?.blocks ?? [])
         let noteId = parsedNoteId
+        let realNoteId = envNoteId
         let remoteTargets = targets.filter { NoteImageStore.parseLocalTarget($0) == nil }
         Task.detached(priority: .userInitiated) {
             var map: [String: URL] = [:]
@@ -114,13 +115,17 @@ struct MarkdownPreviewView: View {
             }
             await MainActor.run { resolvedImages = map }
             // Index which web images THIS note shows — Storage's per-note
-            // deletion and the recycle bin's purge both key off this.
-            let urls = remoteTargets.compactMap(URL.init(string:))
-                .filter { url in
-                    guard let scheme = url.scheme?.lowercased() else { return false }
-                    return scheme == "http" || scheme == "https"
-                }
-            RemoteImageStore.record(urls: urls, noteId: noteId)
+            // deletion and the recycle bin's purge both key off this. Only
+            // for a real note identity (the preview's fallback UUID must not
+            // litter the index).
+            if let realId = realNoteId {
+                let urls = remoteTargets.compactMap(URL.init(string:))
+                    .filter { url in
+                        guard let scheme = url.scheme?.lowercased() else { return false }
+                        return scheme == "http" || scheme == "https"
+                    }
+                RemoteImageStore.record(urls: urls, noteId: realId)
+            }
         }
     }
 
