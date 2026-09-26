@@ -207,7 +207,18 @@ struct BookPDFReaderView: View {
         }
         .onAppear {
             store.markOpened(book)
-            outlineRows = Self.flattenOutline(book: book)
+            // Round 7: flattenOutline opens the PDF and walks its whole
+            // outline tree — a big textbook blocked the main thread for
+            // seconds, freezing the app outright when an audiobook was
+            // already playing (open book → open big PDF → force quit).
+            // Off-main now; the sheet fills in when the walk lands.
+            if outlineRows.isEmpty {
+                let snapshot = book
+                Task.detached(priority: .userInitiated) {
+                    let rows = Self.flattenOutline(book: snapshot)
+                    await MainActor.run { outlineRows = rows }
+                }
+            }
             // The reader has its own player bar — the global mini-player
             // yields while THIS book is the one speaking (editor pattern).
             player.miniPlayerSuppressed = player.nowPlayingBookId == book.id.uuidString
