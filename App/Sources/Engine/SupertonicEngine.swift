@@ -61,6 +61,10 @@ final class SupertonicEngine: NSObject, SpeechEngine {
         self.core = StreamingTTSPlaybackCore(config: .init(
             sampleRate: 24_000, // provisional; tts.json's value is published at load
             chunkMaxChars: Self.chunkMaxChars,
+            // Round 6 device log: a 155-char first chunk rendered 15.3 s
+            // (TTFA 15.4 s) while an 11-char opener was 1.7 s. Cap the first
+            // chunk so speech starts fast; the rest stay full-size.
+            firstMaxChars: 60,
             generationAheadLimit: 2,
             exportInterChunkSilence: 0.05,
             logPrefix: "SupertonicEngine"
@@ -181,7 +185,11 @@ final class SupertonicEngine: NSObject, SpeechEngine {
             throw SupertonicEngineError.noOutput
         }
         let duration = Double(playableLen) / core.sampleRate
-        Log.shared.info("SupertonicEngine: \(String(format: "%.1f", duration))s audio in \(String(format: "%.2f", Date().timeIntervalSince(started)))s (\(voice), \(lang))")
+        // The RTF climbed 0.5 → 5.3 WITHIN one session on device and
+        // recovered on the next — thermal throttling is the prime suspect.
+        // Log the state per chunk so the next round's logs decide it.
+        let thermal = ["nominal", "fair", "serious", "critical"][min(3, ProcessInfo.processInfo.thermalState.rawValue)]
+        Log.shared.info("SupertonicEngine: \(String(format: "%.1f", duration))s audio in \(String(format: "%.2f", Date().timeIntervalSince(started)))s (\(voice), \(lang), thermal \(thermal))")
         return Array(result.wav.prefix(playableLen))
     }
 

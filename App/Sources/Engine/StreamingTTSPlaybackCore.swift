@@ -28,6 +28,11 @@ final class StreamingTTSPlaybackCore: NSObject {
         let sampleRate: Double
         /// Max characters (~words) handed to one synthesis call.
         let chunkMaxChars: Int
+        /// Optional SMALLER cap for the FIRST chunk only — time-to-first-
+        /// audio is the first chunk's render time, so a 155-char opener made
+        /// Supertonic's TTFA 15 s on device while an 11-char opener was
+        /// 1.7 s. Nil = chunkMaxChars (engines that don't need it).
+        let firstMaxChars: Int?
         /// How many chunks beyond the playback cursor the producer may run.
         let generationAheadLimit: Int
         /// Inter-chunk pause baked into WAV exports only (playback itself
@@ -191,7 +196,7 @@ final class StreamingTTSPlaybackCore: NSObject {
 
         let allChunks = SentenceChunker.chunks(
             for: clean,
-            firstMaxChars: config.chunkMaxChars,
+            firstMaxChars: config.firstMaxChars ?? config.chunkMaxChars,
             batchMaxChars: config.chunkMaxChars
         )
         guard !allChunks.isEmpty else { return }
@@ -540,7 +545,7 @@ final class StreamingTTSPlaybackCore: NSObject {
 
         let renderChunks = SentenceChunker.chunks(
             for: clean,
-            firstMaxChars: config.chunkMaxChars,
+            firstMaxChars: config.firstMaxChars ?? config.chunkMaxChars,
             batchMaxChars: config.chunkMaxChars
         )
         let total = max(1, clean.utf16.count)

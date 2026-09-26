@@ -15,6 +15,19 @@ import SpeechLogic
 /// All pipeline machinery (chunking, pacing, scheduling, position tracking,
 /// WAV export, audio session) lives in StreamingTTSPlaybackCore, shared with
 /// the other ONNX engines; this class contributes only model loading and
+/// Step-level cancellation for the backbone loop — a lock-guarded bool.
+/// `stop()` arrives on the main thread while the loop owns the generate
+/// queue; without this the loop ran every chunk to the 512-position ceiling
+/// after the user had already stopped (4+ seconds of wasted, then-unwanted
+/// synthesis per tap).
+final class GenerationCancel {
+    private let lock = NSLock()
+    private var cancelled = false
+    var isCancelled: Bool { lock.withLock { cancelled } }
+    func cancel() { lock.withLock { cancelled = true } }
+    func reset() { lock.withLock { cancelled = false } }
+}
+
 /// `generateChunk`, confined to the core's generateQueue.
 ///
 /// The exact graph contract was established by `Tests/SopranoSpike` on the CI
@@ -194,7 +207,10 @@ final class SopranoEngine: NSObject, SpeechEngine {
 
     func pause() { core.pause() }
     func resume() { core.resume() }
-    func stop() { core.stop() }
+    func stop() {
+        if !exportInFlight { generationCancel.cancel() }
+        core.stop()
+    }
 
     /// Core liveness — see SpeechEngine.hasLiveSession.
     var hasLiveSession: Bool { core.hasLiveSession }
@@ -219,6 +235,7 @@ final class SopranoEngine: NSObject, SpeechEngine {
     private func generateChunk(_ text: String) throws -> [Float] {
         guard let backbone, let decoder else { throw SopranoEngineError.modelUnavailable }
         guard !tokenIDs.isEmpty else { throw SopranoEngineError.noVocab }
+        generationCancel.reset()
 
         // The reference generation loop: prompt = [STOP][TEXT] + tokens +
         // [START] in ONE prefill, then one token per step. [STOP] also ENDS
@@ -427,29 +444,35 @@ final class SopranoEngine: NSObject, SpeechEngine {
                     break
                 }
                 let logitsData: Data = try logitsValue.tensorData() as Data
-                // Sampling-loop insurance: the reference's repetition penalty
-                // is presence-based (a token in the set is penalized once,
-                // however often it repeats), so a 1-3-token cycle never
-                // escalates on its own. Detect the cycle and break it this
-                // step with an escalated penalty; top_p 0.95 (the model
-                // card's setting) additionally cuts the tail that feeds such
-                // loops.
+                if generationCancel.isCancelled {
+                    endReason = "cancelled"
+                    break
+                }
+                // Round 6 (local reference reproduction, 2026-09-26): the
+                // device's 40-60 loop breaks per chunk were OUR sampling, not
+                // the model. Temperature 0.3 + top-K 50 + an all-time
+                // multiplicative penalty reproduced the device loops 1:1 in
+                // an onnxruntime harness (63/34 loop breaks, same tokens);
+                // the reference's own parameters — temperature 1.0, top_p
+                // 0.95, a PRESENCE penalty over the recent window only —
+                // produced ZERO loops and even reached a natural [STOP]. The
+                // detector below stays as a health log; the hard cut is gone.
                 let loopTokens = Self.loopPatternTokens(in: recentTokens)
                 if !loopTokens.isEmpty, loopTokens != lastLoopPattern {
                     loopBreaks += 1
-                    Log.shared.info("SopranoEngine: token loop #\(loopBreaks) — breaking repeated pattern \(loopTokens.sorted()) at step \(step)")
+                    Log.shared.info("SopranoEngine: token loop #\(loopBreaks) — repeated pattern \(loopTokens.sorted()) at step \(step)")
                 }
                 lastLoopPattern = loopTokens.isEmpty ? nil : loopTokens
                 let next = Self.nextToken(
                     logits: logitsData,
                     vocabSize: Self.vocabSize,
                     fallback: stopID,
-                    temperature: 0.3,
-                    topK: 50,
+                    temperature: 1.0,
+                    topK: 0,
                     topP: 0.95,
                     repetitionPenalty: 1.2,
-                    loopPenaltyTokens: loopTokens,
-                    seenTokens: seenTokens,
+                    loopPenaltyTokens: [],
+                    seenTokens: Set(recentTokens.suffix(24)),
                     rng: &rng
                 )
                 recentTokens.append(next)
@@ -467,8 +490,9 @@ final class SopranoEngine: NSObject, SpeechEngine {
 
             // The reference's finish decode: emit the frames no mid-stream
             // window covered — (RF + counter − 2) tokens of the final ring,
-            // exactly the stragglers past the last emitted slice.
-            if !hiddenRing.isEmpty {
+            // exactly the stragglers past the last emitted slice. A
+            // cancelled chunk skips it: the ring ends mid-word by definition.
+            if endReason != "cancelled", !hiddenRing.isEmpty {
                 try decodeRing(tailTokens: max(1, Self.decoderReceptiveField + chunkCounter - 2))
             }
         } catch let sopranoError as SopranoEngineError {
@@ -505,13 +529,30 @@ final class SopranoEngine: NSObject, SpeechEngine {
             completion(.failure(SopranoEngineError.modelUnavailable))
             return
         }
-        core.renderWAV(text: text, title: title, onChunkProgress: onChunkProgress, completion: completion)
+        exportInFlight = true
+        generationCancel.reset()
+        core.renderWAV(text: text, title: title, onChunkProgress: onChunkProgress, completion: { [weak self] result in
+            self?.exportInFlight = false
+            completion(result)
+        })
     }
 
     // MARK: - Static helpers
 
     /// True once the hidden-state tensor layout was logged this session.
     private var loggedHiddenLayout = false
+
+    /// Set by stop(), observed per STEP inside generateChunk — the round-6
+    /// device log showed decodes continuing 4+ seconds after an explicit
+    /// stop (the loop ran to the 512-position ceiling on a book the user had
+    /// already abandoned). Lock-guarded: stop() is called from the main
+    /// thread while the loop runs on the generate queue.
+    private let generationCancel = GenerationCancel()
+
+    /// Exports share generateChunk with live speech; a stop() during an
+    /// export must NOT truncate the file, so cancellation is disarmed while
+    /// one is in flight.
+    private var exportInFlight = false
 
     /// The LAST position's hidden frame, respecting the tensor's actual
     /// layout. The spike header claimed `last_hidden_state` is
@@ -669,8 +710,8 @@ final class SopranoEngine: NSObject, SpeechEngine {
             }
         }
         let sorted = last.indices.sorted { last[$0] > last[$1] }
-        let k = min(topK, last.count)
-        var top = Array(sorted.prefix(k))
+        // topK <= 0: no top-K cut (the reference doesn't use one).
+        var top = topK > 0 ? Array(sorted.prefix(min(topK, last.count))) : Array(sorted)
         if topP < 1.0, !top.isEmpty {
             // Nucleus filter (model card: top_p 0.95): keep the smallest
             // prefix of the sorted candidates whose softmax mass reaches
