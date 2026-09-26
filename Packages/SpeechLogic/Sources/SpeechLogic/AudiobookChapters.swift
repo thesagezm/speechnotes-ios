@@ -169,7 +169,8 @@ public enum AudiobookChapters {
         // No `chpl` (or it was empty): try a real chapter track — a `trak`
         // whose handler is `text` (or `sbtl`), whose sample table then gives
         // one chapter per sample. This is what m4b-tool and ffmpeg write.
-        if let timescale = mvhdPayload.map({ parseMvhdTimescale(Array(data[$0])) }) {
+        if let mvhdPayload,
+           let timescale = parseMvhdTimescale(Array(data[mvhdPayload])) {
             for trak in traks {
                 if let chapters = chaptersFromTrak(data, range: trak, movieTimescale: timescale),
                    !chapters.isEmpty {
@@ -255,7 +256,7 @@ public enum AudiobookChapters {
         // pointing outside (mdat-colocated layouts) drops the remaining
         // titles but keeps the positions.
         guard !chunkOffsets.isEmpty else { return nil }
-        var starts: [Int] = []
+        var starts: [Double] = []
         var extents: [(offset: Int, size: Int)] = []
         var sampleIndex = 0
         outer: for chunkOffset in chunkOffsets {
@@ -295,7 +296,7 @@ public enum AudiobookChapters {
         }
         let chapters = zip(starts, titles).map { start, title in
             AudioChapter(
-                title: title.isEmpty ? "" : title,
+                title: title,
                 startSeconds: start,
                 endSeconds: 0
             )

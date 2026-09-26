@@ -270,18 +270,23 @@ public enum JexImport {
     /// to nil and the caller assigns a fresh one.
     public static func uuid(fromJoplinId id: String) -> UUID? {
         let hex = id.lowercased()
-        guard hex.count == 32, hex.allSatisfy({ $0.isHexDigit }), 
-              let raw = UInt32(hex.prefix(8), radix: 16),
-              let rest1 = UInt32(hex.dropFirst(8).prefix(4), radix: 16),
-              let rest2 = UInt32(hex.dropFirst(12).prefix(4), radix: 16),
-              let rest3 = UInt32(hex.dropFirst(16).prefix(4), radix: 16),
-              let rest4 = UInt64(hex.dropFirst(20), radix: 16) else { return nil }
-        return UUID(
-            uuid: (raw, rest1, rest2, rest3, UInt8((rest4 >> 56) & 0xFF), UInt8((rest4 >> 48) & 0xFF),
-                   UInt8((rest4 >> 40) & 0xFF), UInt8((rest4 >> 32) & 0xFF),
-                   UInt8((rest4 >> 24) & 0xFF), UInt8((rest4 >> 16) & 0xFF),
-                   UInt8((rest4 >> 8) & 0xFF), UInt8(rest4 & 0xFF))
-        )
+        guard hex.count == 32, hex.allSatisfy({ $0.isHexDigit }) else { return nil }
+        // UUID(uuid:) takes 16 raw bytes — build them from the hex pairs.
+        var bytes = [UInt8]()
+        bytes.reserveCapacity(16)
+        var index = hex.startIndex
+        while index < hex.endIndex {
+            let next = hex.index(index, offsetBy: 2)
+            guard let byte = UInt8(hex[index..<next], radix: 16) else { return nil }
+            bytes.append(byte)
+            index = next
+        }
+        return UUID(uuid: (
+            bytes[0], bytes[1], bytes[2], bytes[3],
+            bytes[4], bytes[5], bytes[6], bytes[7],
+            bytes[8], bytes[9], bytes[10], bytes[11],
+            bytes[12], bytes[13], bytes[14], bytes[15]
+        ))
     }
 
     // MARK: - Metadata block
