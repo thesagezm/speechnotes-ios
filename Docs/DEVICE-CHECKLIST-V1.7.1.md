@@ -250,3 +250,79 @@ shape at runtime and slices correctly either way.
 - Audiobook landscape: same width — ±15 s around a 52 pt play, position
   capsule, live time readouts.
 - Read-along text must not run under the panel in landscape.
+
+---
+
+# Round 6 (2026-09-26 evening, green run 36274107245) — chapters root cause, rail polish, drop-down TOCs
+
+## 1. Audiobook chapters — the parser was the bug, not the file
+
+Round 5 fixed the file EXTENSION; round 6 found the chapter PARSER itself
+matched a synthetic fixture instead of the real Nero chpl format (1-byte
+count where the spec has 4, hundredths where the spec has 100-ns units,
+chpl searched at the wrong box level). The fixture was rewritten to the
+spec VLC/mp4chaps write, with a moov-at-end test and a millisecond-writer
+tolerance. Open the Books shelf once (backfill re-reads), then check the
+chapter list — the import log line names the count + source ("chpl",
+"avfoundation", "mp4-full", …). If it STILL says "single", send that log
+line — it now says exactly which readers fired.
+
+## 2. Settings → Storage works again
+
+The value-based NavigationLink never registered inside the lazy Form row
+on device — back to the closure link. The mini-player jump rides
+navigationDestination(isPresented:) at form level.
+
+## 3. EPUB tap-to-hide works again (portrait + landscape)
+
+Book text lives INSIDE epub.js iframes; the shell click listener never saw
+taps. Each rendered section's document now carries its own listener.
+
+## 4. No bottom band in landscape
+
+Page/chapter bars are portrait-only now (they covered the page they
+named). Tab bar untouched.
+
+## 5. Rail alignment stable + slightly smaller
+
+Top zone (progress + voice chip) and bottom zone (rate) pinned; the play
+cluster centers ITSELF between them — identical alignment with the title
+bar hidden or shown. Width 170 → 150.
+
+## 6. Landscape TOC → page jumps hardened
+
+go(to:) re-issues after the sheet dismissal settles (transitions can drop
+it) and logs unresolvable pages.
+
+## 7. Drop-down TOC trees (new request)
+
+PDF outline: entries with children fold behind chevrons (all expanded
+initially, depth indent kept). EPUB: the toc parser now captures REAL
+nesting (NCX navPoint stack, EPUB3 nav <ol> depth); the shelf backfill
+re-parses books whose toc predates depth; the sheet seeds from the
+manifest (which has depth) and falls back to the flat webview list.
+
+## 8. Landscape rail minimizes (new request)
+
+chevron.compact.right at the rail's top collapses it to a 40pt strip:
+progress hairline + play/pause + expand chevron — the portrait pill's
+twin. One preference shared by note/epub/pdf rail AND the audiobook panel.
+
+## 9. Soprano — the loops were OUR sampler, verified locally (new)
+
+The model was downloaded and its backbone run locally in onnxruntime with
+the port's exact sampling: the device's 40-60 loop breaks per chunk
+reproduced 1:1 (same tokens). The reference's own parameters (temp 1.0,
+top_p 0.95, presence-only penalty on the recent window) produced ZERO
+loops on the same inputs — one sentence even reached a natural [STOP].
+The engine now samples with the reference parameters, and the loop
+detector is a health log only.
+
+## 10. Soprano stops on a dime; Supertonic TTFA + thermal log
+
+stop() now cancels the backbone per step (the logs showed 4+ s of
+generation AFTER an explicit stop; exports are guarded). Supertonic's
+first chunk is capped at 60 chars (TTFA 15.4 s → ~2 s expected), and the
+per-chunk log now includes the device thermal state — the round-6 RTF
+climb (0.5 → 5.3 within one session, recovered next session) looks like
+throttling; the next logs will say so definitively.
