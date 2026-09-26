@@ -108,6 +108,35 @@ final class AudiobookChaptersTests: XCTestCase {
         XCTAssertEqual(chapters[1].startSeconds, 600, accuracy: 0.001)
     }
 
+    /// ffmpeg movenc's chpl variant — the layout the USER'S own book uses
+    /// (When Breath Becomes Air, MOODY release): 4 zero bytes where Nero
+    /// puts the count, then the count as ONE byte at offset 8. The round-6
+    /// parser read a 4-byte count and got 0 → "Full audiobook" forever.
+    /// Byte layout mirrors the probed real file.
+    func testFfmpegChplVariantIsRead() {
+        var payload: [UInt8] = [1, 0, 0, 0]      // version 1 + flags
+        payload += [0, 0, 0, 0]                  // ffmpeg's 4 zero bytes
+        payload += [3]                           // count, ONE byte
+        func entry(_ seconds: Int, _ title: String) -> [UInt8] {
+            let raw = seconds * 10_000_000
+            let start = [UInt8((raw >> 56) & 0xFF), UInt8((raw >> 48) & 0xFF),
+                         UInt8((raw >> 40) & 0xFF), UInt8((raw >> 32) & 0xFF),
+                         UInt8((raw >> 24) & 0xFF), UInt8((raw >> 16) & 0xFF),
+                         UInt8((raw >> 8) & 0xFF), UInt8(raw & 0xFF)]
+            let bytes = Array(title.utf8)
+            return start + [UInt8(bytes.count)] + bytes
+        }
+        payload += entry(0, "Opening Credits")
+        payload += entry(27, "Events described are based on the author's")
+        payload += entry(918, "Prologue")
+        let moov = box("moov", box("udta", box("chpl", payload)))
+        let data = Data(box("ftyp", Array("M4B ".utf8) + be32(0) + Array("M4B ".utf8)) + moov)
+        let chapters = AudiobookChapters.chaptersFromMP4(data, totalSeconds: 19722.5)
+        XCTAssertEqual(chapters.map(\.title), ["Opening Credits", "Events described are based on the author's", "Prologue"])
+        XCTAssertEqual(chapters[1].startSeconds, 27, accuracy: 0.01)
+        XCTAssertEqual(chapters[2].startSeconds, 918, accuracy: 0.01)
+    }
+
     func testMillisecondChplFallsBackWhenSpecReadingOverflows() {
         // A writer that stored MILLISECONDS instead of 100-ns units: the
         // spec reading overflows the duration by ~10,000×, the ms reading

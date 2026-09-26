@@ -440,51 +440,71 @@ public enum AudiobookChapters {
     /// `chpl` payload: version+flags (4), reserved (4), chapter count (1),
     /// then per chapter an 8-byte start (in the movie timescale, usually
     /// 1/100 s but read from `mvhd` when we can) and a Pascal string title.
-    /// `chpl` (Nero chapters) payload — THE standard layout, the one
-    /// mp4chaps/ffmpeg/VLC write and read:
-    ///   version(1) flags(3) chapterCount(4, BE) then per chapter:
-    ///   startTime(8, 100-NANOSECOND units) nameLength(1) name(UTF-8)
+    /// `chpl` — BOTH layouts in the wild, validated against real files
+    /// (2026-09-26: the user's own M4B and an ffmpeg-muxed sample, both
+    /// cross-checked against ffprobe):
     ///
-    /// The round-5 parser matched a synthetic fixture instead of this spec —
-    /// it read a 1-byte count at offset 8 (the first byte of the first
-    /// chapter's start time, i.e. 0x00 whenever chapter 1 starts at 0) and
-    /// divided timestamps by 100. Real files therefore always came back
-    /// EMPTY: chapters that VLC/PocketCasts show, we collapsed to "Full
-    /// audiobook". Both errors are fixed here, with one tolerance: a few
-    /// writers use milliseconds instead of 100 ns — when the parsed starts
-    /// overflow the known duration, the millisecond reading is used.
+    ///   * Nero / mp4chaps: version(1) flags(3) chapterCount(4, BE) —
+    ///     entries from offset 8.
+    ///   * ffmpeg movenc (m4b-tool & friends): version(1) flags(3) ZEROS(4)
+    ///     chapterCount(1 BYTE at offset 8) — entries from offset 9. This
+    ///     is the variant the round-6 rewrite missed: it read the 4-byte
+    ///     count and got 0, so every ffmpeg-muxed book ("still no chapters
+    ///     — VLC and PocketCasts show them") stayed "Full audiobook".
+    ///
+    /// Entries are startTime(8, big-endian) nameLength(1) name(UTF-8). Both
+    /// probed files store 100-NANOSECOND units; a millisecond-writer
+    /// tolerance remains via the closest-to-duration divisor choice.
     private static func parseChpl(_ bytes: [UInt8], totalSeconds: Double?) -> [AudioChapter] {
-        guard bytes.count >= 8 else { return [] }
-        let count = Int(be32(bytes, 4))
-        guard count > 0, count < 10_000 else { return [] } // sanity: chpl counts are small
-        var cursor = 8
-        var rawStarts: [Int] = []
-        var titles: [String] = []
-        for _ in 0..<count {
-            guard cursor + 9 <= bytes.count else { break }
-            var start = 0
-            for shift in stride(from: 56, through: 0, by: -8) {
-                start |= Int(bytes[cursor]) << shift
+        func entries(count: Int, cursor: Int) -> (starts: [Int], titles: [String]) {
+            var starts: [Int] = []
+            var titles: [String] = []
+            var cursor = cursor
+            for _ in 0..<count {
+                guard cursor + 9 <= bytes.count else { break }
+                var start = 0
+                for shift in stride(from: 56, through: 0, by: -8) {
+                    start |= Int(bytes[cursor]) << shift
+                    cursor += 1
+                }
+                let titleLength = Int(bytes[cursor])
                 cursor += 1
+                guard cursor + titleLength <= bytes.count else { break }
+                let title = String(
+                    bytes: bytes[cursor..<(cursor + titleLength)],
+                    encoding: .utf8
+                ) ?? ""
+                cursor += titleLength
+                starts.append(start)
+                titles.append(title.trimmingCharacters(in: .whitespacesAndNewlines))
             }
-            let titleLength = Int(bytes[cursor])
-            cursor += 1
-            guard cursor + titleLength <= bytes.count else { break }
-            let title = String(
-                bytes: bytes[cursor..<(cursor + titleLength)],
-                encoding: .utf8
-            ) ?? ""
-            cursor += titleLength
-            rawStarts.append(start)
-            titles.append(title.trimmingCharacters(in: .whitespacesAndNewlines))
+            return (starts, titles)
         }
-        guard !rawStarts.isEmpty else { return [] }
 
-        // 100-ns units are the spec (divisor 10_000_000). A few writers use
-        // milliseconds. With a known duration, pick the reading that is both
-        // plausible (within the book's length) and CLOSEST to it — a 900,000
-        // raw start is 0.09 s under the spec reading and 900 s under ms, and
-        // a 9-hour book is obviously the second one.
+        var candidates: [(starts: [Int], titles: [String])] = []
+        // Variant A — the 4-byte Nero count.
+        if bytes.count >= 8 {
+            let count = Int(be32(bytes, 4))
+            if count > 0, count < 10_000 {
+                let parsed = entries(count: count, cursor: 8)
+                if !parsed.starts.isEmpty { candidates.append(parsed) }
+            }
+        }
+        // Variant B — ffmpeg's 1-byte count after 4 zero bytes.
+        if candidates.isEmpty, bytes.count >= 9 {
+            let count = Int(bytes[8])
+            if count > 0, count < 255 {
+                let parsed = entries(count: count, cursor: 9)
+                if !parsed.starts.isEmpty { candidates.append(parsed) }
+            }
+        }
+        guard let (rawStarts, titles) = candidates.first, !rawStarts.isEmpty else { return [] }
+
+        // 100-ns units are what both probed files carry. With a known
+        // duration, pick the reading that is both plausible (within the
+        // book's length) and CLOSEST to it — a 900,000 raw start is 0.09 s
+        // under the spec reading and 900 s under ms, and a 9-hour book is
+        // obviously the second one.
         let maxStart = rawStarts.max() ?? 0
         let divisor: Double
         if let total = totalSeconds, total > 0 {
