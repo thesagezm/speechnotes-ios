@@ -242,54 +242,53 @@ struct BookAudioReaderView: View {
     }
 
     private var minimizedAudioRail: some View {
-        HStack(spacing: 0) {
-            GeometryReader { proxy in
-                ZStack(alignment: .top) {
-                    Capsule()
-                        .fill(Color.secondary.opacity(0.25))
-                        .frame(width: 3)
-                    Capsule()
-                        .fill(theme.accentFadeVerticalGradient)
-                        .frame(width: 3, height: max(4, (proxy.size.height - 12) * displayProgress))
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            }
-            .frame(width: 3)
-            .padding(.vertical, 6)
-
-            VStack(spacing: 12) {
-                Button {
-                    Haptics.tap()
-                    railMinimized = false
-                } label: {
-                    Image(systemName: "chevron.compact.left")
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 30, height: 30)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Expand playback rail")
-
-                Button {
-                    Haptics.tap()
-                    togglePlayback()
-                } label: {
+        VStack(spacing: 10) {
+            Button {
+                Haptics.tap()
+                togglePlayback()
+            } label: {
+                ZStack {
+                    Circle()
+                        .fill(.ultraThinMaterial)
+                        .shadow(color: .black.opacity(0.18), radius: 8, y: 3)
+                    Circle()
+                        .trim(from: 0, to: max(0.001, min(1, displayProgress)))
+                        .stroke(theme.accentGradient, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
                     Image(systemName: isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(.white)
-                        .frame(width: 30, height: 30)
-                        .background(Circle().fill(theme.accentGradient))
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(Color.accentColor)
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel(isPlaying ? "Pause" : "Play")
-
-                Spacer(minLength: 0)
+                .frame(width: 46, height: 46)
             }
-            .padding(.horizontal, 3)
+            .buttonStyle(.plain)
+            .accessibilityLabel(isPlaying ? "Pause" : "Play")
+
+            Button {
+                Haptics.tap()
+                railMinimized = false
+            } label: {
+                Image(systemName: "chevron.compact.left")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 32, height: 24)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Expand playback rail")
         }
-        .frame(width: PlaybackRail.minimizedWidth)
-        .frame(maxHeight: .infinity)
-        .background(.bar)
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 26, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .shadow(color: .black.opacity(0.14), radius: 10, y: 3)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 26, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.07))
+        )
+        .padding(.horizontal, 10)
+        .frame(maxHeight: .infinity, alignment: .center)
     }
 
     private var fullAudioRail: some View {
@@ -344,11 +343,21 @@ struct BookAudioReaderView: View {
             timeReadout
                 .font(.caption.monospacedDigit())
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 14)
         .frame(width: PlaybackRail.idealWidth)
-        .frame(maxHeight: .infinity)
-        .background(.bar)
+        .fixedSize(horizontal: false, vertical: true)
+        .background(
+            RoundedRectangle(cornerRadius: 26, style: .continuous)
+                .fill(.bar)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 26, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.07))
+        )
+        .shadow(color: .black.opacity(0.12), radius: 14, y: 4)
+        .padding(.horizontal, 10)
+        .frame(maxHeight: .infinity, alignment: .center)
     }
 
     /// Elapsed/chapter position — tap flips to whole-book remaining.

@@ -96,7 +96,7 @@ struct PlaybackRail: View {
 
     var body: some View {
         if minimized {
-            minimizedStrip
+            minimizedCapsule
         } else {
             fullPanel
         }
@@ -109,6 +109,13 @@ struct PlaybackRail: View {
     /// uneven uncentered way" with the title bar hidden. Now the top/bottom
     /// blocks never move and the play cluster is always optically centered in
     /// the leftover space, regardless of session state or chrome.
+    ///
+    /// Round 7: the panel FLOATS — content-hugging height, rounded, softly
+    /// shadowed, vertically centered in the trailing column. The old
+    /// edge-to-edge `.bar` grew and shrank with the nav bar (the "stretched
+    /// out when I hide the title bar" report); a fixed-height floating panel
+    /// is pixel-identical whether the chrome is visible or not, and reads as
+    /// a deliberate landscape player instead of a strip of UI.
     private var fullPanel: some View {
         VStack(spacing: 0) {
             topGroup
@@ -118,10 +125,20 @@ struct PlaybackRail: View {
                 .padding(.top, 10)
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 12)
+        .padding(.vertical, 14)
         .frame(width: Self.idealWidth)
-        .frame(maxHeight: .infinity)
-        .background(.bar)
+        .fixedSize(horizontal: false, vertical: true)
+        .background(
+            RoundedRectangle(cornerRadius: 26, style: .continuous)
+                .fill(.bar)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 26, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.07))
+        )
+        .shadow(color: .black.opacity(0.12), radius: 14, y: 4)
+        .padding(.horizontal, 10)
+        .frame(maxHeight: .infinity, alignment: .center)
         .overlay(alignment: .topTrailing) {
             // Minimize — the portrait bar's chevron affordance, pointing off
             // the trailing edge.
@@ -136,74 +153,73 @@ struct PlaybackRail: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .padding(.top, 2)
-            .padding(.trailing, 2)
+            .padding(.top, 4)
+            .padding(.trailing, 4)
             .accessibilityLabel("Minimize playback rail")
         }
     }
 
-    /// The minimized rail: one slim strip on the trailing edge — a vertical
-    /// progress hairline, the play state and the expand chevron. Everything
-    /// the portrait minimized pill keeps (state, progress, expand), in the
-    /// rail's vertical idiom.
-    private var minimizedStrip: some View {
-        HStack(spacing: 0) {
-            GeometryReader { proxy in
-                ZStack(alignment: .top) {
-                    Capsule()
-                        .fill(Color.secondary.opacity(0.25))
-                        .frame(width: 3)
-                    if let progress, progress > 0 {
-                        Capsule()
-                            .fill(theme.accentFadeVerticalGradient)
-                            .frame(width: 3, height: max(4, (proxy.size.height - 12) * progress))
+    /// The minimized rail: a floating rounded capsule on the trailing edge —
+    /// the mini-player bubble's idiom, not a bare strip. Live progress ring
+    /// around the play glyph, expand chevron beneath. Round 7: the first
+    /// edge-to-edge strip looked improvised next to the portrait pill; this
+    /// matches it (material, rounding, shadow, progress).
+    private var minimizedCapsule: some View {
+        VStack(spacing: 10) {
+            Button {
+                Haptics.tap()
+                action.onTogglePlay()
+            } label: {
+                ZStack {
+                    Circle()
+                        .fill(.ultraThinMaterial)
+                        .shadow(color: .black.opacity(0.18), radius: 8, y: 3)
+                    if let progress {
+                        Circle()
+                            .trim(from: 0, to: max(0.001, min(1, progress)))
+                            .stroke(theme.accentGradient, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                            .rotationEffect(.degrees(-90))
                     }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            }
-            .frame(width: 3)
-            .padding(.vertical, 6)
-
-            VStack(spacing: 12) {
-                Button {
-                    Haptics.tap()
-                    minimized = false
-                } label: {
-                    Image(systemName: "chevron.compact.left")
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 30, height: 30)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Expand playback rail")
-
-                Button {
-                    Haptics.tap()
-                    action.onTogglePlay()
-                } label: {
                     Image(systemName: playIcon)
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(.white)
-                        .frame(width: 30, height: 30)
-                        .background(Circle().fill(theme.accentGradient))
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(Color.accentColor)
                 }
-                .buttonStyle(.plain)
-                .disabled(!isPlayEnabled)
-                .accessibilityLabel(sessionActive ? "Pause" : "Play")
-
-                Spacer(minLength: 0)
+                .frame(width: 46, height: 46)
             }
-            .padding(.horizontal, 3)
+            .buttonStyle(.plain)
+            .disabled(!isPlayEnabled)
+            .accessibilityLabel(sessionActive ? "Pause" : "Play")
+
+            Button {
+                Haptics.tap()
+                minimized = false
+            } label: {
+                Image(systemName: "chevron.compact.left")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 32, height: 24)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Expand playback rail")
         }
-        .frame(width: Self.minimizedWidth)
-        .frame(maxHeight: .infinity)
-        .background(.bar)
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 26, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .shadow(color: .black.opacity(0.14), radius: 10, y: 3)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 26, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.07))
+        )
+        .padding(.horizontal, 10)
+        .frame(maxHeight: .infinity, alignment: .center)
     }
 
-    /// The minimized strip's width — ReadAlongView's inset keeps using
-    /// idealWidth, so the text column simply gains breathing room while the
-    /// rail is collapsed; nothing can run under it either way.
+    /// ReadAlongView's trailing inset keeps using idealWidth, so the text
+    /// column simply gains breathing room while the rail is collapsed;
+    /// nothing can run under it either way.
     static let minimizedWidth: CGFloat = 40
 
     // MARK: - Zones
@@ -224,7 +240,7 @@ struct PlaybackRail: View {
                 controlsRow
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        .frame(maxWidth: .infinity)
     }
 
     // MARK: - Progress
