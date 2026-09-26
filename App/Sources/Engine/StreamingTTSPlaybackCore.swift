@@ -31,8 +31,10 @@ final class StreamingTTSPlaybackCore: NSObject {
         /// Optional SMALLER cap for the FIRST chunk only — time-to-first-
         /// audio is the first chunk's render time, so a 155-char opener made
         /// Supertonic's TTFA 15 s on device while an 11-char opener was
-        /// 1.7 s. Nil = chunkMaxChars (engines that don't need it).
-        let firstMaxChars: Int?
+        /// 1.7 s. Nil = chunkMaxChars (engines that don't need it). `var`
+        /// with a default so the memberwise init keeps compiling for engines
+        /// that don't pass it.
+        var firstMaxChars: Int? = nil
         /// How many chunks beyond the playback cursor the producer may run.
         let generationAheadLimit: Int
         /// Inter-chunk pause baked into WAV exports only (playback itself
