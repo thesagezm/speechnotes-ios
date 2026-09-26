@@ -326,3 +326,39 @@ first chunk is capped at 60 chars (TTFA 15.4 s → ~2 s expected), and the
 per-chunk log now includes the device thermal state — the round-6 RTF
 climb (0.5 → 5.3 within one session, recovered next session) looks like
 throttling; the next logs will say so definitively.
+
+---
+
+# Round 7 (2026-09-26 night) — chapters validated against YOUR file; freeze fix; rail float; Soprano removed
+
+## 1. The freeze (audiobook playing → open big PDF)
+
+The PDF reader walked the document's whole outline on the MAIN thread at
+open — a textbook meant seconds of frozen UI, fatal over live audio. The
+walk is detached now.
+
+## 2. Audiobook chapters — validated against your actual book
+
+You supplied the file. Its chpl atom is ffmpeg's variant: 4 zero bytes
+where the Nero count lives, then the count as ONE byte, entries in
+100-ns units. The parser now tries Nero's 4-byte count first and falls
+back to ffmpeg's 1-byte form — cross-checked against ffprobe: 12/12
+chapters, exact titles and starts (Opening Credits 0:00, Epigraph
+1:20, Prologue 15:18…). Open the Books shelf once so the backfill
+re-reads the manifest; the log line will name the source ("mp4-full").
+
+## 3+4. Rail: floating panel, bubble minimize, fixed with chrome hidden
+
+The panel floats (content-hugging, rounded, shadowed, centered) — its
+pixels no longer depend on the nav bar, so hiding the title bar leaves
+it exactly as-is. Minimize is now the mini-player bubble's look:
+material capsule, live progress ring around the play, expand chevron.
+The audiobook's landscape transport matches both shapes.
+
+## 5. Soprano is removed
+
+Engine, model manager, settings UI, picker scope, CI spike — deleted. A
+stored Soprano preference migrates to Kokoro fp32 automatically. (The
+reproduction that finally made it speak — reference sampling, zero
+loops — is preserved in the repo history and the handover notes; the
+model itself just isn't worth the slot.)
