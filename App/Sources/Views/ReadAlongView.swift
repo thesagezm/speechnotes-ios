@@ -84,7 +84,7 @@ struct ReadAlongView: View {
                 // view's own geometry so the inset is right on the very first
                 // frame of the new orientation (an environment value can
                 // arrive a frame late — the tab-rail bug).
-                .padding(.trailing, proxyWidth > 500 ? PlaybackRail.idealWidth + 14 : 16)
+                .padding(.trailing, proxyWidth > 500 ? PlaybackRail.idealWidth + 24 : 16)
             }
             .onChange(of: activeRange?.lowerBound) { start in
                 guard let start else { return }

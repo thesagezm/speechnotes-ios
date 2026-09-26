@@ -9,7 +9,7 @@ struct SpeechSettingsView: View {
 
     private var neuralEngineIsActive: Bool {
         (player.engineKind == .kokoroOnnx || player.engineKind == .kokoroSmall
-            || player.engineKind == .supertonic || player.engineKind == .soprano)
+            || player.engineKind == .supertonic)
             && !player.usingSystemFallback
     }
 
@@ -25,7 +25,6 @@ struct SpeechSettingsView: View {
         case .kokoroOnnx: return !models.isReady
         case .kokoroSmall: return !models.smallIsReady
         case .supertonic: return !models.supertonicIsReady
-        case .soprano: return !models.sopranoIsReady
         default: return false
         }
     }
@@ -34,7 +33,6 @@ struct SpeechSettingsView: View {
         switch player.engineKind {
         case .kokoroSmall: return .kokoroSmall
         case .supertonic: return .supertonic
-        case .soprano: return .soprano
         default: return .kokoro
         }
     }
@@ -43,7 +41,6 @@ struct SpeechSettingsView: View {
         switch player.engineKind {
         case .kokoroSmall, .kokoroOnnx: return "Kokoro voice"
         case .supertonic: return "Supertonic voice"
-        case .soprano: return "Soprano voice"
         default: return "Kokoro voice"
         }
     }
@@ -74,7 +71,7 @@ struct SpeechSettingsView: View {
             } header: {
                 Text("Speech engine")
             } footer: {
-                Text("Listed worst to best. Soprano (experimental, English only) is a research-grade 80M model — expect rougher pronunciation than the others. Supertonic sounds the best (10 voice styles, 31 languages). Kokoro uint8 (~177 MB) is the lightweight tier; Kokoro fp32 is the solid default. All use the same 28 voices.")
+                Text("Listed worst to best. Supertonic sounds the best (10 voice styles, 31 languages). Kokoro uint8 (~177 MB) is the lightweight tier; Kokoro fp32 is the solid default. All use the same 28 voices.")
             }
 
             Section {
@@ -160,25 +157,6 @@ struct SpeechSettingsView: View {
                 Text("Supertone supertonic-3 — flow-matching TTS with 31 languages and 10 voice styles. Large (~399 MB) and CPU-based; keep it as the optional multilingual engine alongside Kokoro.")
             }
 
-            Section {
-                switch models.sopranoState {
-                case .notDownloaded:
-                    Button { models.startSopranoDownload() } label: {
-                        Label("Download Soprano model (~110 MB)", systemImage: "arrow.down.circle")
-                    }
-                case .downloading(let progress):
-                    ProgressView(value: progress) { Text("Downloading Soprano… \(Int(progress*100))%") }
-                case .failed(let message):
-                    Label("Soprano download failed: \(message)", systemImage: "exclamationmark.triangle")
-                        .font(.footnote)
-                    Button("Retry") { models.startSopranoDownload() }
-                case .ready:
-                    Label("Soprano model ready", systemImage: "checkmark.circle")
-                    Button("Delete Soprano model (frees ~110 MB)", role: .destructive) { models.deleteSopranoModels() }
-                }
-            } header: { Text("Soprano model") } footer: {
-                Text("ekwek/Soprano-1.1-80M (Apache-2.0) — experimental. A tiny 80M English model (the authors trained it on ~1000 hours, so uncommon words can mispronounce); it generates token-by-token, so time-to-first-audio is seconds, not instant. One voice, ~110 MB, the smallest neural engine here. Numbers and currency are read out as words before they reach the model.")
-            }
 
             Section {
                 switch models.state {

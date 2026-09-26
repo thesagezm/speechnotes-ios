@@ -633,7 +633,7 @@ final class StreamingTTSPlaybackCore: NSObject {
         let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1)!
         // A zero-frame capacity init returns nil and the force-unwrap would
         // crash — an engine that legitimately produced no samples (e.g.
-        // Soprano sampled [STOP] on step 0) schedules as a one-frame silent
+        // A chunk whose engine emitted [STOP] on step 0) schedules as a one-frame silent
         // buffer instead.
         let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: max(1, AVAudioFrameCount(samples.count)))!
         buffer.frameLength = min(AVAudioFrameCount(samples.count), buffer.frameCapacity)
