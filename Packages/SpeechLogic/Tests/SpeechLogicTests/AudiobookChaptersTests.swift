@@ -253,7 +253,9 @@ final class AudiobookChaptersTests: XCTestCase {
             let raw: [UInt8] = [UInt8((Array(title.utf8).count >> 8) & 0xFF),
                                 UInt8(Array(title.utf8).count & 0xFF)] + Array(title.utf8)
             let padded = raw + [UInt8](repeating: 0, count: (4 - raw.count % 4) % 4)
-            samples.append((offset: cursor, delta: index == 0 ? 0 : 30_000, size: padded.count, title: title))
+            // stts delta = duration from THIS sample to the NEXT — the
+            // first chapter's delta is the 30 s gap to chapter 2.
+            samples.append((offset: cursor, delta: 30_000, size: padded.count, title: title))
             payloads += padded
             cursor += padded.count
         }

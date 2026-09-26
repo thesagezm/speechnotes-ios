@@ -323,13 +323,16 @@ final class BooksStore: ObservableObject {
         // ended at start+1s — one more contributor to "it stops after two
         // seconds").
         let durationSem = DispatchSemaphore(value: 0)
-        var loadedDuration: CMTime = .invalid
-        asset.load(.duration) { duration, _ in
-            loadedDuration = duration
+        final class Box { var value: CMTime = .invalid }
+        let box = Box()
+        Task.detached {
+            if let duration = try? await asset.load(.duration) {
+                box.value = duration
+            }
             durationSem.signal()
         }
         _ = durationSem.wait(timeout: .now() + 5)
-        let seconds = loadedDuration.isValid ? loadedDuration.seconds : asset.duration.seconds
+        let seconds = box.value.isValid ? box.value.seconds : asset.duration.seconds
         if seconds.isFinite, seconds > 0 { book.audioDuration = seconds }
 
         // Chapters: read the head of the file. MP4 boxes need only the first
@@ -384,11 +387,17 @@ final class BooksStore: ObservableObject {
         // titles, authors AND covers all came back empty for files that
         // plainly had them (the "no thumbnail" report; the title survived
         // only because the filename fallback covered it).
-        let metadata: [AVMetadataItem]
-        let sem = DispatchSemaphore(value: 0)
-        asset.load(.metadata) { _, _ in sem.signal() }
-        _ = sem.wait(timeout: .now() + 5)
-        metadata = asset.metadata
+        let metadataSem = DispatchSemaphore(value: 0)
+        final class MetaBox { var value: [AVMetadataItem] = [] }
+        let metaBox = MetaBox()
+        Task.detached {
+            if let items = try? await asset.load(.metadata) {
+                metaBox.value = items
+            }
+            metadataSem.signal()
+        }
+        _ = metadataSem.wait(timeout: .now() + 5)
+        let metadata = metaBox.value.isEmpty ? asset.metadata : metaBox.value
 
         let title = Self.metadataString(metadata, key: AVMetadataKey.commonKeyTitle.rawValue)
         if let title, !title.isEmpty { book.title = title }

@@ -303,11 +303,19 @@ public enum JexImport {
             // `key: value` sequence ending in `type_:` — search from the end.
             guard let typeRange = entry.range(of: "\ntype_: ", options: .backwards) else { return nil }
             let blockStart = entry[..<typeRange.lowerBound]
-            // Walk back to the blank line that begins the block.
+            // Walk back to the blank line that begins the block. A resource
+            // metadata file has NO body — its block starts at the top, with
+            // no blank line to find; that is a valid block too.
             let head = String(blockStart)
-            guard let separator = head.range(of: "\n\n", options: .backwards) else { return nil }
-            let body = String(head[..<separator.lowerBound])
-            let block = String(entry[separator.upperBound...])
+            if let separator = head.range(of: "\n\n", options: .backwards) {
+                let body = String(head[..<separator.lowerBound])
+                let block = String(entry[separator.upperBound...])
+                return parseBlock(block, body: body)
+            }
+            return parseBlock(entry, body: "")
+        }
+
+        static func parseBlock(_ block: String, body: String) -> MetadataBlock? {
             var fields: [String: String] = [:]
             var type = 0
             for line in block.components(separatedBy: "\n") {

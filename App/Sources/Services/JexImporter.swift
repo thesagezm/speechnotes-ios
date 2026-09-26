@@ -47,7 +47,7 @@ enum JexImporter {
         } catch {
             throw ImportErrorProxy.parse(error.localizedDescription)
         }
-        return try apply(archive, into: notes, notebooks: notebooks)
+        return try apply(archive, into: notesStore, notebooksStore: notebooks)
     }
 
     @discardableResult
@@ -64,7 +64,7 @@ enum JexImporter {
         } catch {
             throw ImportErrorProxy.parse(error.localizedDescription)
         }
-        return try apply(archive, into: notesStore, notebooks: notebooksStore)
+        return try apply(archive, into: notesStore, notebooksStore: notebooksStore)
     }
 
     @discardableResult
