@@ -56,7 +56,7 @@ struct BooksRecycleBinView: View {
                             store.recover(book)
                             Haptics.success()
                         } label: {
-                            Label("Recover", systemName: "arrow.uturn.backward")
+                            Label("Recover", systemImage: "arrow.uturn.backward")
                         }
                         .tint(.green)
                     }
