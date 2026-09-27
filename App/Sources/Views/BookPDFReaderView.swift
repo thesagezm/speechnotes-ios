@@ -334,11 +334,19 @@ struct BookPDFReaderView: View {
         let pageIndex: Int
     }
 
-    /// Flattens the PDF outline tree depth-first. Runs once per open; big
-    /// outlines are rare and cheap compared to the document itself. Walks
-    /// via numberOfChildren/child(at:) — this SDK's PDFOutline has no
-    /// `children` array (CI-caught). Entries whose destination does not
-    /// resolve to a page are skipped: every row must be navigable.
+    /// Flattens the PDF outline tree depth-first. Runs once per open — but
+    /// OFF THE MAIN THREAD now (round 7): `PDFDocument(url:)` opens the file
+    /// and touches the page tree + every outline destination, which on a
+    /// big textbook took SECONDS and froze the app outright (the round-7
+    /// report: open an audiobook, then open a big PDF → force quit).
+    ///
+    /// The document instance here is throwaway on purpose: `OutlineRow` keeps
+    /// the resolved PAGE INDEX, never a destination from this instance (a
+    /// destination belonging to another document silently does nothing in
+    /// PDFKit — the round-5 lesson). Walks via numberOfChildren/child(at:)
+    /// — this SDK's PDFOutline has no `children` array (CI-caught). Entries
+    /// whose destination does not resolve to a page are skipped: every row
+    /// must be navigable.
     private static func flattenOutline(book: Book) -> [OutlineRow] {
         guard let document = PDFDocument(url: BooksStore.originalFileURL(book)),
               let root = document.outlineRoot else { return [] }
@@ -522,7 +530,8 @@ struct BookPDFReaderView: View {
         .presentationDetents([.medium, .large])
     }
 
-    private func handlePageChange(pageIndex: Int, pageCount: Int) {        currentPage = pageIndex
+    private func handlePageChange(pageIndex: Int, pageCount: Int) {
+        currentPage = pageIndex
         if pageCount > 0 { self.pageCount = pageCount }
         store.updatePosition(book, chapterIndex: pageIndex, chapterFraction: 0)
     }

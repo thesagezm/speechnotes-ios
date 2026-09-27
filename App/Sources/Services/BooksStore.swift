@@ -451,7 +451,9 @@ final class BooksStore: ObservableObject {
         }
 
         // No chapter metadata: the whole file is one chapter so the player bar
-        // has a unit and the position can still be remembered.
+        // has a unit and the position can still be remembered. `single` is the
+        // marker the shelf backfill looks for — a book that only ever got ONE
+        // chapter may simply pre-date the readers above, so it is re-read once.
         if book.audioChapters == nil {
             book.audioChapters = [AudioChapter(
                 title: "Full audiobook",
