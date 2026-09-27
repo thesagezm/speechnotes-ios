@@ -431,3 +431,67 @@ Per AP12, green CI is not device truth; the device checklist is unchanged.
 **Note on process:** the two failed rounds are the reason the gate is
 CI and not me — both times the failure was a compile error in a file I
 had edited, caught by the machine before it could reach a phone.
+
+---
+
+## Bugfix round 2 — `6d4da8c`, `3ee3b9d` (from the device log the user pasted)
+
+Reviewed inline; mandatory question per commit.
+
+### `6d4da8c` — the freeze
+
+**Score: 9/10. Faster than baseline: YES** — this is the direct answer to
+"the freezing is even more severe in the latest build".
+
+1. **F7 (fixed) the shelf re-opened every pending audiobook on every
+   open.** `backfillMissingPDFCovers` filtered `audioChapterSource` in
+   {nil, single, chpl, mp4, id3} and the user's two books both sat in
+   that set (and re-imported copies kept landing there) — each pass mapped
+   the whole file, loaded AVURLAsset duration, ran the SYNC
+   `chapterMetadataGroups`, and walked the entire top-level box tree. For
+   a 266 MB m4b that's seconds per book, per launch, on a utility queue
+   competing with the main thread's I/O. Now: one audio book per launch,
+   oldest first.
+2. **F8 (fixed) the parse read the entire file.** `Data(.mappedIfSafe)`
+   over a 3 GB 'Harry Potter' m4b (1.5 GB Harrisons-sized, the user's
+   point) is thousands of page faults. Replaced with an 8 MB head slice
+   (normal box walk — moov is there for +faststart files) plus, on a miss,
+   one 8 MB tail slice read through `AudiobookChapters.chaptersFromMP4Tail`
+   (signature hunt validated by chpl's own count + title lengths).
+3. **Verified against the real bytes.** The tail slice of the user's own
+   WBBA m4b contains `chpl` at offset 8387585 and parses all 12 chapters
+   ffprobe reports; exactly ONE `chpl` occurrence in 8 MB, so the
+   false-positive surface is bounded and the parse validates it anyway.
+   New test pins the tail path against the same fixture the box walk
+   reads, sliced mid-stream, plus junk and false-positive cases.
+
+### `3ee3b9d` — EAC3, transport, headings, mini-player
+
+**Score: 8/10. Faster than baseline: YES** (UI responsiveness; the codec
+fix also stops a 30-deep error storm).
+
+1. **F9 (fixed) the EAC3 book couldn't play and nothing said why.**
+   `AVAudioPlayer(contentsOf:)` throws `kAudioFileInvalidChunkError`
+   (1685348671) for Dolby Digital Plus / Atmos — ffprobe on the actual
+   file confirms `eac3`, 6 channels. Every tap retried, 30+ identical
+   `cannot play original.m4b` lines. One reason is derived, the codec is
+   sniffed from the container, and it's published for the UI. Verified
+   the sniff reads `ec-3` from a 256 KB head slice — the EAC3 stsd fourCC.
+2. **F10 (fixed) chapter chevrons existed twice** (bottom bar + rail) and
+   the user asked for them "lateral to the 15s±/-". Now one row:
+   chapter prev, −15 s, play, +15 s, chapter next, with a shared
+   `transportIcon` for consistent sizing/disabled state/labels. The
+   bottom bar keeps the label only.
+3. **F11 (fixed) the heading sizes ignored the text-size slider** —
+   `.title`/`.title2` are fixed Dynamic Type steps. Now the Dynamic Type
+   point size × the reader's multiplier, matching body text.
+4. **F12 (fixed) the mini-player snapped instead of easing** — four
+   separate `.animation(0.2)` modifiers, one per value; a change that
+   moved two at once ran two conflicting transactions. One spring keyed
+   on the union.
+
+**On the user's architecture question** (why not a Files-app-backed
+store): noted, not done — it is a design change, not a bug. Recording it
+in `Docs/PLAN-APP-FILE-SYSTEM.md` as the next-cycle decision, because
+"just open Speechnotes in the Files app and drop books in" would
+also remove the copy step that is currently most of the import time.
