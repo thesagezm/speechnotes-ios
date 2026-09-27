@@ -99,6 +99,7 @@ struct BookAudioReaderView: View {
                             Spacer(minLength: 0)
                             audioCoverBlock
                             Spacer(minLength: 0)
+                            if blockedReason != nil { blockedBanner }
                         }
                         audioRail
                     }
@@ -111,8 +112,13 @@ struct BookAudioReaderView: View {
 
                         Spacer(minLength: 0)
 
-                        audioTransport
-                            .padding(.bottom, 12)
+                        if blockedReason != nil {
+                            blockedBanner
+                                .padding(.bottom, 12)
+                        } else {
+                            audioTransport
+                                .padding(.bottom, 12)
+                        }
 
                         chapterBar
                             .padding(.bottom, 8)
@@ -568,10 +574,38 @@ struct BookAudioReaderView: View {
         scrubValue = audioBook.chapterProgress
     }
 
-    /// True while this book's file is un-decodable — the reader then shows
-    /// the reason (once) and the transport's Play affordance explains
-    /// itself instead of failing 30 times, as the device log showed.
-    private var isBlocked: Bool { audioBook.playbackBlockedReason != nil }
+    /// The one honest reason this file cannot play (EAC3/Atmos and friends),
+    /// surfaced once over the cover and in the transport row instead of the
+    /// 30 identical failures the device log showed.
+    private var blockedReason: String? {
+        guard isActive else { return nil }
+        return audioBook.playbackBlockedReason
+    }
+
+    /// Banner shown where the transport's Play button would be when the
+    /// file is un-decodable: the icon, dimmed, plus the reason.
+    @ViewBuilder
+    private var blockedBanner: some View {
+        if let reason = blockedReason {
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(Color.orange)
+                Text(reason)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color.orange.opacity(0.12))
+            )
+            .padding(.horizontal, 16)
+            .accessibilityLabel("Playback unavailable: \(reason)")
+        }
+    }
 
     private func stepChapter(_ delta: Int) {
         let target = max(0, min(chapters.count - 1, chapterIndex + delta))
