@@ -495,3 +495,60 @@ store): noted, not done — it is a design change, not a bug. Recording it
 in `Docs/PLAN-APP-FILE-SYSTEM.md` as the next-cycle decision, because
 "just open Speechnotes in the Files app and drop books in" would
 also remove the copy step that is currently most of the import time.
+
+---
+
+## Bugfix round 3 — `979ec11`, `2a423e7` (EAC3 banner · Files-store plan · books recycle bin)
+
+### `979ec11` — the Files-app question
+
+**Score: 9/10. Faster than baseline: YES** (removes nothing today; the
+first step it plans removes the 3 GB import copy the user waited through).
+Reviewed as a plan, not code: it records the user's question, the three
+costs of today's copy-into-Documents model, and a 3-step landing order
+(share the folder → security-scoped bookmarks → opt-in migration) with
+the prior failures that make the bookmark work non-trivial. The
+recommendation to defer the migration is recorded as a decision, not
+hand-waving.
+
+### `1fd973b` — the EAC3 failure actually surfaces
+
+**Score: 8/10. Faster than baseline: YES.**
+
+1. **F13 (fixed — my own Round-2 finding) `isBlocked` was computed and
+   never rendered.** The honest failure existed only in the player; the
+   device log still showed 30 retries and the reader still drew a dead
+   Play button. The transport row now swaps for a banner naming the codec
+   and the fix, in both orientations.
+2. **F14 (verified clean) the banner is keyed on `isActive`**, so another
+   book's failure never leaks into this reader's surface (the single
+   writing rule for the player's one slot).
+
+### CI rounds 3–4 (`6af7701`, `1a1ca47`)
+
+**Score: 8/10. Faster than baseline: YES.**
+
+1. **C8 (fixed) Int64/UInt64 mismatches** — seekToEnd() returns UInt64;
+   the slice helper now converts once at the boundary.
+2. **C9 (fixed) 'immutable value chapters may only be initialized once'**
+   — Swift 5 rejects reassigning a `let` across the two parse steps; a
+   local mutable carries the head/tail result.
+3. **Build gate: `36357497029` all six jobs green** on `1fd973b`.
+
+### `2a423e7` — the books recycle bin
+
+**Score: 8/10. Faster than baseline: YES (neutral-to-positive).**
+
+1. **F15 (fixed) deleting a book destroyed it immediately.** `deletedAt`
+   on the manifest (optional — old shelves decode), the shelf split so
+   the bin is derived rather than a parallel list, and recover / purge /
+   empty / retention-prune in the store. The confirmation now describes
+   the truth: moved to the bin, kept 30 days.
+2. **F16 (fixed in passing) a playing audiobook now stops before its file
+   is removed** — the delete and purge paths both handle it.
+3. **F17 (recorded) `books` and `allBooks` are two arrays that must agree.
+   Every mutation path was re-read and updates both (delete/copy remove
+   from the visible list only; recover/purge/refresh rebuild from the raw
+   shelf). The next reviewer should keep it that way — the notes store
+   avoids the duplication entirely and that is the cleaner long-term
+   shape, but it is a migration, not a fix.
