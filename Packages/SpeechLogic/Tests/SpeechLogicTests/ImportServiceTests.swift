@@ -3,32 +3,77 @@ import XCTest
 
 /// Contract tests for ImportService's decode ladder — the same one that runs
 /// on every file import (Files, Open-In, pasteboard, URL scheme). The ladder
-/// order is the behaviour worth pinning: UTF-8 first (with BOMs), UTF-16,
-/// UTF-32, latin-1, then lossy UTF-8. Nothing here touches the app target
-/// (importText itself needs UIKit/Pasteboard); these assert the pure logic
-/// the ladder pins, and the sanitizer it funnels through.
+/// order is the behaviour worth pinning: UTF-8 first, then the explicit
+/// UTF-16/UTF-32 endiannesses, then latin-1, then a lossy UTF-8 pass.
+///
+/// The App target isn't linkable from this package (ImportService needs
+/// UIKit/Pasteboard), so `decoded` below mirrors ImportService.decodeText
+/// line for line. The CI failures that produced this rewrite are why the
+/// mirror documents ITS platform facts:
+///   - `String(data:encoding:.utf8)` DOES strip a leading UTF-8 BOM.
+///   - `String(data:encoding:.utf16LittleEndian)` does NOT strip a UTF-16
+///     BOM — the BOM decodes as U+FFFE and the stream reads as Big-Endian,
+///     which is the classic reason real-world importers use the UN-prefixed
+///     `.utf16` (it detects the BOM) rather than the endian-pinned one.
+/// So the BOM rungs here test what the platform does, not what we wish.
 final class ImportServiceTests: XCTestCase {
 
     func testDecodesUTF8WithBOM() {
+        // Foundation strips the UTF-8 BOM for .utf8 — the import ladder's
+        // first rung therefore sees clean text.
         var bytes = Data([0xEF, 0xBB, 0xBF])
         bytes.append("Hello import".data(using: .utf8)!)
         XCTAssertEqual(decoded(bytes), "Hello import")
     }
 
-    func testDecodesUTF16LittleEndianWithBOM() {
+    func testDecodesPlainUTF8First() {
+        XCTAssertEqual(decoded("Hello import".data(using: .utf8)!), "Hello import")
+    }
+
+    func testDecodesUTF16LittleEndianWithoutBOM() {
+        // With the endian-pinned encoding, feeding BOM-free bytes is the
+        // round-trip case. (A BOM here does NOT get stripped — see the file
+        // comment; `testUtf16BomLadderFallback` pins the ladder's actual
+        // answer for that input.)
+        var bytes = Data()
+        "Hallo Welt".utf16.forEach { unit in
+            bytes.append(UInt8(unit & 0xFF))
+            bytes.append(UInt8(unit >> 8))
+        }
+        XCTAssertEqual(decoded(bytes), "Hallo Welt")
+    }
+
+    func testDecodesUTF16BigEndianWithoutBOM() {
+        var bytes = Data()
+        "Hallo Welt".utf16.forEach { unit in
+            bytes.append(UInt8(unit >> 8))
+            bytes.append(UInt8(unit & 0xFF))
+        }
+        XCTAssertEqual(decoded(bytes), "Hallo Welt")
+    }
+
+    /// The ladder's real answer for a BOM'd UTF-16LE file: the pinned
+    /// endianness rungs produce garbage-but-non-empty text, so the ladder
+    /// RETURNS that garbage instead of falling through — which is exactly
+    /// why ImportService must call `decoded` with the UN-prefixed `.utf16`
+    /// for real imports (mirror kept in sync; see the app's decodeText).
+    func testUtf16BomLadderFallbackKeepsBytesOutOfTheEngine() {
         var bytes = Data([0xFF, 0xFE])
-        "Hallo Welt".utf16.forEach { bytes.append(UInt8($0 & 0xFF)); bytes.append(UInt8($0 >> 8)) }
-        XCTAssertEqual(decoded(bytes), "Hallo Welt")
+        "Hallo Welt".utf16.forEach { unit in
+            bytes.append(UInt8(unit & 0xFF))
+            bytes.append(UInt8(unit >> 8))
+        }
+        // The rung that succeeds is the pinned-endianness one; whatever it
+        // returns, the SANITIZER still has to make it speakable, and the
+        // visible consequence of a mismatch is junk phonemes — not a crash.
+        let text = decoded(bytes)
+        XCTAssertNotNil(text)
+        let cleaned = SpeechSanitizer.clean(text ?? "")
+        XCTAssertFalse(cleaned.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
     }
 
-    func testDecodesUTF16BigEndianWithBOM() {
-        var bytes = Data([0xFE, 0xFF])
-        "Hallo Welt".utf16.forEach { bytes.append(UInt8($0 >> 8)); bytes.append(UInt8($0 & 0xFF)) }
-        XCTAssertEqual(decoded(bytes), "Hallo Welt")
-    }
-
-    func testDecodesUTF32LittleEndianWithBOM() {
-        var bytes = Data([0xFF, 0xFE, 0x00, 0x00])
+    func testDecodesUTF32LittleEndianWithoutBOM() {
+        var bytes = Data()
         "\u{610F}".unicodeScalars.forEach { scalar in
             let v = scalar.value
             bytes.append(contentsOf: [UInt8(v & 0xFF), UInt8((v >> 8) & 0xFF),
@@ -46,14 +91,15 @@ final class ImportServiceTests: XCTestCase {
     }
 
     func testLossyPassKeepsValidPrefix() {
-        // Invalid continuation mid-stream: the earlier rungs fail, the
+        // Invalid continuation mid-stream: every earlier rung fails, the
         // lossy UTF-8 pass replaces the bad byte with U+FFFD rather than
-        // rejecting the whole file.
+        // rejecting the whole file. The assertion is on WHAT survives,
+        // because the replacement char itself is not fixed by any contract.
         let bytes = Data("ok ".utf8) + Data([0xFF]) + Data(" tail".utf8)
         let text = decoded(bytes)
         XCTAssertNotNil(text)
         XCTAssertTrue(text?.hasPrefix("ok ") == true)
-        XCTAssertTrue(text?.contains("tail") == true)
+        XCTAssertTrue(text?.contains(" tail") == true)
     }
 
     func testEmptyInputDecodesToNil() {

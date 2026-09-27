@@ -144,9 +144,9 @@ final class SystemEngine: NSObject, SpeechEngine {
         // intelligible; anything below it begins halving and the user's
         // "slower than Supertonic" report follows directly. Map so 1.0 →
         // AVSpeechUtteranceDefaultSpeechRate (0.5) and 2.0 → 1.0.
-        let mapped = AVSpeechUtteranceDefaultSpeechRate
-            + (effectiveRate - 1.0) * (AVSpeechUtteranceMaximumSpeechRate - AVSpeechUtteranceDefaultSpeechRate)
-        utterance.rate = Float(min(AVSpeechUtteranceMaximumSpeechRate, max(0.0, mapped)))
+        let mapped = Double(AVSpeechUtteranceDefaultSpeechRate)
+            + (effectiveRate - 1.0) * (Double(AVSpeechUtteranceMaximumSpeechRate) - Double(AVSpeechUtteranceDefaultSpeechRate))
+        utterance.rate = Float(min(AVSpeechUtteranceMaximumSpeechRate, max(AVSpeechUtteranceMinimumSpeechRate, mapped)))
         if let identifier = voiceIdentifier,
            let voice = AVSpeechSynthesisVoice(identifier: identifier) {
             utterance.voice = voice

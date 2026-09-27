@@ -256,14 +256,18 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
         let speedData = Data(bytes: &speedValue,
                              count: MemoryLayout<Float>.size)
         let styleSlice = voiceFlat[offset..<(offset + Self.styleDim)]
-        let styleData = Data(styleSlice)
+        let styleData = styleSlice.withUnsafeBufferPointer { src in
+            Data(bytes: src.baseAddress!, count: src.count * MemoryLayout<Float>.size)
+        }
 
         // One allocation, one copy each: the voice style for this token
-        // count and the token ids. NSMutableData(bytes:) used to drain one
-        // temporary array per chunk — pure GC churn at 1-2 Hz per engine.
+        // count and the token ids. The old path drained a temporary [Int64]
+        // and a temporary [Float] style array per chunk — pure GC churn at
+        // 1-2 Hz per engine. `unsafeUninitializedCapacity` writes the ids in
+        // place (little-endian, the order ORT expects for int64 tensors).
         let tokensData = Data(unsafeUninitializedCapacity: tokens.count * MemoryLayout<Int64>.size) { buffer, cooked in
             for (i, t) in tokens.enumerated() {
-                buffer.storeBytes(of: Int64(t).littleEndian, toByteOffset: i * MemoryLayout<Int64>, as: Int64.self)
+                (buffer.baseAddress?.advanced(by: i * MemoryLayout<Int64>))?.storeBytes(of: Int64(t).littleEndian, as: Int64.self)
             }
             cooked = buffer.count
         }

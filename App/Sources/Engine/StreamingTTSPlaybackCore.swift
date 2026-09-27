@@ -171,13 +171,17 @@ final class StreamingTTSPlaybackCore: NSObject {
 
         let purgedCount = scheduledUpTo - firstPurged + 1
         let purgedAudioSeconds = (firstPurged...scheduledUpTo).reduce(0.0) { total, idx in
-            guard let id = bufferSlots[idx], let buffer = bufferPool[id], idx >= firstPurged else { return total }
-            return total + Double(buffer.frameLength) / buffer.format.sampleRate
+            let slot = bufferSlots[idx]
+            if slot >= 0, let buffer = bufferPool[slot] {
+                return total + Double(buffer.frameLength) / buffer.format.sampleRate
+            }
+            return total
         }
 
         for idx in firstPurged...scheduledUpTo {
-            if let id = bufferSlots[idx], id >= 0 {
-                bufferPool.removeValue(forKey: id)
+            let slot = bufferSlots[idx]
+            if slot >= 0 {
+                bufferPool.removeValue(forKey: slot)
             }
             bufferSlots[idx] = Self.slotPending
         }
