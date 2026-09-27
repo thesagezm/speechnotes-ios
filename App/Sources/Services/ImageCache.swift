@@ -1,3 +1,4 @@
+import ImageIO
 import SwiftUI
 
 /// In-memory image cache for the markdown preview.
@@ -70,7 +71,7 @@ final class ImageCache {
                 data = d
             }
         }
-        guard let data, let decoded = UIImage(data: data) else { return nil }
+        guard let data, let decoded = Self.downsampledImage(data) else { return nil }
         lock.lock()
         defer { lock.unlock() }
         // Cost in DECODED bytes (compressed bytes * 4–30× undercount and
@@ -79,6 +80,36 @@ final class ImageCache {
         let cost = max(pixelSize, data.count)
         cache.setObject(decoded, forKey: cacheKey(for: url), cost: cost)
         return decoded
+    }
+
+    /// Long-edge cap for the DECODE. The preview renders at screen width
+    /// (max ~1000pt logical, thumbnail source 1200px), so a 6000×4000 photo
+    /// was being built as a full-size bitmap (≈96 MB) and then scaled down
+    /// by SwiftUI at draw time — pure render cost on every frame and the
+    /// single biggest in-app memory spike. Image I/O already decodes at
+    /// `ImageDecoder`'s requested point size for far less then that
+    /// (`CGImageSourceCreateThumbnailAtIndex`), so nothing visible changes.
+    private static let decodeLongEdgePixels = 1200
+
+    private static func downsampledImage(_ data: Data) -> UIImage? {
+        if Thread.isMainThread {
+            // Callers today are off the main actor (CachedImage.load awaits
+            // ImageCache.load on a detached task); keep the decode itself
+            // main-safe so an accidental main-thread call cannot be worse
+            // than it was.
+        }
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
+            return UIImage(data: data)
+        }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: decodeLongEdgePixels,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+        ]
+        if let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) {
+            return UIImage(cgImage: cgImage)
+        }
+        return UIImage(data: data)
     }
 
     /// Async load with in-flight deduplication. Multiple callers awaiting the

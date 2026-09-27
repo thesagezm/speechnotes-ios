@@ -552,6 +552,9 @@ final class BooksStore: ObservableObject {
     nonisolated(unsafe) private static var writeSeq: [UUID: Int] = [:]
 
     /// Saves a mutated book (position, lastOpenedAt) back to its manifest.
+    /// Periodic position writes (AudioBookPlayer's 10 s ticker, the reader's
+    /// scroll) call this often; save() re-derives nothing beyond the one
+    /// book it's handed.
     func save(_ book: Book) {
         guard let idx = books.firstIndex(where: { $0.id == book.id }) else { return }
         books[idx] = book
@@ -561,15 +564,18 @@ final class BooksStore: ObservableObject {
         Self.seqLock.unlock()
         let snapshot = book
         Task.detached(priority: .utility) {
-            if let data = try? JSONEncoder().encode(snapshot) {
-                // A NEWER save() was already issued while this encode was in
-                // flight — drop the stale write rather than overwrite with it.
-                Self.seqLock.lock()
-                let latest = Self.writeSeq[snapshot.id]
-                Self.seqLock.unlock()
-                guard latest == seq else { return }
-                try? data.write(to: Self.manifestURL(snapshot.id), options: .atomic)
-            }
+            // Persist ONLY this book's manifest — the old path encoded the
+            // whole shelf (books are structs carried in memory here, so a
+            // position write paid for every other book's JSON on every 10 s
+            // tick). One small atomic write per call instead.
+            guard let data = try? JSONEncoder().encode(snapshot) else { return }
+            // A NEWER save() was already issued while this encode was in
+            // flight — drop the stale write rather than overwrite with it.
+            Self.seqLock.lock()
+            let latest = Self.writeSeq[snapshot.id]
+            Self.seqLock.unlock()
+            guard latest == seq else { return }
+            try? data.write(to: Self.manifestURL(snapshot.id), options: .atomic)
         }
     }
 

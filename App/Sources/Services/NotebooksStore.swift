@@ -91,7 +91,33 @@ final class NotebooksStore: ObservableObject {
         }
     }
 
+    private var saveTask: Task<Void, Never>?
+
+    /// Debounced save — matches NotesStore's 1 s coalesce. Row renames and
+    /// deletes used to encode + write the whole JSON synchronously per
+    /// action; the manager screen fires one call per keystroke during a
+    /// rename, and a rename/deleted flurry now lands one write when typing
+    /// settles. Same backup-touch behavior as before, just not per keystroke.
     private func save() {
+        saveTask?.cancel()
+        saveTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            guard !Task.isCancelled, let self else { return }
+            self.saveNow()
+        }
+    }
+
+    /// Synchronous save, kept for the moments a pending write must not be
+    /// lost (the app is about to background). Hooked up the same way
+    /// NotesStore's flushNow is — call sites that need it are added there,
+    /// alongside the notes flush.
+    func flushNow() {
+        saveTask?.cancel()
+        saveTask = nil
+        saveNow()
+    }
+
+    private func saveNow() {
         do {
             let data = try JSONEncoder().encode(notebooks)
             try data.write(to: Self.fileURL, options: .atomic)

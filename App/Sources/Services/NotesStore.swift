@@ -81,12 +81,15 @@ final class NotesStore: ObservableObject {
     func setPinned(_ pinned: Bool, noteId: UUID) {
         guard let index = allNotes.firstIndex(where: { $0.id == noteId }) else { return }
         allNotes[index].isPinned = pinned
+        bumpVersion()  // pin chips + section move need a fresh list
+        rowMetadata.removeValue(forKey: noteId)
         save()
     }
 
     func setFavorite(_ favorite: Bool, noteId: UUID) {
         guard let index = allNotes.firstIndex(where: { $0.id == noteId }) else { return }
         allNotes[index].isFavorite = favorite
+        rowMetadata.removeValue(forKey: noteId)
         save()
     }
 
@@ -96,6 +99,7 @@ final class NotesStore: ObservableObject {
         guard allNotes[index].notebookId != notebookId else { return }
         allNotes[index].notebookId = notebookId
         allNotes[index].updatedAt = Date()
+        rowMetadata.removeValue(forKey: noteId)
         save()
     }
 

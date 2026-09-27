@@ -114,6 +114,10 @@ struct SpeechnotesApp: App {
                 .onChange(of: scenePhase) { phase in
                     if phase != .active {
                         notes.flushNow()
+                        // Notebooks mirror the notes flush: a rename or delete
+                        // pending in the 400 ms debounce must not be lost to
+                        // a suspension the moment the app leaves the screen.
+                        NotebooksStore.shared.flushNow()
                         // Mid-speech: a bookmark lets playback resume where
                         // it stopped if iOS suspends or kills the process.
                         player.persistPlaybackBookmark()
