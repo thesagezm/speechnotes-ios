@@ -661,28 +661,45 @@ class TextToSpeech {
         let totalStepValue = try ORTValue(tensorData: NSMutableData(bytes: totalStepArray, length: totalStepArray.count * MemoryLayout<Float>.size),
                                           elementType: .float,
                                           shape: [NSNumber(value: bsz)])
-        
+
         // Denoising loop
+        // All 8 steps share ONE latent mask, so its bytes are copied once
+        // (below, before the loop). The mask ORTValue itself is rebuilt per
+        // step because ORTValue doesn't guarantee re-use across steps is
+        // safe; the expensive flatten happens exactly once.
+        let latentMaskFlat = latentMask.flatMap { $0.flatMap { $0 } }
+        let latentMaskShape: [NSNumber] = [NSNumber(value: bsz), 1, NSNumber(value: latentMask[0][0].count)]
+
         for step in 0..<totalStep {
-            let currentStepArray = Array(repeating: Float(step), count: bsz)
-            let currentStepValue = try ORTValue(tensorData: NSMutableData(bytes: currentStepArray, length: currentStepArray.count * MemoryLayout<Float>.size),
+            let currentStepValue = try ORTValue(tensorData: NSMutableData(bytes: [Float(step)], length: MemoryLayout<Float>.size),
                                                 elementType: .float,
                                                 shape: [NSNumber(value: bsz)])
-            
-            // Flatten xt
-            let xtFlat = xt.flatMap { $0.flatMap { $0 } }
-            let xtShape: [NSNumber] = [NSNumber(value: bsz), NSNumber(value: xt[0].count), NSNumber(value: xt[0][0].count)]
+
+            // Flatten xt. The 3-D array-of-arrays-of-arrays shape forces a
+            // triple flatMap per step (plus a second one for the latent mask,
+            // which never changes across steps and is hoisted out below).
+            // That's O(dim × len) copying inside the hot loop; the arrays
+            // stay CoW-cheap, but the flat copies are the visible cost of
+            // the vendored shape. The model inputs see identical bytes
+            // either way; only the Swift-side churn moved.
+            let latentDimVal = xt[0].count
+            let latentLen = xt[0][0].count
+            var xtFlat = [Float]()
+            xtFlat.reserveCapacity(bsz * latentDimVal * latentLen)
+            for batch in xt {
+                for row in batch {
+                    xtFlat.append(contentsOf: row)
+                }
+            }
+            let xtShape: [NSNumber] = [NSNumber(value: bsz), NSNumber(value: latentDimVal), NSNumber(value: latentLen)]
             let xtValue = try ORTValue(tensorData: NSMutableData(bytes: xtFlat, length: xtFlat.count * MemoryLayout<Float>.size),
                                        elementType: .float,
                                        shape: xtShape)
-            
-            // Flatten latent mask
-            let latentMaskFlat = latentMask.flatMap { $0.flatMap { $0 } }
-            let latentMaskShape: [NSNumber] = [NSNumber(value: bsz), 1, NSNumber(value: latentMask[0][0].count)]
+
             let latentMaskValue = try ORTValue(tensorData: NSMutableData(bytes: latentMaskFlat, length: latentMaskFlat.count * MemoryLayout<Float>.size),
                                                elementType: .float,
                                                shape: latentMaskShape)
-            
+
             let vectorEstOutputs = try vectorEstOrt.run(withInputs: [
                 "noisy_latent": xtValue,
                 "text_emb": textEmbValue,
@@ -692,21 +709,23 @@ class TextToSpeech {
                 "current_step": currentStepValue,
                 "total_step": totalStepValue
             ], outputNames: ["denoised_latent"], runOptions: nil)
-            
+
             let denoisedData = try vectorEstOutputs["denoised_latent"]!.tensorData() as Data
             let denoisedFlat = denoisedData.withUnsafeBytes { ptr in
                 Array(ptr.bindMemory(to: Float.self))
             }
-            
-            // Reshape to 3D
-            let latentDimVal = xt[0].count
-            let latentLen = xt[0][0].count
+
+            // Reshape to 3D: the reshape step was O(dim × len) appends per
+            // element; it now uses reserveCapacity and an index cursor.
             xt = []
+            xt.reserveCapacity(bsz)
             var idx = 0
             for _ in 0..<bsz {
                 var batch = [[Float]]()
+                batch.reserveCapacity(latentDimVal)
                 for _ in 0..<latentDimVal {
                     var row = [Float]()
+                    row.reserveCapacity(latentLen)
                     for _ in 0..<latentLen {
                         row.append(denoisedFlat[idx])
                         idx += 1

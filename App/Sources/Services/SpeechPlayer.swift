@@ -701,6 +701,33 @@ final class SpeechPlayer: ObservableObject {
         }
     }
 
+    /// Same idle-unload contract for the Kokoro session (fp32 ~326 MB of
+    /// resident weights, uint8 ~177 MB). Supertonic already had one; the
+    /// Kokoro instance was pinned for the whole session once the user
+    /// switched off it, and in LiveContainer the jetsam budget is shared
+    /// across guests. Reload-on-next-use is transparent (and logged) —
+    /// the fp32 model has to re-parse at first play, which is why the
+    /// TTL-cached validation still lets the cold load land in the
+    /// model-ready metric instead of the play-path validation one.
+    private var kokoroIdleUnloadTask: Task<Void, Never>?
+    private func scheduleKokoroIdleUnload() {
+        kokoroIdleUnloadTask?.cancel()
+        guard (engineKind == .kokoroOnnx || engineKind == .kokoroSmall), onnxEngine != nil else { return }
+        kokoroIdleUnloadTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 5 * 60 * 1_000_000_000)
+            guard !Task.isCancelled, let self else { return }
+            guard self.engineKind == .kokoroOnnx || self.engineKind == .kokoroSmall else { return }
+            guard self.state == .idle, !self.isExporting else { return }
+            guard self.onnxEngine?.hasLoadedModel == true else { return }
+            Log.shared.info("SpeechPlayer: unloading idle Kokoro sessions")
+            let keepVoice = self.voice
+            self.onnxEngine = nil
+            self.onnxEngineFileIsBig = self.engineKind == .kokoroOnnx
+            self.rebuildEngine()
+            self.onnxEngine?.voice = keepVoice
+        }
+    }
+
     /// Which model file the cached OnnxKokoroEngine instance points at —
     /// the fp32 and uint8 tiers share one slot, so a tier switch must
     /// rebuild it rather than reuse the other tier's session.
@@ -781,6 +808,7 @@ final class SpeechPlayer: ObservableObject {
         abandonLiveSession(reason: "engine switch")
 
         scheduleSupertonicIdleUnload()
+        scheduleKokoroIdleUnload()
 
         // The Supertonic set is ~399 MB of resident sessions — release it as
         // soon as another engine takes over (single-slot rule, PocketPal

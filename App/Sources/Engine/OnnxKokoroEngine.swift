@@ -156,6 +156,10 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
     /// self-heal reads it).
     var hasLiveSession: Bool { core.hasLiveSession }
 
+    /// True once the model was actually loaded this instance — only then is
+    /// there anything resident to free (mirrors SupertonicEngine).
+    var hasLoadedModel: Bool { modelLoadAttempted }
+
     // MARK: - Model loading (generateQueue)
 
     private func loadModelIfNeeded() {
@@ -248,31 +252,34 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
         guard offset + Self.styleDim <= voiceFlat.count else {
             throw OnnxEngineError.voiceShape(voiceFlat.count)
         }
-        let style = Array(voiceFlat[offset..<(offset + Self.styleDim)])
-
-        let tokens64 = tokens.map(Int64.init)
-        let tokensData = NSMutableData(
-            bytes: tokens64,
-            length: tokens64.count * MemoryLayout<Int64>.size
-        )
         var speedValue = core.speed
-        let speedData = NSMutableData(
-            bytes: &speedValue,
-            length: MemoryLayout<Float>.size
-        )
+        let speedData = Data(bytes: &speedValue,
+                             count: MemoryLayout<Float>.size)
+        let styleSlice = voiceFlat[offset..<(offset + Self.styleDim)]
+        let styleData = Data(styleSlice)
+
+        // One allocation, one copy each: the voice style for this token
+        // count and the token ids. NSMutableData(bytes:) used to drain one
+        // temporary array per chunk — pure GC churn at 1-2 Hz per engine.
+        let tokensData = Data(unsafeUninitializedCapacity: tokens.count * MemoryLayout<Int64>.size) { buffer, cooked in
+            for (i, t) in tokens.enumerated() {
+                buffer.storeBytes(of: Int64(t).littleEndian, toByteOffset: i * MemoryLayout<Int64>, as: Int64.self)
+            }
+            cooked = buffer.count
+        }
 
         let tokensTensor = try ORTValue(
-            tensorData: tokensData,
+            tensorData: NSMutableData(data: tokensData),
             elementType: .int64,
             shape: [1, NSNumber(value: tokens.count)]
         )
         let styleTensor = try ORTValue(
-            tensorData: NSMutableData(bytes: style, length: style.count * MemoryLayout<Float>.size),
+            tensorData: NSMutableData(data: styleData),
             elementType: .float,
             shape: [1, NSNumber(value: Self.styleDim)]
         )
         let speedTensor = try ORTValue(
-            tensorData: speedData,
+            tensorData: NSMutableData(data: speedData),
             elementType: .float,
             shape: [1]
         )
