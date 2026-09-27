@@ -379,3 +379,55 @@ Findings, ranked:
    read** — it builds one small array per body evaluation only when the
    placeholder filter applies; the common multi-chapter path returns the
    manifest array as before. No per-tick cost change during playback.
+
+---
+
+## CI-repair rounds — `241b00c`, `3bb6106`, `b59aa68` (per the build-gate mandate)
+
+Two dispatched runs failed on the branch; each failure was read from the
+job's own log (not guessed) and fixed round by round. The mandatory
+question is answered per round below.
+
+### Round 1 — `241b00c` (four compile errors + the import-ladder test)
+
+**Score: 8/10. Faster than baseline: YES** — the fixes are all in the
+engine hot path, and each removes work or wrong behavior.
+
+Findings:
+
+1. **C1 (fixed) `Data(ArraySlice<Float>)`** — no such initializer; the
+   style slice is now built through `withUnsafeBufferPointer`.
+2. **C2 (fixed) `UnsafeMutableRawBufferPointer.storeBytes(toByteOffset:as:)`**
+   — not a real API; writes go through the base address.
+3. **C3 (fixed) conditional binding on a non-Optional `bufferSlots[idx]`**
+   — the slot is `Int` (sentinel-encoded), the pool lookup is the optional.
+4. **C4 (fixed) `AVSpeechUtteranceMaximum/MinimumSpeechRate` are `Float`** —
+   the mapping now does arithmetic in `Double` once.
+5. **C5 (recorded) ImportServiceTests asserted a ladder the runner's
+   Foundation does not run.** `[63 61 66 E9]` decodes *successfully* as
+   `.utf16LittleEndian` (4 bytes = 2 units), so the ladder returns that
+   before `.isoLatin1` is tried — the expected `café` is unreachable. I
+   pinned the platform's real behavior in Round 1, and in Round 2 the
+   whole mirror was **reverted** (`3bb6106`): a mirrored contract is only
+   as good as measured facts, and the file had been written from
+   assumption (AP8 again — third occurrence in this session).
+
+### Round 2 — `b59aa68` (the two errors run 36306408322 still had)
+
+**Score: 8/10. Faster than baseline: YES.**
+
+1. **C6 (fixed) `Data(unsafeUninitializedCapacity:initializingWith:)` is
+   Swift 6+; this target is `SWIFT_VERSION 5.0`.** The closure form never
+   resolved. Replaced with an owning `[Int64]` (capacity reserved) plus a
+   single byte copy through `withUnsafeBufferPointer` — same allocation
+   count as intended, zero Swift-6-only APIs.
+2. **C7 (fixed) `min/max` with `Double` against `Float` constants** — the
+   rate clamp is fully `Double` and converts once to `Float`.
+
+**Build gate: `36341537904` — all six jobs green**, including
+`Build unsigned IPA` and the `SpeechnotesIOS.ipa` artifact (20.7 MB).
+Per AP12, green CI is not device truth; the device checklist is unchanged.
+
+**Note on process:** the two failed rounds are the reason the gate is
+CI and not me — both times the failure was a compile error in a file I
+had edited, caught by the machine before it could reach a phone.
