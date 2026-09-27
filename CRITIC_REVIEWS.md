@@ -314,3 +314,68 @@ Findings:
 - **Build proof: PENDING** — commits pushed to `batch-c-d-session`; CI
   `build-ipa` + `logic-tests` + spikes are the success gate. Per AP12,
   green CI is not device truth; the on-device checklist is unchanged.
+
+---
+
+## Bugfix batch — `5625a39`, `07785fb` (telemetry: system voice, audiobook reader)
+
+Per the mandate, each change reviewed inline with the mandatory question asked.
+
+### `5625a39` — system-voice rate, mid-utterance re-pitch, monotonic progress
+
+**Score: 8/10. Faster than baseline: YES** — the system voice was literally
+speaking at half its designed pace at the default rate, so every system-voice
+playback was ~2× slower than Supertonic; after the mapping fix it is a
+full-speed voice.
+
+Findings, ranked:
+
+1. **F1 (fixed) — the rate mapping halved every request.**
+   `utterance.rate = 0.5 * multiplier` mapped the app's 1.0 to Apple's 0.5,
+   which is not "1×" but the *default* of a scale whose top is 1.0 — so 2.0
+   requests also only ever reached 1.0. New mapping pins 1.0 →
+   `AVSpeechUtteranceDefaultSpeechRate` and 2.0 → maximum, so the app's
+   0.5…2.0 slider spans the whole scale.
+2. **F2 (fixed) — a rate change waited for the note to end.**
+   `restartAtCurrentPosition()` re-speaks from `lastRangeOffset` at the new
+   rate; `spokenOffsetInActiveText` keeps `onPlayedChars` addressed to the
+   whole spoken string so the read-along highlight and the resume bookmark
+   don't restart from char 0 on a pitch change.
+3. **F3 (fixed) — the progress publish could rewind.** The re-pitched
+   remainder starts its own range counter at 0; the 3.3 Hz throttle now only
+   passes strictly-increasing counts.
+4. **F4 (self-inflicted, caught in review) — the epoch trick was wrong at
+   first.** My first draft zeroed `spokenOffsetInActiveText` inside
+   `speak()`, which would have wiped the re-pitch offset because
+   `restartAtCurrentPosition` calls `speak(remainder)` after setting it. The
+   final version distinguishes a fresh speak (epoch bumped) from a re-pitch
+   (epoch untouched) and only zeroes on the fresh path. Caught by re-reading
+   the final file, not the diff.
+5. **(recorded) The `speed` setter now calls into speaking state.** Main-actor
+   only (every caller is the main-actor `SpeechPlayer`); guarded on
+   `synthesizer.isSpeaking`, so a background/idle set is a no-op.
+
+### `07785fb` — audiobook reader placeholder
+
+**Score: 8/10. Faster than baseline: YES** — the reader no longer renders a
+fake chapter row, and the empty state replaces a misleading one. (Also removes
+a per-render array allocation for the common single-placeholder case.)
+
+Findings, ranked:
+
+1. **F5 (fixed) — the placeholder masqueraded as a chapter.** One entry
+   titled "Full audiobook" at start 0 was rendered as a real chapter; the
+   view now filters exactly that shape (the writer's own fallback constant)
+   so the sheet's ContentUnavailableView states the truth.
+2. **F6 (recorded) — I first changed the parser.** I probed the user's real
+   m4b (box tree + byte-exact simulation of `parseChpl` against it) and it
+   parses all 12 chapters ffprobe reports — the parser was never the blocker
+   for THIS file. Speculative parser changes are exactly the anti-pattern the
+   repo's HANDOVER warns about ("dont claim too much about the audiobook
+   chapters"), so that change was reverted before commit and the diagnosis
+   is recorded instead. The device log line
+   `AudioBook import: ... N chapter(s) via SOURCE` decides it in one read.
+3. **(verified clean) `chapters` is now O(1) instead of a stored-property
+   read** — it builds one small array per body evaluation only when the
+   placeholder filter applies; the common multi-chapter path returns the
+   manifest array as before. No per-tick cost change during playback.
