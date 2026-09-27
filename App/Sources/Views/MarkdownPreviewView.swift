@@ -1,6 +1,7 @@
 import SwiftUI
 import SafariServices
 import SpeechLogic
+import UIKit
 
 /// Block-rendered markdown reading view.
 ///
@@ -536,13 +537,20 @@ struct MarkdownPreviewView: View {
         return resolvedImages[target]
     }
 
+    /// Headings follow the reader's text-size multiplier like body text
+    /// does. `.title`/`.title2`/... are fixed Dynamic Type steps, so the
+    /// Appearance slider used to move the paragraphs and leave the
+    /// headings exactly where they were — "the resizer does nothing for
+    /// headers" (device report). Each step is now the Dynamic Type size ×
+    /// the user's multiplier, computed once per body evaluation.
     private func headingFont(_ level: Int) -> Font {
+        let scale = theme.previewTextScale
         switch level {
-        case 1: return .title.weight(.bold)
-        case 2: return .title2.weight(.semibold)
-        case 3: return .title3.weight(.semibold)
-        case 4: return .headline
-        default: return .subheadline.weight(.semibold)
+        case 1: return .system(size: UIFont.preferredFont(forTextStyle: .largeTitle).pointSize * scale, weight: .bold)
+        case 2: return .system(size: UIFont.preferredFont(forTextStyle: .title1).pointSize * scale, weight: .semibold)
+        case 3: return .system(size: UIFont.preferredFont(forTextStyle: .title2).pointSize * scale, weight: .semibold)
+        case 4: return .system(size: UIFont.preferredFont(forTextStyle: .headline).pointSize * scale, weight: .semibold)
+        default: return .system(size: UIFont.preferredFont(forTextStyle: .subheadline).pointSize * scale, weight: .semibold)
         }
     }
 }

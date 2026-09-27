@@ -79,6 +79,18 @@ final class AudioBookPlayer: ObservableObject {
     private var lastPublishAt: Date?
     private var remoteWired = false
 
+    /// Set when a book's file cannot be decoded by the player at all.
+    /// The device log showed 30+ identical "cannot play original.m4b"
+    /// errors for the EAC3/5.1 'Harry Potter' file — the import succeeded,
+    /// every tap of Play retried the same un-decodable file. Reads set this
+    /// to nil; a non-nil value disables the play affordance and the reader
+    /// shows why (an honest "this file's audio can't be decoded" beats 30
+    /// retries and a dead bar).
+    @Published private(set) var playbackBlockedReason: String?
+
+    /// Set when this book's file cannot be decoded by the player at all.
+    var isBlocked: Bool { playbackBlockedReason != nil }
+
     /// Set by the audio reader on appear; position writes go through it.
     weak var store: BooksStore?
 
@@ -110,6 +122,7 @@ final class AudioBookPlayer: ObservableObject {
         activeBook = book
         activeBookID = book.id
         userPaused = false
+        playbackBlockedReason = nil
         let url = BooksStore.resolveAudioOriginalURL(book: book)
         do {
             // Same one-shot session configuration every engine runs on first
@@ -140,8 +153,57 @@ final class AudioBookPlayer: ObservableObject {
             publishNowPlaying(force: true)
             persistPosition(force: true)
         } catch {
-            Log.shared.error("AudioBookPlayer: cannot play \(url.lastPathComponent): \(error)")
+            // ONE line, and a reason the UI can act on. The device log for
+            // the EAC3 'Harry Potter' book showed this catch firing 30+
+            // times for one book — every Play tap re-created the same
+            // un-decodable file. AVAudioPlayer cannot decode EAC3/5.1
+            // (Dolby Digital Plus / Atmos): the OS exposes those to
+            // hardware decoders the Audio File path doesn't reach.
+            let reason = AudioBookPlayer.unplayableReason(for: error, url: url)
+            Log.shared.error("AudioBookPlayer: cannot play \(url.lastPathComponent): \(error) — \(reason)")
+            playbackBlockedReason = reason
+            isPlaying = false
+            // Leave the ticker running off; a dead ticker would keep
+            // publishing a playhead that never moves.
+            stopTicker()
         }
+    }
+
+    /// A codec-level failure is the file's, not a transient: name it so the
+    /// reader can show it instead of retrying forever.
+    private static func unplayableReason(for error: Error, url: URL) -> String {
+        let nsError = error as NSError
+        // 1685348671 = kAudioFileInvalidChunkError: the container/codec walk
+        // failed — in practice EAC3/Atmos or another software-undecodable
+        // stream. Sniff the codec so the message is specific.
+        let codec = sniffedCodec(url: url)
+        if let codec {
+            return "This file's audio (\(codec)) can't be decoded on this device. Re-encode it as AAC or MP3 and re-import."
+        }
+        if nsError.code == 1685348671 {
+            return "This file's audio format can't be decoded on this device. Re-encode it as AAC or MP3 and re-import."
+        }
+        return "Couldn't read this file (\(nsError.localizedDescription))."
+    }
+
+    /// The first audio stream's codec, read from the container's own
+    /// `stsd`/`esds` descriptors. Cheap — one small head read, and only
+    /// ever called on the failure path.
+    private static func sniffedCodec(url: URL) -> String? {
+        guard let head = BooksStore.slice(of: url, from: 0, length: 256 * 1024) else { return nil }
+        let known: [(String, String)] = [
+            ("ec-3", "Dolby Digital Plus (EAC3)"),
+            ("EAC3", "Dolby Digital Plus (EAC3)"),
+            ("ac-3", "Dolby Digital (AC3)"),
+            ("AC-3", "Dolby Digital (AC3)"),
+            ("alac", "Apple Lossless (ALAC)"),
+            ("Opus", "Opus"),
+            ("fLaC", "FLAC"),
+        ]
+        for (fourCC, label) in known {
+            if head.range(of: Data(fourCC.utf8)) != nil { return label }
+        }
+        return nil
     }
 
     func pause() {

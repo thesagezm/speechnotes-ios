@@ -32,6 +32,13 @@ struct GlobalMiniPlayerOverlay: ViewModifier {
 
     private enum Bar { case audioBook, export, note, none }
 
+    /// One identity for "everything that can make the bar appear,
+    /// disappear, or change shape" — so the overlay attaches ONE spring to
+    /// one value instead of four easings to four.
+    private var barAnimationKey: String {
+        "\(player.showMiniPlayer)|\(audioBooks.showMiniBar)|\(wav.showMiniPlayer)|\(miniPlayerCollapsed)|\(player.state)|\(audioBooks.isPlaying)"
+    }
+
     func body(content: Content) -> some View {
         ZStack(alignment: .bottom) {
             content
@@ -47,7 +54,7 @@ struct GlobalMiniPlayerOverlay: ViewModifier {
                             .frame(maxWidth: .infinity, alignment: .trailing)
                             .padding(.horizontal, 16)
                             .padding(.bottom, 49 + 34 + 8)
-                            .transition(.scale.combined(with: .opacity))
+                            .transition(.scale(scale: 0.85, anchor: .bottomTrailing).combined(with: .opacity))
                             .zIndex(1)
                     } else {
                         expandedBar
@@ -57,10 +64,18 @@ struct GlobalMiniPlayerOverlay: ViewModifier {
                     }
                 }
             }
-            .animation(.easeInOut(duration: 0.2), value: player.showMiniPlayer)
-            .animation(.easeInOut(duration: 0.2), value: audioBooks.showMiniBar)
-            .animation(.easeInOut(duration: 0.2), value: wav.showMiniPlayer)
-            .animation(.easeInOut(duration: 0.2), value: miniPlayerCollapsed)
+            // One spring for the whole bar. The four separate .animation
+            // modifiers each attached their own 0.2 s ease to a DIFFERENT
+            // value, so a bar that changed two of them at once (play → the
+            // mini-player surfaces AND the collapsed state flips) animated
+            // two conflicting transactions and the bar visibly snapped
+            // rather than eased. A single spring on the union of the four
+            // values gives one coherent motion, and the longer,
+            // lower-bounce curve is what reads as "smooth" rather than
+            // "popped". The tuck expand/collapse keeps its own spring
+            // modifier inside AudioBookMiniPlayerBar.
+            .animation(.spring(response: 0.42, dampingFraction: 0.82, blendDuration: 0.12),
+                       value: barAnimationKey)
         }
     }
 

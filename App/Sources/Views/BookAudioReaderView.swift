@@ -192,9 +192,11 @@ struct BookAudioReaderView: View {
         .frame(maxWidth: .infinity)
     }
 
-    /// Portrait transport cluster: scrub slider, ±15 s skip around the play
-    /// button (the VLC/Apple-Books shape — chapter stepping lives in the
-    /// chapter bar below, which is visible with the chrome hidden too).
+    /// Portrait transport cluster: scrub slider, then the VLC/Apple-Books
+    /// row — chapter prev, −15 s, play, +15 s, chapter next. The chapter
+    /// chevrons moved OUT of the bottom bar to flank the ±15 s skips so
+    /// every transport control sits in one place (user request: "place
+    /// them lateral to the 15s+/-").
     private var audioTransport: some View {
         VStack(spacing: 14) {
             Slider(value: Binding(
@@ -206,13 +208,14 @@ struct BookAudioReaderView: View {
             })
             .padding(.horizontal, 24)
 
-            HStack(spacing: 40) {
-                Button {
-                    Haptics.tap()
+            HStack(spacing: 22) {
+                transportIcon("backward.end.fill", size: 22, weight: .semibold,
+                              disabled: chapterIndex <= 0,
+                              label: "Previous chapter") {
+                    stepChapter(-1)
+                }
+                transportIcon("gobackward.15", size: 30, weight: .regular, label: "Back 15 seconds") {
                     audioBook.seekBy(-15)
-                } label: {
-                    Image(systemName: "gobackward.15")
-                        .font(.system(size: 30))
                 }
 
                 Button {
@@ -223,18 +226,43 @@ struct BookAudioReaderView: View {
                         .font(.system(size: 56))
                 }
 
-                Button {
-                    Haptics.tap()
+                transportIcon("goforward.15", size: 30, weight: .regular, label: "Forward 15 seconds") {
                     audioBook.seekBy(15)
-                } label: {
-                    Image(systemName: "goforward.15")
-                        .font(.system(size: 30))
+                }
+                transportIcon("forward.end.fill", size: 22, weight: .semibold,
+                              disabled: totalChapters > 0 && chapterIndex >= totalChapters - 1,
+                              label: "Next chapter") {
+                    stepChapter(1)
                 }
             }
             .foregroundStyle(Color.accentColor)
 
             timeReadout
         }
+    }
+
+    /// One transport icon with the same affordance as the play button —
+    /// disabled state, haptic, accessibility label, and a consistent hit
+    /// area so the ±15 s and chapter chevrons all feel the same under the
+    /// thumb.
+    @ViewBuilder
+    private func transportIcon(
+        _ systemName: String,
+        size: CGFloat,
+        weight: Font.Weight,
+        disabled: Bool = false,
+        label: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button {
+            Haptics.tap()
+            action()
+        } label: {
+            Image(systemName: systemName)
+                .font(.system(size: size, weight: weight))
+        }
+        .disabled(disabled)
+        .accessibilityLabel(label)
     }
 
     /// Landscape transport panel — the audiobook twin of the redesigned
@@ -395,35 +423,19 @@ struct BookAudioReaderView: View {
     /// Chapter bar — visible in BOTH orientations at the bottom of the cover
     /// column. The chapter LIST lives in the toolbar's Chapters button only
     /// (round 5: the second entry point at the bottom was redundant — the
-    /// toolbar is the table of contents, one tap with the chrome visible).
-    /// Centre: position + title. Trailing: chapter stepping, the semantic
-    /// next/prev the ±15 s skips deliberately are not.
+    /// toolbar is the table of contents, one tap with the chrome visible),
+    /// and the chapter STEP chevrons moved into the transport cluster
+    /// (flanking the ±15 s skips) so every control sits in one place.
+    /// What remains here is the label itself: where you are, and where the
+    /// book runs to.
     private var chapterBar: some View {
         HStack(spacing: 16) {
-            Spacer()
+            Spacer(minLength: 0)
             Text(chapterLabel)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
-            Spacer()
-
-            Button {
-                Haptics.tap()
-                stepChapter(-1)
-            } label: {
-                Image(systemName: "chevron.left")
-            }
-            .disabled(chapterIndex <= 0)
-            .accessibilityLabel("Previous chapter")
-
-            Button {
-                Haptics.tap()
-                stepChapter(1)
-            } label: {
-                Image(systemName: "chevron.right")
-            }
-            .disabled(totalChapters > 0 && chapterIndex >= totalChapters - 1)
-            .accessibilityLabel("Next chapter")
+            Spacer(minLength: 0)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
@@ -555,6 +567,11 @@ struct BookAudioReaderView: View {
         audioBook.play(book: book, chapterIndex: index, withinChapterFraction: fraction)
         scrubValue = audioBook.chapterProgress
     }
+
+    /// True while this book's file is un-decodable — the reader then shows
+    /// the reason (once) and the transport's Play affordance explains
+    /// itself instead of failing 30 times, as the device log showed.
+    private var isBlocked: Bool { audioBook.playbackBlockedReason != nil }
 
     private func stepChapter(_ delta: Int) {
         let target = max(0, min(chapters.count - 1, chapterIndex + delta))
