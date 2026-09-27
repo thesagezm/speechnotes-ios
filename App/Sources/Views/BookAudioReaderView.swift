@@ -31,7 +31,23 @@ struct BookAudioReaderView: View {
     /// whole-book remaining.
     @State private var showingBookRemaining = false
 
-    private var chapters: [AudioChapter] { book.audioChapters ?? [] }
+    /// The chapters the UI shows. `book.audioChapters` is the manifest's
+    /// stored list, but a book imported while a chapter reader was broken
+    /// (or by an older build) can carry only the implicit "Full audiobook"
+    /// placeholder — one entry that is not a real marker. Showing it as a
+    /// one-row chapter sheet reads as "the app found chapters, they're just
+    /// badly named"; the honest UI (and what the user reported as "chapters
+    /// not showing") is the empty list: the sheet then says the file carries
+    /// no chapter markers, and the chapter bar reads "Chapter 1 of 1".
+    private var chapters: [AudioChapter] {
+        let stored = book.audioChapters ?? []
+        // The placeholder is exactly one chapter titled "Full audiobook"
+        // starting at 0 — the writer's fallback in BooksStore.buildAudioManifest.
+        if stored.count == 1, stored[0].title == "Full audiobook", stored[0].startSeconds == 0 {
+            return []
+        }
+        return stored
+    }
     /// True when the app-level player is currently loaded with THIS book.
     private var isActive: Bool { audioBook.activeBookID == book.id }
     private var isPlaying: Bool { isActive && audioBook.isPlaying }
