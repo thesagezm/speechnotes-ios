@@ -3,7 +3,7 @@
 An offline, Speech Note (Linux)-style app for iPhone — built entirely from Linux,
 compiled on GitHub Actions macOS runners, sideloaded via SideStore + LiveContainer.
 
-**Current status: v1.7.0 — Books complete (EPUB, PDF and audiobooks, with
+**Current status: v1.7.1 — Books complete (EPUB, PDF and audiobooks, with
 full TTS for the first two), landscape with the playback controls on a
 lateral rail. The device rounds' reported bugs are being fixed on this
 branch WITHOUT version bumps: the Soprano download now completes and
@@ -30,7 +30,7 @@ same text fails the same way, and the wait for it is silence the listener pays
 for. Text is cleaned at import so the things that used to fail (soft hyphens,
 zero-width joiners, control bytes, embedded-font glyphs) never reach the model.
 
-Reader and reading surfaces (v1.6.1→v1.7.0, all from device reports):
+Reader and reading surfaces (v1.6.1→v1.7.1, all from device reports):
 
 - **Landscape, controls on the side.** Rotate the phone: the playback
   controls become a vertical rail on the trailing edge — voice, play/stop,
