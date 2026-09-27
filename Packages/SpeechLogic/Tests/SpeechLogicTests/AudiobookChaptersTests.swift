@@ -108,6 +108,29 @@ final class AudiobookChaptersTests: XCTestCase {
         XCTAssertEqual(chapters[1].startSeconds, 600, accuracy: 0.001)
     }
 
+    /// The TAIL slice parse: the manifest builder now reads an 8 MB head
+    /// slice + an 8 MB tail slice of an audiobook instead of mapping the
+    /// whole 266 MB (or 1.5 GB) file, so the tail scan starts MID-STREAM
+    /// (inside mdat) and cannot use a box walk. `chaptersFromMP4Tail`
+    /// finds `chpl` by signature; this is the same fixture the box walk
+    /// reads, sliced to the last 8 MB so the parse starts mid-mdat.
+    func testTailSliceChplIsFound() {
+        let file = m4bMoovAtEnd(chapters: [(0, "Prologue"), (600, "Epilogue"), (900, "Afterword")])
+        // Mid-stream start: the first bytes must NOT be a box header.
+        let tailStart = max(0, file.count - 64)
+        let tail = file.subdata(in: tailStart..<file.count)
+        let chapters = AudiobookChapters.chaptersFromMP4Tail(tail, totalSeconds: 1000)
+        XCTAssertEqual(chapters.map(\.title), ["Prologue", "Epilogue", "Afterword"])
+        XCTAssertEqual(chapters[1].startSeconds, 600, accuracy: 0.001)
+        // A tail with no chpl at all returns nothing (no crash, no junk).
+        let junk = Data([UInt8](repeating: 0x41, count: 512))
+        XCTAssertTrue(AudiobookChapters.chaptersFromMP4Tail(junk, totalSeconds: 1000).isEmpty)
+        // A 'chpl' byte sequence in audio payload must not manufacture
+        // chapters: the payload that follows is not a valid chpl.
+        let falsePositive = Data("AAAAchplAAAA".utf8)
+        XCTAssertTrue(AudiobookChapters.chaptersFromMP4Tail(falsePositive, totalSeconds: 1000).isEmpty)
+    }
+
     /// ffmpeg movenc's chpl variant — the layout the USER'S own book uses
     /// (When Breath Becomes Air, MOODY release): 4 zero bytes where Nero
     /// puts the count, then the count as ONE byte at offset 8. The round-6

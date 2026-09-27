@@ -71,6 +71,34 @@ final class BooksStore: ObservableObject {
         bookDirectory(book.id).appendingPathComponent("cover.jpg")
     }
 
+    // MARK: - Audiobook parse slices
+
+    /// How much of an audiobook the chapter readers look at: moov sits at
+    /// the head (+faststart) or the tail (plain ffmpeg), so head+tail is
+    /// enough for anything real. The old code mapped the WHOLE file, which
+    /// on a 266 MB m4b was seconds of page faults on the utility queue —
+    /// the "tap any book and the app freezes" report.
+    nonisolated static let audioParseHeadBytes = 8 * 1024 * 1024
+    nonisolated static let audioParseTailBytes = 8 * 1024 * 1024
+
+    /// `length` bytes starting at `from`, clamped to the file's size.
+    nonisolated static func slice(of url: URL, from offset: Int64, length: Int) -> Data? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        do {
+            let size = try handle.seekToEnd()
+            guard offset < size else { return nil }
+            try handle.seek(toOffset: offset)
+            return handle.readData(ofLength: min(Int(length), Int(size - offset)))
+        } catch {
+            return nil
+        }
+    }
+
+    nonisolated static func fileSize(of url: URL) -> Int64 {
+        (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int64 ?? 0
+    }
+
     /// Cached speech text for one chapter (written by the TTS phase; the
     /// reader path never has to re-extract a chapter it already spoke).
     nonisolated static func speechTextURL(_ book: Book, chapterIndex: Int) -> URL {
@@ -101,6 +129,17 @@ final class BooksStore: ObservableObject {
 
     /// Called on tab open — never at launch (LiveContainer launch hygiene:
     /// no file I/O inside the first render).
+    ///
+    /// MANIFEST DECODE ONLY: each book is one small manifest.json, so the
+    /// shelf is a directory listing plus N tiny decodes — cheap. The audio
+    /// backfill below used to re-open every pending audiobook's FULL FILE
+    /// (a memory map of the whole m4b, an AVURLAsset duration load, a sync
+    /// chapterMetadataGroups, then a complete top-level box walk touching
+    /// every mdat chunk). For a 266 MB book that was seconds of wall time
+    /// on a utility queue competing with the main thread's I/O — the
+    /// "tapping any book freezes the app" report. The audio backfill is
+    /// now ONE BOOK PER LAUNCH (oldest first) and everything else about it
+    /// is unchanged.
     func refresh() {
         let fm = FileManager.default
         guard let dirs = try? fm.contentsOfDirectory(
@@ -117,17 +156,22 @@ final class BooksStore: ObservableObject {
         books = shelf.sorted {
             ($0.lastOpenedAt ?? $0.addedAt) > ($1.lastOpenedAt ?? $1.addedAt)
         }
-        backfillMissingPDFCovers()
+        backfillMissingBooks(maxAudioBooks: 1)
     }
 
-    /// PDFs imported before covers existed (or whose render failed at import)
-    /// get their page-1 cover generated lazily here; epubs imported before the
-    /// TTS phase lack their spine list and get it re-parsed. One detached pass
-    /// per book, then the manifest updates and the shelf refreshes. One-shot
-    /// per session: a book that keeps failing must not loop.
+    /// One backfill pass per launch: PDFs/EPUBs imported before covers,
+    /// spine lists or nested TOCs existed get them filled in, and
+    /// `maxAudioBooks` (default 1) audio books get their manifest re-read
+    /// from the file. One detached pass, then the shelf refreshes.
+    ///
+    /// The audio book re-read is EXPENSIVE by nature — it maps the whole
+    /// m4b and walks its box tree — so it is capped (oldest book first) and
+    /// deferred behind everything else. With N pending audio books the
+    /// shelf repaired one per launch rather than seconds of I/O on every
+    /// launch.
     private var didBackfillLegacyBooks = false
 
-    private func backfillMissingPDFCovers() {
+    private func backfillMissingBooks(maxAudioBooks: Int = 1) {
         guard !didBackfillLegacyBooks else { return }
         let pending = books.filter { book in
             (book.format == .pdf && (!book.hasCover || book.pdfChapters == nil))
@@ -153,8 +197,18 @@ final class BooksStore: ObservableObject {
         }
         guard !pending.isEmpty else { return }
         didBackfillLegacyBooks = true
+        // Audio books: oldest added first, at most `maxAudioBooks`. Other
+        // formats are cheap (a page render, a spine parse) and all go.
+        let orderedPending = pending
+        let capped: [Book] = {
+            let others = orderedPending.filter { $0.format != .audio }
+            let audio = orderedPending.filter { $0.format == .audio }
+                .sorted { $0.addedAt < $1.addedAt }
+                .prefix(maxAudioBooks)
+            return others + audio
+        }()
         Task.detached(priority: .utility) { [weak self] in
-            for var book in pending {
+            for var book in capped {
                 let dir = BooksStore.bookDirectory(book.id)
                 switch book.format {
                 case .pdf:
@@ -419,9 +473,17 @@ final class BooksStore: ObservableObject {
         //      hand parser needs a full sample-table walk for) and resolves
         //      titles. The first device round showed the byte parsers alone
         //      leave real books with "Full audiobook" as the only chapter.
-        //   2. The hand parsers on the head slice (chpl / ID3 CHAP / chapter
-        //      track) — the fallback for files AVFoundation opens without
-        //      chapter metadata, and the unit-tested reference.
+        //   2. The hand parsers — the fallback for files AVFoundation opens
+        //      without chapter metadata, and the unit-tested reference.
+        //
+        // Only an 8 MB head slice and (at most) one 8 MB tail slice are
+        // read now — never the whole file. moov lives at the head
+        // (+faststart) or the tail (plain ffmpeg) and nothing between is
+        // a box header. Mapping a 266 MB m4b — let alone a 1.5 GB
+        // Harrisons-sized one — to find a box that is at one end or the
+        // other is the device freeze: every page of the map is a fault,
+        // the utility queue competes with the main thread for I/O, and
+        // taps stop landing.
         let avChapters = Self.chaptersFromAVFoundation(asset, totalSeconds: book.audioDuration ?? 0)
         if !avChapters.isEmpty {
             book.audioChapters = avChapters
@@ -429,17 +491,28 @@ final class BooksStore: ObservableObject {
         }
 
         if book.audioChapters == nil {
-            // Full-file parse through a memory mapping (moov may sit at the
-            // END of the container — ffmpeg without +faststart puts it there,
-            // and the old 8 MB head slice never saw it; VLC reads the whole
-            // box tree, which is why those books showed chapters there and
-            // "Full audiobook" here). Mapped data costs no RAM to walk.
             let chapters: [AudioChapter]
-            if book.format == .audio, let mapped = try? Data(contentsOf: original, options: .mappedIfSafe) {
-                if mapped.starts(with: [0x49, 0x44, 0x33]) {
-                    chapters = AudiobookChapters.chaptersFromID3(mapped)
+            if book.format == .audio, let head = Self.slice(of: original, from: 0, length: Self.audioParseHeadBytes) {
+                if head.starts(with: [0x49, 0x44, 0x33]) {
+                    // MP3: ID3v2 lives at the head, full stop.
+                    chapters = AudiobookChapters.chaptersFromID3(head)
                 } else {
-                    chapters = AudiobookChapters.chaptersFromMP4(mapped, totalSeconds: book.audioDuration ?? 0)
+                    // MP4-family: the HEAD slice starts on a box boundary
+                    // so the normal box walk reads moov when the file was
+                    // written +faststart. Otherwise moov lives at the end
+                    // and the tail slice starts MID-mdat — no box walk
+                    // works there, so chaptersFromMP4Tail hunts chpl by
+                    // signature (its own count + title lengths validate
+                    // the hit; a random 4CC in audio payload fails the
+                    // parse and the scan moves on).
+                    chapters = AudiobookChapters.chaptersFromMP4(head, totalSeconds: book.audioDuration ?? 0)
+                    if chapters.isEmpty {
+                        let size = Self.fileSize(of: original)
+                        let tailStart = max(0, size - Self.audioParseTailBytes)
+                        if let tail = Self.slice(of: original, from: tailStart, length: Self.audioParseTailBytes) {
+                            chapters = AudiobookChapters.chaptersFromMP4Tail(tail, totalSeconds: book.audioDuration ?? 0)
+                        }
+                    }
                 }
             } else {
                 chapters = []

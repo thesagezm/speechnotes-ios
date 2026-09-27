@@ -69,6 +69,31 @@ public enum AudiobookChapters {
         return chapters
     }
 
+    /// `chaptersFromMP4` over a slice that does NOT start on a box boundary
+    /// (the tail slice of a container, whose first bytes are mid-mdat).
+    ///
+    /// Rather than resync a box walk by scanning for plausible lengths —
+    /// which is indistinguishable from garbage — this walks the payload for
+    /// a `chpl` atom by signature. `chpl` carries a count, a per-chapter
+    /// 8-byte start and a Pascal title, so its own structure validates the
+    /// hit: a false positive would have to carry a consistent count and
+    /// title lengths. If no chpl is found, the caller falls back to
+    /// AVFoundation (whose reader understood the file) or to "single".
+    public static func chaptersFromMP4Tail(_ data: Data, totalSeconds: Double) -> [AudioChapter] {
+        let bytes = Array(data)
+        let signature = Array("chpl".utf8)
+        var cursor = 0
+        while let hit = bytes.firstRange(of: signature, in: cursor..<bytes.count) {
+            let payloadStart = hit.upperBound
+            let chapters = parseChpl(Array(bytes[payloadStart...]), totalSeconds: totalSeconds)
+            if !chapters.isEmpty {
+                return normalize(chapters, totalSeconds: totalSeconds) ?? chapters
+            }
+            cursor = hit.upperBound
+        }
+        return []
+    }
+
     /// Chapters from ID3v2 `CHAP` frames (MP3). `CTOC` is read only to learn
     /// the intended order; with no CTOC the frames' own order is used.
     public static func chaptersFromID3(_ data: Data) -> [AudioChapter] {
