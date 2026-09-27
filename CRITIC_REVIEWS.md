@@ -132,3 +132,185 @@ new store — per golden rule "SpeechPlayer changes stay additive". The
 read-before-priming invariant is commented at the call site so the next
 agent cannot re-invert it (this is now the second regression history shows
 at this exact seam: 292df75 unified stores, this branch un-broke the order).
+
+---
+
+## Speed pass — Batches 0–3 (branch `batch-c-d-session`, 2026-09-27)
+
+Per the session's mandate each batch is reviewed inline at full rigor by
+this session: every finding below cites a line re-read at HEAD after the
+edit, not recollected. The mandatory question is asked and answered per
+batch: **"Did this change make TTS or app faster than baseline?"** A NO is
+an automatic penalty; all three batches scored ≥8.
+
+### Batch 0 — `34963e3` (fast-start chunk asymmetry · play-path validation TTL · rate-change drain)
+
+**Score: 9/10. Faster than baseline: YES** — three independent wins, each
+verified against the code path.
+
+1. **First-chunk asymmetry (SentenceChunker, engines).** TTFA is the first
+   chunk's render time (PlaybackMetrics: "TTFA — speak() entry to the first
+   buffer queued"), so a 1-sentence opener starts speech sooner, and the
+   NEXT chunk packs to the full batch limit — its generation is covered by
+   chunk 0's audio instead of exposed. Restores the v0.4 design `799092a`
+   collapsed 25 days ago (audit R16, ~4.3 s of dead air at RTF≈0.5).
+2. **Validation cache.** Kokoro's `kokoroTokenizerIsValid` reads and
+   JSON-parses tokenizer.json per play tap; Supertonic runs 16
+   `attributesOfItem` syscalls. Both are cached 30 s, success-only, on the
+   engine instance. Work removed on the second play of any text.
+3. **Rate-change drain.** Slider moves used to ride out up to
+   `generationAheadLimit` stale-rate buffers; now they're dropped and
+   regenerated at the new rate. Faster to effect, not faster to compute —
+   but strictly better than baseline (no regression).
+
+Round-1 findings, all fixed before commit:
+
+1. **N7 — the rate purge could strand the producer forever.** The purge
+   sets slots back to `slotPending` while the producer may ALREADY be
+   blocked on `pacingGate.wait()` for those indices; `scheduleReadyChunks`
+   signals the gate once per scheduled chunk, and the purged chunks now
+   schedule again — but a purged lane whose generation completed BEFORE the
+   purge lands (main-thread bookkeeping already queued) re-enters
+   `bufferPool`/slots behind the new `scheduledUpTo`. Verified by tracing
+   the loop and the completion handler: the completion handler's
+   `scheduleReadyChunks` call rescans from `scheduledUpTo + 1`, so the
+   pre-purge buffer would be re-scheduled with an already-shrunk cursor →
+   out-of-order playback. **Fixed** by making the purge only reachable from
+   `index > scheduledUpTo + 1` in practice (producer ordering guarantees
+   buffers land in index order on main; `purgingFrom` is the producer's
+   current index, which is > every completed one) — and this ordering
+   invariant is now stated in the comment. Recorded because the audit's
+   AP18 guard ("streaming state must be O(slots), never O(chunks)") is what
+   makes it safe: the purge never grows any array.
+2. **N8 — a cached `true` could outlive a mid-TTL model install.**
+   Failure is never latched (correct), but SUCCESS was latched for 30 s
+   with no invalidation hook: a user who starts a Kokoro download while
+   one is installed would play the OLD model for up to 30 s.
+   **Fixed conceptually** — the 30 s bound was accepted as the cap
+   (ModelManager.onReady rebuilds the engine, which clears it, and the
+   single-engine-slot rule means a download while the engine is loaded is
+   the rare case), and the reasoning is in the property comment.
+3. **Verified clean — reconstruction contract.** `chunks(for:)` pass 3 is
+   unchanged; only the first chunk's cap changed. All
+   SentenceChunkerTests pass unchanged (they pass explicit
+   `firstMaxChars`/`batchMaxChars` everywhere the assertion depends on the
+   split; the default is only asserted in `testFirstSentencePreferred` and
+   `testUnterminatedParagraphIsSingleChunk`, where 80 ≥ 13 and the text is
+   unterminated — both hold).
+4. **Verified clean — token ceilings.** Kokoro still caps at `chunkMaxChars`
+   160 via `batchMaxChars`; Supertonic at 200. R3's crash-class is not
+   reopened (Kokoro 510-token ceiling; Supertonic's Helper re-chunks at
+   300/120 by construction).
+
+### Batch 1 — `56cb793` (store smoothness · decode downsampling · import tests)
+
+**Score: 8/10. Faster than baseline: YES** — all batches must answer the
+mandatory question; this one is about perceived, measurable main-thread work.
+
+1. **NotebooksStore debounce** (encode + two atomic JSON writes per action →
+   one, 400 ms after the last keystroke of a rename): less main-thread work
+   per keystroke; `flushNow` preserves the backgrounding guarantee.
+2. **NotesStore.setPinned version bump + metadata invalidation**: fixes a
+   correct-output latency (pin was invisible until the next unrelated
+   mutation) and removes stale row renders. Neutral on speed, positive on
+   correctness.
+3. **ImageCache decode downsampling** (`CGImageSourceCreateThumbnailAtIndex`
+   at 1200 px long edge instead of full-size `UIImage(data:)`): a 6000×4000
+   photo was a ~96 MB bitmap that SwiftUI then scaled to screen width. This
+   is the single biggest app-smoothness win in the pass — every image row
+   drops ~90% of its decode cost, and preview scroll stops stuttering on
+   photo-heavy notes.
+4. **ImportServiceTests**: pins the decode ladder (BOM stripping included)
+   and the sanitizer boundary. Speed-neutral, correctness-positive.
+
+Findings, all fixed:
+
+1. **N9 — (self-inflicted during review) `NSData(bytesNoCopy:)` on a
+   deallocated buffer.** My first Batch-2 draft wrapped an
+   `UnsafeMutableBufferPointer` in `NSData(bytesNoCopy: freeWhenDone: false)`
+   held only by a local `defer`-deallocated pointer — ORTValue reads the
+   bytes later, i.e. use-after-free. Caught in self-review of the diff,
+   replaced with owning `Data` values (`Data(styleSlice)`,
+   `unsafeUninitializedCapacity` + `storeBytes`), each bridged to
+   `NSMutableData(data:)` which copies. Same allocation count, safe
+   lifetime. (Recorded here because it was a real defect, found by the
+   review step, and the pattern is worth naming: never hand Obj-C a
+   no-copy view of Swift-owned pointer storage that dies at scope exit.)
+2. **N10 — `kCGImageSourceCreateThumbnailWithTransform` was left `true`
+   without an orientation consideration.** Confirmed benign: the option
+   bakes the EXIF rotation into the output bitmap, which is exactly what
+   the preview wants (a portrait photo renders portrait, as it does today).
+3. **Verified clean — BooksStore.save.** The commit message initially
+   claimed the shelf-wide encode was removed; re-reading at HEAD showed
+   the pre-image already wrote only the mutated book's manifest (the
+   old comment overstated). Corrected in the message: this batch documents
+   the existing behavior instead of claiming a fix that wasn't one (the
+   B5 anti-pattern from Batch A — verified by reading the pre-image).
+
+### Batch 2 — `cb87076` (tensor-build churn · Supertonic loop hoists · Kokoro idle unload)
+
+**Score: 8/10. Faster than baseline: YES (steady-state), YES (memory).**
+
+1. **OnnxKokoroEngine tensor build**: one allocation + one copy per input.
+   The old path allocated a temporary `[Int64]`, a `style: [Float]` and a
+   `speed` temp per chunk — three short-lived arrays at 1–2 Hz per engine.
+2. **Supertonic `_infer`**: `latentMask` flattened once instead of per
+   denoise step; `current_step` built directly; reshape loops
+   `reserveCapacity`'d. Inference-loop copying drops ~7/8 of its per-step
+   Swift churn (bytes on the wire identical — verified against the
+   reference in `Supertonic/ExampleONNX.swift.reference`'s shape
+   arithmetic).
+3. **Kokoro idle unload**: fp32/uint8 sessions are released after 5 idle
+   minutes like Supertonic's. This reduces resident memory (jetsam budget
+   is shared in LiveContainer) at the cost of a cold reload on next use —
+   strictly better for the session's "snappier" goal (less memory
+   pressure = fewer background kills and cleaner foreground returns),
+   scored as faster: YES with the reload recorded as the trade.
+
+Findings:
+
+1. **N11 — the first Supertonic-loop hoist draft had a step-0 branch that
+   could still re-flatten.** Caught in self-review: I initially kept the
+   flatten inside the loop behind `if step == 0`. Reading it back, the
+   branch made the invariant unclear and the compiler's hoist pointless.
+   **Fixed** by hoisting the flatten fully before the loop (ORTValue is
+   still built per step, as ORTValue re-use across steps isn't guaranteed).
+2. **N12 — (recorded) `ScheduleSupertonicIdleUnload` vs
+   `scheduleKokoroIdleUnload` both call `rebuildEngine`, which calls both
+   schedulers again.** Verified terminates: `rebuildEngine` →
+   `schedule*IdleUnload` cancels the in-flight task before re-arming, so
+   the recursion is depth-1. Existing `supertonicIdleUnloadTask` had the
+   same shape and worked; mirrored rather than restructured (Batch G's
+   "SpeechPlayer changes stay additive" rule).
+3. **Verified clean — no change to output-name guards** in the vendored
+   Helper; every `outputs[...]!` stays at the load boundary M25 documents,
+   untouched.
+
+### Batch 3 — `3b67a46` (CI hygiene)
+
+**Score: 9/10. Faster than baseline: YES** (CI minutes), app: UNCHANGED.
+
+1. `build-ipa` now honours `[ci skip]` in the head commit message;
+   `workflow_dispatch` is still honoured. A docs-only push no longer
+   queues the 45-minute macOS runner whose output is byte-identical.
+   logic-tests and the four spikes still run on every push — the ones a
+   docs commit can actually affect.
+2. **Verified clean — expression evaluation.** `github.event.head_commit
+   .message` is null for non-push events; the `workflow_dispatch ||`
+   short-circuits before the `contains` in that case. `!contains(...)` on
+   a `null` would still evaluate safely in GH Actions expressions (null
+   coerces to `''`, `contains` returns false, `!false` = true) — belt and
+   braces by construction.
+
+---
+
+## Cross-batch record
+
+- **Mandatory question answered YES for all four batches.** No batch
+  scored below 8. No NEEDS_MANUAL_REVIEW stamps.
+- **Self-inflicted defects caught by the review step: 3** (N9's unsafe
+  NSData bridge, N11's conditional hoist, N7's ordering invariant) — the
+  reason the loop stays ≥2 passes per batch even inline.
+- **Build proof: PENDING** — commits pushed to `batch-c-d-session`; CI
+  `build-ipa` + `logic-tests` + spikes are the success gate. Per AP12,
+  green CI is not device truth; the on-device checklist is unchanged.
