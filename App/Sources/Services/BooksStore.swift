@@ -85,14 +85,12 @@ final class BooksStore: ObservableObject {
     nonisolated static func slice(of url: URL, from offset: Int64, length: Int) -> Data? {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
-        do {
-            let size = try handle.seekToEnd()
-            guard offset < size else { return nil }
-            try handle.seek(toOffset: offset)
-            return handle.readData(ofLength: min(Int(length), Int(size - offset)))
-        } catch {
-            return nil
-        }
+        guard offset >= 0 else { return nil }
+        let start = UInt64(offset)
+        guard let size = try? handle.seekToEnd(), start < size else { return nil }
+        try? handle.seek(toOffset: start)
+        let want = UInt64(max(0, length))
+        return handle.readData(ofLength: Int(min(want, size - start)))
     }
 
     nonisolated static func fileSize(of url: URL) -> Int64 {
@@ -507,8 +505,8 @@ final class BooksStore: ObservableObject {
                     // parse and the scan moves on).
                     chapters = AudiobookChapters.chaptersFromMP4(head, totalSeconds: book.audioDuration ?? 0)
                     if chapters.isEmpty {
-                        let size = Self.fileSize(of: original)
-                        let tailStart = max(0, size - Self.audioParseTailBytes)
+                        let size = Self.fileSize(of: original)              // Int64
+                        let tailStart = max(0, size - Int64(Self.audioParseTailBytes))
                         if let tail = Self.slice(of: original, from: tailStart, length: Self.audioParseTailBytes) {
                             chapters = AudiobookChapters.chaptersFromMP4Tail(tail, totalSeconds: book.audioDuration ?? 0)
                         }
