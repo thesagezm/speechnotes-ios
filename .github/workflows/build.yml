@@ -319,6 +319,13 @@ jobs:
     name: Build unsigned IPA
     runs-on: macos-latest
     timeout-minutes: 45
+    # Docs-only pushes used to burn a 45-minute macOS runner: the whole
+    # build-ipa job is identical to the last run (the binary cannot change).
+    # A workflow_dispatch is always accepted (manual runs are a request);
+    # paths is evaluated only for pushes.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      !contains(github.event.head_commit.message, '[ci skip]')
     steps:
       - name: Checkout
         uses: actions/checkout@v4
