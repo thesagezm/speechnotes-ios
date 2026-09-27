@@ -503,14 +503,15 @@ final class BooksStore: ObservableObject {
                     // signature (its own count + title lengths validate
                     // the hit; a random 4CC in audio payload fails the
                     // parse and the scan moves on).
-                    chapters = AudiobookChapters.chaptersFromMP4(head, totalSeconds: book.audioDuration ?? 0)
-                    if chapters.isEmpty {
+                    var found = AudiobookChapters.chaptersFromMP4(head, totalSeconds: book.audioDuration ?? 0)
+                    if found.isEmpty {
                         let size = Self.fileSize(of: original)              // Int64
                         let tailStart = max(0, size - Int64(Self.audioParseTailBytes))
                         if let tail = Self.slice(of: original, from: tailStart, length: Self.audioParseTailBytes) {
-                            chapters = AudiobookChapters.chaptersFromMP4Tail(tail, totalSeconds: book.audioDuration ?? 0)
+                            found = AudiobookChapters.chaptersFromMP4Tail(tail, totalSeconds: book.audioDuration ?? 0)
                         }
                     }
+                    chapters = found
                 }
             } else {
                 chapters = []
