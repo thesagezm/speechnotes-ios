@@ -146,7 +146,8 @@ final class SystemEngine: NSObject, SpeechEngine {
         // AVSpeechUtteranceDefaultSpeechRate (0.5) and 2.0 → 1.0.
         let mapped = Double(AVSpeechUtteranceDefaultSpeechRate)
             + (effectiveRate - 1.0) * (Double(AVSpeechUtteranceMaximumSpeechRate) - Double(AVSpeechUtteranceDefaultSpeechRate))
-        utterance.rate = Float(min(AVSpeechUtteranceMaximumSpeechRate, max(AVSpeechUtteranceMinimumSpeechRate, mapped)))
+        utterance.rate = Float(min(Double(AVSpeechUtteranceMaximumSpeechRate),
+                                   max(Double(AVSpeechUtteranceMinimumSpeechRate), mapped)))
         if let identifier = voiceIdentifier,
            let voice = AVSpeechSynthesisVoice(identifier: identifier) {
             utterance.voice = voice

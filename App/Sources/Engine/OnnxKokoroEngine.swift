@@ -260,16 +260,16 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
             Data(bytes: src.baseAddress!, count: src.count * MemoryLayout<Float>.size)
         }
 
-        // One allocation, one copy each: the voice style for this token
-        // count and the token ids. The old path drained a temporary [Int64]
-        // and a temporary [Float] style array per chunk — pure GC churn at
-        // 1-2 Hz per engine. `unsafeUninitializedCapacity` writes the ids in
-        // place (little-endian, the order ORT expects for int64 tensors).
-        let tokensData = Data(unsafeUninitializedCapacity: tokens.count * MemoryLayout<Int64>.size) { buffer, cooked in
-            for (i, t) in tokens.enumerated() {
-                (buffer.baseAddress?.advanced(by: i * MemoryLayout<Int64>))?.storeBytes(of: Int64(t).littleEndian, as: Int64.self)
-            }
-            cooked = buffer.count
+        // One allocation, one copy: the token ids. The old path drained a
+        // temporary [Int64] per chunk — GC churn at 1-2 Hz per engine.
+        // (Data(unsafeUninitializedCapacity:initializingWith:) is Swift 6+;
+        // this target compiles in Swift 5 mode, so build the Int64 array
+        // once and take a single copy of its bytes.)
+        var tokens64 = [Int64]()
+        tokens64.reserveCapacity(tokens.count)
+        for t in tokens { tokens64.append(Int64(t).littleEndian) }
+        let tokensData = tokens64.withUnsafeBufferPointer { src in
+            Data(bytes: src.baseAddress!, count: src.count * MemoryLayout<Int64>.size)
         }
 
         let tokensTensor = try ORTValue(
