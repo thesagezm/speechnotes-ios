@@ -26,14 +26,15 @@ final class StreamingTTSPlaybackCore: NSObject {
     struct Config {
         /// Output sample rate of the engine's PCM (24 kHz Kokoro, tts.json Supertonic).
         let sampleRate: Double
-        /// Max characters (~words) handed to one synthesis call.
+        /// Max characters (~words) handed to one synthesis call — also the
+        /// packing ceiling for every chunk past the first (the model's
+        /// token-budget ceiling; see SentenceChunker.chunks `batchMaxChars`).
         let chunkMaxChars: Int
-        /// Optional SMALLER cap for the FIRST chunk only — time-to-first-
-        /// audio is the first chunk's render time, so a 155-char opener made
-        /// Supertonic's TTFA 15 s on device while an 11-char opener was
-        /// 1.7 s. Nil = chunkMaxChars (engines that don't need it). `var`
-        /// with a default so the memberwise init keeps compiling for engines
-        /// that don't pass it.
+        /// Max UTF-16 length of the fast-start FIRST chunk only — time-to-first-
+        /// audio is the first chunk's render time, so a small opener starts
+        /// speech quickly while chunk 1 packs to `chunkMaxChars` to cover the
+        /// following-sentence wait (restores the v0.4 first/batch asymmetry —
+        /// TTS_BASELINE §2). Nil = chunkMaxChars.
         var firstMaxChars: Int? = nil
         /// How many chunks beyond the playback cursor the producer may run.
         let generationAheadLimit: Int
@@ -93,10 +94,31 @@ final class StreamingTTSPlaybackCore: NSObject {
     /// chunk on generateQueue. Lock-guarded because it crosses threads.
     private let rateLock = NSLock()
     private var storedSpeed: Float = 1.0
+    /// Playback generation when `storedSpeed` last changed. The producer uses
+    /// this to drain stale-rate buffers: buffers scheduled BEFORE a rate
+    /// change carry the old speed, and waiting for all `generationAheadLimit`
+    /// of them to play out made a 1.0→2.0 slider move take seconds of audible
+    /// old-rate speech to catch up (rate is baked in at synthesis). Written
+    /// under rateLock (main), read under rateLock (generateQueue).
+    private var speedChangedGeneration = 0
     /// Live: assigning mid-playback takes effect from the very next chunk.
     var speed: Float {
         get { rateLock.lock(); defer { rateLock.unlock() }; return storedSpeed }
-        set { rateLock.lock(); storedSpeed = Float(min(2.0, max(0.5, newValue))); rateLock.unlock() }
+        set {
+            rateLock.lock()
+            let clamped = Float(min(2.0, max(0.5, newValue)))
+            if clamped != storedSpeed {
+                storedSpeed = clamped
+                speedChangedGeneration = playbackGeneration
+            }
+            rateLock.unlock()
+        }
+    }
+    /// Producer-side read on generateQueue: (current speed, generation in
+    /// which it last changed). One lock acquisition, one coherent pair.
+    private var speedSnapshot: (speed: Float, changedIn: Int) {
+        rateLock.lock(); defer { rateLock.unlock() }
+        return (storedSpeed, speedChangedGeneration)
     }
 
     /// Active PCM sample rate. Starts at the config default; an engine whose
@@ -126,6 +148,44 @@ final class StreamingTTSPlaybackCore: NSObject {
     private var stallWatchdog: Timer?
 
     private var interruptionObserver: NSObjectProtocol?
+
+    // MARK: - Rate-change buffer drain
+
+    /// True once per session: a rate change was committed and the pending
+    /// old-rate purge has been issued. Reset by `speak()`.
+    private var rateDrainArmed = false
+
+    /// Drop every scheduled-but-not-yet-playing buffer, rebase the position
+    /// tracker at the first DELETED chunk (so the read-along cursor and the
+    /// progress % continue from the same text the user heard), signal the
+    /// producer semaphore for the purged lanes, and log the transition.
+    /// Main thread only — called from the producer hop on the rate-change
+    /// boundary. The single already-playing buffer (index `< firstPurged`)
+    /// finishes audibly; everything after it is re-synthesized at the new
+    /// rate from the SAME chunk list.
+    private func purgeStaleRateBuffers(from firstPurged: Int, generation: Int) {
+        guard playbackGeneration == generation else { return }
+        // Nothing to do if the purge point is already past the schedule
+        // cursor (session was torn down / restarted in between).
+        guard firstPurged <= scheduledUpTo else { return }
+
+        let purgedCount = scheduledUpTo - firstPurged + 1
+        let purgedAudioSeconds = (firstPurged...scheduledUpTo).reduce(0.0) { total, idx in
+            guard let id = bufferSlots[idx], let buffer = bufferPool[id], idx >= firstPurged else { return total }
+            return total + Double(buffer.frameLength) / buffer.format.sampleRate
+        }
+
+        for idx in firstPurged...scheduledUpTo {
+            if let id = bufferSlots[idx], id >= 0 {
+                bufferPool.removeValue(forKey: id)
+            }
+            bufferSlots[idx] = Self.slotPending
+        }
+        scheduledUpTo = firstPurged - 1
+        playTracker.reset()
+
+        Log.shared.info("\(config.logPrefix) rate change — purged \(purgedCount) stale-rate buffer(s) (\(String(format: "%.1f", purgedAudioSeconds))s of buffered audio), regenerating from chunk \(firstPurged)")
+    }
 
     private var state: SpeechState = .idle {
         didSet {
@@ -232,6 +292,14 @@ final class StreamingTTSPlaybackCore: NSObject {
         scheduledUpTo = -1
         totalChars = max(1, clean.utf16.count)
         playTracker.reset()
+        rateDrainArmed = false
+        // A new session inherits its starting rate as the baseline: a rate
+        // scribbled between taps isn't a "change" for the purge, so the very
+        // first chunk isn't pointlessly regenerated when it was synthesized
+        // at the rate the user already set.
+        rateLock.lock()
+        speedChangedGeneration = generation
+        rateLock.unlock()
 
         // Fresh gate per generation: the first generationAheadLimit chunks
         // pass free, every later one waits for a schedule signal. stop()
@@ -265,6 +333,25 @@ final class StreamingTTSPlaybackCore: NSObject {
                     self.pacingGate?.wait()
                 }
                 guard self.playbackGeneration == generation else { return }
+                // Rate change: buffers synthesized BEFORE the slider moved
+                // carry the OLD speed. Waiting for all `generationAheadLimit`
+                // of them to play out made 1.0→2.0 take seconds to land —
+                // audible dead-air transition latency. Instead of waiting we
+                // drop the not-yet-playing ones (the producer regenerates
+                // them at the new rate from the same chunk list), reset the
+                // play-position tracker on the far side of the boundary so
+                // the cursor never steps back, and release the producer back
+                // into its loop. One dispatch per rate change, never in the
+                // steady-state loop.
+                let snap = self.speedSnapshot
+                if snap.changedIn == generation, index > 0, !self.rateDrainArmed {
+                    self.rateDrainArmed = true
+                    let purgingFrom = index
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self, self.playbackGeneration == generation else { return }
+                        self.purgeStaleRateBuffers(from: purgingFrom, generation: generation)
+                    }
+                }
                 // A chunk the model cannot synthesize is skipped on the FIRST
                 // failure. There is no retry: a second attempt at the same
                 // text fails the same way (the input is what is wrong — see

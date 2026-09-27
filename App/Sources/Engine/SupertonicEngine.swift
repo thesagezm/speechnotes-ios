@@ -42,10 +42,17 @@ final class SupertonicEngine: NSObject, SpeechEngine {
 
     private let core: StreamingTTSPlaybackCore
 
-    /// How many times `speak()` has validated on this instance — the first is
-    /// always logged, later ones only when they get slow. Main thread only
-    /// (every `speak()` call is), like the rest of the engine's non-model state.
+    /// How many times `validationResult()` ran the filesystem walk on this
+    /// instance — the first is always logged, later ones only when they get
+    /// slow. Main thread only (every `speak()`/export call is).
     private var validationCalls = 0
+    /// Cached `supertonicFilesAreValid()` + monotonic stamp; success latches
+    /// for 30 s (16 `attributesOfItem` syscalls live upstream of TTFA's t0,
+    /// and no play path changes the model files). Failure is never latched —
+    /// a transient blip must not brick the engine (R7).
+    private var lastValidationResult: Bool?
+    private var lastValidationAt: ContinuousClock.Instant?
+    private static let validationTTL: TimeInterval = 30
 
     /// True once sessions were actually loaded this instance — the idle
     /// unload only pays off when there's something resident to free.
@@ -126,17 +133,10 @@ final class SupertonicEngine: NSObject, SpeechEngine {
     func speak(_ text: String, rateMultiplier: Double) {
         let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
-        // Timed because it sits upstream of TTFA's t0 — see PlaybackMetrics.
-        // Supertonic's check is the heavier of the two: one `attributesOfItem`
-        // per model file across four ONNX sessions.
-        let logIt = validationCalls == 0
-        validationCalls += 1
-        let filesValid = PlaybackMetrics.timedValidation(
-            prefix: core.config.logPrefix,
-            label: "play-path file validation",
-            alwaysLog: logIt
-        ) { ModelManager.supertonicFilesAreValid() }
-        guard filesValid else {
+        // Validation sits upstream of TTFA's t0; the result is cached for
+        // `validationTTL` so an eight-chunk layout doesn't re-stat all file
+        // sizes on every play tap (R19).
+        guard validationResult() else {
             Log.shared.error("SupertonicEngine asked to speak but its model isn't downloaded")
             return
         }
@@ -145,6 +145,27 @@ final class SupertonicEngine: NSObject, SpeechEngine {
             return
         }
         core.speak(text, rateMultiplier: rateMultiplier)
+    }
+
+    /// Timed validation, TTL-cached (see the property comment).
+    private func validationResult() -> Bool {
+        if let cached = lastValidationResult, cached,
+           let stamp = lastValidationAt,
+           PlaybackMetrics.seconds(since: stamp) < Self.validationTTL {
+            return true
+        }
+        let logIt = validationCalls == 0
+        validationCalls += 1
+        let filesValid = PlaybackMetrics.timedValidation(
+            prefix: core.config.logPrefix,
+            label: "play-path file validation",
+            alwaysLog: logIt
+        ) { ModelManager.supertonicFilesAreValid() }
+        if filesValid {
+            lastValidationResult = true
+            lastValidationAt = ContinuousClock.now
+        }
+        return filesValid
     }
 
     func pause() { core.pause() }
@@ -201,7 +222,7 @@ final class SupertonicEngine: NSObject, SpeechEngine {
         onChunkProgress: ((Double) -> Void)? = nil,
         completion: @escaping (Result<URL, Error>) -> Void
     ) {
-        guard ModelManager.supertonicFilesAreValid(), isValidLang(lang) else {
+        guard validationResult(), isValidLang(lang) else {
             completion(.failure(SupertonicEngineError.modelUnavailable))
             return
         }

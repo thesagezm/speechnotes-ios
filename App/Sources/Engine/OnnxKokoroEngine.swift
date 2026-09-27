@@ -42,10 +42,23 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
     private let modelFileURL: URL
     private let modelFilesValid: () -> Bool
 
-    /// How many times `speak()` has validated on this instance — the first is
-    /// always logged, later ones only when they get slow. Main thread only
-    /// (every `speak()` call is), like the rest of the engine's non-model state.
+    /// How many times `validationResult()` ran the filesystem walk on this
+    /// instance — the first is always logged, later ones only when they get
+    /// slow. Main thread only (every `speak()`/export call is).
     private var validationCalls = 0
+    /// Cached `modelFilesValid()` result + monotonic stamp. Success is
+    /// latched for `validationTTL`; the expensive part of Kokoro's check is
+    /// reading + JSON-parsing `tokenizer.json` (~3.5 KB) on EVERY play tap —
+    /// every tap is pure TTFA overhead for a result that cannot change
+    /// between two plays (nothing the user can do rewrites the files).
+    /// Failure is never latched: a transient file-lock or memory-pressure
+    /// blip must not disable playback like the old `modelLoadAttempted`
+    /// latch (R7). *Maximum-cost* cap: a file landing mid-TTL is picked up
+    /// within this window; ModelManager's onReady rebuilds the engine
+    /// anyway, which clears the cache.
+    private var lastValidationResult: Bool?
+    private var lastValidationAt: ContinuousClock.Instant?
+    private static let validationTTL: TimeInterval = 30
 
     private let core: StreamingTTSPlaybackCore
 
@@ -74,6 +87,12 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
         self.core = StreamingTTSPlaybackCore(config: .init(
             sampleRate: 24_000,
             chunkMaxChars: Self.chunkMaxChars,
+            // Fast-start first chunk: render a short opener now, and the
+            // NEXT chunk packs to the full 160-char batch ceiling while it
+            // sounds — chunk 0 covers chunk 1's generation instead of
+            // exposing it. SentenceChunker keeps the 510-token ceiling via
+            // `batchMaxChars`; this only re-opens the v0.4 fast-start.
+            firstMaxChars: 100,
             generationAheadLimit: 3,
             exportInterChunkSilence: 0,
             logPrefix: "OnnxKokoroEngine"
@@ -100,7 +119,21 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
     func speak(_ text: String, rateMultiplier: Double) {
         let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
-        // Timed because it sits upstream of TTFA's t0 — see PlaybackMetrics.
+        guard validationResult() else {
+            Log.shared.error("OnnxKokoroEngine asked to speak but no ONNX model is downloaded")
+            return
+        }
+        core.speak(text, rateMultiplier: rateMultiplier)
+    }
+
+    /// Timed validation, TTL-cached. See the property comment for the
+    /// success-only latch and why this sits upstream of TTFA's t0.
+    private func validationResult() -> Bool {
+        if let cached = lastValidationResult, cached,
+           let stamp = lastValidationAt,
+           PlaybackMetrics.seconds(since: stamp) < Self.validationTTL {
+            return true
+        }
         let logIt = validationCalls == 0
         validationCalls += 1
         let filesValid = PlaybackMetrics.timedValidation(
@@ -108,11 +141,11 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
             label: "play-path file validation",
             alwaysLog: logIt
         ) { self.modelFilesValid() }
-        guard filesValid else {
-            Log.shared.error("OnnxKokoroEngine asked to speak but no ONNX model is downloaded")
-            return
+        if filesValid {
+            lastValidationResult = true
+            lastValidationAt = ContinuousClock.now
         }
-        core.speak(text, rateMultiplier: rateMultiplier)
+        return filesValid
     }
 
     func pause() { core.pause() }
@@ -291,7 +324,7 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
         onChunkProgress: ((Double) -> Void)? = nil,
         completion: @escaping (Result<URL, Error>) -> Void
     ) {
-        guard modelFilesValid() else {
+        guard validationResult() else {
             completion(.failure(OnnxEngineError.modelUnavailable))
             return
         }

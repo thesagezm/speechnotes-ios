@@ -114,6 +114,12 @@ public enum SentenceChunker {
     /// - Parameters:
     ///   - text: The full text to be spoken.
     ///   - firstMaxChars: Maximum UTF-16 length of the fast-start first chunk.
+    ///     Deliberately SMALLER than `batchMaxChars` so chunk 0 is one short
+    ///     sentence (fast TTFA) while chunk 1 packs to the batch limit to
+    ///     cover the following-sentence wait (v0.4's `firstMaxChars: 200,
+    ///     batchMaxChars: 400` asymmetry; v0.5.2 collapsed it, re-creating a
+    ///     ~4.3 s dead-air stall between sentence 1 and sentence 2 — see
+    ///     TTS_BASELINE §2 and TTS_REGRESSION_AUDIT R16).
     ///   - batchMaxChars: Maximum total UTF-16 length of every later chunk.
     ///     Consecutive whole sentences are packed greedily up to this limit,
     ///     and a single sentence longer than the limit is split at word
@@ -122,7 +128,7 @@ public enum SentenceChunker {
     /// - Returns: All chunks in order. The first element is `firstChunk(in:)`;
     ///   substrings taken at each chunk's offset/length reproduce `text`
     ///   exactly. Empty for empty or whitespace-only input.
-    public static func chunks(for text: String, firstMaxChars: Int = 200, batchMaxChars: Int = 400) -> [Chunk] {
+    public static func chunks(for text: String, firstMaxChars: Int = 80, batchMaxChars: Int = 400) -> [Chunk] {
         guard let first = firstChunk(in: text, maxChars: firstMaxChars) else { return [] }
 
         var result = [first]
