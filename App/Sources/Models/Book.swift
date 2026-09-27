@@ -79,6 +79,10 @@ struct Book: Identifiable, Codable, Equatable, Hashable {
     /// container) — the shelf explains WHY instead of shelving a silent
     /// husk with no TOC and no TTS.
     var importError: String?
+    /// Soft-delete stamp for the books recycle bin — nil while the book is
+    /// on the shelf. Optional so manifests written before the bin existed
+    /// keep decoding exactly as they did.
+    var deletedAt: Date?
 
     init(
         id: UUID,
@@ -99,7 +103,8 @@ struct Book: Identifiable, Codable, Equatable, Hashable {
         hasCover: Bool = false,
         toc: [BookTocEntry]? = nil,
         position: BookPosition? = nil,
-        importError: String? = nil
+        importError: String? = nil,
+        deletedAt: Date? = nil
     ) {
         self.id = id
         self.title = title
@@ -120,7 +125,14 @@ struct Book: Identifiable, Codable, Equatable, Hashable {
         self.toc = toc
         self.position = position
         self.importError = importError
+        self.deletedAt = deletedAt
     }
+
+    /// True when the book sits in the recycle bin.
+    var isDeleted: Bool { deletedAt != nil }
+
+    /// How long a binned book stays on disk. Same window as notes.
+    static let recycleRetentionDays = 30
 }
 
 extension Book {

@@ -22,6 +22,7 @@ struct BooksView: View {
     @State private var showingImporter = false
     @State private var bookToDelete: Book?
     @State private var searchText = ""
+    @State private var showingRecycleBin = false
     /// Pushed reader — set by the mini-player's book jump.
     @State private var path: [Book] = []
 
@@ -51,6 +52,21 @@ struct BooksView: View {
                 prompt: "Title or author"
             )
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Menu {
+                        Button {
+                            Haptics.tap()
+                            showingRecycleBin = true
+                        } label: {
+                            Label(
+                                "Recently Deleted\(!store.deletedBooks.isEmpty ? " (\(store.deletedBooks.count))" : "")",
+                                systemImage: "trash"
+                            )
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                    }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         Haptics.tap()
@@ -74,6 +90,11 @@ struct BooksView: View {
                 case .pdf: BookPDFReaderView(book: book, store: store)
                 case .audio: BookAudioReaderView(book: book, store: store)
                 }
+            }
+            .navigationDestination(isPresented: $showingRecycleBin) {
+                BooksRecycleBinView()
+                    .environmentObject(store)
+                    .environmentObject(audioBooks)
             }
             .onAppear {
                 store.refresh()
@@ -110,12 +131,12 @@ struct BooksView: View {
             ) { book in
                 Button("Delete", role: .destructive) {
                     Haptics.press()
-                    // Deleting a book that is playing would leave a ghost
-                    // session playing a removed file — stop it first. A
-                    // synthesised book goes through SpeechPlayer; an
-                    // audiobook lives in the app-level AudioBookPlayer,
-                    // which can stop from here (no reader needs to be open
-                    // any more — playback survives tab switches now).
+                    // Soft delete into the recycle bin — the file stays for
+                    // the retention window. If the book is PLAYING right
+                    // now it must stop, or a ghost session keeps sounding
+                    // from a de-shelved book (synthesised books go through
+                    // SpeechPlayer; an audiobook lives in the app-level
+                    // AudioBookPlayer, which survives tab switches).
                     if BookPlaybackController.shared.isBookActive(book) {
                         player.stop()
                     }
@@ -127,7 +148,7 @@ struct BooksView: View {
                     bookToDelete = nil
                 }
             } message: { book in
-                Text("Delete \"\(book.title)\"? The book file and its reading position are removed. Notes are not affected.")
+                Text("Move \"\(book.title)\" to the recycle bin? The file and its reading position stay for \(Book.recycleRetentionDays) days. Notes are not affected.")
             }
         }
     }

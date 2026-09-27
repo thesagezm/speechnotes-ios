@@ -15,6 +15,16 @@ import SpeechLogic
 @MainActor
 final class BooksStore: ObservableObject {
     @Published private(set) var books: [Book] = []
+    /// Binned books, most recently deleted first — the books recycle bin.
+    /// Optional in the manifest (`Book.deletedAt`), so a shelf written
+    /// before the bin existed decodes as an empty bin.
+    var deletedBooks: [Book] {
+        allBooks
+            .filter { $0.isDeleted }
+            .sorted { ($0.deletedAt ?? .distantPast) > ($1.deletedAt ?? .distantPast) }
+    }
+    /// Everything on disk, active or binned — the raw shelf + the bin.
+    private var allBooks: [Book] = []
     @Published private(set) var isImporting = false
     @Published var importError: String?
 
@@ -151,9 +161,11 @@ final class BooksStore: ObservableObject {
                   let book = try? JSONDecoder().decode(Book.self, from: data) else { continue }
             shelf.append(book)
         }
-        books = shelf.sorted {
+        allBooks = shelf.sorted {
             ($0.lastOpenedAt ?? $0.addedAt) > ($1.lastOpenedAt ?? $1.addedAt)
         }
+        books = allBooks.filter { !$0.isDeleted }
+        pruneExpiredBooks()
         backfillMissingBooks(maxAudioBooks: 1)
     }
 
@@ -612,9 +624,58 @@ final class BooksStore: ObservableObject {
 
     // MARK: - Mutations
 
+    /// Soft-deletes into the recycle bin (notes' pattern): the file stays on
+    /// disk for `Book.recycleRetentionDays`, so a mis-tap on a 3 GB
+    /// audiobook is recoverable. purge() is the one real removal.
     func delete(_ book: Book) {
-        try? FileManager.default.removeItem(at: Self.bookDirectory(book.id))
+        guard let idx = allBooks.firstIndex(where: { $0.id == book.id }) else { return }
+        var binned = book
+        binned.deletedAt = Date()
+        allBooks[idx] = binned
         books.removeAll { $0.id == book.id }
+        save(binned)
+        if book.format == .audio {
+            NotificationCenter.default.post(name: .audioBookStopped, object: book.id)
+        }
+    }
+
+    /// Moves a binned book back onto the shelf, timestamp preserved.
+    func recover(_ book: Book) {
+        guard let idx = allBooks.firstIndex(where: { $0.id == book.id }) else { return }
+        var restored = book
+        restored.deletedAt = nil
+        allBooks[idx] = restored
+        books = allBooks.filter { !$0.isDeleted }.sorted {
+            ($0.lastOpenedAt ?? $0.addedAt) > ($1.lastOpenedAt ?? $1.addedAt)
+        }
+        save(restored)
+    }
+
+    /// Really deletes one binned book. No undo.
+    func purge(_ book: Book) {
+        try? FileManager.default.removeItem(at: Self.bookDirectory(book.id))
+        allBooks.removeAll { $0.id == book.id }
+        books.removeAll { $0.id == book.id }
+    }
+
+    /// Purges every binned book past the retention window — called on
+    /// refresh (once per shelf open), like NotesStore's prune.
+    private func pruneExpiredBooks() {
+        let cutoff = Date().addingTimeInterval(-Double(Book.recycleRetentionDays) * 24 * 3600)
+        let expired = allBooks.filter { ($0.deletedAt ?? .distantFuture) < cutoff }
+        guard !expired.isEmpty else { return }
+        for book in expired {
+            try? FileManager.default.removeItem(at: Self.bookDirectory(book.id))
+        }
+        allBooks.removeAll { ($0.deletedAt ?? .distantFuture) < cutoff }
+    }
+
+    /// Really deletes every binned book.
+    func emptyRecycleBin() {
+        for book in allBooks where book.isDeleted {
+            try? FileManager.default.removeItem(at: Self.bookDirectory(book.id))
+        }
+        allBooks.removeAll { $0.isDeleted }
     }
 
     /// Monotonic write counter per book — a detached encode-then-write can
@@ -630,8 +691,12 @@ final class BooksStore: ObservableObject {
     /// scroll) call this often; save() re-derives nothing beyond the one
     /// book it's handed.
     func save(_ book: Book) {
-        guard let idx = books.firstIndex(where: { $0.id == book.id }) else { return }
-        books[idx] = book
+        guard let idx = allBooks.firstIndex(where: { $0.id == book.id }) else { return }
+        allBooks[idx] = book
+        if !book.isDeleted,
+           let activeIdx = books.firstIndex(where: { $0.id == book.id }) {
+            books[activeIdx] = book
+        }
         Self.seqLock.lock()
         let seq = (Self.writeSeq[book.id] ?? 0) + 1
         Self.writeSeq[book.id] = seq
@@ -656,6 +721,7 @@ final class BooksStore: ObservableObject {
     func markOpened(_ book: Book) {
         var updated = book
         updated.lastOpenedAt = Date()
+        updated.deletedAt = nil      // opening a binned book un-bins it
         save(updated)
     }
 
