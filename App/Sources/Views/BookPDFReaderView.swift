@@ -25,6 +25,10 @@ struct BookPDFReaderView: View {
     @State private var pdfView: PDFView?
     @State private var outlineRows: [OutlineRow] = []
     @State private var showingOutline = false
+    /// True until the reader's document lands — the open itself is the
+    /// expensive part and runs off main (see BookPDFView), so the surface
+    /// says so instead of sitting blank.
+    @State private var pdfLoading = true
     /// Collapsed outline row ids (round 6: the TOC is a drop-down tree —
     /// entries with children get a chevron and fold their subtree).
     @State private var collapsedOutlineRows: Set<Int> = []
@@ -207,18 +211,6 @@ struct BookPDFReaderView: View {
         }
         .onAppear {
             store.markOpened(book)
-            // Round 7: flattenOutline opens the PDF and walks its whole
-            // outline tree — a big textbook blocked the main thread for
-            // seconds, freezing the app outright when an audiobook was
-            // already playing (open book → open big PDF → force quit).
-            // Off-main now; the sheet fills in when the walk lands.
-            if outlineRows.isEmpty {
-                let snapshot = book
-                Task.detached(priority: .userInitiated) {
-                    let rows = Self.flattenOutline(book: snapshot)
-                    await MainActor.run { outlineRows = rows }
-                }
-            }
             // The reader has its own player bar — the global mini-player
             // yields while THIS book is the one speaking (editor pattern).
             player.miniPlayerSuppressed = player.nowPlayingBookId == book.id.uuidString
@@ -259,12 +251,24 @@ struct BookPDFReaderView: View {
                 textScale: appTheme.previewTextScale
             )
         } else {
-            BookPDFView(
-                url: BooksStore.originalFileURL(book),
-                startPageIndex: currentPage,
-                onPageChange: handlePageChange,
-                onReady: { pdfView = $0 }
-            )
+            ZStack {
+                BookPDFView(
+                    url: BooksStore.originalFileURL(book),
+                    startPageIndex: currentPage,
+                    onPageChange: handlePageChange,
+                    onReady: {
+                        pdfView = $0
+                        // A fresh surface identity is loading again (the
+                        // read-along swap remakes this view on return).
+                        pdfLoading = true
+                    },
+                    onDocumentLoaded: { pdfLoading = false },
+                    onOutlineLoaded: { outlineRows = $0 }
+                )
+                if pdfLoading {
+                    ProgressView()
+                }
+            }
         }
     }
 
@@ -323,57 +327,6 @@ struct BookPDFReaderView: View {
     }
 
     // MARK: - Contents (outline + chapter fallback)
-
-    private struct OutlineRow: Identifiable {
-        let id: Int
-        let label: String
-        let depth: Int
-        let destination: PDFDestination
-        /// 0-based page the entry points at, resolved at flatten time so
-        /// rows can show their page number and highlight the current one.
-        let pageIndex: Int
-    }
-
-    /// Flattens the PDF outline tree depth-first. Runs once per open — but
-    /// OFF THE MAIN THREAD now (round 7): `PDFDocument(url:)` opens the file
-    /// and touches the page tree + every outline destination, which on a
-    /// big textbook took SECONDS and froze the app outright (the round-7
-    /// report: open an audiobook, then open a big PDF → force quit).
-    ///
-    /// The document instance here is throwaway on purpose: `OutlineRow` keeps
-    /// the resolved PAGE INDEX, never a destination from this instance (a
-    /// destination belonging to another document silently does nothing in
-    /// PDFKit — the round-5 lesson). Walks via numberOfChildren/child(at:)
-    /// — this SDK's PDFOutline has no `children` array (CI-caught). Entries
-    /// whose destination does not resolve to a page are skipped: every row
-    /// must be navigable.
-    private static func flattenOutline(book: Book) -> [OutlineRow] {
-        guard let document = PDFDocument(url: BooksStore.originalFileURL(book)),
-              let root = document.outlineRoot else { return [] }
-        var rows: [OutlineRow] = []
-        func walk(_ outline: PDFOutline, depth: Int) {
-            if let dest = outline.destination, let page = dest.page {
-                rows.append(OutlineRow(
-                    id: rows.count,
-                    label: outline.label ?? "Untitled",
-                    depth: depth,
-                    destination: dest,
-                    pageIndex: document.index(for: page)
-                ))
-            }
-            for index in 0..<outline.numberOfChildren {
-                if let child = outline.child(at: index) {
-                    walk(child, depth: depth + 1)
-                }
-            }
-        }
-        for index in 0..<root.numberOfChildren {
-            if let child = root.child(at: index) {
-                walk(child, depth: 0)
-            }
-        }
-        return rows
-    }
 
     /// The row the reader should open scrolled to and highlight — the last
     /// entry at or before the visible page (readest's activeHref equivalent,
@@ -537,11 +490,11 @@ struct BookPDFReaderView: View {
     }
 
     /// Navigates by PAGE INDEX, not by the outline's PDFDestination. The
-    /// sheet's rows were flattened against a DIFFERENT PDFDocument instance
-    /// (flattenOutline opens its own), and a destination whose page object
-    /// belongs to another document silently does nothing in PDFKit — the
-    /// round-5 "TOC taps don't go to the page, in-book links do" report. The
-    /// page index is instance-independent; resolving it in the reader's own
+    /// outline rows were flattened on the background pass that opened the
+    /// document, and rows carry only the resolved page index (a destination
+    /// kept across documents silently does nothing in PDFKit — the round-5
+    /// "TOC taps don't go to the page, in-book links do" report). The page
+    /// index is instance-independent; resolving it in the reader's own
     /// document always lands.
     private func goToPage(_ index: Int) {
         guard let pdfView, let document = pdfView.document,
@@ -605,14 +558,45 @@ struct BookPDFReaderView: View {
     }
 }
 
-/// PDFKit bridge. PDFDocument(url:) is lazy — page content loads as the user
-/// scrolls, which is exactly why whole-document extraction stays out of the
-/// book path.
+/// One flattened outline row, fileprivate so the representable below can
+/// build and carry rows from its background pass. Navigation is by PAGE
+/// INDEX only: a `PDFDestination` kept here would belong to whatever
+/// document instance produced it, and a destination from another document
+/// silently does nothing in PDFKit (the round-5 lesson) — the index is
+/// instance-independent and always lands.
+fileprivate struct OutlineRow: Identifiable {
+    let id: Int
+    let label: String
+    let depth: Int
+    /// 0-based page the entry points at, resolved at flatten time so rows
+    /// can show their page number and highlight the current one.
+    let pageIndex: Int
+}
+
+/// PDFKit bridge. THE OPEN RUNS OFF MAIN: `PDFDocument(url:)` is lazy about
+/// page *content*, but the container parse itself — cross-reference table,
+/// page tree, outline destinations — is synchronous, and on the big scanned
+/// textbooks this library carries (hundreds of MB) it stalled the main
+/// thread long enough to read as a terminal freeze (the round-7 report:
+/// open an audiobook, then open a big PDF → force quit; round 7 detached
+/// the outline walk but left THIS open on main, and the freeze survived).
+/// makeUIView now returns a responsive empty surface and kicks off ONE
+/// background pass that opens the document and flattens the outline on the
+/// same thread; the results land on main together. While it runs the
+/// reader shows a spinner — the app stays interactive no matter how long
+/// PDFKit takes with the file.
 private struct BookPDFView: UIViewRepresentable {
     let url: URL
     let startPageIndex: Int
     var onPageChange: (Int, Int) -> Void
     var onReady: (PDFView) -> Void
+    /// Fires when the open pass ends (document or not) — the reader hides
+    /// its loading state.
+    var onDocumentLoaded: () -> Void
+    /// The outline flattened during the same background pass that opened
+    /// the document — rows for the Contents sheet, or [] when the PDF has
+    /// no resolvable outline.
+    var onOutlineLoaded: ([OutlineRow]) -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(onPageChange: onPageChange)
@@ -622,16 +606,13 @@ private struct BookPDFView: UIViewRepresentable {
         let pdfView = PDFView()
         pdfView.autoScales = true
         pdfView.displayMode = .singlePageContinuous
-        pdfView.document = PDFDocument(url: url)
         context.coordinator.attach(pdfView)
-
-        if startPageIndex > 0,
-           let document = pdfView.document,
-           startPageIndex < document.pageCount,
-           let page = document.page(at: startPageIndex) {
-            pdfView.go(to: page)
-        }
-
+        context.coordinator.load(
+            url: url,
+            startPageIndex: startPageIndex,
+            onLoaded: onDocumentLoaded,
+            onOutline: onOutlineLoaded
+        )
         DispatchQueue.main.async { [onReady] in
             onReady(pdfView)
         }
@@ -642,10 +623,53 @@ private struct BookPDFView: UIViewRepresentable {
         context.coordinator.onPageChange = onPageChange
     }
 
+    /// Opens `url` and flattens its outline tree depth-first — ON ONE
+    /// THREAD, end to end. The old shape had two defects at once: the open
+    /// ran on main (makeUIView) and a SECOND document instance was opened
+    /// on a detached task for the outline walk, so a big textbook paid the
+    /// container parse twice concurrently. Walking the single instance
+    /// before it reaches the view keeps every PDFKit touch single-threaded
+    /// (PDFDocument is documented thread-safe, but PDFPage is not — the
+    /// walk stops before the view's main-thread rendering begins). Walks
+    /// via numberOfChildren/child(at:) — this SDK's PDFOutline has no
+    /// `children` array (CI-caught). Entries whose destination does not
+    /// resolve to a page are skipped: every row must be navigable.
+    fileprivate static func openWithOutline(url: URL) -> (document: PDFDocument, rows: [OutlineRow])? {
+        guard let document = PDFDocument(url: url),
+              document.pageCount > 0,
+              let root = document.outlineRoot else { return nil }
+        var rows: [OutlineRow] = []
+        func walk(_ outline: PDFOutline, depth: Int) {
+            if let dest = outline.destination, let page = dest.page {
+                let index = document.index(for: page)
+                if index >= 0, index < document.pageCount {
+                    rows.append(OutlineRow(
+                        id: rows.count,
+                        label: outline.label ?? "Untitled",
+                        depth: depth,
+                        pageIndex: index
+                    ))
+                }
+            }
+            for index in 0..<outline.numberOfChildren {
+                if let child = outline.child(at: index) {
+                    walk(child, depth: depth + 1)
+                }
+            }
+        }
+        for index in 0..<root.numberOfChildren {
+            if let child = root.child(at: index) {
+                walk(child, depth: 0)
+            }
+        }
+        return (document, rows)
+    }
+
     final class Coordinator {
         var onPageChange: (Int, Int) -> Void
         private var observer: NSObjectProtocol?
         private weak var pdfView: PDFView?
+        private var loadTask: Task<Void, Never>?
 
         init(onPageChange: @escaping (Int, Int) -> Void) {
             self.onPageChange = onPageChange
@@ -662,6 +686,39 @@ private struct BookPDFView: UIViewRepresentable {
             }
         }
 
+        /// One background pass: open + outline walk, then a single
+        /// main-actor delivery. The main turn is uninterruptible (assign →
+        /// go(to:) → callbacks with no await between), so no runloop turn
+        /// can deliver a page-changed notification for page 0 between the
+        /// document landing and the saved page being applied — the saved
+        /// position can't be overwritten by the initial report.
+        func load(
+            url: URL,
+            startPageIndex: Int,
+            onLoaded: @escaping () -> Void,
+            onOutline: @escaping ([OutlineRow]) -> Void
+        ) {
+            loadTask?.cancel()
+            loadTask = Task.detached(priority: .userInitiated) { [weak self] in
+                let opened = BookPDFView.openWithOutline(url: url)
+                if Task.isCancelled { return }
+                await MainActor.run { [weak self] in
+                    onLoaded()
+                    guard let self,
+                          let opened,
+                          let pdfView = self.pdfView,
+                          pdfView.window != nil else { return }
+                    pdfView.document = opened.document
+                    if startPageIndex > 0,
+                       startPageIndex < opened.document.pageCount,
+                       let page = opened.document.page(at: startPageIndex) {
+                        pdfView.go(to: page)
+                    }
+                    onOutline(opened.rows)
+                }
+            }
+        }
+
         private func report() {
             guard let pdfView, let document = pdfView.document else { return }
             let index = pdfView.currentPage.map { document.index(for: $0) } ?? 0
@@ -672,6 +729,7 @@ private struct BookPDFView: UIViewRepresentable {
             if let observer {
                 NotificationCenter.default.removeObserver(observer)
             }
+            loadTask?.cancel()
         }
     }
 }
