@@ -112,6 +112,7 @@ final class AudioBookPlayer: ObservableObject {
 
     private var player: AVPlayer?
     private var statusObserver: NSKeyValueObservation?
+    private var durationObserver: NSKeyValueObservation?
     private var ticker: Timer?
     /// Set true only by the item-creation branch in play(), and read right
     /// after: a freshly created item commits its first seek immediately
@@ -185,10 +186,12 @@ final class AudioBookPlayer: ObservableObject {
             // "plays two seconds then dies" on device.
             AudioSessionSetup.configureIfNeeded(prefix: "AudioBookPlayer")
             if loadedURL != url || player == nil {
-                // A failure must not leave the previous item's observer
+                // A failure must not leave the previous item's observers
                 // attached to the new one.
                 statusObserver?.invalidate()
                 statusObserver = nil
+                durationObserver?.invalidate()
+                durationObserver = nil
                 player?.replaceCurrentItem(with: nil)
                 let item = AVPlayerItem(url: url)
                 // Watch the item's status: AVPlayer fails asynchronously
@@ -202,18 +205,17 @@ final class AudioBookPlayer: ObservableObject {
                         }
                     }
                 }
-                // The file's length arrives ASYNC, loaded exactly once:
-                // the item's duration is the value every transport read
-                // used to hammer synchronously (the deprecated sync access
-                // is the one AVFoundation read documented as able to block
-                // the calling thread). load(.duration) is the official
-                // async replacement; the manifest's duration covers the
-                // gap until it lands.
-                Task { [weak self] in
-                    let time = try? await item.load(.duration)
-                    let seconds = Self.seconds(of: time)
-                    await MainActor.run {
-                        self?.cachedFileDuration = seconds
+                // The file's length arrives by KVO: AVPlayerItem.duration
+                // starts indefinite and changes once the container is
+                // parsed. Caching it here keeps every transport read off
+                // the deprecated synchronous access (the one AVFoundation
+                // read documented as able to block the calling thread);
+                // the manifest's duration covers the gap until it lands.
+                durationObserver = item.observe(\.duration, options: [.new]) { [weak self] item, _ in
+                    let seconds = Self.seconds(of: item.duration)
+                    Task { @MainActor in
+                        guard let self, seconds != nil else { return }
+                        self.cachedFileDuration = seconds
                     }
                 }
                 let p = AVPlayer(playerItem: item)
@@ -661,6 +663,8 @@ final class AudioBookPlayer: ObservableObject {
     private func teardownAudio() {
         statusObserver?.invalidate()
         statusObserver = nil
+        durationObserver?.invalidate()
+        durationObserver = nil
         player?.pause()
         player?.replaceCurrentItem(with: nil)
         player = nil
