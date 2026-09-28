@@ -55,7 +55,11 @@ final class AudioBookPlayer: ObservableObject {
     var nowPlayingTitle: String? { activeBook?.title }
 
     /// The loaded file's length in seconds — nil while nothing is loaded.
-    var fileDuration: Double? { player?.currentItem?.duration.seconds }
+    var fileDuration: Double? { player.flatMap { Self.seconds(of: $0.currentItem?.duration) } }
+    /// The manifest's duration — the fallback while an item is still
+    /// opening (AVPlayer reports an indefinite duration until the stream
+    /// is ready, and the manifest value is right by construction).
+    private var bookDurationFallback: Double { activeBook?.audioDuration ?? 0 }
 
     /// Cover art for the mini-player thumbnail (loaded once per file).
     var artworkImage: UIImage? { cachedArtwork }
@@ -172,7 +176,8 @@ final class AudioBookPlayer: ObservableObject {
                 cachedArtwork = Self.loadArtwork(book: book)
             }
             guard let player else { return }
-            let fileDuration = Self.seconds(of: player.currentItem?.duration) ?? 0
+            let fileDuration = Self.seconds(of: player.currentItem?.duration)
+                ?? (bookDurationFallback)
             let start = clampToChapterStart(fraction: fraction, fileDuration: fileDuration)
             // AVPlayer seeks before play so the first rendered frame is
             // already the chapter start; a seek during playback would be
@@ -306,7 +311,8 @@ final class AudioBookPlayer: ObservableObject {
     func seekBy(_ seconds: Double) {
         guard let player else { return }
         let here = Self.seconds(of: player.currentTime()) ?? 0
-        let target = min(max(0, here + seconds), max(0, fileDuration - 0.05))
+        let duration = Self.seconds(of: player.currentItem?.duration) ?? (totalDuration > 0 ? totalDuration : bookDurationFallback)
+        let target = min(max(0, here + seconds), max(0, duration - 0.05))
         if let index = chapters.firstIndex(where: { target >= $0.startSeconds && target < $0.endSeconds }) {
             chapterIndex = index
         }
