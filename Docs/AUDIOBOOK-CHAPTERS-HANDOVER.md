@@ -65,6 +65,16 @@ Then leave the final claim to the device test. The user's standing rule:
 
 ## Other active threads (in case of context switch)
 
+- **PDF open freeze (2026-09-28)** — the round-7 freeze survived the
+  flattenOutline detach because the READER's own open was still on main:
+  `BookPDFView.makeUIView` ran `PDFDocument(url:)` + assignment +
+  `go(to:)` synchronously, and the detached outline walk opened a SECOND
+  instance of the same file concurrently (the container parse ran twice).
+  Fixed in 1f7e380: one background pass opens the document AND walks the
+  outline single-threaded, delivers both to main; the reader shows a
+  spinner while PDFKit works. Verified green (run 36391563393) but NOT
+  device-confirmed — the user's repro file is likely the 508 MB
+  "Ear, Nose & Throat (ENT) - 2 Block.pdf" (267 pages, 2880×1800 scans).
 - **Supertonic slowdown** — RTF climbed 0.5 → 5.3 within one session on
   device and recovered on the next; engine now logs
   `thermal <state>` per chunk from `ProcessInfo.thermalState`. Ask the next
