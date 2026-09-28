@@ -75,6 +75,25 @@ struct SpeechnotesApp: App {
                     BookPlaybackController.shared.bind(to: player)
                     Task { @MainActor in
                         player.wirePlaybackOnce()
+                        // ARMED LAST, AFTER WIRING. The hang watchdog is
+                        // the only component that watches for a blocked
+                        // main thread (a blocked thread also blocks every
+                        // timer that runs on it, so nothing in-process
+                        // can notice its own freeze). Armed past the first
+                        // frame: launch is legitimately slow, and arming
+                        // it earlier would trip on LiveContainer's
+                        // cold-start stall.
+                        //
+                        // When it fires: the shelf backfill — the heaviest
+                        // main-adjacent work in the app — is cancelled
+                        // mid-pass, so the freeze stops being terminal and
+                        // clears when the block lifts instead of needing a
+                        // hard restart. See HangWatchdog for why it does
+                        // not (and must not) relaunch the UI.
+                        HangWatchdog.shared.onBlocked = {
+                            BooksStore.shared.cancelShelfBackfill()
+                        }
+                        HangWatchdog.shared.start()
                     }
                 }
                 // One mini-player for the whole window; per-screen insets

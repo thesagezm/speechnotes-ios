@@ -81,6 +81,30 @@ final class BooksStore: ObservableObject {
         bookDirectory(book.id).appendingPathComponent("cover.jpg")
     }
 
+    /// Cancellation token for the in-flight shelf backfill. Replaced per
+    /// pass; the watchdog cancels the current one when it sees the main
+    /// thread blocked.
+    private var backfillCancellation: BookBackfillCancellation = BookBackfillCancellation()
+
+    /// One backfill pass's cancellation token.
+    final class BookBackfillCancellation {
+        private let lock = NSLock()
+        private var cancelled = false
+        var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return cancelled }
+        func cancel() { lock.lock(); cancelled = true; lock.unlock() }
+    }
+
+    /// Called by the HangWatchdog: abandon the current shelf pass so the
+    /// main thread stops competing with it, and clear the one-shot flag so
+    /// the next shelf open tries again (a cancelled pass is not a completed
+    /// one).
+    func cancelShelfBackfill() {
+        guard !backfillCancellation.isCancelled else { return }
+        backfillCancellation.cancel()
+        didBackfillLegacyBooks = false
+        Log.shared.info("BooksStore: shelf backfill cancelled by the hang watchdog — will retry next open")
+    }
+
     // MARK: - Audiobook parse slices
 
     /// How much of an audiobook the chapter readers look at: moov sits at
@@ -217,8 +241,17 @@ final class BooksStore: ObservableObject {
                 .prefix(maxAudioBooks)
             return others + audio
         }()
+        // Cancellable: if the HangWatchdog sees the main thread blocked
+        // while this pass runs (a slow PDF render, a cold disk), the pass
+        // is abandoned instead of continuing to compete for I/O — the
+        // freeze stops being terminal. The audit's AP2 guard applies:
+        // this loop checks the token between books, not per byte.
+        backfillCancellation = BookBackfillCancellation()
+        let cancellation = backfillCancellation
         Task.detached(priority: .utility) { [weak self] in
             for var book in capped {
+                if cancellation.isCancelled { break }
+                if self?.backfillCancellation !== cancellation { return }
                 let dir = BooksStore.bookDirectory(book.id)
                 switch book.format {
                 case .pdf:
