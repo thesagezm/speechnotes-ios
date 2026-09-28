@@ -552,3 +552,82 @@ hand-waving.
    shelf). The next reviewer should keep it that way — the notes store
    avoids the duplication entirely and that is the cleaner long-term
    shape, but it is a migration, not a fix.
+
+---
+
+## Bugfix round 4 — `c71a9cf`/`cf335d5`/`e04fd0e` (AVPlayer for EAC3 · HangWatchdog)
+
+### `c71a9cf` — the EAC3 decode question answered by changing the API, not the file
+
+**Score: 9/10. Faster than baseline: YES (perceived: a file that produced
+dead silence now produces audio).**
+
+The user's report and instruction were precise: *"the native audio player
+in Files can play it why is it failing in my app... i want it decoded...
+if you fail to decode fork or analyse some vlc code"*. ffprobe on the
+actual file answers it: `codec_name=eac3, channels=6, 48 kHz` —
+Dolby Digital Plus / Atmos. AVAudioPlayer routes through Audio File
+Services, which fails on EAC3 with `kAudioFileInvalidChunkError`;
+AVPlayer hands the same URL to the same media stack the Files app uses.
+No forked decoder is needed — Apple ships the decoder, our API choice
+was the only thing keeping us from it.
+
+1. **F18 (fixed) transport swapped to AVPlayer.** Construction is now
+   `AVPlayerItem` + `AVPlayer` (no `prepareToPlay`); position/duration
+   moved from `Double` to `CMTime` behind `seconds(of:)`/`time(_)`
+   helpers, so every other computation in the player is unchanged plain
+   seconds.
+2. **F19 (fixed) seeking semantics.** AVPlayer seeks are async and
+   rate-preserving, so the chapter start is `seek(to:)` BEFORE `play()` —
+   the first rendered frame is already the chapter start, no pre-roll
+   glitch. All three seek paths (chapter start, ±15 s, scrub) go through
+   the same helper.
+3. **F20 (fixed) AVPlayer fails asynchronously.** An un-decodable codec
+   surfaces on the item's `.status`, not at construction, so the player
+   observes `\.status` and routes a failure through the SAME
+   `unplayableReason()` path the sync catch uses — one honest banner
+   whether the failure is sync or async. The observer is invalidated on
+   teardown (no leak across items).
+4. **F21 (fixed) liveness.** `player.timeControlStatus == .playing`
+   replaces `isPlaying`, which reports "paused" while AVPlayer is
+   buffering a large file — the UI would have lied exactly when the
+   file mattered most.
+5. **F22 (verified clean) duration before ready.** AVPlayer reports an
+   indefinite `CMTime` until the stream is ready; `seconds(of:)` maps that
+   to nil and the arithmetic falls back to the manifest's duration. The
+   CI round-6 error (`Double?` in `seekBy`'s clamp) was exactly this
+   seam, and it is now typed, not assumed.
+
+### `1a30607` — the freeze stops being terminal
+
+**Score: 9/10. Faster than baseline: YES** — the freeze was already
+removed at the source in `6d4da8c`; this makes any future block
+self-reporting instead of requiring a hard restart.
+
+1. **F23 (fixed) nothing could see a blocked main thread.** Every timer in
+   the app runs *on* the main thread, so a blocked main thread blocks
+   its own watchdog — the app had no way to know it was frozen. A plain
+   `Thread` (never main, never blocked) ticks at 1 Hz and measures the
+   gap around a main-actor check.
+2. **F24 (fixed) the recovery is deliberately conservative.** The
+   watchdog cancels the shelf backfill (the only main-adjacent pass in
+   the app — its loop checks the token between books) and logs. It does
+   NOT relaunch the UI, reset state, or force-quit: a blocked main thread
+   is by definition the only thing that can fix the UI, and a watchdog
+   "recovering" into a wedged state is worse than the freeze. The honest
+   recovery is "the work stops, the block lifts, the next tick clears."
+3. **F25 (fixed) Swift 5 isolation, from CI round 7.** Three errors:
+   a detached task reading a main-isolated property (the token is now a
+   local captured first), a worker thread calling an isolated closure
+   synchronously (both closures are plain and hop internally — the hop
+   not running is the whole point), and `BooksStore.shared` not existing
+   (the tab owns the store, so the watchdog posts `.hangWatchdogFired`
+   and the store installs a one-time observer on first shelf open).
+
+**Build gate: `36381017354` — all six jobs green** (build-ipa plus
+logic-tests and all four spikes) on `e04fd0e`.
+
+**On the user's audiophile ask (FLAC):** the same swap answers it — AVPlayer
+decodes ALAC and FLAC-in-MP4, and a raw `.flac` file is not a book
+container (the importer takes m4b/m4a/mp4/mp3 by design). Nothing about
+this path re-encodes; it hands the file to the decoder Apple ships.
