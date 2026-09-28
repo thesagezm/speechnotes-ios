@@ -81,8 +81,7 @@ final class HangWatchdog {
                     Log.shared.error("HangWatchdog: main thread blocked ~\(String(format: "%.1f", gap))s — cancelling shelf work and reporting")
                     self.onBlocked?()
                 }
-            }
-        )
+            })
         worker.name = "com.speechnotes.hang-watchdog"
         worker.start()
         self.worker = worker
@@ -110,11 +109,13 @@ final class HangWatchdog {
 /// measures the gap between the check running and the previous one. A gap
 /// over the threshold is a blocked main thread.
 private final class MainThreadProbeThread: Thread {
-    private let check: @MainActor () -> Void
-    /// Called ON THE WORKER when the measured gap crosses the threshold.
-    private let onBlocked: @MainActor (_ gapSeconds: Double) -> Void
+    /// Both are plain (non-isolated) closures that hop to main internally:
+    /// a blocking main thread is precisely when the hop cannot run, so the
+    /// worker must never call an isolated function synchronously.
+    private let check: () -> Void
+    private let onBlocked: (_ gapSeconds: Double) -> Void
 
-    init(check: @escaping @MainActor () -> Void, onBlocked: @escaping @MainActor (_ gapSeconds: Double) -> Void) {
+    init(check: @escaping () -> Void, onBlocked: @escaping (_ gapSeconds: Double) -> Void) {
         self.check = check
         self.onBlocked = onBlocked
         super.init()
@@ -142,7 +143,7 @@ private final class MainThreadProbeThread: Thread {
             // worker's own sleep; if the main hop did not run inside it,
             // the difference is the main thread's block.
             if gap >= 1.4 {
-                DispatchQueue.main.async { self.onBlocked(gap) }
+                self.onBlocked(gap)
             }
         }
     }

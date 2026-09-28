@@ -322,4 +322,10 @@ extension Notification.Name {
     /// Posted when a note is soft-deleted or purged (object = note UUID).
     /// SpeechPlayer stops playback if the deleted note is the live one.
     static let noteDeleted = Notification.Name("NotesStore.noteDeleted")
+
+    /// Posted by the HangWatchdog when it sees the main thread blocked.
+    /// The shelf backfill listens: a blocked main thread plus a heavy
+    /// background pass is the freeze, so the pass is cancelled instead of
+    /// continuing to compete for I/O. See HangWatchdog for the full story.
+    static let hangWatchdogFired = Notification.Name("HangWatchdog.fired")
 }

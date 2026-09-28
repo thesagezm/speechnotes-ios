@@ -172,7 +172,22 @@ final class BooksStore: ObservableObject {
     /// "tapping any book freezes the app" report. The audio backfill is
     /// now ONE BOOK PER LAUNCH (oldest first) and everything else about it
     /// is unchanged.
+    private var watchdogObserverInstalled = false
+
+    private func installWatchdogObserverOnce() {
+        guard !watchdogObserverInstalled else { return }
+        watchdogObserverInstalled = true
+        NotificationCenter.default.addObserver(
+            forName: .hangWatchdogFired,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.cancelShelfBackfill() }
+        }
+    }
+
     func refresh() {
+        installWatchdogObserverOnce()
         let fm = FileManager.default
         guard let dirs = try? fm.contentsOfDirectory(
             at: Self.booksDirectory,
@@ -246,12 +261,11 @@ final class BooksStore: ObservableObject {
         // is abandoned instead of continuing to compete for I/O — the
         // freeze stops being terminal. The audit's AP2 guard applies:
         // this loop checks the token between books, not per byte.
-        backfillCancellation = BookBackfillCancellation()
-        let cancellation = backfillCancellation
+        let cancellation = BookBackfillCancellation()
+        backfillCancellation = cancellation
         Task.detached(priority: .utility) { [weak self] in
             for var book in capped {
                 if cancellation.isCancelled { break }
-                if self?.backfillCancellation !== cancellation { return }
                 let dir = BooksStore.bookDirectory(book.id)
                 switch book.format {
                 case .pdf:

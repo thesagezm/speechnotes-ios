@@ -91,7 +91,7 @@ struct SpeechnotesApp: App {
                         // hard restart. See HangWatchdog for why it does
                         // not (and must not) relaunch the UI.
                         HangWatchdog.shared.onBlocked = {
-                            BooksStore.shared.cancelShelfBackfill()
+                            NotificationCenter.default.post(name: .hangWatchdogFired, object: nil)
                         }
                         HangWatchdog.shared.start()
                     }
