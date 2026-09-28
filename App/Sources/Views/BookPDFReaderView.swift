@@ -755,7 +755,7 @@ private struct BookPDFView: UIViewRepresentable {
                     pdfView.document = opened.document
                     // Width-fit BEFORE the saved-page jump, so go(to:)
                     // lands on a page already at its final scale.
-                    Self.applyWidthFit(pdfView, width: self.fitWidth)
+                    BookPDFView.applyWidthFit(pdfView, width: self.fitWidth)
                     if startPageIndex > 0,
                        startPageIndex < opened.document.pageCount,
                        let page = opened.document.page(at: startPageIndex) {

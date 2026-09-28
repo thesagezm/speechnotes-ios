@@ -203,16 +203,17 @@ final class AudioBookPlayer: ObservableObject {
                     }
                 }
                 // The file's length arrives ASYNC, loaded exactly once:
-                // AVPlayerItem.duration is the one AVFoundation property
-                // Apple documents as "may block the calling thread", and
-                // the old code read it synchronously from every transport
-                // path. The manifest's duration covers the gap until the
-                // load lands.
-                item.loadValuesAsynchronously(forKeys: ["duration"]) { [weak self] in
-                    let status = item.statusOfValue(forKey: "duration", error: nil)
-                    let duration: Double? = status == .loaded ? Self.seconds(of: item.duration) : nil
-                    Task { @MainActor in
-                        self?.cachedFileDuration = duration
+                // the item's duration is the value every transport read
+                // used to hammer synchronously (the deprecated sync access
+                // is the one AVFoundation read documented as able to block
+                // the calling thread). load(.duration) is the official
+                // async replacement; the manifest's duration covers the
+                // gap until it lands.
+                Task { [weak self] in
+                    let time = try? await item.load(.duration)
+                    let seconds = Self.seconds(of: time)
+                    await MainActor.run {
+                        self?.cachedFileDuration = seconds
                     }
                 }
                 let p = AVPlayer(playerItem: item)
@@ -398,7 +399,7 @@ final class AudioBookPlayer: ObservableObject {
     /// One deliberate jump per drag end — committed immediately, no
     /// coalescing window.
     func seek(toFraction value: Double) {
-        guard let player, chapters.indices.contains(chapterIndex) else { return }
+        guard chapters.indices.contains(chapterIndex) else { return }
         let chapter = chapters[chapterIndex]
         guard let end = effectiveChapterEnd(fileDuration: fileLength) else { return }
         let span = end - chapter.startSeconds
