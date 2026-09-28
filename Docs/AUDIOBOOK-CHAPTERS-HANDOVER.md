@@ -65,16 +65,33 @@ Then leave the final claim to the device test. The user's standing rule:
 
 ## Other active threads (in case of context switch)
 
-- **PDF open freeze (2026-09-28)** — the round-7 freeze survived the
-  flattenOutline detach because the READER's own open was still on main:
-  `BookPDFView.makeUIView` ran `PDFDocument(url:)` + assignment +
-  `go(to:)` synchronously, and the detached outline walk opened a SECOND
-  instance of the same file concurrently (the container parse ran twice).
-  Fixed in 1f7e380: one background pass opens the document AND walks the
-  outline single-threaded, delivers both to main; the reader shows a
-  spinner while PDFKit works. Verified green (run 36391563393) but NOT
-  device-confirmed — the user's repro file is likely the 508 MB
-  "Ear, Nose & Throat (ENT) - 2 Block.pdf" (267 pages, 2880×1800 scans).
+- **PDF open freeze (2026-09-28) — DEVICE-CONFIRMED FIXED by the user.**
+  Root cause was `BookPDFView.makeUIView`'s synchronous
+  `PDFDocument(url:)` + a duplicate concurrent open for the outline walk
+  (1f7e380). Follow-ups in dabf043: default fit-to-WIDTH (autoScales
+  fits the whole page, which left dead side margins — the user asked),
+  re-fit on surface width change, pinch-zoom preserved.
+- **Audiobook transport freeze (dabf043, NOT device-confirmed)** —
+  mashing ±15 s / prev-chapter froze the UI while audio continued.
+  Costs per press: exact-tolerance seek (the comment said "loose" but
+  `seek(to:)` is kCMTimeZero), synchronous `AVPlayerItem.duration`
+  reads (deprecated; can block the calling thread), and force
+  publish+persist per press. Now coalesced: presses accumulate on the
+  pending target, one commit 0.2 s after the last press (single loose
+  ±0.25 s seek + one publish + one persist); duration cached via KVO;
+  tick() holds steady while a commit is pending. If the user still
+  reports a stall, the HangWatchdog log line names it.
+- **EAC3 background kill (dabf043, NOT device-confirmed)** — 'Harry
+  Potter' (EAC3) got suspended in background while AAC books persisted.
+  The app had NO audio-session event handling; multichannel content
+  triggers reconfigurations stereo AAC never sees. Now wired:
+  interruption began/ended (re-activate + resume on shouldResume),
+  route change (old-device-unavailable reflects the system pause),
+  mediaServicesWereReset (AudioSessionSetup.invalidateConfiguration()
+  + cold-resume). VLC comparison: it software-decodes to its own audio
+  unit and re-activates after every session event — we adopted the
+  session-resilience half; bundling ffmpeg software decode is the
+  fallback if AVPlayer's EAC3 background path still fails.
 - **Supertonic slowdown** — RTF climbed 0.5 → 5.3 within one session on
   device and recovered on the next; engine now logs
   `thermal <state>` per chunk from `ProcessInfo.thermalState`. Ask the next
