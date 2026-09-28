@@ -4,6 +4,14 @@ import SwiftUI
 import SpeechLogic
 import UIKit
 
+// AVPlayer, not AVAudioPlayer. The Files app plays the EAC3/5.1 'Harry
+// Potter' m4b without complaint because it hands the file to the same
+// media stack AVPlayer uses; AVAudioPlayer goes through Audio File
+// Services, which fails on Dolby Digital Plus with
+// kAudioFileInvalidChunkError. The cost of the swap is that position and
+// duration move to CMTime — the two helpers below keep the rest of this
+// player's arithmetic in plain seconds.
+
 /// App-level audiobook playback owner — the audiobook twin of `SpeechPlayer`.
 ///
 /// v1.7 device round 3: this used to be a `@StateObject` inside
@@ -47,7 +55,7 @@ final class AudioBookPlayer: ObservableObject {
     var nowPlayingTitle: String? { activeBook?.title }
 
     /// The loaded file's length in seconds — nil while nothing is loaded.
-    var fileDuration: Double? { player?.duration }
+    var fileDuration: Double? { player?.currentItem?.duration.seconds }
 
     /// Cover art for the mini-player thumbnail (loaded once per file).
     var artworkImage: UIImage? { cachedArtwork }
@@ -62,7 +70,15 @@ final class AudioBookPlayer: ObservableObject {
 
     // MARK: Internals
 
-    private var player: AVAudioPlayer?
+    /// libx264 saves key frames at 10-second intervals, so the AVPlayer seek
+    /// tolerance is deliberately loose: a tap lands within a key frame
+    /// boundary and playback resumes from there. 1000 is the CMTime
+    /// timescale for every position in this player — one second of
+    /// millisecond resolution is plenty for chapter-accurate scrubbing.
+    private static let timeScale: CMTimeScale = 1000
+
+    private var player: AVPlayer?
+    private var statusObserver: NSKeyValueObservation?
     private var ticker: Timer?
     /// The file currently loaded — reload only when it actually changes.
     private var loadedURL: URL?
@@ -126,26 +142,47 @@ final class AudioBookPlayer: ObservableObject {
         let url = BooksStore.resolveAudioOriginalURL(book: book)
         do {
             // Same one-shot session configuration every engine runs on first
-            // play — an AVAudioPlayer created with the session still in its
-            // launch default (ambient/silent-switch-able) is silenced by the
-            // mute switch and pauses when the app backgrounds, which looks
-            // like "plays two seconds then dies" on device.
+            // An item created while the session is still in its launch
+            // default (ambient/silent-switch-able) is silenced by the mute
+            // switch and pauses when the app backgrounds, which looks like
+            // "plays two seconds then dies" on device.
             AudioSessionSetup.configureIfNeeded(prefix: "AudioBookPlayer")
             if loadedURL != url || player == nil {
-                player?.stop()
-                let p = try AVAudioPlayer(contentsOf: url)
-                p.prepareToPlay()
+                // A failure must not leave the previous item's observer
+                // attached to the new one.
+                statusObserver?.invalidate()
+                statusObserver = nil
+                player?.replaceCurrentItem(with: nil)
+                let item = AVPlayerItem(url: url)
+                // Watch the item's status: AVPlayer fails asynchronously
+                // (an un-decodable codec surfaces here, not at init), and
+                // this is where the honest message comes from.
+                statusObserver = item.observe(\.status, options: [.new]) { [weak self] item, _ in
+                    Task { @MainActor in
+                        guard let self, self.player?.currentItem === item else { return }
+                        if item.status == .failed {
+                            self.handleItemFailure(item.error)
+                        }
+                    }
+                }
+                let p = AVPlayer(playerItem: item)
+                p.allowsExternalPlayback = false
                 player = p
                 loadedURL = url
                 cachedArtwork = Self.loadArtwork(book: book)
             }
             guard let player else { return }
-            player.currentTime = clampToChapterStart(fraction: fraction, fileDuration: player.duration)
+            let fileDuration = Self.seconds(of: player.currentItem?.duration) ?? 0
+            let start = clampToChapterStart(fraction: fraction, fileDuration: fileDuration)
+            // AVPlayer seeks before play so the first rendered frame is
+            // already the chapter start; a seek during playback would be
+            // the pre-roll glitch VLC avoids.
+            player.seek(to: Self.time(start))
             player.play()
             isPlaying = true
             chapterProgress = chapterProgressValue
-            elapsed = player.currentTime
-            totalDuration = player.duration
+            elapsed = Self.seconds(of: player.currentTime()) ?? start
+            totalDuration = fileDuration
             startTicker()
             wireRemoteCommandsOnce()
             NowPlayingCenter.shared.configure()
@@ -155,10 +192,7 @@ final class AudioBookPlayer: ObservableObject {
         } catch {
             // ONE line, and a reason the UI can act on. The device log for
             // the EAC3 'Harry Potter' book showed this catch firing 30+
-            // times for one book — every Play tap re-created the same
-            // un-decodable file. AVAudioPlayer cannot decode EAC3/5.1
-            // (Dolby Digital Plus / Atmos): the OS exposes those to
-            // hardware decoders the Audio File path doesn't reach.
+            // times for one book.
             let reason = AudioBookPlayer.unplayableReason(for: error, url: url)
             Log.shared.error("AudioBookPlayer: cannot play \(url.lastPathComponent): \(error) — \(reason)")
             playbackBlockedReason = reason
@@ -271,12 +305,13 @@ final class AudioBookPlayer: ObservableObject {
     /// without chapter metadata, which read as "navigation not working".
     func seekBy(_ seconds: Double) {
         guard let player else { return }
-        let target = min(max(0, player.currentTime + seconds), max(0, player.duration - 0.05))
+        let here = Self.seconds(of: player.currentTime()) ?? 0
+        let target = min(max(0, here + seconds), max(0, fileDuration - 0.05))
         if let index = chapters.firstIndex(where: { target >= $0.startSeconds && target < $0.endSeconds }) {
             chapterIndex = index
         }
         userPaused = false
-        player.currentTime = target
+        player.seek(to: Self.time(target))
         chapterProgress = chapterProgressValue
         elapsed = target
         // VLC's rule: republish the full surface right after a seek.
@@ -288,13 +323,15 @@ final class AudioBookPlayer: ObservableObject {
     func seek(toFraction value: Double) {
         guard let player, chapters.indices.contains(chapterIndex) else { return }
         let chapter = chapters[chapterIndex]
-        guard let end = effectiveChapterEnd(fileDuration: player.duration) else { return }
+        let fileDuration = Self.seconds(of: player.currentItem?.duration) ?? 0
+        guard let end = effectiveChapterEnd(fileDuration: fileDuration) else { return }
         let span = end - chapter.startSeconds
         guard span > 0 else { return }
-        player.currentTime = min(max(0, chapter.startSeconds + value * span), max(0, end - 0.05))
+        let target = min(max(0, chapter.startSeconds + value * span), max(0, end - 0.05))
+        player.seek(to: Self.time(target))
         userPaused = false
         chapterProgress = chapterProgressValue
-        elapsed = player.currentTime
+        elapsed = target
         // VLC's rule: republish the full surface right after a seek — iOS
         // extrapolates the in-between from rate + elapsed.
         publishNowPlaying(force: true)
@@ -330,16 +367,20 @@ final class AudioBookPlayer: ObservableObject {
     private var chapterProgressValue: Double {
         guard let player, chapters.indices.contains(chapterIndex) else { return 0 }
         let chapter = chapters[chapterIndex]
-        guard let end = effectiveChapterEnd(fileDuration: player.duration) else { return 0 }
+        let fileDuration = Self.seconds(of: player.currentItem?.duration) ?? 0
+        guard let end = effectiveChapterEnd(fileDuration: fileDuration) else { return 0 }
         let span = end - chapter.startSeconds
         guard span > 0 else { return 0 }
-        return min(1, max(0, (player.currentTime - chapter.startSeconds) / span))
+        let here = Self.seconds(of: player.currentTime()) ?? chapter.startSeconds
+        return min(1, max(0, (here - chapter.startSeconds) / span))
     }
 
     private var chapterIsFinished: Bool {
         guard let player else { return false }
-        guard let end = effectiveChapterEnd(fileDuration: player.duration) else { return false }
-        return player.currentTime >= end - 0.05
+        let fileDuration = Self.seconds(of: player.currentItem?.duration) ?? 0
+        guard let end = effectiveChapterEnd(fileDuration: fileDuration) else { return false }
+        let here = Self.seconds(of: player.currentTime()) ?? 0
+        return here >= end - 0.05
     }
 
     private func clampToChapterStart(fraction: Double?, fileDuration: Double) -> Double {
@@ -375,13 +416,16 @@ final class AudioBookPlayer: ObservableObject {
 
     private func tick() {
         guard let player else { return }
-        let playing = player.isPlaying
+        // timeControlStatus is AVPlayer's "is it actually producing audio"
+        // — .playing while rendering, .paused when paused, and
+        // .waitingToPlayAtSpecifiedRate while buffering a big file.
+        let playing = player.timeControlStatus == .playing
         if isPlaying != playing { isPlaying = playing }
         let value = chapterProgressValue
         if chapterProgress != value { chapterProgress = value }
-        let now = player.currentTime
+        let now = Self.seconds(of: player.currentTime()) ?? 0
         if elapsed != now { elapsed = now }
-        let duration = player.duration
+        let duration = Self.seconds(of: player.currentItem?.duration) ?? 0
         if totalDuration != duration { totalDuration = duration }
 
         guard chapterIsFinished, !userPaused else {
@@ -474,8 +518,8 @@ final class AudioBookPlayer: ObservableObject {
             isPlaying: isPlaying,
             progress: nil,
             rate: 1.0,
-            elapsedSeconds: player?.currentTime,
-            durationSeconds: book.audioDuration ?? player?.duration,
+            elapsedSeconds: player.flatMap { Self.seconds(of: $0.currentTime()) },
+            durationSeconds: book.audioDuration ?? Self.seconds(of: player?.currentItem?.duration),
             chapterCount: chapters.count > 1 ? chapters.count : nil,
             chapterNumber: chapters.count > 1 ? chapterIndex + 1 : nil
         )
@@ -491,10 +535,37 @@ final class AudioBookPlayer: ObservableObject {
     }
 
     private func teardownAudio() {
-        player?.stop()
+        statusObserver?.invalidate()
+        statusObserver = nil
+        player?.pause()
+        player?.replaceCurrentItem(with: nil)
         player = nil
         loadedURL = nil
         cachedArtwork = nil
+        stopTicker()
+    }
+
+    // MARK: - CMTime helpers
+
+    /// Position/duration in seconds, or nil when the value is indefinite
+    /// (AVPlayer reports that before a stream is ready).
+    static func seconds(of time: CMTime?) -> Double? {
+        guard let time, time.isNumeric, !time.isIndefinite else { return nil }
+        return time.seconds
+    }
+
+    static func time(_ seconds: Double) -> CMTime {
+        CMTime(seconds: seconds, preferredTimescale: timeScale)
+    }
+
+    /// AVPlayer's async failure path — an un-decodable codec surfaces here,
+    /// not at construction, so the honest banner comes from this hook too.
+    private func handleItemFailure(_ error: Error?) {
+        guard let url = loadedURL else { return }
+        let reason = Self.unplayableReason(for: error ?? URLError(.cannotDecodeContentData), url: url)
+        Log.shared.error("AudioBookPlayer: \(url.lastPathComponent) failed to decode — \(reason)")
+        playbackBlockedReason = reason
+        isPlaying = false
         stopTicker()
     }
 }
