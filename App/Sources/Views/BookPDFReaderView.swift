@@ -251,22 +251,25 @@ struct BookPDFReaderView: View {
                 textScale: appTheme.previewTextScale
             )
         } else {
-            ZStack {
-                BookPDFView(
-                    url: BooksStore.originalFileURL(book),
-                    startPageIndex: currentPage,
-                    onPageChange: handlePageChange,
-                    onReady: {
-                        pdfView = $0
-                        // A fresh surface identity is loading again (the
-                        // read-along swap remakes this view on return).
-                        pdfLoading = true
-                    },
-                    onDocumentLoaded: { pdfLoading = false },
-                    onOutlineLoaded: { outlineRows = $0 }
-                )
-                if pdfLoading {
-                    ProgressView()
+            GeometryReader { geo in
+                ZStack {
+                    BookPDFView(
+                        url: BooksStore.originalFileURL(book),
+                        fitWidth: geo.size.width,
+                        startPageIndex: currentPage,
+                        onPageChange: handlePageChange,
+                        onReady: {
+                            pdfView = $0
+                            // A fresh surface identity is loading again (the
+                            // read-along swap remakes this view on return).
+                            pdfLoading = true
+                        },
+                        onDocumentLoaded: { pdfLoading = false },
+                        onOutlineLoaded: { outlineRows = $0 }
+                    )
+                    if pdfLoading {
+                        ProgressView()
+                    }
                 }
             }
         }
@@ -587,6 +590,10 @@ fileprivate struct OutlineRow: Identifiable {
 /// PDFKit takes with the file.
 private struct BookPDFView: UIViewRepresentable {
     let url: URL
+    /// The surface's current width (from the reader's GeometryReader) — the
+    /// width-fit scale is derived from it, and a change (rotation, the
+    /// landscape rail appearing) re-fits.
+    let fitWidth: CGFloat
     let startPageIndex: Int
     var onPageChange: (Int, Int) -> Void
     var onReady: (PDFView) -> Void
@@ -606,6 +613,7 @@ private struct BookPDFView: UIViewRepresentable {
         let pdfView = PDFView()
         pdfView.autoScales = true
         pdfView.displayMode = .singlePageContinuous
+        context.coordinator.fitWidth = fitWidth
         context.coordinator.attach(pdfView)
         context.coordinator.load(
             url: url,
@@ -621,6 +629,18 @@ private struct BookPDFView: UIViewRepresentable {
 
     func updateUIView(_ pdfView: PDFView, context: Context) {
         context.coordinator.onPageChange = onPageChange
+        // Width re-fit: the surface's slot changed (rotation, landscape
+        // rail) — recompute the scale against the new width. Guarded by a
+        // width delta so ordinary state-driven updates don't touch the
+        // scale, and a manual zoom survives until the surface itself
+        // changes shape.
+        let coordinator = context.coordinator
+        if abs(fitWidth - coordinator.fitWidth) > 0.5 {
+            coordinator.fitWidth = fitWidth
+            if pdfView.document != nil {
+                Self.applyWidthFit(pdfView, width: fitWidth)
+            }
+        }
     }
 
     /// Opens `url` and flattens its outline tree depth-first — ON ONE
@@ -665,8 +685,32 @@ private struct BookPDFView: UIViewRepresentable {
         return (document, rows)
     }
 
+    /// Width-fit: the page's width fills the surface — what every reader
+    /// defaults to on a phone. PDFKit's own autoScales fits the WHOLE page
+    /// instead, which on a portrait screen leaves dead margins down both
+    /// sides (the user's report). autoScales goes OFF so PDFKit stops
+    /// re-fitting the whole page on every layout, and pinch-zoom still
+    /// works on top of the chosen scale; a surface width change re-fits
+    /// (see updateUIView).
+    fileprivate static func applyWidthFit(_ pdfView: PDFView, width: CGFloat) {
+        guard width > 0,
+              let document = pdfView.document,
+              document.pageCount > 0,
+              let first = document.page(at: 0) else { return }
+        let pageWidth = first.bounds(for: .cropBox).width
+        guard pageWidth > 0 else { return }
+        let scale = width / pageWidth
+        pdfView.minScaleFactor = scale * 0.5
+        pdfView.maxScaleFactor = scale * 6
+        pdfView.scaleFactor = scale
+        pdfView.autoScales = false
+    }
+
     final class Coordinator {
         var onPageChange: (Int, Int) -> Void
+        /// The surface width the current scale was fitted against (set by
+        /// makeUIView, refreshed by updateUIView).
+        var fitWidth: CGFloat = 0
         private var observer: NSObjectProtocol?
         private weak var pdfView: PDFView?
         private var loadTask: Task<Void, Never>?
@@ -709,6 +753,9 @@ private struct BookPDFView: UIViewRepresentable {
                           let pdfView = self.pdfView,
                           pdfView.window != nil else { return }
                     pdfView.document = opened.document
+                    // Width-fit BEFORE the saved-page jump, so go(to:)
+                    // lands on a page already at its final scale.
+                    Self.applyWidthFit(pdfView, width: self.fitWidth)
                     if startPageIndex > 0,
                        startPageIndex < opened.document.pageCount,
                        let page = opened.document.page(at: startPageIndex) {

@@ -68,4 +68,11 @@ enum AudioSessionSetup {
     static func resetForTesting() {
         configured = false
     }
+
+    /// Production hook for `mediaServicesWereReset`: the media server died,
+    /// so the applied category is void with it. The next `configureIfNeeded`
+    /// re-applies from scratch instead of trusting a stale one-shot flag.
+    static func invalidateConfiguration() {
+        configured = false
+    }
 }

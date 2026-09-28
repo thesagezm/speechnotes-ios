@@ -54,12 +54,41 @@ final class AudioBookPlayer: ObservableObject {
 
     var nowPlayingTitle: String? { activeBook?.title }
 
-    /// The loaded file's length in seconds — nil while nothing is loaded.
-    var fileDuration: Double? { player.flatMap { Self.seconds(of: $0.currentItem?.duration) } }
+    /// The loaded file's length in seconds — nil while nothing loaded or
+    /// the async load has not landed yet (see the item creation in play()).
+    var fileDuration: Double? { cachedFileDuration }
     /// The manifest's duration — the fallback while an item is still
     /// opening (AVPlayer reports an indefinite duration until the stream
     /// is ready, and the manifest value is right by construction).
     private var bookDurationFallback: Double { activeBook?.audioDuration ?? 0 }
+
+    /// The file's length, loaded ASYNC once per item. Every transport read
+    /// reads THIS — never `AVPlayerItem.duration` synchronously: it is the
+    /// one AVFoundation property Apple documents as "may block the calling
+    /// thread" (deprecated in iOS 16 for exactly that), and it sat inside
+    /// seekBy, tick, chapterProgressValue and chapterIsFinished, so
+    /// mashing the transport hammered it dozens of times a second on the
+    /// main thread.
+    private var cachedFileDuration: Double?
+
+    /// The file length the transport math uses: the async cache, then the
+    /// manifest, then zero. No synchronous AVPlayerItem property access.
+    private var fileLength: Double {
+        cachedFileDuration ?? (totalDuration > 0 ? totalDuration : bookDurationFallback)
+    }
+
+    /// Coalesced transport (VLC's behavior): rapid ±15 s / chapter presses
+    /// each recompute the target and move the PUBLISHED playhead, but only
+    /// the last press commits an actual seek + publish + persist. The
+    /// media stack re-primes per seek — N rapid presses must cost one
+    /// seek, not N — and every commit also carried a now-playing publish
+    /// and a position write.
+    private struct PendingSeek {
+        var target: Double
+        var wasPlaying: Bool
+    }
+    private var pendingSeek: PendingSeek?
+    private var seekCommitTimer: Timer?
 
     /// Cover art for the mini-player thumbnail (loaded once per file).
     var artworkImage: UIImage? { cachedArtwork }
@@ -84,6 +113,10 @@ final class AudioBookPlayer: ObservableObject {
     private var player: AVPlayer?
     private var statusObserver: NSKeyValueObservation?
     private var ticker: Timer?
+    /// Set true only by the item-creation branch in play(), and read right
+    /// after: a freshly created item commits its first seek immediately
+    /// (no coalescing window on a cold start).
+    private var loadedItemJustCreated = false
     /// The file currently loaded — reload only when it actually changes.
     private var loadedURL: URL?
     /// The book a future play() starts from (bound by the reader on appear).
@@ -169,31 +202,62 @@ final class AudioBookPlayer: ObservableObject {
                         }
                     }
                 }
+                // The file's length arrives ASYNC, loaded exactly once:
+                // AVPlayerItem.duration is the one AVFoundation property
+                // Apple documents as "may block the calling thread", and
+                // the old code read it synchronously from every transport
+                // path. The manifest's duration covers the gap until the
+                // load lands.
+                item.loadValuesAsynchronously(forKeys: ["duration"]) { [weak self] in
+                    let status = item.statusOfValue(forKey: "duration", error: nil)
+                    let duration: Double? = status == .loaded ? Self.seconds(of: item.duration) : nil
+                    Task { @MainActor in
+                        self?.cachedFileDuration = duration
+                    }
+                }
                 let p = AVPlayer(playerItem: item)
                 p.allowsExternalPlayback = false
                 player = p
                 loadedURL = url
+                loadedItemJustCreated = true
+                cachedFileDuration = nil
                 cachedArtwork = Self.loadArtwork(book: book)
             }
             guard let player else { return }
-            let fileDuration = Self.seconds(of: player.currentItem?.duration)
-                ?? (bookDurationFallback)
+            let fileDuration = fileLength
             let start = clampToChapterStart(fraction: fraction, fileDuration: fileDuration)
-            // AVPlayer seeks before play so the first rendered frame is
-            // already the chapter start; a seek during playback would be
-            // the pre-roll glitch VLC avoids.
-            player.seek(to: Self.time(start))
-            player.play()
             isPlaying = true
-            chapterProgress = chapterProgressValue
-            elapsed = Self.seconds(of: player.currentTime()) ?? start
             totalDuration = fileDuration
             startTicker()
             wireRemoteCommandsOnce()
+            wireSessionObserversOnce()
             NowPlayingCenter.shared.configure()
             NowPlayingCenter.shared.setChapterSkipEnabled(chapters.count > 1)
-            publishNowPlaying(force: true)
-            persistPosition(force: true)
+            // AVPlayer seeks before play so the first rendered frame is
+            // already the chapter start; a seek during playback would be
+            // the pre-roll glitch VLC avoids.
+            //
+            // The commit is split by WHERE the press came from: a cold
+            // start (the item above was just created — the tap is already
+            // slow) and a fraction-carrying resume commit at once; a
+            // chapter jump on the LIVE item is the mash path — the UI
+            // state above is already live, and the actual seek waits for
+            // the presses to stop (see PendingSeek).
+            if fraction != nil {
+                userPaused = false
+                player.play()
+                commitSeek(to: start, wasPlaying: true, fileDuration: fileDuration)
+            } else if loadedItemJustCreated {
+                loadedItemJustCreated = false
+                userPaused = false
+                player.play()
+                commitSeek(to: start, wasPlaying: true, fileDuration: fileDuration)
+            } else {
+                userPaused = false
+                elapsed = start
+                chapterProgress = 0
+                scheduleSeekCommit(target: start, wasPlaying: true)
+            }
         } catch {
             // ONE line, and a reason the UI can act on. The device log for
             // the EAC3 'Harry Potter' book showed this catch firing 30+
@@ -246,6 +310,9 @@ final class AudioBookPlayer: ObservableObject {
     }
 
     func pause() {
+        // A press is pending its commit: it must not come back playing
+        // over an explicit pause.
+        pendingSeek?.wasPlaying = false
         player?.pause()
         userPaused = true
         isPlaying = false
@@ -308,36 +375,82 @@ final class AudioBookPlayer: ObservableObject {
     /// chapter boundary moves the chapter (and the lock-screen chapter
     /// metadata) with it — the old chapter chevrons did nothing on files
     /// without chapter metadata, which read as "navigation not working".
+    ///
+    /// Mashing accumulates on the PENDING target: the playhead has not
+    /// moved yet for presses 2…N, so computing each press from
+    /// currentTime() would make them no-ops (five −15 s taps must rewind
+    /// 75 s, not 15). The published playhead updates per press; one seek
+    /// commits when the presses stop.
     func seekBy(_ seconds: Double) {
         guard let player else { return }
-        let here = Self.seconds(of: player.currentTime()) ?? 0
-        let duration = Self.seconds(of: player.currentItem?.duration) ?? (totalDuration > 0 ? totalDuration : bookDurationFallback)
-        let target = min(max(0, here + seconds), max(0, duration - 0.05))
+        let base = pendingSeek?.target ?? (Self.seconds(of: player.currentTime()) ?? 0)
+        let target = min(max(0, base + seconds), max(0, fileLength - 0.05))
         if let index = chapters.firstIndex(where: { target >= $0.startSeconds && target < $0.endSeconds }) {
             chapterIndex = index
         }
         userPaused = false
-        player.seek(to: Self.time(target))
-        chapterProgress = chapterProgressValue
         elapsed = target
-        // VLC's rule: republish the full surface right after a seek.
-        publishNowPlaying(force: true)
-        persistPosition(force: true)
+        let wasPlaying = isPlaying || pendingSeek?.wasPlaying == true
+        scheduleSeekCommit(target: target, wasPlaying: wasPlaying)
     }
 
     /// Scrub to a 0…1 fraction of the CURRENT chapter — the reader's slider.
+    /// One deliberate jump per drag end — committed immediately, no
+    /// coalescing window.
     func seek(toFraction value: Double) {
         guard let player, chapters.indices.contains(chapterIndex) else { return }
         let chapter = chapters[chapterIndex]
-        let fileDuration = Self.seconds(of: player.currentItem?.duration) ?? 0
-        guard let end = effectiveChapterEnd(fileDuration: fileDuration) else { return }
+        guard let end = effectiveChapterEnd(fileDuration: fileLength) else { return }
         let span = end - chapter.startSeconds
         guard span > 0 else { return }
         let target = min(max(0, chapter.startSeconds + value * span), max(0, end - 0.05))
-        player.seek(to: Self.time(target))
         userPaused = false
+        commitSeek(to: target, wasPlaying: isPlaying, fileDuration: fileLength)
+    }
+
+    // MARK: Seek commit (coalesced transport)
+
+    /// Schedules (or re-schedules) the single seek commit 0.2 s after the
+    /// last press. The window is short enough to feel instant, long enough
+    /// that a mash costs one seek instead of one per press.
+    private func scheduleSeekCommit(target: Double, wasPlaying: Bool) {
+        pendingSeek = PendingSeek(target: target, wasPlaying: wasPlaying)
+        seekCommitTimer?.invalidate()
+        let timer = Timer(timeInterval: 0.2, repeats: false) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, let pending = self.pendingSeek else { return }
+                self.commitSeek(
+                    to: pending.target,
+                    wasPlaying: pending.wasPlaying,
+                    fileDuration: self.fileLength
+                )
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        seekCommitTimer = timer
+    }
+
+    /// The ONE place a seek actually reaches AVPlayer, with loose
+    /// tolerance (the class comment always said "deliberately loose" — the
+    /// old `seek(to:)` call was the EXACT variant, kCMTimeZero on both
+    /// sides, forcing the decoder to land sample-exact on every press).
+    /// ±0.25 s is inaudible in an audiobook and lets the media stack land
+    /// on a decode boundary. Seeks before play (wasPlaying) keep the
+    /// first-rendered-frame-already-at-target property.
+    private func commitSeek(to target: Double, wasPlaying: Bool, fileDuration: Double) {
+        pendingSeek = nil
+        seekCommitTimer?.invalidate()
+        seekCommitTimer = nil
+        guard let player else { return }
+        player.seek(
+            to: Self.time(target),
+            toleranceBefore: Self.time(0.25),
+            toleranceAfter: Self.time(0.25)
+        )
+        if wasPlaying { player.play() }
         chapterProgress = chapterProgressValue
         elapsed = target
+        if fileDuration > 0 { totalDuration = fileDuration }
         // VLC's rule: republish the full surface right after a seek — iOS
         // extrapolates the in-between from rate + elapsed.
         publishNowPlaying(force: true)
@@ -373,8 +486,7 @@ final class AudioBookPlayer: ObservableObject {
     private var chapterProgressValue: Double {
         guard let player, chapters.indices.contains(chapterIndex) else { return 0 }
         let chapter = chapters[chapterIndex]
-        let fileDuration = Self.seconds(of: player.currentItem?.duration) ?? 0
-        guard let end = effectiveChapterEnd(fileDuration: fileDuration) else { return 0 }
+        guard let end = effectiveChapterEnd(fileDuration: fileLength) else { return 0 }
         let span = end - chapter.startSeconds
         guard span > 0 else { return 0 }
         let here = Self.seconds(of: player.currentTime()) ?? chapter.startSeconds
@@ -383,8 +495,7 @@ final class AudioBookPlayer: ObservableObject {
 
     private var chapterIsFinished: Bool {
         guard let player else { return false }
-        let fileDuration = Self.seconds(of: player.currentItem?.duration) ?? 0
-        guard let end = effectiveChapterEnd(fileDuration: fileDuration) else { return false }
+        guard let end = effectiveChapterEnd(fileDuration: fileLength) else { return false }
         let here = Self.seconds(of: player.currentTime()) ?? 0
         return here >= end - 0.05
     }
@@ -422,6 +533,12 @@ final class AudioBookPlayer: ObservableObject {
 
     private func tick() {
         guard let player else { return }
+        // A transport press is pending its commit: hold the surface steady
+        // — the playhead is about to jump, so neither the published state
+        // nor the chapter auto-advance may react to the pre-seek position
+        // (mid-mash, chapterIsFinished still reads the OLD playhead and
+        // would fire an auto-advance that fights the user's rewind).
+        if pendingSeek != nil { return }
         // timeControlStatus is AVPlayer's "is it actually producing audio"
         // — .playing while rendering, .paused when paused, and
         // .waitingToPlayAtSpecifiedRate while buffering a big file.
@@ -431,8 +548,8 @@ final class AudioBookPlayer: ObservableObject {
         if chapterProgress != value { chapterProgress = value }
         let now = Self.seconds(of: player.currentTime()) ?? 0
         if elapsed != now { elapsed = now }
-        let duration = Self.seconds(of: player.currentItem?.duration) ?? 0
-        if totalDuration != duration { totalDuration = duration }
+        let duration = cachedFileDuration ?? 0
+        if totalDuration != duration, duration > 0 { totalDuration = duration }
 
         guard chapterIsFinished, !userPaused else {
             // Playing, mid-chapter: a slow-cadence refresh of the lock
@@ -525,7 +642,7 @@ final class AudioBookPlayer: ObservableObject {
             progress: nil,
             rate: 1.0,
             elapsedSeconds: player.flatMap { Self.seconds(of: $0.currentTime()) },
-            durationSeconds: book.audioDuration ?? Self.seconds(of: player?.currentItem?.duration),
+            durationSeconds: book.audioDuration ?? cachedFileDuration,
             chapterCount: chapters.count > 1 ? chapters.count : nil,
             chapterNumber: chapters.count > 1 ? chapterIndex + 1 : nil
         )
@@ -547,6 +664,11 @@ final class AudioBookPlayer: ObservableObject {
         player?.replaceCurrentItem(with: nil)
         player = nil
         loadedURL = nil
+        loadedItemJustCreated = false
+        cachedFileDuration = nil
+        pendingSeek = nil
+        seekCommitTimer?.invalidate()
+        seekCommitTimer = nil
         cachedArtwork = nil
         stopTicker()
     }
@@ -573,5 +695,116 @@ final class AudioBookPlayer: ObservableObject {
         playbackBlockedReason = reason
         isPlaying = false
         stopTicker()
+    }
+
+    // MARK: Audio session resilience — the background-kill fix
+
+    /// The device report: one audiobook persists on the lock screen all
+    /// session long while another (the EAC3 'Harry Potter' file) gets the
+    /// app suspended "the way Apple does not allow apps to run in the
+    /// background". The difference is not the app's background mode — it
+    /// is the SESSION surviving what iOS does around it. Interruptions
+    /// (calls, Siri, alarms) and route reconfigurations tear the session
+    /// down; multichannel EAC3 content triggers decoder reconfigurations
+    /// that stereo AAC never sees. With no handlers, the session dies in
+    /// the background, no audio renders, and iOS suspends the process a
+    /// few seconds later — playback "closed by the system". VLC never
+    /// loses background audio because it owns its audio output and
+    /// re-activates after every session event; these handlers are the
+    /// AVPlayer equivalent of that contract.
+    private var sessionObserversWired = false
+    private var sessionObservers: [NSObjectProtocol] = []
+    /// Set when iOS interrupts (began) while we were audibly playing — the
+    /// .ended event resumes from THIS, not from the published isPlaying
+    /// (which .began just set false).
+    private var interruptedWhilePlaying = false
+
+    private func wireSessionObserversOnce() {
+        guard !sessionObserversWired else { return }
+        sessionObserversWired = true
+        let center = NotificationCenter.default
+        sessionObservers.append(center.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: nil, queue: .main
+        ) { [weak self] note in
+            Task { @MainActor in self?.handleInterruption(note) }
+        })
+        sessionObservers.append(center.addObserver(
+            forName: AVAudioSession.routeChangeNotification,
+            object: nil, queue: .main
+        ) { [weak self] note in
+            Task { @MainActor in self?.handleRouteChange(note) }
+        })
+        sessionObservers.append(center.addObserver(
+            forName: AVAudioSession.mediaServicesWereResetNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.handleMediaServicesReset() }
+        })
+    }
+
+    private func handleInterruption(_ note: Notification) {
+        guard let info = note.userInfo,
+              let raw = info[AVAudioSessionInterruptionTypeKey] as? UInt,
+              let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
+        switch type {
+        case .began:
+            // iOS paused the pipeline. userPaused stays false — an
+            // interruption is not the user parking the book.
+            interruptedWhilePlaying = isPlaying
+            if isPlaying { isPlaying = false }
+        case .ended:
+            defer { interruptedWhilePlaying = false }
+            guard interruptedWhilePlaying, !userPaused else { return }
+            let optionsRaw = note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
+            let options = AVAudioSession.InterruptionOptions(rawValue: optionsRaw)
+            if options.contains(.shouldResume) {
+                resumeAfterSessionEvent()
+            }
+        @unknown default:
+            break
+        }
+    }
+
+    private func handleRouteChange(_ note: Notification) {
+        guard let info = note.userInfo,
+              let raw = info[AVAudioSessionRouteChangeReasonKey] as? UInt,
+              let reason = AVAudioSession.RouteChangeReason(rawValue: raw) else { return }
+        // Headphones yanked: the system already paused the pipeline —
+        // reflect it (auto-resuming onto the speaker would blast audio).
+        if reason == .oldDeviceUnavailable, !userPaused {
+            isPlaying = player?.timeControlStatus == .playing
+        }
+    }
+
+    private func handleMediaServicesReset() {
+        // The media server died: session configuration and the loaded item
+        // are both void. Re-arm the setup and cold-resume where the user
+        // was — a stuck "playing" surface with a dead pipeline is exactly
+        // the state that gets the app suspended.
+        Log.shared.error("AudioBookPlayer: media services reset — rebuilding the session and resuming")
+        AudioSessionSetup.invalidateConfiguration()
+        guard let book = activeBook else { return }
+        let fraction = chapterProgress
+        let wasPlaying = isPlaying
+        teardownAudio()
+        if wasPlaying {
+            play(book: book, chapterIndex: chapterIndex, withinChapterFraction: fraction)
+        }
+    }
+
+    /// Interruption ended with shouldResume: re-activate the session and
+    /// pick up where the interruption cut in. Without the explicit
+    /// re-activation the session stays deactivated and, in the background,
+    /// the process is suspended seconds later.
+    private func resumeAfterSessionEvent() {
+        do {
+            try AVAudioSession.sharedInstance().setActive(true)
+        } catch {
+            Log.shared.error("AudioBookPlayer: session re-activate failed: \(error)")
+        }
+        player?.play()
+        isPlaying = true
+        publishNowPlaying(force: true)
     }
 }
