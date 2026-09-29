@@ -42,9 +42,9 @@ final class LocalSendReceiver: ObservableObject {
     @Published private(set) var lastError: String?
     @Published private(set) var history: [BookDropRecord] = []
 
-    /// Extensions we accept, route and import today. Office formats join as
-    /// their importers land (DOCX/ODT, PPTX/ODP, legacy DOC).
-    static let acceptedExtensions: Set<String> = ["epub", "pdf", "m4b", "m4a", "mp4", "mp3", "jex"]
+    /// Extensions we accept, route and import today. Legacy DOC and the
+    /// presentation formats join as their importers land.
+    static let acceptedExtensions: Set<String> = ["epub", "pdf", "m4b", "m4a", "mp4", "mp3", "jex", "docx", "odt"]
 
     private let server = LocalSendHTTPServer()
     private var sessions: [String: Session] = [:]
@@ -260,7 +260,7 @@ final class LocalSendReceiver: ObservableObject {
         case .memory(let data):
             guard Int64(data.count) == meta.size else { return .unsupported() }
             if let expected = meta.sha256, !expected.isEmpty,
-               SHA256.hash(data: data) != Self.sha256Digest(fromHex: expected) {
+               digestHex(SHA256.hash(data: data)) != expected.lowercased() {
                 return .unsupported()
             }
             let url = FileManager.default.temporaryDirectory
@@ -407,19 +407,10 @@ final class LocalSendReceiver: ObservableObject {
 
     private static func matchesSHA256(url: URL, expected: String) -> Bool {
         guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return false }
-        return SHA256.hash(data: data) == sha256Digest(fromHex: expected)
+        return digestHex(SHA256.hash(data: data)) == expected.lowercased()
     }
 
-    private static func sha256Digest(fromHex hex: String) -> SHA256.Digest {
-        var bytes = [UInt8]()
-        var iterator = hex.utf8.makeIterator()
-        while let a = iterator.next(), let b = iterator.next() {
-            // Two hex chars → one byte; invalid input skips, and a garbage
-            // hash simply never matches.
-            guard let high = UInt8(String(Character(a)), radix: 16),
-                  let low = UInt8(String(Character(b)), radix: 16) else { continue }
-            bytes.append(high << 4 | low)
-        }
-        return SHA256.Digest(bytes)
+    private static func digestHex<D: Sequence>(_ digest: D) -> String where D.Element == UInt8 {
+        digest.map { String(format: "%02x", $0) }.joined()
     }
 }

@@ -341,6 +341,10 @@ final class BooksStore: ObservableObject {
         // frames is the other one that carries chapters. Anything else is not
         // a book.
         case "m4b", "m4a", "mp4", "mp3": format = .audio
+        // Office documents normalize to EPUB at import (DocumentEpub): the
+        // reader, the TOC and the TTS spine pipeline all consume the result
+        // unchanged, so downstream nothing ever knows the difference.
+        case "docx", "odt": format = .epub
         default:
             format = nil
         }
@@ -360,7 +364,26 @@ final class BooksStore: ObservableObject {
             // which sniffs content, kept playing fine — hiding the damage).
             let destinationExtension = format == .audio ? ext : format.rawValue
             let destination = dir.appendingPathComponent("original.\(destinationExtension)")
-            try FileManager.default.copyItem(at: sourceURL, to: destination)
+            if ext == "docx" || ext == "odt" {
+                // Normalize-to-EPUB: parse the office XML into chapters and
+                // emit a real EPUB the reader + TTS pipeline already speak.
+                do {
+                    let sourceData = try Data(contentsOf: sourceURL, options: .mappedIfSafe)
+                    let chapters = try (ext == "docx"
+                        ? DocxParser.parse(archive: sourceData)
+                        : OdtParser.parse(archive: sourceData))
+                    let title = (sourceURL.lastPathComponent as NSString).deletingPathExtension
+                        .replacingOccurrences(of: "_", with: " ")
+                    let epub = DocumentEpubConverter.epubData(chapters: chapters, title: title, author: nil)
+                    try epub.write(to: destination, options: .atomic)
+                } catch {
+                    importError = "Could not read the \(ext.uppercased()) document: \(error.localizedDescription)"
+                    try? FileManager.default.removeItem(at: dir)
+                    return nil
+                }
+            } else {
+                try FileManager.default.copyItem(at: sourceURL, to: destination)
+            }
         } catch {
             importError = "Could not copy \"\(sourceURL.lastPathComponent)\": \(error.localizedDescription)"
             try? FileManager.default.removeItem(at: dir)

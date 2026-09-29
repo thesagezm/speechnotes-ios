@@ -32,7 +32,7 @@ final class ImportService {
     static func canImport(_ url: URL) -> Bool {
         guard url.isFileURL else { return false }
         let pathExtension = url.pathExtension.lowercased()
-        if ["txt", "text", "md", "markdown", "pdf"].contains(pathExtension) { return true }
+        if ["txt", "text", "md", "markdown", "pdf", "docx", "odt"].contains(pathExtension) { return true }
         guard let type = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType else {
             // No extension and no type metadata (common before security scope
             // is granted) — let the reader decide; it fails with a log if the
@@ -54,7 +54,17 @@ final class ImportService {
         let title = url.deletingPathExtension().lastPathComponent
         let kind = url.pathExtension.lowercased()
 
-        let raw = kind == "pdf" ? pdfText(from: url) : plainText(from: url)
+        let raw: String?
+        switch kind {
+        case "pdf":
+            raw = pdfText(from: url)
+        case "docx", "odt":
+            // Office documents extract to plain text for NOTES (the Books
+            // shelf normalizes the same files to EPUB instead).
+            raw = officeDocumentText(from: url, kind: kind)
+        default:
+            raw = plainText(from: url)
+        }
         guard let raw, !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             Log.shared.error("ImportService: no extractable text in \(url.lastPathComponent)")
             return nil
@@ -71,6 +81,32 @@ final class ImportService {
         }
         Log.shared.info("ImportService: imported \(url.lastPathComponent) (\(text.count) chars, \(kind.isEmpty ? "text" : kind))")
         return (title.isEmpty ? "Imported note" : String(title.prefix(60)), text)
+    }
+
+    /// DOCX/ODT → speakable note text: parse, join paragraphs with blank
+    /// lines (chapter structure is a Books-side concern; notes want prose).
+    private static func officeDocumentText(from url: URL, kind: String) -> String? {
+        guard let data = coordinatedData(from: url) else {
+            Log.shared.error("ImportService: could not read \(kind) data from \(url.lastPathComponent)")
+            return nil
+        }
+        do {
+            let chapters = try (kind == "docx"
+                ? DocxParser.parse(archive: data)
+                : OdtParser.parse(archive: data))
+            let lines = chapters.flatMap { chapter -> [String] in
+                var out: [String] = []
+                if let title = chapter.title { out.append(title) }
+                out.append(contentsOf: chapter.paragraphs)
+                return out
+            }
+            let joined = lines.joined(separator: "\n\n")
+            Log.shared.info("ImportService: \(kind) parsed (\(lines.count) paragraphs)")
+            return joined.isEmpty ? nil : joined
+        } catch {
+            Log.shared.error("ImportService: \(kind) parse failed: \(error.localizedDescription)")
+            return nil
+        }
     }
 
     // MARK: - Plain text

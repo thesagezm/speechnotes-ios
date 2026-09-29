@@ -14,7 +14,12 @@ struct BooksView: View {
     /// read-along books. The UTType set lives here rather than in BooksStore
     /// so the picker's contents and the store's accepted extensions cannot
     /// drift apart.
-    private static let importableBookTypes: [UTType] = [.epub, .pdf, .mpeg4Audio, .mp3]
+    private static let importableBookTypes: [UTType] = [
+        .epub, .pdf, .mpeg4Audio, .mp3,
+        // Office documents normalize to EPUB at import (DocumentEpub).
+        UTType(importedAs: "org.openxmlformats.wordprocessingml.document"),
+        UTType(importedAs: "org.oasis.opendocument.text"),
+    ]
 
     // App-level store (SpeechnotesApp) — BookDrop imports land on the same
     // instance, so received books appear on this shelf without a reload.
