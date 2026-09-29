@@ -227,7 +227,7 @@ enum RemoteImageStore {
         var data = Data()
         data.reserveCapacity(1 << 20)
         do {
-            for byte in stream {
+            for try await byte in stream {
                 data.append(byte)
                 if data.count > maxBytes {
                     return nil
