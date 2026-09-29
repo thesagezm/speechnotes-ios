@@ -91,6 +91,10 @@ private final class ListeningSlot {
 /// Listening attribution: SpeechPlayer speaks BOTH notes and read-aloud
 /// books; the book id wins when present, else the note id. AudioBookPlayer
 /// plays audiobook files.
+///
+/// MainActor: it reads the players' @Published state (both player classes
+/// are main-actor isolated) and every caller already lives on main.
+@MainActor
 final class StatsCenter {
     static let shared = StatsCenter()
 
@@ -103,26 +107,38 @@ final class StatsCenter {
     /// Call once after the players exist (app onAppear, deferred past the
     /// first frame like the other eager wiring).
     func attach(player: SpeechPlayer, audioBooks: AudioBookPlayer) {
+        // The sinks deliver on RunLoop.main; the Task hop is what makes the
+        // main-actor isolation visible to the compiler.
         player.$state
             .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.syncTTS(player) }
+            .sink { [weak self] _ in
+                Task { @MainActor in self?.syncTTS(player) }
+            }
             .store(in: &cancellables)
         player.$nowPlayingNoteId
             .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.syncTTS(player) }
+            .sink { [weak self] _ in
+                Task { @MainActor in self?.syncTTS(player) }
+            }
             .store(in: &cancellables)
         player.$nowPlayingBookId
             .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.syncTTS(player) }
+            .sink { [weak self] _ in
+                Task { @MainActor in self?.syncTTS(player) }
+            }
             .store(in: &cancellables)
 
         audioBooks.$isPlaying
             .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.syncAudiobook(audioBooks) }
+            .sink { [weak self] _ in
+                Task { @MainActor in self?.syncAudiobook(audioBooks) }
+            }
             .store(in: &cancellables)
         audioBooks.$activeBookID
             .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.syncAudiobook(audioBooks) }
+            .sink { [weak self] _ in
+                Task { @MainActor in self?.syncAudiobook(audioBooks) }
+            }
             .store(in: &cancellables)
     }
 

@@ -48,6 +48,10 @@ targets:
         CFBundleShortVersionString: "1.7.1"
         CFBundleVersion: "38"
         UILaunchScreen: {}
+        # BookDrop (LocalSend receiver): the local-network permission prompt
+        # copy. Receive-only — we never multicast, so no multicast
+        # entitlement and no NSBonjourServices are needed.
+        NSLocalNetworkUsageDescription: "BookDrop receives books and notes sent from nearby devices on your Wi-Fi network."
         # v1.6.1 probe (device-gated): landscape keys were re-added in v1.2.0
         # and that build black-screened at launch inside LiveContainer on iOS 26
         # (v1.1 differs ONLY by these keys — verified byte-level 2026-08-18, see

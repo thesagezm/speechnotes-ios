@@ -16,7 +16,9 @@ struct BooksView: View {
     /// drift apart.
     private static let importableBookTypes: [UTType] = [.epub, .pdf, .mpeg4Audio, .mp3]
 
-    @StateObject private var store = BooksStore()
+    // App-level store (SpeechnotesApp) — BookDrop imports land on the same
+    // instance, so received books appear on this shelf without a reload.
+    @EnvironmentObject private var store: BooksStore
     @EnvironmentObject private var player: SpeechPlayer
     @EnvironmentObject private var audioBooks: AudioBookPlayer
     @State private var showingImporter = false

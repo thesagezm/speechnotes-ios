@@ -39,6 +39,11 @@ struct SettingsTabView: View {
                         Label("Import from Joplin (.jex)", systemImage: "square.and.arrow.down")
                     }
                 }
+                Section("Integrations") {
+                    NavigationLink("BookDrop") {
+                        BookDropView()
+                    }
+                }
                 Section("Storage") {
                     // Closure-based link (the value-based NavigationLink from
                     // the first round-6 attempt never registered its

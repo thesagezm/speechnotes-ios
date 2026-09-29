@@ -3,6 +3,9 @@ import SwiftUI
 @main
 struct SpeechnotesApp: App {
     @StateObject private var notes = NotesStore()
+    /// App-level Books store — BookDrop imports must land on the SAME
+    /// instance the Books tab displays, so the shelf updates live.
+    @StateObject private var books = BooksStore()
     @StateObject private var player = SpeechPlayer()
     /// App-level audiobook playback — owns the AVAudioPlayer for .audio
     /// books so playback survives tab switches (the reader only binds and
@@ -81,6 +84,49 @@ struct SpeechnotesApp: App {
                     // Listening-time recording derives from the players'
                     // published state — zero hooks inside the engines.
                     StatsCenter.shared.attach(player: player, audioBooks: audioBooks)
+                    // BookDrop: route landed files into the import
+                    // pipelines; start the receiver if the toggle was left on.
+                    let books = self.books
+                    LocalSendReceiver.shared.router = { @MainActor url in
+                        let ext = url.pathExtension.lowercased()
+                        if ext == "jex" {
+                            do {
+                                let outcome = try JexImporter.importArchive(
+                                    at: url,
+                                    into: notes,
+                                    notebooks: NotebooksStore.shared
+                                )
+                                LocalSendReceiver.shared.reportImport(
+                                    name: url.lastPathComponent,
+                                    size: 0,
+                                    outcome: .imported("\(outcome.notesCreated) notes imported")
+                                )
+                            } catch {
+                                LocalSendReceiver.shared.reportImport(
+                                    name: url.lastPathComponent,
+                                    size: 0,
+                                    outcome: .failed(error.localizedDescription)
+                                )
+                            }
+                            try? FileManager.default.removeItem(at: url)
+                            return
+                        }
+                        if let imported = await books.importBook(from: url) {
+                            LocalSendReceiver.shared.reportImport(
+                                name: imported.title,
+                                size: 0,
+                                outcome: .imported("Added to Books")
+                            )
+                            try? FileManager.default.removeItem(at: url)
+                        } else {
+                            LocalSendReceiver.shared.reportImport(
+                                name: url.lastPathComponent,
+                                size: 0,
+                                outcome: .failed(books.importError ?? "Import failed")
+                            )
+                        }
+                    }
+                    LocalSendReceiver.shared.applyPersistedEnabledState()
                     Task { @MainActor in
                         player.wirePlaybackOnce()
                         // ARMED LAST, AFTER WIRING. The hang watchdog is
@@ -163,6 +209,7 @@ struct SpeechnotesApp: App {
                 // every node below it — TabView content AND the mini-player
                 // modifier — resolves @EnvironmentObject.
                 .environmentObject(notes)
+                .environmentObject(books)
                 .environmentObject(player)
                 .environmentObject(audioBooks)
                 .environmentObject(WavPlayer.shared)
