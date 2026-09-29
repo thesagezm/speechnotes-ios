@@ -114,23 +114,6 @@ public enum NoteImageStore {
 
     // MARK: - Import (sniffing + re-encode)
 
-    /// Import an image file (picker/drop path). Oversized photos and HEIC
-    /// sources are re-encoded as JPEG for portability; small PNGs/GIFs keep
-    /// their original bytes. Call off the main thread for big files.
-    @discardableResult
-    public static func importImage(
-        at url: URL,
-        noteId: UUID,
-        maxDimension: CGFloat = 2400,
-        recompressThreshold: Int = 800_000
-    ) -> String? {
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        return importImageData(
-            data, pathExtension: url.pathExtension, noteId: noteId,
-            maxDimension: maxDimension, recompressThreshold: recompressThreshold
-        )
-    }
-
     @discardableResult
     public static func importImageData(
         _ data: Data,
@@ -258,20 +241,6 @@ public enum NoteImageStore {
             }
         }
         return freed
-    }
-
-    /// Copy every cached image to another note (note duplication).
-    public static func copyImages(from source: UUID, to destination: UUID) {
-        let src = directory(for: source)
-        let dst = directory(for: destination)
-        guard let files = try? FileManager.default.contentsOfDirectory(at: src, includingPropertiesForKeys: nil) else { return }
-        try? FileManager.default.createDirectory(at: dst, withIntermediateDirectories: true)
-        for file in files {
-            let target = dst.appendingPathComponent(file.lastPathComponent)
-            if !FileManager.default.fileExists(atPath: target.path) {
-                try? FileManager.default.copyItem(at: file, to: target)
-            }
-        }
     }
 
     /// Bytes used by the whole store across all notes (thumbnails excluded).

@@ -45,7 +45,7 @@ struct ZoomableImageView: View {
                 return
             }
             self.image = await Task.detached(priority: .userInitiated) {
-                ImageCache.shared.image(for: url)
+                await ImageCache.shared.image(for: url)
             }.value
         }
         .accessibilityLabel(alt)

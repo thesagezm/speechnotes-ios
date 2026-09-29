@@ -148,10 +148,6 @@ final class BookPlaybackController: ObservableObject {
         }
     }
 
-    /// True when the item is a finished audiobook file: the audio already
-    /// exists, so playback goes through AudioBookPlayer, not the engines.
-    static func isAudioBook(_ book: Book) -> Bool { book.format == .audio }
-
     private func advanceToNextChapter() {
         guard let book = activeBook else { return }
         let next = activeChapterIndex + 1

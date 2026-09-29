@@ -366,9 +366,9 @@ public enum PdfText {
     public static func normalize(_ raw: String) -> String {
         var text = raw.precomposedStringWithCompatibilityMapping
         for hyphenBreak in ["-\r\n", "-\r", "-\n"] {
-            while text.range(of: hyphenBreak) != nil {
-                text = text.replacingOccurrences(of: hyphenBreak, with: "")
-            }
+            // replacingOccurrences already replaces every occurrence — the
+            // old `while range(of:) != nil` wrapper re-scanned for nothing.
+            text = text.replacingOccurrences(of: hyphenBreak, with: "")
         }
         text = text
             .replacingOccurrences(of: "\r\n", with: "\n")

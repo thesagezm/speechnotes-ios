@@ -180,14 +180,15 @@ enum RemoteImageStore {
 
     /// Every remote (web) image URL a markdown body references — the same
     /// extraction the preview uses, so the index and the prefetch see exactly
-    /// what will render. Local `speechnotes://` targets are excluded.
+    /// what will render. Local `speechnotes://` targets are excluded, and so
+    /// is plain http (ATS blocks it; the fetcher only speaks https).
     static func remoteImageURLs(in markdown: String) -> [URL] {
         var out: [URL] = []
         func collect(_ target: String) {
             guard NoteImageStore.parseLocalTarget(target) == nil,
                   let url = URL(string: target),
                   let scheme = url.scheme?.lowercased(),
-                  scheme == "http" || scheme == "https" else { return }
+                  scheme == "https" else { return }
             out.append(url)
         }
         for block in MarkdownText.blocks(markdown) {
@@ -204,23 +205,50 @@ enum RemoteImageStore {
         return out
     }
 
+    // MARK: - Fetching
+
+    /// Hard cap on one remote image download. A note can name any URL —
+    /// without a cap, `URLSession` buffers the whole response in RAM and a
+    /// multi-gigabyte target in a note body killed the app by jetsam.
+    static let maxImageBytes = 25 * 1024 * 1024
+
+    /// Fetches `url` with a hard byte cap, streaming: the read aborts as
+    /// soon as the cap is crossed (or immediately, for free, when the
+    /// server's declared Content-Length exceeds it). https only — plain
+    /// http never worked here (ATS blocks it), so accepting the scheme
+    /// only produced silent failures. A truncated or errored stream
+    /// returns nil — never a partial image worth storing.
+    static func fetchCapped(_ url: URL, maxBytes: Int = maxImageBytes) async -> Data? {
+        guard let scheme = url.scheme?.lowercased(), scheme == "https" else { return nil }
+        guard let (stream, response) = try? await URLSession.shared.bytes(from: url) else { return nil }
+        if response.expectedContentLength > 0, response.expectedContentLength > Int64(maxBytes) {
+            return nil
+        }
+        var data = Data()
+        data.reserveCapacity(1 << 20)
+        do {
+            for byte in stream {
+                data.append(byte)
+                if data.count > maxBytes {
+                    return nil
+                }
+            }
+        } catch {
+            return nil
+        }
+        return data.isEmpty ? nil : data
+    }
+
     /// Downloads and stores `urls` without decoding (the Automatic caching
     /// mode's open-a-note prefetch). Already-cached URLs are skipped.
-    static func prefetch(_ urls: [URL]) {
+    /// Sequential on purpose — one image in flight keeps the memory and
+    /// radio footprint flat, and nothing here is on the critical path (the
+    /// caller runs it detached).
+    static func prefetch(_ urls: [URL]) async {
         for url in urls {
             guard loadData(for: url) == nil else { continue }
-            guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else { continue }
-            var fetched: Data?
-            let sem = DispatchSemaphore(value: 0)
-            let task = URLSession.shared.dataTask(with: url) { d, _, _ in
-                fetched = d
-                sem.signal()
-            }
-            task.resume()
-            _ = sem.wait(timeout: .now() + 15)
-            task.cancel()
-            if let d = fetched, !d.isEmpty {
-                store(d, for: url)
+            if let data = await fetchCapped(url) {
+                store(data, for: url)
             }
         }
     }

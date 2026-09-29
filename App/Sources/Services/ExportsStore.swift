@@ -75,15 +75,6 @@ final class ExportsStore: ObservableObject {
         exports.removeAll { $0.url == item.url }
     }
 
-    /// Returns bytes freed (for the log).
-    @discardableResult
-    func deleteAll() -> Int64 {
-        let freed = totalBytes
-        try? FileManager.default.removeItem(at: Self.exportsDirectory)
-        exports = []
-        return freed
-    }
-
     var totalBytes: Int64 {
         exports.reduce(0) { $0 + $1.sizeBytes }
     }

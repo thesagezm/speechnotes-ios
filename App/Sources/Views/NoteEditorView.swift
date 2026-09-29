@@ -142,7 +142,7 @@ struct NoteEditorView: View {
         Task.detached(priority: .utility) {
             let urls = RemoteImageStore.remoteImageURLs(in: markdown)
             guard !urls.isEmpty else { return }
-            RemoteImageStore.prefetch(urls)
+            await RemoteImageStore.prefetch(urls)
         }
     }
 

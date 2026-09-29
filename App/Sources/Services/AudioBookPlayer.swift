@@ -54,9 +54,6 @@ final class AudioBookPlayer: ObservableObject {
 
     var nowPlayingTitle: String? { activeBook?.title }
 
-    /// The loaded file's length in seconds — nil while nothing loaded or
-    /// the async load has not landed yet (see the item creation in play()).
-    var fileDuration: Double? { cachedFileDuration }
     /// The manifest's duration — the fallback while an item is still
     /// opening (AVPlayer reports an indefinite duration until the stream
     /// is ready, and the manifest value is right by construction).
@@ -180,10 +177,10 @@ final class AudioBookPlayer: ObservableObject {
         let url = BooksStore.resolveAudioOriginalURL(book: book)
         do {
             // Same one-shot session configuration every engine runs on first
-            // An item created while the session is still in its launch
-            // default (ambient/silent-switch-able) is silenced by the mute
-            // switch and pauses when the app backgrounds, which looks like
-            // "plays two seconds then dies" on device.
+            // play — an item created while the session is still in its
+            // launch default (ambient/silent-switch-able) is silenced by the
+            // mute switch and pauses when the app backgrounds, which looks
+            // like "plays two seconds then dies" on device.
             AudioSessionSetup.configureIfNeeded(prefix: "AudioBookPlayer")
             if loadedURL != url || player == nil {
                 // A failure must not leave the previous item's observers

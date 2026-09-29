@@ -88,8 +88,11 @@ final class ImportService {
     }
 
     /// Reads through `NSFileCoordinator`, and first asks iCloud to
-    /// materialize the file if it's an un-downloaded ubiquitous item.
-    private static func coordinatedData(from url: URL) -> Data? {
+    /// materialize the file if it's an un-downloaded ubiquitous item. The
+    /// reader closure gets the coordinated URL and reads however it wants —
+    /// by bytes (`coordinatedData`) or by lazily opening the document — so
+    /// a big-file importer never has to hold the whole file in RAM.
+    private static func coordinatedRead(from url: URL, _ reader: (URL) -> Void) {
         let fileManager = FileManager.default
 
         // iCloud Drive files can be placeholders; start the download and
@@ -111,18 +114,24 @@ final class ImportService {
             }
         }
 
-        var readData: Data?
         var coordinationError: NSError?
         let coordinator = NSFileCoordinator()
         coordinator.coordinate(readingItemAt: url, options: [], error: &coordinationError) { readURL in
+            reader(readURL)
+        }
+        if let coordinationError {
+            Log.shared.error("ImportService: file coordination error: \(coordinationError.localizedDescription)")
+        }
+    }
+
+    private static func coordinatedData(from url: URL) -> Data? {
+        var readData: Data?
+        coordinatedRead(from: url) { readURL in
             do {
                 readData = try Data(contentsOf: readURL, options: .mappedIfSafe)
             } catch {
                 Log.shared.error("ImportService: read error: \(error.localizedDescription)")
             }
-        }
-        if let coordinationError {
-            Log.shared.error("ImportService: file coordination error: \(coordinationError.localizedDescription)")
         }
         return readData
     }
@@ -153,13 +162,38 @@ final class ImportService {
 
     // MARK: - PDF
 
+    /// Caps so the note importer stays a note importer: per-page extraction
+    /// (whole-document `PDFDocument.string` is the OOM/freeze pattern
+    /// PdfText's own header bans) over at most `maxPdfPages` pages and
+    /// `maxPdfTextChars` characters. A 500 MB textbook through this path
+    /// used to be a jetsam kill; big books belong on the Books tab, which
+    /// reads them lazily and by chapter.
+    private static let maxPdfPages = 150
+    private static let maxPdfTextChars = 1_000_000
+
     private static func pdfText(from url: URL) -> String? {
-        // Route PDFs through the same coordinated read as plain text so
-        // iCloud placeholder PDFs materialize first; PDFDocument(url:)
-        // alone fails on placeholders.
-        guard let data = coordinatedData(from: url), !data.isEmpty else { return nil }
-        guard let document = PDFDocument(data: data), document.pageCount > 0 else { return nil }
-        return document.string
+        var extracted: String?
+        coordinatedRead(from: url) { readURL in
+            // Open by URL inside the coordinated read — PDFDocument(url:)
+            // parses the container without materializing the whole file the
+            // way PDFDocument(data:) would, and page content loads per page.
+            guard let document = PDFDocument(url: readURL), document.pageCount > 0 else { return }
+            var out = ""
+            let pageCount = min(document.pageCount, maxPdfPages)
+            for index in 0..<pageCount {
+                guard let page = document.page(at: index),
+                      let pageString = page.string,
+                      !pageString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+                if !out.isEmpty { out += "\n\n" }
+                out += pageString
+                if out.utf16.count > maxPdfTextChars {
+                    out += "\n\n[Text truncated at \(maxPdfTextChars / 1000)k characters — import large PDFs on the Books tab instead.]"
+                    break
+                }
+            }
+            extracted = out.isEmpty ? nil : out
+        }
+        return extracted
     }
 
     // MARK: - Clipboard

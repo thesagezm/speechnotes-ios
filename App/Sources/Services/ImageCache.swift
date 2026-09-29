@@ -34,41 +34,34 @@ final class ImageCache {
         return cache.object(forKey: cacheKey(for: url))
     }
 
-    /// Resolve a cached image for a URL, decoding if necessary. Synchronous
-    /// — callers must ALREADY be off the main actor (disk read + decode).
-    func image(for url: URL) -> UIImage? {
+    /// Resolve a cached image for a URL, decoding if necessary. Async (the
+    /// network fetch-through awaits) — callers must still be OFF the main
+    /// actor for the synchronous disk read + decode parts.
+    func image(for url: URL) async -> UIImage? {
         if let cached = peek(url) { return cached }
         let data: Data?
         if url.isFileURL {
             data = try? Data(contentsOf: url)
         } else {
-            // Only web schemes may be fetched: markdown is user input, and
-            // an arbitrary scheme (file:, data:, custom) must not be turned
-            // into a fetch by the preview's read-through cache.
-            guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
+            // Only https may be fetched: markdown is user input, and an
+            // arbitrary scheme (file:, data:, custom) must not be turned
+            // into a fetch by the preview's read-through cache. Plain http
+            // is excluded too — ATS blocks it, so accepting the scheme only
+            // produced silent failures.
+            guard let scheme = url.scheme?.lowercased(), scheme == "https" else {
                 return nil
             }
             // Remote: disk-backed store first (persists across launches —
-            // Storage's gallery browses these files too), then a network
-            // fetch-through on a miss.
+            // Storage's gallery browses these files too), then a byte-capped
+            // fetch-through on a miss. Awaiting the fetch instead of parking
+            // a cooperative thread on a semaphore (the old 15 s wait) — the
+            // cap also stops a huge URL from buffering the whole file in RAM.
             if let disk = RemoteImageStore.loadData(for: url) {
                 data = disk
             } else {
-                // URLSession with timeout — Data(contentsOf:) blocks the
-                // cooperative thread with no cancellation and a 60s default
-                // timeout, and many images in one note = many blocked threads.
-                var fetched: Data?
-                let sem = DispatchSemaphore(value: 0)
-                let task = URLSession.shared.dataTask(with: url) { d, _, _ in
-                    fetched = d
-                    sem.signal()
-                }
-                task.resume()
-                _ = sem.wait(timeout: .now() + 15)
-                task.cancel()
-                guard let d = fetched, !d.isEmpty else { return nil }
-                RemoteImageStore.store(d, for: url)
-                data = d
+                guard let fetched = await RemoteImageStore.fetchCapped(url) else { return nil }
+                RemoteImageStore.store(fetched, for: url)
+                data = fetched
             }
         }
         guard let data, let decoded = Self.downsampledImage(data) else { return nil }
@@ -123,7 +116,7 @@ final class ImageCache {
         }
         let task = Task<UIImage?, Never> { [weak self] in
             guard let self else { return nil }
-            let image = self.image(for: url)
+            let image = await self.image(for: url)
             self.lock.lock()
             self.inFlight.removeValue(forKey: key)
             self.lock.unlock()
