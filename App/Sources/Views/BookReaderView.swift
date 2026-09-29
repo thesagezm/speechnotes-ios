@@ -13,7 +13,11 @@ struct BookReaderView: View {
     @EnvironmentObject private var appTheme: AppTheme
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
     @State private var webView: WKWebView?
+    /// Visual reading time — begins with the reader, pauses on background,
+    /// folds into StatsStore every 30 s.
+    @State private var readingRecorder = StatsRecorder(kind: .reading)
     @State private var chapterIndex: Int
     @State private var chapterFraction: Double
     @State private var totalChapters: Int
@@ -224,6 +228,7 @@ struct BookReaderView: View {
         }
         .onAppear {
             store.markOpened(book)
+            readingRecorder.begin(subjectId: book.id.uuidString)
             // The manifest TOC (parsed from the epub's own nav/NCX) carries
             // nesting DEPTH for the drop-down tree; the epub.js webview toc
             // is flat. Seed from the manifest and keep it when present.
@@ -235,9 +240,18 @@ struct BookReaderView: View {
         .onChange(of: player.nowPlayingBookId) { _ in
             player.miniPlayerSuppressed = player.nowPlayingBookId == book.id.uuidString
         }
+        .onChange(of: scenePhase) { phase in
+            // Background = not reading (the recorder's Task freezes anyway);
+            // return = resume the same book's fold stream.
+            switch phase {
+            case .active: readingRecorder.begin(subjectId: book.id.uuidString)
+            default: readingRecorder.end()
+            }
+        }
         .onDisappear {
             player.miniPlayerSuppressed = false
             persistPosition()
+            readingRecorder.end()
             // Deliberately NO readerDestroy() here: onDisappear fires on every
             // TAB SWITCH, and destroying the rendition blanked the book the
             // moment the user left the tab (the "EPUB text disappears" report)

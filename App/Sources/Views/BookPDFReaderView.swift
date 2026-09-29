@@ -19,6 +19,9 @@ struct BookPDFReaderView: View {
     let store: BooksStore
     @EnvironmentObject private var player: SpeechPlayer
     @EnvironmentObject private var appTheme: AppTheme
+    @Environment(\.scenePhase) private var scenePhase
+    /// Visual reading time — same fold pattern as the epub reader.
+    @State private var readingRecorder = StatsRecorder(kind: .reading)
 
     @State private var currentPage: Int
     @State private var pageCount: Int
@@ -211,12 +214,19 @@ struct BookPDFReaderView: View {
         }
         .onAppear {
             store.markOpened(book)
+            readingRecorder.begin(subjectId: book.id.uuidString)
             // The reader has its own player bar — the global mini-player
             // yields while THIS book is the one speaking (editor pattern).
             player.miniPlayerSuppressed = player.nowPlayingBookId == book.id.uuidString
         }
         .onChange(of: player.nowPlayingBookId) { _ in
             player.miniPlayerSuppressed = player.nowPlayingBookId == book.id.uuidString
+        }
+        .onChange(of: scenePhase) { phase in
+            switch phase {
+            case .active: readingRecorder.begin(subjectId: book.id.uuidString)
+            default: readingRecorder.end()
+            }
         }
         .onChange(of: showsReadAlong) { active in
             if active {
@@ -238,6 +248,7 @@ struct BookPDFReaderView: View {
         .onDisappear {
             player.miniPlayerSuppressed = false
             store.updatePosition(book, chapterIndex: currentPage, chapterFraction: 0)
+            readingRecorder.end()
         }
     }
 

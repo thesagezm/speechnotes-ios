@@ -15,7 +15,7 @@ struct SpeechnotesApp: App {
     @State private var selectedTab: Tab = .notes
 
     private enum Tab: Hashable, CaseIterable, Identifiable {
-        case notes, books, settings
+        case notes, books, stats, settings
 
         var id: Self { self }
 
@@ -23,6 +23,7 @@ struct SpeechnotesApp: App {
             switch self {
             case .notes: return "Notes"
             case .books: return "Books"
+            case .stats: return "Stats"
             case .settings: return "Settings"
             }
         }
@@ -31,6 +32,7 @@ struct SpeechnotesApp: App {
             switch self {
             case .notes: return "note.text"
             case .books: return "books.vertical"
+            case .stats: return "chart.bar.xaxis"
             case .settings: return "gearshape"
             }
         }
@@ -48,6 +50,9 @@ struct SpeechnotesApp: App {
             BooksView()
                 .tag(Tab.books)
                 .tabItem { Label("Books", systemImage: "books.vertical") }
+            StatsTabView()
+                .tag(Tab.stats)
+                .tabItem { Label("Stats", systemImage: "chart.bar.xaxis") }
             SettingsTabView()
                 .tag(Tab.settings)
                 .tabItem { Label("Settings", systemImage: "gearshape") }
@@ -73,6 +78,9 @@ struct SpeechnotesApp: App {
                         notes.notes.first(where: { $0.id == id })
                     }
                     BookPlaybackController.shared.bind(to: player)
+                    // Listening-time recording derives from the players'
+                    // published state — zero hooks inside the engines.
+                    StatsCenter.shared.attach(player: player, audioBooks: audioBooks)
                     Task { @MainActor in
                         player.wirePlaybackOnce()
                         // ARMED LAST, AFTER WIRING. The hang watchdog is
