@@ -12,8 +12,9 @@ import SpeechLogic
 struct BookWebView: UIViewRepresentable {
     let book: Book
     let startChapter: Int
-    let startTheme: String
-    let startFontSize: Int
+    /// Full appearance state (theme, flow, typography, margins) — rides the
+    /// shell URL so it applies at rendition creation.
+    let appearance: ReaderAppearance
     /// epub.js CFI restored from the manifest — wins over `startChapter` when
     /// present so reopening lands mid-chapter, not at the chapter top (M20).
     let startCFI: String?
@@ -28,6 +29,9 @@ struct BookWebView: UIViewRepresentable {
     /// a WKWebView swallows SwiftUI gestures, so the reader's SwiftUI
     /// .onTapGesture never fired and a hidden title bar was unreachable.
     var onChromeTap: (() -> Void)? = nil
+    /// Paginated-flow page-turn swipe, detected in the section iframe
+    /// (reader.js) and relayed here. Payload is "next" | "prev".
+    var onSwipe: ((String) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -46,7 +50,7 @@ struct BookWebView: UIViewRepresentable {
         webView.scrollView.backgroundColor = .clear
         context.coordinator.parent = self
 
-        if let url = Self.shellURL(book: book, chapter: startChapter, theme: startTheme, fontSize: startFontSize, cfi: startCFI) {
+        if let url = Self.shellURL(book: book, chapter: startChapter, appearance: appearance, cfi: startCFI) {
             webView.load(URLRequest(url: url))
         }
         // Async: setting parent @State synchronously inside makeUIView would
@@ -68,14 +72,11 @@ struct BookWebView: UIViewRepresentable {
     /// across two custom-scheme hosts is cross-origin between opaque
     /// origins and WebKit blocks it ("TypeError: Load failed" — the first
     /// device build's failure).
-    static func shellURL(book: Book, chapter: Int, theme: String, fontSize: Int, cfi: String?) -> URL? {
+    static func shellURL(book: Book, chapter: Int, appearance: ReaderAppearance, cfi: String?) -> URL? {
         var components = URLComponents(string: "bookscheme://shell/index.html")
-        var items = [
-            URLQueryItem(name: "bookPath", value: "/book/\(book.id.uuidString)/original.epub"),
-            URLQueryItem(name: "chapter", value: String(chapter)),
-            URLQueryItem(name: "theme", value: theme),
-            URLQueryItem(name: "fontSize", value: String(fontSize)),
-        ]
+        var items = appearance.queryItems
+        items.append(URLQueryItem(name: "bookPath", value: "/book/\(book.id.uuidString)/original.epub"))
+        items.append(URLQueryItem(name: "chapter", value: String(chapter)))
         if let cfi, !cfi.isEmpty {
             items.append(URLQueryItem(name: "cfi", value: cfi))
         }
@@ -340,6 +341,8 @@ struct BookWebView: UIViewRepresentable {
                 parent.onError(body["message"] as? String ?? "Unknown reader error")
             case "chromeTap":
                 parent.onChromeTap?()
+            case "swipe":
+                parent.onSwipe?(body["dir"] as? String ?? "next")
             default:
                 break
             }

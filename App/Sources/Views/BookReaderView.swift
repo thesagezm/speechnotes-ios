@@ -38,6 +38,20 @@ struct BookReaderView: View {
     @State private var bookLoaded = false
     @AppStorage("bookReaderTheme") private var theme = "light"
     @AppStorage("bookReaderFontSize") private var fontSize = 100.0
+    // Appearance v2 (1.7.2) — the same keys ReaderAppearance.load() reads.
+    @AppStorage("bookReaderFlow") private var flow = "scrolled"
+    @AppStorage("bookReaderFont") private var font = "book"
+    @AppStorage("bookReaderLineHeight") private var lineHeight = 1.6
+    @AppStorage("bookReaderParaSpacing") private var paraSpacing = 0.0
+    @AppStorage("bookReaderLetterSpacing") private var letterSpacing = 0.0
+    @AppStorage("bookReaderMargin") private var margin = 16
+    @AppStorage("bookReaderRespectStyles") private var respectStyles = false
+    @AppStorage("bookReaderAutoScroll") private var autoScroll = false
+    @AppStorage("bookReaderAutoScrollSpeed") private var autoScrollSpeed = 40.0
+    /// Bumped when the page flow (scroll/pages) changes — epub.js flow is
+    /// fixed at rendition creation, so switching rebuilds the shell webview
+    /// with the new query param; position survives via the CFI bridge.
+    @State private var reloadToken = 0
     @AppStorage("readAlongEnabled") private var readAlongEnabled = true
     /// While THIS book speaks (and read-along is on) the webview surface
     /// swaps to the native ReadAlongView — the exact pattern the note editor
@@ -262,9 +276,12 @@ struct BookReaderView: View {
         BookWebView(
             book: book,
             startChapter: chapterIndex,
-            startTheme: theme,
-            startFontSize: Int(fontSize),
-            startCFI: book.position?.cfi,
+            appearance: ReaderAppearance.load(),
+            // lastKnownCFI (not the manifest value): it is one relocation
+            // fresher, which is exactly what a flow-switch reload needs to
+            // land the user back where they were — and identical to the
+            // manifest value on first open.
+            startCFI: lastKnownCFI,
             onRelocated: handleRelocated,
             onTOC: { entries in
                 // Manifest toc wins (it has depth); webview toc is the
@@ -272,12 +289,17 @@ struct BookReaderView: View {
                 if (book.toc ?? []).isEmpty { toc = entries }
             },
             onError: { errorMessage = $0 },
-            onWebViewReady: { webView = $0 },
+            onWebViewReady: { webView = $0; resumeAutoScrollIfNeeded() },
             onChromeTap: {
                 Haptics.tap()
                 immersiveBarsHidden.toggle()
+            },
+            onSwipe: { dir in
+                Haptics.tap()
+                webView?.evaluateJavaScript(dir == "prev" ? "readerPrev()" : "readerNext()", completionHandler: nil)
             }
         )
+        .id(reloadToken)
         .overlay {
             if !bookLoaded {
                 openingVeil
@@ -298,7 +320,7 @@ struct BookReaderView: View {
 
     private var veilColor: Color {
         switch theme {
-        case "dark": return .black
+        case "dark", "trueBlack": return .black
         case "sepia": return Color(red: 0.96, green: 0.94, blue: 0.89)
         default: return Color(.systemBackground)
         }
@@ -495,14 +517,67 @@ struct BookReaderView: View {
                         Text("Light").tag("light")
                         Text("Sepia").tag("sepia")
                         Text("Dark").tag("dark")
+                        Text("True Black").tag("trueBlack")
                     }
                     .pickerStyle(.segmented)
                 }
                 Section {
+                    Picker("Page view", selection: $flow) {
+                        Text("Scroll").tag("scrolled")
+                        Text("Pages").tag("paginated")
+                    }
+                    .pickerStyle(.segmented)
+                    Toggle("Auto-scroll", isOn: $autoScroll)
+                        .disabled(flow != "scrolled")
+                    if autoScroll && flow == "scrolled" {
+                        LabeledContent("Speed", value: "\(Int(autoScrollSpeed)) px/s")
+                        Slider(value: $autoScrollSpeed, in: 10...200, step: 5)
+                    }
+                } header: {
+                    Text("Page")
+                } footer: {
+                    Text(flow == "scrolled"
+                         ? "Auto-scroll turns the pages for you and advances to the next chapter at the bottom."
+                         : "Auto-scroll works in Scroll mode.")
+                }
+                Section {
+                    Picker("Font", selection: $font) {
+                        Text("Book").tag("book")
+                        Text("Serif").tag("serif")
+                        Text("Sans").tag("sans")
+                        Text("Mono").tag("mono")
+                    }
                     LabeledContent("Text size", value: "\(Int(fontSize))%")
                     Slider(value: $fontSize, in: 70...200, step: 10)
+                    LabeledContent("Line height", value: String(format: "%.1f×", lineHeight))
+                    Slider(value: $lineHeight, in: 1.2...2.4, step: 0.1)
+                    LabeledContent("Paragraph spacing", value: String(format: "%.1f em", paraSpacing))
+                    Slider(value: $paraSpacing, in: 0...2, step: 0.1)
+                    LabeledContent("Letter spacing", value: String(format: "%.1f pt", letterSpacing))
+                    Slider(value: $letterSpacing, in: 0...3, step: 0.5)
+                    Toggle("Respect book styling", isOn: $respectStyles)
+                } header: {
+                    Text("Typography")
                 } footer: {
-                    Text("Applies to the book pages. The read-along view follows the app's Reading View text size instead.")
+                    Text(respectStyles
+                         ? "The publisher's own fonts and spacing are kept; only colors apply."
+                         : "Applies to the book pages. The read-along view follows the app's Reading View text size instead.")
+                }
+                Section {
+                    LabeledContent("Page margin", value: "\(margin) px")
+                    Slider(
+                        value: Binding(
+                            get: { Double(margin) },
+                            set: { margin = Int($0) }
+                        ),
+                        in: 0...48,
+                        step: 4
+                    )
+                    .disabled(flow == "paginated")
+                } header: {
+                    Text("Margins")
+                } footer: {
+                    Text(flow == "paginated" ? "Margins follow the book in Pages mode." : "")
                 }
             }
             .navigationTitle("Appearance")
@@ -512,11 +587,20 @@ struct BookReaderView: View {
                     Button("Done") { showingAppearance = false }
                 }
             }
+            .onAppear { applyAppearance() }
+            .onChange(of: theme) { _ in applyAppearance() }
+            .onChange(of: fontSize) { _ in applyAppearance() }
+            .onChange(of: font) { _ in applyAppearance() }
+            .onChange(of: lineHeight) { _ in applyAppearance() }
+            .onChange(of: paraSpacing) { _ in applyAppearance() }
+            .onChange(of: letterSpacing) { _ in applyAppearance() }
+            .onChange(of: margin) { _ in applyAppearance() }
+            .onChange(of: respectStyles) { _ in applyAppearance() }
+            .onChange(of: flow) { _ in switchFlow() }
+            .onChange(of: autoScroll) { _ in pushAutoScroll() }
+            .onChange(of: autoScrollSpeed) { _ in pushAutoScrollSpeed() }
         }
-        .presentationDetents([.medium])
-        .onAppear { applyAppearance() }
-        .onChange(of: theme) { _ in applyAppearance() }
-        .onChange(of: fontSize) { _ in applyAppearance() }
+        .presentationDetents([.medium, .large])
     }
 
     // MARK: - Actions & plumbing
@@ -560,20 +644,57 @@ struct BookReaderView: View {
         applyAppearanceDebounced()
     }
 
-    /// Slider drags fire onChange per 10% step — each one used to push two
-    /// evaluateJavaScript calls straight into the webview. 150 ms after the
-    /// drag settles is visually indistinguishable and keeps the bridge quiet.
+    /// Slider drags fire onChange per step — each one used to push an
+    /// evaluateJavaScript call straight into the webview. 150 ms after the
+    /// drag settles is visually indistinguishable and keeps the bridge
+    /// quiet. The full appearance state goes over as one JSON command so
+    /// every setting shares one code path.
     @State private var appearanceTask: Task<Void, Never>?
 
     private func applyAppearanceDebounced() {
         appearanceTask?.cancel()
-        let size = Int(fontSize)
-        let themeName = theme
         appearanceTask = Task {
             try? await Task.sleep(nanoseconds: 150_000_000)
             guard !Task.isCancelled else { return }
-            webView?.evaluateJavaScript("readerFontSize(\(size))", completionHandler: nil)
-            webView?.evaluateJavaScript("readerTheme(\"\(themeName)\")", completionHandler: nil)
+            webView?.evaluateJavaScript(ReaderAppearance.load().jsCommand, completionHandler: nil)
         }
+    }
+
+    /// epub.js flow is fixed at rendition creation — the switch rebuilds the
+    /// shell webview with the new query param. The veil covers the rebuild;
+    /// the fresh shell restores position from lastKnownCFI.
+    private func switchFlow() {
+        Haptics.tap()
+        withAnimation(.easeInOut(duration: 0.2)) {
+            bookLoaded = false
+            reloadToken += 1
+        }
+    }
+
+    /// A fresh webview (first open or flow-switch reload) resumes auto-scroll
+    /// when the persisted toggle says so — the JS loop never survives the
+    /// reload itself.
+    private func resumeAutoScrollIfNeeded() {
+        let appearance = ReaderAppearance.load()
+        guard appearance.autoScroll, !appearance.flowIsPaginated else { return }
+        webView?.evaluateJavaScript(
+            "readerAutoScroll(true, \(appearance.autoScrollSpeed))",
+            completionHandler: nil
+        )
+    }
+
+    private func pushAutoScroll() {
+        let appearance = ReaderAppearance.load()
+        webView?.evaluateJavaScript(
+            "readerAutoScroll(\(appearance.autoScroll), \(appearance.autoScrollSpeed))",
+            completionHandler: nil
+        )
+    }
+
+    private func pushAutoScrollSpeed() {
+        webView?.evaluateJavaScript(
+            "readerAutoScrollSpeed(\(autoScrollSpeed))",
+            completionHandler: nil
+        )
     }
 }
