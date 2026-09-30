@@ -160,7 +160,8 @@ public enum LegacyDocParser {
                 // surrogate pair across pieces.
                 out.append(contentsOf: decoded.unicodeScalars)
             } else {
-                let decoded = String(data: chunk, encoding: .utf16LittleEndian) ?? String(decoding: chunk, as: UTF16.self)
+                let decoded = String(data: chunk, encoding: .utf16LittleEndian)
+                    ?? utf16String(from: chunk)
                 out.append(contentsOf: decoded.unicodeScalars)
             }
         }
@@ -168,6 +169,19 @@ public enum LegacyDocParser {
     }
 
     // MARK: - Byte helpers
+
+    /// UTF-16LE decode for data that failed strict `String(data:encoding:)`
+    /// (odd lengths, lone surrogates) — lossy but never throws.
+    private static func utf16String(from data: Data) -> String {
+        var units = [UInt16]()
+        units.reserveCapacity(data.count / 2)
+        var i = 0
+        while i + 1 < data.count {
+            units.append(UInt16(data[data.startIndex + i]) | (UInt16(data[data.startIndex + i + 1]) << 8))
+            i += 2
+        }
+        return String(decoding: units, as: UTF16.self)
+    }
 
     private static func u16(_ data: Data, _ offset: Int) -> UInt16 {
         guard offset + 2 <= data.count else { return 0 }

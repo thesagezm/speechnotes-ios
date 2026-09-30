@@ -134,3 +134,71 @@ proper queue becomes both needed and testable.)
 - TTS baseline impact: **slower by~10⁻⁵ of measured work** (the one exception to the no-regression-by-removal rule, accounted line-by-line in TTS_BASELINE §6, with the thinning that keeps a 1300-chunk chapter at ~64 log lines)
 - O5 decision recorded: README stays at v1.5.0 — 1.5.1/31 is a diagnostic build number, and the release procedure (README refresh + tag + fast-forward) is reserved by constraint
 - O7 deferred to Batch C: PlaybackMetrics testability needs SpeechLogic reachability or an app test target; rides with the chunker contract tests
+
+## [2026-09-30] v1.7.2 — Reader appearance, Stats, BookDrop, office formats
+
+Batches pushed to `sage-upgrades` per batch; every batch rode its own CI run
+(several CI-fix rounds: `@MainActor` isolation on StatsCenter,
+`XMLParser.parserError`, `SHA256.Digest`/static-member quirks — CI is the
+compiler, there is no local Swift toolchain on the Linux box).
+
+**Batch A — Reader appearance v2** (`76bc0d1`):
+- Page flow: Scroll/Pages switch (epub.js flow is fixed at rendition
+  creation → the shell webview rebuilds; position survives via
+  lastKnownCFI, one relocation fresher than the manifest).
+- Auto-scroll: rAF loop in reader.js, advances chapters at the bottom
+  (dwell-guarded), speed slider, resumes across flow reloads.
+- Typography: font family (book/serif/sans/mono), line height, paragraph
+  + letter spacing, scrolled-only margins, respect-book-styles switch;
+  one merged theme registered+selected per apply; true-black theme.
+- Appearance rides the shell URL at creation and one
+  `readerAppearance({...})` JSON command afterwards (`ReaderAppearance`
+  owns both encodings).
+
+**Batch B — Stats tab** (`51393f2`):
+- `StatsStore` (SpeechLogic): per-day/per-subject/per-kind folded JSON
+  rows; windowed queries, streak, active days; UTC-calendar injection for
+  deterministic tests.
+- Recording: reading time from the epub/PDF readers (scenePhase-aware);
+  listening time derived from the players' published state via
+  `StatsCenter` (TTS slot for read-aloud books + notes, audio slot for
+  audiobook files) — zero hooks inside the playback engines.
+- `StatsTabView`: 4th tab — Fitness-style header cards, Swift Charts bars
+  (Reading vs Listening split; week/month-pannable/year), an 18-week
+  heatmap, per-subject cards with covers and progress. iOS-native theming
+  throughout (deliberately not Anx's Material look).
+
+**Batch C — BookDrop** (`f3f9d81` + fixes):
+- LocalSend protocol v2.2 RECEIVER: register / prepare-upload / upload /
+  cancel with per-file tokens, sha256 verification, one session at a
+  time, 5-min timeouts. Receive-only — no multicast entitlement needed
+  (senders find us via /24 unicast scan hitting /register).
+- `LocalSendHTTPServer` on NWListener, port fallback 53317-53327, bodies
+  spill to disk past 8 MB; probe-and-heal on every foreground (Readest's
+  zombie-listener lesson: 500 ms loopback connect, stop FIRST then start).
+- Routing: books → Books importer, .jex → JEX importer; toasts + history.
+  BooksStore promoted to app-level env object so BookDrop imports appear
+  live on the shelf. Settings → Integrations → BookDrop.
+- `Docs/BOOKDROP.md` = porting brief for the Linux/Android receivers.
+
+**Batches D/E/F — office formats, normalize-to-EPUB** (`4e6bf40`,
+`cb5f38a`, `7af0092`):
+- DOCX, ODT, PPTX, ODP, legacy DOC all normalize to a real EPUB at import
+  (`ZipWriter` + `DocumentEpubConverter`): the existing reader, TOC and
+  TTS spine pipeline consume them unchanged. Chapters = heading 1-2
+  sections (documents) or slides (presentations); headless text chunks
+  at 150 paragraphs.
+- Legacy .doc: self-contained CFB reader + FIB/piece-table text
+  extraction, best-effort by design — exotic docs fail loudly with a
+  convert-to-docx message.
+- Note-import twin: office files extract to plain-text notes too.
+- Tests: fixtures BUILT in-test (ZipWriter for docx/odt/pptx; a
+  structurally-real hand-built CFB for .doc) and validated by parsing the
+  emitted EPUB back through the app's own EpubParser.
+
+**Explicitly not done (this round):** per-book appearance overrides
+(global-only for now), BookDrop PIN gate (auto-accept toggle exists),
+speaker-notes extraction from PPTX, BookDrop for Linux/Android (ported
+separately per Docs/BOOKDROP.md).
+
+**Version:** 1.7.2 / 39 (project.yml 4-field bump + NSLocalNetworkUsageDescription).
