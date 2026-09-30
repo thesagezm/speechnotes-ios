@@ -303,7 +303,12 @@ private struct CFBReader {
                 let entryName = String(data: utf16, encoding: .utf16LittleEndian)
                 let type = directory[directory.startIndex + base + 66]
                 if entryName == name && type == 2 {
-                    return try readStream(base: base)
+                    // start/size live in the DIRECTORY data, not the archive
+                    // at those offsets (the directory stream sits at its own
+                    // file offset).
+                    let start = Self.u32(directory, base + 116)
+                    let size = Self.u64(directory, base + 120)
+                    return try readStream(start: start, size: size)
                 }
             }
             offsetInDir += 128
@@ -326,9 +331,7 @@ private struct CFBReader {
         return nil
     }
 
-    private func readStream(base: Int) throws -> Data {
-        let start = Self.u32(archive, base + 116)
-        let size = Self.u64(archive, base + 120)
+    private func readStream(start: UInt32, size: UInt64) throws -> Data {
         guard size <= 200_000_000 else {
             throw DocumentParseError.malformed("stream implausibly large")
         }
