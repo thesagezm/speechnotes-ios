@@ -147,6 +147,17 @@ extension View {
 /// Tap vs drag: the bubble stays a Button (tap expands back to the bar);
 /// the drag gesture needs 10 pt of travel before it claims the touch, so a
 /// tap never turns into a micro-drag and a drag never fires the tap.
+/// Layout constants live OUTSIDE the generic struct — Swift forbids static
+/// stored properties on generic types.
+private enum BubbleLayout {
+    /// Half the bubble's size (all three bubble variants are ~58 pt).
+    static let radius: CGFloat = 29
+    static let margin: CGFloat = 12
+    /// The tab bar (49 pt) plus breathing room: the bottom edge stops above
+    /// the tab bar so a parked bubble never covers its right-hand tabs.
+    static let bottomReserve: CGFloat = 57
+}
+
 private struct EdgeSnappingBubble<Bubble: View>: View {
     @ViewBuilder let bubble: () -> Bubble
 
@@ -154,23 +165,17 @@ private struct EdgeSnappingBubble<Bubble: View>: View {
     @AppStorage("miniBubbleY") private var storedY: Double = 1
     @State private var dragOffset: CGSize = .zero
 
-    /// Half the bubble's size (all three bubble variants are ~58 pt) and
-    /// the breathing margin from the screen edges.
-    private static let radius: CGFloat = 29
-    private static let margin: CGFloat = 12
-    /// The tab bar (49 pt) plus breathing room: the bottom edge stops above
-    /// the tab bar so a parked bubble never covers its right-hand tabs.
-    private static let bottomReserve: CGFloat = 57
-
     var body: some View {
         GeometryReader { geo in
+            // GeometryReader's insets are EdgeInsets: leading/trailing, not
+            // left/right.
             let insets = geo.safeAreaInsets
-            let minX = insets.left + Self.margin + Self.radius
-            let maxX = geo.size.width - insets.right - Self.margin - Self.radius
+            let minX = insets.leading + BubbleLayout.margin + BubbleLayout.radius
+            let maxX = geo.size.width - insets.trailing - BubbleLayout.margin - BubbleLayout.radius
             // Bottom clamps above the tab bar; the other three edges keep
             // the plain safe-area margin.
-            let minY = insets.top + Self.margin + Self.radius
-            let maxY = geo.size.height - insets.bottom - Self.bottomReserve - Self.margin - Self.radius
+            let minY = insets.top + BubbleLayout.margin + BubbleLayout.radius
+            let maxY = geo.size.height - insets.bottom - BubbleLayout.bottomReserve - BubbleLayout.margin - BubbleLayout.radius
             let baseX = minX + (maxX - minX) * min(max(storedX, 0), 1)
             let baseY = minY + (maxY - minY) * min(max(storedY, 0), 1)
             let liveX = min(max(baseX + dragOffset.width, minX), maxX)

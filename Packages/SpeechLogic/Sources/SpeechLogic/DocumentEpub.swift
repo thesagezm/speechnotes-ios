@@ -120,6 +120,19 @@ enum DocumentItem {
     case table([[DocumentTableCell]])
 }
 
+extension DocumentItem {
+    /// Slides convert their item stream straight to chapter blocks — the
+    /// slide title is carried separately, so a heading item never occurs.
+    var asBlock: DocumentBlock? {
+        switch self {
+        case .paragraph(let text): return .paragraph(text)
+        case .image(let index): return .image(index)
+        case .table(let rows): return .table(rows)
+        case .heading: return nil
+        }
+    }
+}
+
 /// Shared image-pool bookkeeping: blocks reference images by pool index so
 /// the same media file used twice is stored (and shipped) once.
 final class DocumentImagePool {
@@ -764,7 +777,7 @@ public enum PptxParser {
             chapters.append(
                 DocumentChapter(
                     title: delegate.title ?? "Slide \(index + 1)",
-                    blocks: delegate.items
+                    blocks: delegate.items.compactMap(\.asBlock)
                 )
             )
         }

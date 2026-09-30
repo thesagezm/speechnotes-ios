@@ -673,6 +673,11 @@ final class SpeechPlayer: ObservableObject {
                     self.onChapterSkip?(-1)
                 case .nextChapter:
                     self.onChapterSkip?(1)
+                case .skipBackward, .skipForward:
+                    // ±N-second seeking exists only for audiobooks; the
+                    // skip commands never reach this handler (they don't
+                    // fall through the router). Listed for exhaustiveness.
+                    break
                 }
             }
         }

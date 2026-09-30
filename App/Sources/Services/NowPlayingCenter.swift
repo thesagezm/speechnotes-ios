@@ -229,7 +229,8 @@ final class NowPlayingCenter {
             info[MPNowPlayingInfoPropertyChapterNumber] = chapterNumber
         }
         if let skipInterval {
-            info[MPNowPlayingInfoPropertyPreferredIntervals] = [skipInterval]
+            // Raw key: the C constant is not surfaced to Swift here.
+            info["MPNowPlayingInfoPropertyPreferredIntervals"] = [skipInterval]
         }
         infoCenter.nowPlayingInfo = info
     }
@@ -264,9 +265,9 @@ final class NowPlayingCenter {
         guard let info = infoCenter.nowPlayingInfo else { return }
         var updated = info
         if let skipInterval {
-            updated[MPNowPlayingInfoPropertyPreferredIntervals] = [skipInterval]
+            updated["MPNowPlayingInfoPropertyPreferredIntervals"] = [skipInterval]
         } else {
-            updated.removeValue(forKey: MPNowPlayingInfoPropertyPreferredIntervals)
+            updated.removeValue(forKey: "MPNowPlayingInfoPropertyPreferredIntervals")
         }
         infoCenter.nowPlayingInfo = updated
     }

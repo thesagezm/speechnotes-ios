@@ -249,7 +249,7 @@ final class AudioBookPlayer: ObservableObject {
                 }
                 let p = AVPlayer(playerItem: item)
                 p.allowsExternalPlayback = false
-                p.defaultRate = rate
+                p.defaultRate = Float(rate)
                 player = p
                 loadedURL = url
                 loadedItemJustCreated = true
@@ -425,12 +425,12 @@ final class AudioBookPlayer: ObservableObject {
 
     private func applyRate(force: Bool = false) {
         guard let player else { return }
-        player.defaultRate = rate
+        player.defaultRate = Float(rate)
         // After a play() call timeControlStatus may not have flipped yet —
         // the force variant (used right after play) sets the live rate
         // regardless.
         if force || player.timeControlStatus == .playing {
-            player.rate = rate
+            player.rate = Float(rate)
         }
     }
 
@@ -771,7 +771,7 @@ final class AudioBookPlayer: ObservableObject {
             artwork: cachedArtwork,
             isPlaying: isPlaying,
             progress: nil,
-            rate: rate,
+            rate: Float(rate),
             elapsedSeconds: player.flatMap { Self.seconds(of: $0.currentTime()) },
             durationSeconds: book.audioDuration ?? cachedFileDuration,
             chapterCount: chapters.count > 1 ? chapters.count : nil,
