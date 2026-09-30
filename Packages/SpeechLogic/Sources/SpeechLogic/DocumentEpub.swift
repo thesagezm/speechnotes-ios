@@ -51,7 +51,7 @@ public enum DocxParser {
         let parser = XMLParser(data: documentXML)
         parser.delegate = delegate
         guard parser.parse() else {
-            throw DocumentParseError.malformed(parser.error?.localizedDescription ?? "XML error")
+            throw DocumentParseError.malformed(parser.parserError?.localizedDescription ?? "XML error")
         }
         return chapterize(delegate.paragraphs)
     }
@@ -153,7 +153,7 @@ public enum OdtParser {
         let parser = XMLParser(data: contentXML)
         parser.delegate = delegate
         guard parser.parse() else {
-            throw DocumentParseError.malformed(parser.error?.localizedDescription ?? "XML error")
+            throw DocumentParseError.malformed(parser.parserError?.localizedDescription ?? "XML error")
         }
         return chapterize(delegate.paragraphs)
     }
@@ -241,7 +241,7 @@ public enum PptxParser {
             let parser = XMLParser(data: xml)
             parser.delegate = delegate
             guard parser.parse() else {
-                throw DocumentParseError.malformed("slide \(index + 1): \(parser.error?.localizedDescription ?? "XML error")")
+                throw DocumentParseError.malformed("slide \(index + 1): \(parser.parserError?.localizedDescription ?? "XML error")")
             }
             chapters.append(
                 DocumentChapter(
@@ -411,7 +411,7 @@ public enum OdpParser {
         let parser = XMLParser(data: contentXML)
         parser.delegate = delegate
         guard parser.parse() else {
-            throw DocumentParseError.malformed(parser.error?.localizedDescription ?? "XML error")
+            throw DocumentParseError.malformed(parser.parserError?.localizedDescription ?? "XML error")
         }
         return delegate.pages
     }
