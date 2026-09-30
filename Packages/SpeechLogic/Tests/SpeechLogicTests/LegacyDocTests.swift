@@ -18,8 +18,9 @@ final class LegacyDocTests: XCTestCase {
         let compressedOffset = 1024 // bytes in the WordDocument stream
         let utf16Offset = 2048
 
-        // WordDocument stream (4096 bytes ≥ the mini-stream cutoff).
-        var wordDoc = Data(count: sectorSize * 2)
+        // WordDocument stream (4096 bytes = 8 sectors ≥ the mini-stream
+        // cutoff, so it stays on the regular FAT).
+        var wordDoc = Data(count: 4096)
         put(UInt16(0xA5EC), at: 0x00, in: &wordDoc) // wIdent
         put(UInt16(0x00C1), at: 0x02, in: &wordDoc) // nFib (Word 97)
         put(UInt16(0x0200), at: 0x0A, in: &wordDoc) // fWhichTblStm → 1Table
@@ -27,7 +28,7 @@ final class LegacyDocTests: XCTestCase {
         // rgW97 (28 bytes of zeros) sits at 0x22; cslw at 0x3E.
         put(UInt16(22), at: 0x3E, in: &wordDoc)     // cslw
         let rgLWBase = 0x40
-        put(UInt32(sectorSize * 2), at: rgLWBase, in: &wordDoc)           // [0] cbMac
+        put(UInt32(4096), at: rgLWBase, in: &wordDoc)                     // [0] cbMac
         put(UInt32(compressedText.utf8.count + utf16Text.utf16.count), at: rgLWBase + 3 * 4, in: &wordDoc) // [3] ccpText
         let fcLcbBase = rgLWBase + 22 * 4 + 2
         put(UInt16(93), at: fcLcbBase - 2, in: &wordDoc) // cbRgFcLcb (pair count > 33)
