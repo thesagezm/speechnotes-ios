@@ -341,6 +341,11 @@ struct BookWebView: UIViewRepresentable {
                 parent.onError(body["message"] as? String ?? "Unknown reader error")
             case "chromeTap":
                 parent.onChromeTap?()
+            case "pageTurn":
+                // Tap zones and swipes (both detected in the iframe) funnel
+                // into the same next/prev action the old "swipe" message
+                // drove.
+                parent.onSwipe?(body["dir"] as? String ?? "next")
             case "swipe":
                 parent.onSwipe?(body["dir"] as? String ?? "next")
             default:

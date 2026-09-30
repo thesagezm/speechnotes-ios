@@ -1090,3 +1090,46 @@ Checklist: Docs/DEVICE-CHECKLIST-V1.7.1.md round-7 section.
   non-soprano helpers that sat after the soprano block; `git show
   a7d2f88:...` restored them. Diff a purge against the last commit that
   hadn't touched the file.
+
+## 2026-09-30 addendum #19 — v1.7.2 second batch: sleep timer/speed, landscape prev/next, movable bubble, office images/tables/covers, page-turn settings
+
+Branch `sage-upgrades`, build 1.7.2/40. Builds on the first v1.7.2 batch
+(reader appearance v2, stats, BookDrop, office normalize-to-EPUB). Checklist:
+`Docs/DEVICE-CHECKLIST-V1.7.2.md`.
+
+- **Audiobook sleep timer + speed** (`AudioBookPlayer`): rate 0.75–3× via
+  `defaultRate` (setting `rate` while paused starts playback — trap), persisted;
+  sleep timer = minute presets + end-of-chapter, countdown advances only while
+  audibly playing, fires pause + toast, disarms on stop. Lock screen publishes
+  the real rate.
+- **Landscape prev/next everywhere**: the shared `PlaybackRail` gained an
+  optional stepper (chevrons + `Ch x/y` / `Page x/y`) wired by the EPUB and PDF
+  readers; the audiobook rail has its own chapter stepper. Portrait keeps its
+  bottom bars.
+- **Audiobook speed + sleep chips** float UNDER the landscape rail, not inside
+  it (explicit user correction), and sit in the portrait transport row.
+- **Lock screen**: ±15 s skip buttons via skipBackward/Forward remote commands +
+  `MPNowPlayingInfoPropertyPreferredIntervals`, enabled only while an audiobook
+  is loaded (TTS is not seconds-addressable, so the skip commands never fall
+  through to SpeechPlayer). Audiobook publish cadence 10 s → 1 s: the lock-screen
+  clock ticks in real seconds.
+- **Mini-player bubble is movable** (`EdgeSnappingBubble` in
+  GlobalMiniPlayerOverlay): drag repositions, release snaps to the nearest of
+  the four edges, position persists normalized (survives rotation/relaunch),
+  bottom clamps above the tab bar; tap (≤10 pt travel) still expands the bar.
+- **Office→EPUB rebuilt on blocks** (`DocumentEpub.swift`): paragraphs /
+  image(pool index) / table cells (columnSpan, header). DOCX images via rels +
+  blip/imagedata (alt from wp:docPr), tables via w:tbl (gridSpan, tblHeader);
+  ODT/ODP tables + draw:image; PPTX a:tbl + p:pic via per-slide rels. Images
+  packaged at OEBPS/images/, CSS renders them full-width; tables become real
+  bordered HTML. Cover = docProps/Thumbnails thumbnail else synthesized
+  gradient tile; shelf labels say Word/ODT/Slides; backfill covers older
+  office imports. Unloadable media → 1px GIF placeholder (pool indexes never
+  shift). Note import uses `textLines` (tables → comma-joined rows).
+- **Reader page-turn settings (Anx-style)**: tap left/right thirds turns,
+  middle toggles chrome, swap option; swipe toggle. Paginated only; live via
+  the readerAppearance JSON + query params; `pageTurn` message type in
+  BookWebView (old `swipe` kept for compat).
+
+CI-only compilation discipline unchanged: green comes from `gh run list`,
+latest run wins (each dispatch supersedes the previous).

@@ -22,6 +22,13 @@
     letterSpacing: parseFloat(params.get("letterSpacing") || "0"),
     padding: parseInt(params.get("padding") || "16", 10),
     respectStyles: params.get("respectStyles") === "1",
+    // Page-turn interaction (Anx-style choice): tap left/right thirds turn
+    // pages, the middle toggles chrome; swipe turns pages. Both act in
+    // PAGINATED flow only (scrolled flow is native scrolling). Both default
+    // ON, invert swaps the tap sides for RTL readers.
+    tapTurn: params.get("tapTurn") !== "0",
+    swipeTurn: params.get("swipeTurn") !== "0",
+    tapInverted: params.get("tapInv") === "1",
     // Where auto-scroll's chapter-advance resumes from — updated on every
     // relocation so a manual jump keeps advancing from the right place.
     spineIndex: startChapter
@@ -291,6 +298,11 @@
     if (typeof a.letterSpacing === "number") STATE.letterSpacing = a.letterSpacing;
     if (typeof a.margin === "number") STATE.padding = a.margin;
     if (typeof a.respectStyles === "boolean") STATE.respectStyles = a.respectStyles;
+    // Page-turn interaction — booleans, so presence checks must be typeof
+    // (a false value still has to land).
+    if (typeof a.tapTurn === "boolean") STATE.tapTurn = a.tapTurn;
+    if (typeof a.swipeTurn === "boolean") STATE.swipeTurn = a.swipeTurn;
+    if (typeof a.tapInverted === "boolean") STATE.tapInverted = a.tapInverted;
     applyAppearance();
   };
 
@@ -344,6 +356,23 @@
       }
       var sel = doc.getSelection && doc.getSelection();
       if (sel && !sel.isCollapsed && String(sel).length > 0) return;
+      // Paginated + tap zones ON: the left third turns back, the right
+      // third turns forward, the MIDDLE is the chrome toggle (Anx's
+      // layout). Anything else — scrolled flow, tap zones off — keeps the
+      // historical whole-surface chrome toggle.
+      if (STATE.flow === "paginated" && STATE.tapTurn) {
+        var width = (doc.documentElement && doc.documentElement.clientWidth) || doc.body.clientWidth || 0;
+        if (width > 0) {
+          var x = event.clientX;
+          var leftZone = x < width / 3;
+          var rightZone = x > (width * 2) / 3;
+          if (leftZone || rightZone) {
+            var turnNext = STATE.tapInverted ? leftZone : rightZone;
+            try { window.parent.postMessage({ speechnotes: "pageTurn", dir: turnNext ? "next" : "prev" }, "*"); } catch (e) { /* blocked */ }
+            return;
+          }
+        }
+      }
       try { window.parent.postMessage({ speechnotes: "chromeTap" }, "*"); } catch (e) { /* blocked */ }
     }, false);
 
@@ -354,6 +383,7 @@
     }, { passive: true });
     doc.addEventListener("touchend", function (event) {
       if (STATE.flow !== "paginated") return;
+      if (!STATE.swipeTurn) return;
       var t = event.changedTouches[0];
       if (!t) return;
       var dx = t.clientX - touch.x;
@@ -363,7 +393,7 @@
       var sel = doc.getSelection && doc.getSelection();
       if (sel && !sel.isCollapsed && String(sel).length > 0) return;
       try {
-        window.parent.postMessage({ speechnotes: "swipe", dir: dx < 0 ? "next" : "prev" }, "*");
+        window.parent.postMessage({ speechnotes: "pageTurn", dir: dx < 0 ? "next" : "prev" }, "*");
       } catch (e) { /* blocked */ }
     }, { passive: true });
   }
@@ -372,8 +402,10 @@
     if (!event.data) return;
     if (event.data.speechnotes === "chromeTap") {
       post({ type: "chromeTap" });
-    } else if (event.data.speechnotes === "swipe") {
-      post({ type: "swipe", dir: event.data.dir === "prev" ? "prev" : "next" });
+    } else if (event.data.speechnotes === "pageTurn") {
+      // Tap zones AND swipes both land here — the native side runs the
+      // same rendition.next()/prev() for either.
+      post({ type: "pageTurn", dir: event.data.dir === "prev" ? "prev" : "next" });
     }
   }, false);
 })();

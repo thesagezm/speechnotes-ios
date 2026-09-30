@@ -52,6 +52,11 @@ struct BookReaderView: View {
     @AppStorage("bookReaderRespectStyles") private var respectStyles = false
     @AppStorage("bookReaderAutoScroll") private var autoScroll = false
     @AppStorage("bookReaderAutoScrollSpeed") private var autoScrollSpeed = 40.0
+    // Page-turn interaction (v1.7.2, Anx-style choice). Same keys
+    // ReaderAppearance.load() reads.
+    @AppStorage("bookReaderTapTurn") private var tapTurn = true
+    @AppStorage("bookReaderSwipeTurn") private var swipeTurn = true
+    @AppStorage("bookReaderTapInverted") private var tapInverted = false
     /// Bumped when the page flow (scroll/pages) changes — epub.js flow is
     /// fixed at rendition creation, so switching rebuilds the shell webview
     /// with the new query param; position survives via the CFI bridge.
@@ -563,6 +568,21 @@ struct BookReaderView: View {
                          : "Auto-scroll works in Scroll mode.")
                 }
                 Section {
+                    Toggle("Tap page edges to turn", isOn: $tapTurn)
+                        .disabled(flow != "paginated")
+                    if tapTurn && flow == "paginated" {
+                        Toggle("Swap left and right", isOn: $tapInverted)
+                    }
+                    Toggle("Swipe to turn", isOn: $swipeTurn)
+                        .disabled(flow != "paginated")
+                } header: {
+                    Text("Page turning")
+                } footer: {
+                    Text(flow == "paginated"
+                         ? "Tap the left or right third of the page to turn it; the middle toggles the bars. Scroll mode turns pages by swiping."
+                         : "Tap zones and page-turn swipes apply in Pages mode.")
+                }
+                Section {
                     Picker("Font", selection: $font) {
                         Text("Book").tag("book")
                         Text("Serif").tag("serif")
@@ -621,6 +641,11 @@ struct BookReaderView: View {
             .onChange(of: flow) { _ in switchFlow() }
             .onChange(of: autoScroll) { _ in pushAutoScroll() }
             .onChange(of: autoScrollSpeed) { _ in pushAutoScrollSpeed() }
+            // Page-turn settings ride the full appearance JSON — no reload
+            // needed, reader.js reads them live off STATE.
+            .onChange(of: tapTurn) { _ in applyAppearance() }
+            .onChange(of: swipeTurn) { _ in applyAppearance() }
+            .onChange(of: tapInverted) { _ in applyAppearance() }
         }
         .presentationDetents([.medium, .large])
     }

@@ -35,6 +35,12 @@ struct ReaderAppearance: Codable {
     var autoScroll: Bool
     /// px/s, 10...200
     var autoScrollSpeed: Double
+    // Page-turn interaction (v1.7.2, Anx-style choice). Tap zones and swipe
+    // only act in paginated flow — scrolled flow is native scrolling.
+    var tapTurn: Bool
+    var swipeTurn: Bool
+    /// Swap left/right tap zones (RTL readers).
+    var tapInverted: Bool
 
     static let defaults = ReaderAppearance(
         theme: "light",
@@ -47,7 +53,10 @@ struct ReaderAppearance: Codable {
         margin: 16,
         respectStyles: false,
         autoScroll: false,
-        autoScrollSpeed: 40
+        autoScrollSpeed: 40,
+        tapTurn: true,
+        swipeTurn: true,
+        tapInverted: false
     )
 
     var flowIsPaginated: Bool { flow == "paginated" }
@@ -70,6 +79,11 @@ struct ReaderAppearance: Codable {
         a.autoScroll = d.bool(forKey: "bookReaderAutoScroll")
         let speed = d.double(forKey: "bookReaderAutoScrollSpeed")
         if speed > 0 { a.autoScrollSpeed = speed }
+        // Booleans defaulting to TRUE must distinguish "unset" from false —
+        // bool(forKey:) answers false for a missing key.
+        a.tapTurn = (d.object(forKey: "bookReaderTapTurn") as? Bool) ?? true
+        a.swipeTurn = (d.object(forKey: "bookReaderSwipeTurn") as? Bool) ?? true
+        a.tapInverted = d.bool(forKey: "bookReaderTapInverted")
         return a
     }
 
@@ -87,6 +101,9 @@ struct ReaderAppearance: Codable {
             URLQueryItem(name: "letterSpacing", value: String(letterSpacing)),
             URLQueryItem(name: "padding", value: String(margin)),
             URLQueryItem(name: "respectStyles", value: respectStyles ? "1" : "0"),
+            URLQueryItem(name: "tapTurn", value: tapTurn ? "1" : "0"),
+            URLQueryItem(name: "swipeTurn", value: swipeTurn ? "1" : "0"),
+            URLQueryItem(name: "tapInv", value: tapInverted ? "1" : "0"),
         ]
     }
 
