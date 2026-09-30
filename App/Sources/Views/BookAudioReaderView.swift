@@ -243,6 +243,11 @@ struct BookAudioReaderView: View {
             }
             .foregroundStyle(Color.accentColor)
 
+            HStack(spacing: 12) {
+                speedMenu
+                sleepMenu
+            }
+
             timeReadout
         }
     }
@@ -269,6 +274,144 @@ struct BookAudioReaderView: View {
         }
         .disabled(disabled)
         .accessibilityLabel(label)
+    }
+
+    // MARK: Speed + sleep (v1.7.2)
+
+    /// Playback-speed menu — the presets audiobook apps converge on, live
+    /// through the app-level player so the mini-player and lock screen
+    /// follow. Shown in the portrait transport row AND the landscape rail
+    /// (the rail gets the compact label below — the documented 150 pt panel
+    /// has no room for the chip pair at full padding).
+    private var rateMenuItems: some View {
+        ForEach(AudioBookPlayer.ratePresets, id: \.self) { preset in
+            Button {
+                Haptics.tap()
+                audioBook.setRate(preset)
+            } label: {
+                if abs(preset - audioBook.rate) < 0.001 {
+                    Label(Self.rateLabel(preset), systemImage: "checkmark")
+                } else {
+                    Text(Self.rateLabel(preset))
+                }
+            }
+        }
+    }
+
+    private var speedMenu: some View {
+        Menu {
+            rateMenuItems
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "gauge.with.needle")
+                Text(Self.rateLabel(audioBook.rate))
+                    .monospacedDigit()
+            }
+            .font(.footnote.weight(.medium))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(Capsule().fill(Color.secondary.opacity(0.12)))
+        }
+        .accessibilityLabel("Playback speed \(Self.rateLabel(audioBook.rate))")
+    }
+
+    private var railSpeedMenu: some View {
+        Menu {
+            rateMenuItems
+        } label: {
+            Text(Self.rateLabel(audioBook.rate))
+                .font(.caption.weight(.semibold).monospacedDigit())
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(Capsule().fill(Color.secondary.opacity(0.12)))
+        }
+        .accessibilityLabel("Playback speed \(Self.rateLabel(audioBook.rate))")
+    }
+
+    /// Sleep-timer menu: minute presets, the end-of-chapter option, and
+    /// cancel while armed. The label shows the live countdown while armed.
+    private var sleepMenuItems: some View {
+        Group {
+            Section("Stop playing in") {
+                ForEach([5, 10, 15, 30, 45, 60, 90], id: \.self) { minutes in
+                    Button("\(minutes) minutes") {
+                        Haptics.tap()
+                        audioBook.startSleepTimer(minutes: minutes)
+                    }
+                }
+                Button("End of chapter") {
+                    Haptics.tap()
+                    audioBook.startSleepTimerToEndOfChapter()
+                }
+            }
+            if audioBook.sleepTimerActive {
+                Button("Cancel timer", role: .destructive) {
+                    Haptics.tap()
+                    audioBook.cancelSleepTimer()
+                }
+            }
+        }
+    }
+
+    private var sleepMenu: some View {
+        Menu {
+            sleepMenuItems
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: audioBook.sleepTimerActive ? "moon.fill" : "moon.zzz")
+                if let remaining = audioBook.sleepRemaining {
+                    Text(Self.countdown(remaining))
+                        .monospacedDigit()
+                } else if audioBook.sleepAtChapterEnd {
+                    Text("End of ch.")
+                } else {
+                    Text("Sleep")
+                }
+            }
+            .font(.footnote.weight(.medium))
+            .foregroundStyle(audioBook.sleepTimerActive ? Color.accentColor : .primary)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(Capsule().fill(Color.secondary.opacity(0.12)))
+        }
+        .accessibilityLabel(audioBook.sleepTimerActive ? "Sleep timer active" : "Sleep timer")
+    }
+
+    private var railSleepMenu: some View {
+        Menu {
+            sleepMenuItems
+        } label: {
+            Group {
+                if let remaining = audioBook.sleepRemaining {
+                    Text(Self.countdown(remaining))
+                        .monospacedDigit()
+                } else if audioBook.sleepAtChapterEnd {
+                    Text("End ch.")
+                        .font(.caption2.weight(.semibold))
+                } else {
+                    Image(systemName: "moon.zzz")
+                        .font(.caption)
+                }
+            }
+            .foregroundStyle(audioBook.sleepTimerActive ? Color.accentColor : .secondary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(Capsule().fill(Color.secondary.opacity(0.12)))
+        }
+        .accessibilityLabel(audioBook.sleepTimerActive ? "Sleep timer active" : "Sleep timer")
+    }
+
+    private static func rateLabel(_ rate: Double) -> String {
+        String(format: "%g×", rate)
+    }
+
+    /// Live sleep-timer countdown: M:SS below an hour, H:MM:SS above.
+    private static func countdown(_ seconds: Double) -> String {
+        let total = max(0, Int(seconds.rounded()))
+        if total >= 3600 {
+            return String(format: "%d:%02d:%02d", total / 3600, (total / 60) % 60, total % 60)
+        }
+        return String(format: "%d:%02d", total / 60, total % 60)
     }
 
     /// Landscape transport panel — the audiobook twin of the redesigned
@@ -358,6 +501,29 @@ struct BookAudioReaderView: View {
 
             Spacer(minLength: 0)
 
+            // Chapter stepping lives IN the rail now (v1.7.2): round 6's
+            // "the rail carries everything the bottom band did" was quietly
+            // false — the chapter chevrons existed only in portrait. The
+            // stepper is the portrait chapter bar's replacement at this
+            // width: prev/next flanking the live position.
+            HStack(spacing: 10) {
+                transportIcon("backward.end.fill", size: 16, weight: .semibold,
+                              disabled: chapterIndex <= 0,
+                              label: "Previous chapter") {
+                    stepChapter(-1)
+                }
+                Text("\(min(chapterIndex + 1, totalChapters)) / \(totalChapters)")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                transportIcon("forward.end.fill", size: 16, weight: .semibold,
+                              disabled: totalChapters > 0 && chapterIndex >= totalChapters - 1,
+                              label: "Next chapter") {
+                    stepChapter(1)
+                }
+            }
+            .foregroundStyle(Color.accentColor)
+
             HStack(spacing: 18) {
                 Button {
                     Haptics.tap()
@@ -387,6 +553,11 @@ struct BookAudioReaderView: View {
                 .accessibilityLabel("Forward 15 seconds")
             }
             .foregroundStyle(Color.accentColor)
+
+            HStack(spacing: 10) {
+                railSpeedMenu
+                railSleepMenu
+            }
 
             Spacer(minLength: 0)
 

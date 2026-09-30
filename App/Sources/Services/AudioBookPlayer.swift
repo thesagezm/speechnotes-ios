@@ -48,6 +48,33 @@ final class AudioBookPlayer: ObservableObject {
     /// this and the mini-player takes over, which is exactly the ask).
     @Published var readerVisible = false
 
+    // MARK: Playback speed + sleep timer (v1.7.2)
+
+    /// Playback speed, 0.5…3.0. Applied through `defaultRate` (iOS 16+ — the
+    /// deployment target is 18) so play()/pause() resume at the chosen speed
+    /// without every call site having to re-set `rate` — setting `rate`
+    /// directly on a PAUSED player would silently start playback.
+    @Published private(set) var rate: Double {
+        didSet { UserDefaults.standard.set(rate, forKey: Self.rateDefaultsKey) }
+    }
+
+    /// Seconds left on the sleep timer, published per tick while armed (nil
+    /// when off). The countdown only advances while the book is actually
+    /// playing — parking the book must not eat the timer.
+    @Published private(set) var sleepRemaining: TimeInterval?
+    /// End-of-chapter sleep mode: pause when THIS chapter finishes instead of
+    /// auto-advancing (the "let me finish this chapter" option).
+    @Published private(set) var sleepAtChapterEnd = false
+
+    var sleepTimerActive: Bool { sleepRemaining != nil || sleepAtChapterEnd }
+
+    private var lastTickAt: Date?
+
+    static let rateDefaultsKey = "audioBookRate"
+    static let rateRange: ClosedRange<Double> = 0.5...3.0
+    /// The speed menu's presets — the values audiobook apps converge on.
+    static let ratePresets: [Double] = [0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0]
+
     /// The compact bar is shown while a book is loaded (playing or paused),
     /// but never while its own reader is showing the full controls.
     var showMiniBar: Bool { activeBookID != nil && !readerVisible }
@@ -145,6 +172,11 @@ final class AudioBookPlayer: ObservableObject {
     /// Set by the audio reader on appear; position writes go through it.
     weak var store: BooksStore?
 
+    init() {
+        let stored = UserDefaults.standard.double(forKey: Self.rateDefaultsKey)
+        rate = Self.rateRange.contains(stored) && stored > 0 ? stored : 1.0
+    }
+
     // MARK: Binding (no audio yet)
 
     /// Points the player at a book so a later play/resume knows where to
@@ -217,6 +249,7 @@ final class AudioBookPlayer: ObservableObject {
                 }
                 let p = AVPlayer(playerItem: item)
                 p.allowsExternalPlayback = false
+                p.defaultRate = rate
                 player = p
                 loadedURL = url
                 loadedItemJustCreated = true
@@ -337,6 +370,10 @@ final class AudioBookPlayer: ObservableObject {
         chapterProgress = 0
         elapsed = 0
         totalDuration = 0
+        // Nothing left to pause — an armed timer on a stopped book is a
+        // phantom.
+        sleepRemaining = nil
+        sleepAtChapterEnd = false
         NowPlayingCenter.shared.clear()
         NowPlayingCenter.shared.setChapterSkipEnabled(false)
     }
@@ -358,6 +395,7 @@ final class AudioBookPlayer: ObservableObject {
         } else {
             userPaused = false
             player?.play()
+            applyRate(force: true)
             isPlaying = true
             publishNowPlaying(force: true)
         }
@@ -368,6 +406,60 @@ final class AudioBookPlayer: ObservableObject {
         let target = max(0, min(chapters.count - 1, chapterIndex + delta))
         guard target != chapterIndex, let book = activeBook ?? boundBook else { return }
         play(book: book, chapterIndex: target)
+    }
+
+    // MARK: Speed + sleep timer
+
+    /// Sets playback speed and applies it to the live player. Applied through
+    /// `defaultRate` so the next play()/pause() cycle keeps the speed; while
+    /// PLAYING the live `rate` moves too. (Setting `rate` while paused would
+    /// start playback — a trap the default-rate API exists to avoid.)
+    func setRate(_ newRate: Double) {
+        rate = min(max(newRate, Self.rateRange.lowerBound), Self.rateRange.upperBound)
+        applyRate()
+    }
+
+    private func applyRate(force: Bool = false) {
+        guard let player else { return }
+        player.defaultRate = rate
+        // After a play() call timeControlStatus may not have flipped yet —
+        // the force variant (used right after play) sets the live rate
+        // regardless.
+        if force || player.timeControlStatus == .playing {
+            player.rate = rate
+        }
+    }
+
+    /// Arms the sleep timer for N minutes. The countdown runs only while the
+    /// book plays, so parking mid-story does not burn the timer.
+    func startSleepTimer(minutes: Int) {
+        sleepAtChapterEnd = false
+        sleepRemaining = TimeInterval(minutes * 60)
+        lastTickAt = nil
+        Log.shared.info("AudioBookPlayer: sleep timer armed for \(minutes) min")
+    }
+
+    /// Arms the end-of-chapter variant: pause when the current chapter ends,
+    /// instead of auto-advancing.
+    func startSleepTimerToEndOfChapter() {
+        sleepRemaining = nil
+        sleepAtChapterEnd = true
+        Log.shared.info("AudioBookPlayer: sleep timer armed to end of chapter")
+    }
+
+    func cancelSleepTimer() {
+        guard sleepTimerActive else { return }
+        sleepRemaining = nil
+        sleepAtChapterEnd = false
+    }
+
+    /// The timer fired: pause, disarm, say so. The user may be asleep — the
+    /// toast is for whoever looks next.
+    private func fireSleepTimer() {
+        sleepRemaining = nil
+        sleepAtChapterEnd = false
+        if isPlaying { pause() }
+        ToastCenter.shared.show("Sleep timer: paused")
     }
 
     /// VLC-style skip: ±N seconds from the playhead. The chapter index is
@@ -447,7 +539,10 @@ final class AudioBookPlayer: ObservableObject {
             toleranceBefore: Self.time(0.25),
             toleranceAfter: Self.time(0.25)
         )
-        if wasPlaying { player.play() }
+        if wasPlaying {
+            player.play()
+            applyRate(force: true)
+        }
         chapterProgress = chapterProgressValue
         elapsed = target
         if fileDuration > 0 { totalDuration = fileDuration }
@@ -551,6 +646,23 @@ final class AudioBookPlayer: ObservableObject {
         let duration = cachedFileDuration ?? 0
         if totalDuration != duration, duration > 0 { totalDuration = duration }
 
+        // Sleep timer countdown — real elapsed time between ticks, advanced
+        // ONLY while the book is audibly playing (a parked book must not
+        // burn the timer).
+        if let last = lastTickAt {
+            let dt = Date().timeIntervalSince(last)
+            if playing, let remaining = sleepRemaining {
+                let left = remaining - dt
+                if left <= 0 {
+                    lastTickAt = Date()
+                    fireSleepTimer()
+                    return
+                }
+                if sleepRemaining != left { sleepRemaining = left }
+            }
+        }
+        lastTickAt = Date()
+
         guard chapterIsFinished, !userPaused else {
             // Playing, mid-chapter: a slow-cadence refresh of the lock
             // surface and the persisted position. Between publishes iOS
@@ -561,6 +673,13 @@ final class AudioBookPlayer: ObservableObject {
                 publishNowPlaying()
                 persistPosition()
             }
+            return
+        }
+
+        // End-of-chapter sleep mode fires HERE — at the chapter boundary,
+        // before the auto-advance can start the next chapter.
+        if sleepAtChapterEnd {
+            fireSleepTimer()
             return
         }
 
@@ -640,7 +759,7 @@ final class AudioBookPlayer: ObservableObject {
             artwork: cachedArtwork,
             isPlaying: isPlaying,
             progress: nil,
-            rate: 1.0,
+            rate: rate,
             elapsedSeconds: player.flatMap { Self.seconds(of: $0.currentTime()) },
             durationSeconds: book.audioDuration ?? cachedFileDuration,
             chapterCount: chapters.count > 1 ? chapters.count : nil,
@@ -806,6 +925,7 @@ final class AudioBookPlayer: ObservableObject {
             Log.shared.error("AudioBookPlayer: session re-activate failed: \(error)")
         }
         player?.play()
+        applyRate(force: true)
         isPlaying = true
         publishNowPlaying(force: true)
     }
