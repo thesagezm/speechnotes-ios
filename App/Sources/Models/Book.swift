@@ -140,9 +140,24 @@ extension Book {
     var authorOrFormat: String {
         if let author, !author.isEmpty { return author }
         switch format {
-        case .epub: return "EPUB"
+        case .epub: return docKindLabel ?? "EPUB"
         case .pdf: return "PDF"
         case .audio: return "Audiobook"
+        }
+    }
+
+    /// What kind of document a shelf item really is, from the ORIGINAL file
+    /// extension (office formats normalize to EPUB at import, so the plain
+    /// format read "EPUB" for a Word doc). nil for genuine EPUBs.
+    var docKindLabel: String? {
+        guard format == .epub else { return nil }
+        switch (originalFileName as NSString).pathExtension.lowercased() {
+        case "docx": return "Word"
+        case "doc": return "Word 97"
+        case "odt": return "ODT"
+        case "pptx": return "Slides"
+        case "odp": return "ODP"
+        default: return nil
         }
     }
 }

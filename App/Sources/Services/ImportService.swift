@@ -107,7 +107,10 @@ final class ImportService {
             let lines = chapters.flatMap { chapter -> [String] in
                 var out: [String] = []
                 if let title = chapter.title { out.append(title) }
-                out.append(contentsOf: chapter.paragraphs)
+                // textLines (not just paragraphs): table rows come through
+                // as comma-joined lines, so nothing a document contains is
+                // silently lost on the note path.
+                out.append(contentsOf: chapter.textLines)
                 return out
             }
             let joined = lines.joined(separator: "\n\n")

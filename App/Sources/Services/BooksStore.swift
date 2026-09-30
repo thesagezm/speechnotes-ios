@@ -231,6 +231,10 @@ final class BooksStore: ObservableObject {
                 || (book.format == .epub && book.spine != nil
                     && !(book.toc ?? []).isEmpty
                     && (book.toc ?? []).allSatisfy { $0.depth == nil })
+                // v1.7.2: office-normalized books imported before the
+                // document-cover work have no shelf thumbnail — one cheap
+                // re-look gives them the synthesized tile.
+                || (book.format == .epub && !book.hasCover && Self.isOfficeDocument(book.originalFileName))
                 // v1.7.1: books imported before the chapter-TRACK parser and
                 // the awaited-metadata cover fix need one re-read of their
                 // manifest — single-chapter audio with a "chpl" source that
@@ -307,6 +311,11 @@ final class BooksStore: ObservableObject {
                             BookTocEntry(label: entry.label, href: entry.href, spineIndex: indexByHref[entry.href])
                         }
                     }
+                    if !book.hasCover, Self.isOfficeDocument(book.originalFileName),
+                       let tile = Self.synthesizeDocCover(title: book.title, fileName: book.originalFileName) {
+                        try? tile.write(to: dir.appendingPathComponent("cover.jpg"), options: .atomic)
+                        book.hasCover = true
+                    }
                 }
                 if let manifest = try? JSONEncoder().encode(book) {
                     try? manifest.write(to: BooksStore.manifestURL(book.id), options: .atomic)
@@ -371,26 +380,40 @@ final class BooksStore: ObservableObject {
             if ext == "docx" || ext == "odt" || ext == "pptx" || ext == "odp" || ext == "doc" {
                 // Normalize-to-EPUB: parse the office XML into chapters and
                 // emit a real EPUB the reader + TTS pipeline already speak.
+                // v1.7.2: the parse carries the document's images and tables
+                // too — images are packaged into the EPUB (rendered
+                // full-width by the reader), tables become real bordered
+                // HTML tables, and an embedded thumbnail (or the first
+                // image) rides along as the shelf cover.
                 do {
                     let sourceData = try Data(contentsOf: sourceURL, options: .mappedIfSafe)
-                    let chapters: [DocumentChapter]
+                    let result: DocumentParseResult
                     switch ext {
-                    case "docx": chapters = try DocxParser.parse(archive: sourceData)
-                    case "odt": chapters = try OdtParser.parse(archive: sourceData)
-                    case "pptx": chapters = try PptxParser.parse(archive: sourceData)
-                    case "odp": chapters = try OdpParser.parse(archive: sourceData)
+                    case "docx": result = try DocxParser.parseFull(archive: sourceData)
+                    case "odt": result = try OdtParser.parseFull(archive: sourceData)
+                    case "pptx": result = try PptxParser.parseFull(archive: sourceData)
+                    case "odp": result = try OdpParser.parseFull(archive: sourceData)
                     default:
-                        // .doc — plain text out of the binary, no headings.
+                        // .doc — plain text out of the binary, no headings,
+                        // no media.
                         let text = try LegacyDocParser.extractText(archive: sourceData)
                         let paragraphs = text
                             .components(separatedBy: CharacterSet.newlines)
                             .map { $0.trimmingCharacters(in: .whitespaces) }
                             .filter { !$0.isEmpty }
-                        chapters = DocumentEpubConverter.chunk(paragraphs: paragraphs)
+                        result = DocumentParseResult(
+                            chapters: DocumentEpubConverter.chunk(paragraphs: paragraphs)
+                        )
                     }
                     let title = (sourceURL.lastPathComponent as NSString).deletingPathExtension
                         .replacingOccurrences(of: "_", with: " ")
-                    let epub = DocumentEpubConverter.epubData(chapters: chapters, title: title, author: nil)
+                    let epub = DocumentEpubConverter.epubData(
+                        chapters: result.chapters,
+                        title: title,
+                        author: nil,
+                        images: result.images,
+                        cover: result.cover
+                    )
                     try epub.write(to: destination, options: .atomic)
                 } catch {
                     importError = "Could not read the \(ext.uppercased()) document: \(error.localizedDescription)"
@@ -462,6 +485,16 @@ final class BooksStore: ObservableObject {
                let coverData = try? ZipReader.readEntry(coverPath, in: data),
                !coverData.isEmpty {
                 try? coverData.write(to: directory.appendingPathComponent("cover.jpg"), options: .atomic)
+                book.hasCover = true
+            }
+            // Office-normalized books: when the document carried no embedded
+            // thumbnail the generated EPUB has no cover at all — synthesize
+            // a stylized tile (format-colored gradient + extension badge +
+            // title) so the shelf shows something deliberate instead of the
+            // plain format glyph.
+            if !book.hasCover, Self.isOfficeDocument(originalFileName),
+               let tile = Self.synthesizeDocCover(title: book.title, fileName: originalFileName) {
+                try? tile.write(to: directory.appendingPathComponent("cover.jpg"), options: .atomic)
                 book.hasCover = true
             }
             // Snapshot the TOC with spine indices so the reader can navigate
@@ -706,6 +739,85 @@ final class BooksStore: ObservableObject {
         let height = bounds.height > 0 ? width * bounds.height / bounds.width : width
         let thumbnail = page.thumbnail(of: CGSize(width: width, height: height), for: .cropBox)
         return thumbnail.jpegData(compressionQuality: 0.85)
+    }
+
+    // MARK: Office document covers
+
+    /// True when an originalFileName is one of the office formats the
+    /// import normalizes to EPUB.
+    nonisolated static func isOfficeDocument(_ fileName: String) -> Bool {
+        let ext = (fileName as NSString).pathExtension.lowercased()
+        return ["docx", "doc", "odt", "pptx", "odp"].contains(ext)
+    }
+
+    /// A stylized shelf tile for office documents with no embedded
+    /// thumbnail: a vertical gradient in the format's color, a large
+    /// extension badge, and the document title wrapped underneath. Purely
+    /// drawn shapes + text (no SF Symbols) so it renders identically off the
+    /// main thread, where the detached manifest builder runs.
+    nonisolated private static func synthesizeDocCover(title: String, fileName: String) -> Data? {
+        let ext = (fileName as NSString).pathExtension.uppercased()
+        let (topColor, bottomColor, badge): (UIColor, UIColor, String)
+        switch ext {
+        case "DOCX", "DOC":
+            (topColor, bottomColor, badge) = (UIColor(red: 0.16, green: 0.36, blue: 0.68, alpha: 1),
+                                              UIColor(red: 0.08, green: 0.20, blue: 0.44, alpha: 1), "DOC")
+        case "PPTX", "ODP":
+            (topColor, bottomColor, badge) = (UIColor(red: 0.86, green: 0.48, blue: 0.16, alpha: 1),
+                                              UIColor(red: 0.62, green: 0.28, blue: 0.08, alpha: 1), "SLIDES")
+        default: // ODT
+            (topColor, bottomColor, badge) = (UIColor(red: 0.36, green: 0.32, blue: 0.72, alpha: 1),
+                                              UIColor(red: 0.22, green: 0.18, blue: 0.48, alpha: 1), "TEXT")
+        }
+
+        let size = CGSize(width: 600, height: 860)
+        let renderer = UIGraphicsImageRenderer(size: size)
+        let image = renderer.image { context in
+            let gradient = CGGradient(
+                colorsSpace: CGColorSpaceCreateDeviceRGB(),
+                colors: [topColor.cgColor, bottomColor.cgColor] as CFArray,
+                locations: [0, 1]
+            )!
+            context.cgContext.drawLinearGradient(
+                gradient,
+                start: .zero,
+                end: CGPoint(x: 0, y: size.height),
+                options: []
+            )
+
+            // Faint stacked-sheets motif behind the badge — enough texture
+            // to read as a document without pretending to be the real cover.
+            let sheetColor = UIColor.white.withAlphaComponent(0.10)
+            for offset in [Float(36), 24, 12] {
+                let rect = CGRect(x: 150 + offset, y: 210 - offset, width: 300, height: 400)
+                let path = UIBezierPath(roundedRect: rect, cornerRadius: 10)
+                sheetColor.setFill()
+                path.fill()
+            }
+
+            let badgeAttrs: [NSAttributedString.Key: Any] = [
+                .font: UIFont.systemFont(ofSize: 64, weight: .heavy),
+                .foregroundColor: UIColor.white.withAlphaComponent(0.95),
+            ]
+            (badge as NSString).draw(
+                at: CGPoint(x: 150, y: 350),
+                withAttributes: badgeAttrs
+            )
+
+            // The title, wrapped over up to three lines under the badge.
+            let titleStyle = NSMutableParagraphStyle()
+            titleStyle.lineBreakMode = .byWordWrapping
+            let titleAttrs: [NSAttributedString.Key: Any] = [
+                .font: UIFont.systemFont(ofSize: 34, weight: .semibold),
+                .foregroundColor: UIColor.white.withAlphaComponent(0.92),
+                .paragraphStyle: titleStyle,
+            ]
+            (title as NSString).draw(
+                in: CGRect(x: 56, y: 600, width: size.width - 112, height: 170),
+                withAttributes: titleAttrs
+            )
+        }
+        return image.jpegData(compressionQuality: 0.85)
     }
 
     // MARK: - Mutations

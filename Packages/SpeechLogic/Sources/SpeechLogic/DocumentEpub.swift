@@ -1,17 +1,147 @@
 import Foundation
 
+/// One image extracted from an office document, ready to be written into the
+/// normalized EPUB. `mime` comes from the media file's extension; `alt` from
+/// the document's own drawing description when it has one (the TTS text
+/// extractor reads the alt attribute).
+public struct DocumentImage: Equatable {
+    public let data: Data
+    public let mime: String
+    public let alt: String
+
+    public init(data: Data, mime: String, alt: String = "") {
+        self.data = data
+        self.mime = mime
+        self.alt = alt
+    }
+}
+
+/// One cell of a parsed office-document table. `columnSpan` carries
+/// w:gridSpan / table:number-columns-spanned / a:tc@gridSpan so the emitted
+/// HTML keeps its columns aligned; header rows come from w:tblHeader and
+/// table:table-header-rows (and a:tbl@firstRow for decks).
+public struct DocumentTableCell: Equatable {
+    public var text: String
+    public var columnSpan: Int
+    public var isHeader: Bool
+
+    public init(text: String, columnSpan: Int = 1, isHeader: Bool = false) {
+        self.text = text
+        self.columnSpan = columnSpan
+        self.isHeader = isHeader
+    }
+}
+
+/// One content block of a document chapter. v1.7.2: the old model was
+/// paragraphs only — images were dropped entirely and tables were flattened
+/// into run-on paragraphs, which the user rightly called out. Blocks keep
+/// the document's real structure so the EPUB can show images full-width and
+/// render tables as tables.
+public enum DocumentBlock: Equatable {
+    case paragraph(String)
+    /// Index into the parse result's image pool.
+    case image(Int)
+    case table([[DocumentTableCell]])
+}
+
 /// One chapter of a parsed office document: an optional heading title and
-/// the paragraphs under it. The common currency of the normalize-to-EPUB
-/// pipeline (DOCX/ODT today, PPTX/ODP/DOC next) — every parser reduces its
-/// format to this, and one converter turns it into a real EPUB the existing
-/// reader, TOC and TTS chapter pipeline already understand.
+/// the content blocks under it. The common currency of the normalize-to-EPUB
+/// pipeline (DOCX/ODT/PPTX/ODP/DOC) — every parser reduces its format to
+/// this, and one converter turns it into a real EPUB the existing reader,
+/// TOC and TTS chapter pipeline already understand.
+///
+/// `paragraphs` survives as a computed view so the text-only consumers (and
+/// every test written against the paragraph-only model) keep working.
 public struct DocumentChapter: Equatable {
     public var title: String?
-    public var paragraphs: [String]
+    public var blocks: [DocumentBlock]
 
     public init(title: String?, paragraphs: [String]) {
         self.title = title
-        self.paragraphs = paragraphs
+        self.blocks = paragraphs.map { .paragraph($0) }
+    }
+
+    public init(title: String?, blocks: [DocumentBlock]) {
+        self.title = title
+        self.blocks = blocks
+    }
+
+    /// The chapter's plain paragraph text — the historical API shape.
+    public var paragraphs: [String] {
+        blocks.compactMap { block in
+            if case .paragraph(let text) = block { return text }
+            return nil
+        }
+    }
+
+    /// Speakable lines for the note-import path: paragraphs as-is, tables as
+    /// one comma-joined line PER ROW (matching XhtmlText's table reading),
+    /// images dropped (their alt text lives in the parse result, not the
+    /// chapter). Nothing a document contains is silently lost when it
+    /// becomes a note.
+    public var textLines: [String] {
+        blocks.flatMap { block -> [String] in
+            switch block {
+            case .paragraph(let text):
+                return [text]
+            case .image:
+                return []
+            case .table(let rows):
+                return rows.map { row in
+                    row.map { $0.text.replacingOccurrences(of: "\n", with: " ") }
+                        .joined(separator: ", ")
+                }
+            }
+        }
+    }
+}
+
+/// What a full parse produces: the chapterized text PLUS everything needed
+/// to build the EPUB's media (images referenced by blocks, and an optional
+/// embedded cover such as docProps/thumbnail.jpeg).
+public struct DocumentParseResult: Equatable {
+    public var chapters: [DocumentChapter]
+    public var images: [DocumentImage]
+    public var cover: DocumentImage?
+
+    public init(chapters: [DocumentChapter], images: [DocumentImage] = [], cover: DocumentImage? = nil) {
+        self.chapters = chapters
+        self.images = images
+        self.cover = cover
+    }
+}
+
+/// Internal chapterization input — the flat per-document item stream the
+/// delegates emit before chapters are cut.
+enum DocumentItem {
+    case heading(String, level: Int)
+    case paragraph(String)
+    case image(Int)
+    case table([[DocumentTableCell]])
+}
+
+/// Shared image-pool bookkeeping: blocks reference images by pool index so
+/// the same media file used twice is stored (and shipped) once.
+final class DocumentImagePool {
+    private(set) var targets: [String] = []
+    private var altByTarget: [String: String] = [:]
+    private var indexByTarget: [String: Int] = [:]
+
+    func index(for target: String, alt: String) -> Int {
+        if let existing = indexByTarget[target] {
+            if (altByTarget[target] ?? "").isEmpty, !alt.isEmpty {
+                altByTarget[target] = alt
+            }
+            return existing
+        }
+        targets.append(target)
+        indexByTarget[target] = targets.count - 1
+        altByTarget[target] = alt
+        return targets.count - 1
+    }
+
+    func alt(for target: String) -> String {
+        altByTarget[target] ?? ""
     }
 }
 
@@ -33,27 +163,146 @@ extension DocumentParseError: LocalizedError {
     }
 }
 
+// MARK: - Shared relationship + media helpers
+
+enum DocumentMedia {
+    /// Lexically resolves a relationship target against the base part's
+    /// directory ("word" + "media/img1.png" → "word/media/img1.png";
+    /// "ppt/slides" + "../media/img1.png" → "ppt/media/img1.png"). Purely
+    /// lexical — zip entry names are raw strings.
+    static func resolveTarget(baseDir: String, _ target: String) -> String {
+        guard !target.hasPrefix("/") else { return String(target.dropFirst()) }
+        var stack = baseDir.split(separator: "/").map(String.init)
+        for part in target.split(separator: "/").map(String.init) {
+            switch part {
+            case ".", "": continue
+            case "..": if !stack.isEmpty { stack.removeLast() }
+            default: stack.append(part)
+            }
+        }
+        return stack.joined(separator: "/")
+    }
+
+    /// Displayable image mime for a media file extension, or nil for the
+    /// formats neither WebKit nor UIImage can show (WMF/EMF metafiles are
+    /// common in legacy Word docs — dropping them beats a broken image).
+    static func mime(forExtension ext: String) -> String? {
+        switch ext.lowercased() {
+        case "png": return "image/png"
+        case "jpg", "jpeg": return "image/jpeg"
+        case "gif": return "image/gif"
+        case "bmp", "dib": return "image/bmp"
+        case "webp": return "image/webp"
+        case "svg": return "image/svg+xml"
+        default: return nil
+        }
+    }
+
+    static func fileExtension(forMime mime: String) -> String {
+        switch mime {
+        case "image/jpeg": return "jpg"
+        case "image/png": return "png"
+        case "image/gif": return "gif"
+        case "image/bmp": return "bmp"
+        case "image/webp": return "webp"
+        case "image/svg+xml": return "svg"
+        default: return "bin"
+        }
+    }
+
+    /// Loads a relationship's target as a DocumentImage, or nil when the
+    /// entry is missing/external/undisplayable.
+    static func loadImage(target: String, alt: String, archive: Data) -> DocumentImage? {
+        let ext = (target as NSString).pathExtension
+        guard let mime = mime(forExtension: ext) else { return nil }
+        guard let data = try? ZipReader.readEntry(target, in: archive), !data.isEmpty else { return nil }
+        return DocumentImage(data: data, mime: mime, alt: alt)
+    }
+
+    /// Resolves a parse's image pool to DocumentImages — pool-ALIGNED, with
+    /// a transparent 1×1 GIF standing in for any entry that fails to load
+    /// (blocks reference pool indexes; a shifted array would attach every
+    /// later image to the wrong block).
+    static func resolvePool(_ pool: DocumentImagePool, archive: Data) -> [DocumentImage] {
+        pool.targets.map { target in
+            loadImage(target: target, alt: pool.alt(for: target), archive: archive)
+                ?? DocumentImage(data: transparentPixelGIF, mime: "image/gif", alt: "")
+        }
+    }
+
+    /// The office suites' embedded document thumbnails, in preference order
+    /// (OOXML writes docProps/thumbnail.jpeg; ODF writes
+    /// Thumbnails/thumbnail.png).
+    static func embeddedThumbnail(archive: Data) -> DocumentImage? {
+        let candidates = [
+            "docProps/thumbnail.jpeg",
+            "docProps/thumbnail.png",
+            "Thumbnails/thumbnail.png",
+        ]
+        for candidate in candidates {
+            guard let data = try? ZipReader.readEntry(candidate, in: archive), !data.isEmpty,
+                  let mime = mime(forExtension: (candidate as NSString).pathExtension) else { continue }
+            return DocumentImage(data: data, mime: mime, alt: "Document thumbnail")
+        }
+        return nil
+    }
+
+    /// 1×1 transparent GIF — the placeholder that keeps the image pool
+    /// index-aligned when a media entry cannot be loaded (a corrupt archive
+    /// must not shift every later image onto the wrong block).
+    static let transparentPixelGIF = Data(
+        base64Encoded: "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
+    ) ?? Data()
+}
+
 // MARK: - DOCX
 
-/// WordprocessingML (DOCX) parser — text + heading structure from
-/// word/document.xml. Images, tables (as sequential paragraphs) and
-/// footnotes are out of scope: the output feeds the reader and the TTS
-/// chapter pipeline, which want clean prose.
+/// WordprocessingML (DOCX) parser — heading structure, tables and images out
+/// of word/document.xml, media targets resolved through
+/// word/_rels/document.xml.rels. Footnotes remain out of scope.
 public enum DocxParser {
     public static func parse(archive: Data) throws -> [DocumentChapter] {
+        try parseFull(archive: archive).chapters
+    }
+
+    public static func parseFull(archive: Data) throws -> DocumentParseResult {
         let documentXML: Data
         do {
             documentXML = try ZipReader.readEntry("word/document.xml", in: archive)
         } catch let ZipReader.ZipError.entryNotFound(name) {
             throw DocumentParseError.missingEntry(name)
         }
-        let delegate = DocxDelegate()
+
+        // rId → zip path. The rels file is optional only for documents with
+        // no relationships at all — absent means no images, not an error.
+        var relsByRID: [String: String] = [:]
+        if let relsData = try? ZipReader.readEntry("word/_rels/document.xml.rels", in: archive) {
+            let grabber = AttributeGrabber(elements: ["Relationship"])
+            let parser = XMLParser(data: relsData)
+            parser.delegate = grabber
+            parser.parse()
+            for attrs in grabber.captured(for: "Relationship") {
+                guard let id = attrs["Id"], let target = attrs["Target"] else { continue }
+                guard attrs["TargetMode"] != "External" else { continue }
+                relsByRID[id] = DocumentMedia.resolveTarget(baseDir: "word", target)
+            }
+        }
+
+        let pool = DocumentImagePool()
+        let delegate = DocxDelegate(relsByRID: relsByRID, pool: pool)
         let parser = XMLParser(data: documentXML)
         parser.delegate = delegate
         guard parser.parse() else {
             throw DocumentParseError.malformed(parser.parserError?.localizedDescription ?? "XML error")
         }
-        return chapterize(delegate.paragraphs)
+
+        let images = DocumentMedia.resolvePool(pool, archive: archive)
+
+        return DocumentParseResult(
+            chapters: chapterize(delegate.items),
+            images: images,
+            cover: DocumentMedia.embeddedThumbnail(archive: archive)
+        )
     }
 }
 
@@ -63,9 +312,32 @@ private final class DocxDelegate: NSObject, XMLParserDelegate {
         var headingLevel: Int = 0 // 0 = body text, 1...6
     }
 
-    private(set) var paragraphs: [Paragraph] = []
+    private let relsByRID: [String: String]
+    private let pool: DocumentImagePool
+
+    private(set) var items: [DocumentItem] = []
+    private var altByRID: [String: String] = [:]
+    private var pendingImageIndexes: [Int] = []
+
     private var current: Paragraph?
     private var inText = false
+
+    // Table state (w:tbl / w:tr / w:tc; nested tables' content is dropped —
+    // a table inside a cell is rare in documents meant to be read aloud,
+    // and keeping only the outer row's text avoids scrambled output).
+    private var tblDepth = 0
+    private var tableRows: [[DocumentTableCell]] = []
+    private var rowCells: [DocumentTableCell] = []
+    private var rowIsHeader = false
+    private var inCell = false
+    private var cellLines: [String] = []
+    private var cellLine = ""
+    private var cellSpan = 1
+
+    init(relsByRID: [String: String], pool: DocumentImagePool) {
+        self.relsByRID = relsByRID
+        self.pool = pool
+    }
 
     func parser(
         _ parser: XMLParser,
@@ -76,11 +348,13 @@ private final class DocxDelegate: NSObject, XMLParserDelegate {
     ) {
         switch Self.local(elementName) {
         case "p":
-            current = Paragraph()
+            if tblDepth == 0 {
+                current = Paragraph()
+            } else if inCell {
+                cellLine = ""
+            }
+            inText = false
         case "pStyle":
-            // Style IDs are stable across Word UI languages: "Heading1"…,
-            // "Title". Level 1/2 opens a chapter in chapterize(); deeper
-            // headings stay body paragraphs with the heading text inline.
             guard current != nil else { return }
             let style = attributeDict["w:val"] ?? attributeDict.values.first { $0.hasPrefix("Heading") } ?? ""
             if style == "Title" {
@@ -91,18 +365,79 @@ private final class DocxDelegate: NSObject, XMLParserDelegate {
         case "t":
             inText = true
         case "tab":
-            current?.text += " "
+            if tblDepth == 0 {
+                current?.text += " "
+            } else if inCell {
+                cellLine += " "
+            }
         case "br":
-            current?.text += "\n"
+            if tblDepth == 0 {
+                current?.text += "\n"
+            } else if inCell {
+                cellLine += "\n"
+            }
+        case "tbl":
+            tblDepth += 1
+            if tblDepth == 1 { tableRows = [] }
+        case "tr":
+            if tblDepth == 1 {
+                rowCells = []
+                rowIsHeader = false
+            }
+        case "tblHeader":
+            if tblDepth == 1 { rowIsHeader = true }
+        case "tc":
+            if tblDepth == 1 {
+                inCell = true
+                cellLines = []
+                cellLine = ""
+                cellSpan = 1
+            }
+        case "gridSpan":
+            let raw = attributeDict["w:val"] ?? attributeDict.values.first ?? "1"
+            cellSpan = max(1, Int(raw) ?? 1)
+        case "blip":
+            // DrawingML image reference (r:embed, or r:link for linked
+            // pictures — same target lookup, the link target is still a
+            // package part when embedded).
+            if let rid = attributeDict["r:embed"] ?? attributeDict["r:link"] {
+                recordImage(rid: rid)
+            }
+        case "imagedata":
+            // Legacy VML image (w:object).
+            if let rid = attributeDict["r:id"] {
+                recordImage(rid: rid)
+            }
+        case "docPr":
+            // The drawing's accessible name/description — the best alt text
+            // the document offers.
+            let alt = attributeDict["descr"] ?? attributeDict["name"] ?? ""
+            if !alt.isEmpty { latestImageAlt = alt }
         default:
             break
         }
     }
 
+    private var latestImageAlt = ""
+
+    private func recordImage(rid: String) {
+        // Images inside table cells are dropped for now — they complicate
+        // the cell text model and are rare in prose documents.
+        guard tblDepth == 0, let target = relsByRID[rid] else { return }
+        let alt = latestImageAlt
+        latestImageAlt = ""
+        pendingImageIndexes.append(pool.index(for: target, alt: alt))
+    }
+
     func parser(_ parser: XMLParser, foundCharacters string: String) {
-        guard inText, var paragraph = current else { return }
-        paragraph.text += string
-        current = paragraph
+        guard inText else { return }
+        if tblDepth == 0 {
+            guard var paragraph = current else { return }
+            paragraph.text += string
+            current = paragraph
+        } else if inCell {
+            cellLine += string
+        }
     }
 
     func parser(
@@ -115,22 +450,58 @@ private final class DocxDelegate: NSObject, XMLParserDelegate {
         case "t":
             inText = false
         case "p":
-            if var paragraph = current {
-                // Collapse run-split whitespace: runs often break mid-word
-                // with no characters lost, but tab/br inserts may leave
-                // doubled spaces.
-                paragraph.text = paragraph.text
-                    .replacingOccurrences(of: "\u{00A0}", with: " ")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                if !paragraph.text.isEmpty {
-                    paragraphs.append(paragraph)
-                }
+            if tblDepth == 0 {
+                flushParagraphWithImages()
+            } else if inCell {
+                cellLines.append(cellLine)
             }
-            current = nil
-            inText = false
+        case "tc":
+            if inCell, tblDepth == 1 {
+                let text = cellLines
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+                    .joined(separator: "\n")
+                rowCells.append(DocumentTableCell(text: text, columnSpan: cellSpan, isHeader: rowIsHeader))
+                inCell = false
+            }
+        case "tr":
+            if tblDepth == 1, !rowCells.isEmpty {
+                tableRows.append(rowCells)
+                rowCells = []
+            }
+        case "tbl":
+            tblDepth = max(0, tblDepth - 1)
+            if tblDepth == 0, !tableRows.isEmpty {
+                items.append(.table(tableRows))
+                tableRows = []
+            }
         default:
             break
         }
+    }
+
+    /// A body paragraph ended: emit its text, then any images the paragraph
+    /// carried (inline and anchored drawings both live inside runs of a
+    /// w:p — they surface as their own block right after the text).
+    private func flushParagraphWithImages() {
+        if var paragraph = current {
+            paragraph.text = paragraph.text
+                .replacingOccurrences(of: "\u{00A0}", with: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !paragraph.text.isEmpty {
+                items.append(
+                    paragraph.headingLevel > 0
+                        ? .heading(paragraph.text, level: paragraph.headingLevel)
+                        : .paragraph(paragraph.text)
+                )
+            }
+        }
+        current = nil
+        inText = false
+        for index in pendingImageIndexes {
+            items.append(.image(index))
+        }
+        pendingImageIndexes = []
     }
 
     static func local(_ name: String) -> String {
@@ -140,29 +511,59 @@ private final class DocxDelegate: NSObject, XMLParserDelegate {
 
 // MARK: - ODT
 
-/// OpenDocument Text parser — text:h / text:p out of content.xml.
+/// OpenDocument Text parser — text:h / text:p, draw:image frames and
+/// table:table out of content.xml. Media hrefs point at package paths
+/// ("Pictures/…", sometimes with leading "../"), normalized lexically.
 public enum OdtParser {
     public static func parse(archive: Data) throws -> [DocumentChapter] {
+        try parseFull(archive: archive).chapters
+    }
+
+    public static func parseFull(archive: Data) throws -> DocumentParseResult {
         let contentXML: Data
         do {
             contentXML = try ZipReader.readEntry("content.xml", in: archive)
         } catch let ZipReader.ZipError.entryNotFound(name) {
             throw DocumentParseError.missingEntry(name)
         }
-        let delegate = OdtDelegate()
+        let pool = DocumentImagePool()
+        let delegate = OdtDelegate(pool: pool)
         let parser = XMLParser(data: contentXML)
         parser.delegate = delegate
         guard parser.parse() else {
             throw DocumentParseError.malformed(parser.parserError?.localizedDescription ?? "XML error")
         }
-        return chapterize(delegate.paragraphs)
+        let images = DocumentMedia.resolvePool(pool, archive: archive)
+        return DocumentParseResult(
+            chapters: chapterize(delegate.items),
+            images: images,
+            cover: DocumentMedia.embeddedThumbnail(archive: archive)
+        )
     }
 }
 
 private final class OdtDelegate: NSObject, XMLParserDelegate {
-    private(set) var paragraphs: [DocxDelegate.Paragraph] = []
-    private var current: DocxDelegate.Paragraph?
+    private let pool: DocumentImagePool
+    private(set) var items: [DocumentItem] = []
+    private var currentText: String?
+    private var currentHeadingLevel = 0
     private var inside = false
+    private var pendingImageIndexes: [Int] = []
+
+    // Table state
+    private var tblDepth = 0
+    private var inHeaderRows = false
+    private var tableRows: [[DocumentTableCell]] = []
+    private var rowCells: [DocumentTableCell] = []
+    private var inCell = false
+    private var cellIsCovered = false
+    private var cellLines: [String] = []
+    private var cellLine = ""
+    private var cellSpan = 1
+
+    init(pool: DocumentImagePool) {
+        self.pool = pool
+    }
 
     func parser(
         _ parser: XMLParser,
@@ -174,29 +575,76 @@ private final class OdtDelegate: NSObject, XMLParserDelegate {
         switch DocxDelegate.local(elementName) {
         case "h":
             inside = true
-            current = DocxDelegate.Paragraph()
+            currentText = ""
             let level = Int(attributeDict["text:outline-level"] ?? "1") ?? 1
-            current?.headingLevel = min(max(level, 1), 6)
+            currentHeadingLevel = min(max(level, 1), 6)
         case "p":
             inside = true
-            current = DocxDelegate.Paragraph()
+            currentText = ""
+            currentHeadingLevel = 0
+            if tblDepth > 0 { cellLine = "" }
         case "tab":
-            current?.text += " "
+            append(" ")
         case "line-break":
-            current?.text += "\n"
+            append("\n")
         case "s":
             // text:s is a run of literal spaces (c attribute, default 1).
             let count = Int(attributeDict["text:c"] ?? "1") ?? 1
-            current?.text += String(repeating: " ", count: count)
+            append(String(repeating: " ", count: count))
+        case "table":
+            tblDepth += 1
+            if tblDepth == 1 { tableRows = [] }
+        case "table-header-rows":
+            inHeaderRows = true
+        case "table-row":
+            if tblDepth == 1 {
+                rowCells = []
+            }
+        case "table-cell":
+            if tblDepth == 1 {
+                inCell = true
+                cellIsCovered = false
+                cellLines = []
+                cellLine = ""
+                let raw = attributeDict["table:number-columns-spanned"] ?? "1"
+                cellSpan = max(1, Int(raw) ?? 1)
+            }
+        case "covered-table-cell":
+            if tblDepth == 1 {
+                // The masked continuation of a spanned cell — HTML's colspan
+                // already covers it; emitting it would duplicate the column.
+                inCell = true
+                cellIsCovered = true
+                cellLines = []
+                cellLine = ""
+                cellSpan = 1
+            }
+        case "image":
+            // draw:image carries xlink:href to the package picture. Images
+            // inside table cells are dropped (same rule as DOCX): they
+            // would land in the block stream ahead of their own table.
+            if tblDepth == 0,
+               let href = attributeDict["xlink:href"] ?? attributeDict["href"], !href.isEmpty {
+                let target = DocumentMedia.resolveTarget(baseDir: "", href)
+                pendingImageIndexes.append(pool.index(for: target, alt: ""))
+            }
         default:
             break
         }
     }
 
+    /// Text goes to the paragraph outside tables, and to the current cell
+    /// line inside them.
+    private func append(_ value: String) {
+        if tblDepth > 0, inCell {
+            cellLine += value
+        } else if inside, currentText != nil {
+            currentText? += value
+        }
+    }
+
     func parser(_ parser: XMLParser, foundCharacters string: String) {
-        guard inside, var paragraph = current else { return }
-        paragraph.text += string
-        current = paragraph
+        append(string)
     }
 
     func parser(
@@ -207,19 +655,66 @@ private final class OdtDelegate: NSObject, XMLParserDelegate {
     ) {
         switch DocxDelegate.local(elementName) {
         case "h", "p":
-            if var paragraph = current {
-                paragraph.text = paragraph.text
-                    .replacingOccurrences(of: "\u{00A0}", with: " ")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                if !paragraph.text.isEmpty {
-                    paragraphs.append(paragraph)
-                }
+            if tblDepth > 0, inCell {
+                cellLines.append(cellLine)
+                cellLine = ""
+            } else if inside {
+                flushParagraph()
             }
-            current = nil
-            inside = false
+        case "table-cell", "covered-table-cell":
+            if inCell, tblDepth == 1 {
+                if !cellIsCovered {
+                    let text = cellLines
+                        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                        .filter { !$0.isEmpty }
+                        .joined(separator: "\n")
+                    rowCells.append(DocumentTableCell(text: text, columnSpan: cellSpan, isHeader: inHeaderRows))
+                }
+                inCell = false
+                cellIsCovered = false
+            }
+        case "table-row":
+            if tblDepth == 1, !rowCells.isEmpty {
+                tableRows.append(rowCells)
+                rowCells = []
+            }
+        case "table-header-rows":
+            inHeaderRows = false
+        case "table":
+            tblDepth = max(0, tblDepth - 1)
+            if tblDepth == 0, !tableRows.isEmpty {
+                items.append(.table(tableRows))
+                tableRows = []
+            }
+        case "frame":
+            // Images sit in draw:frames, sometimes with no paragraph around
+            // them — the frame close is their last chance to land.
+            flushPendingImages()
         default:
             break
         }
+    }
+
+    private func flushParagraph() {
+        if let text = currentText {
+            let clean = text
+                .replacingOccurrences(of: "\u{00A0}", with: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !clean.isEmpty {
+                items.append(currentHeadingLevel > 0 ? .heading(clean, level: currentHeadingLevel) : .paragraph(clean))
+            }
+        }
+        currentText = nil
+        inside = false
+        currentHeadingLevel = 0
+        flushPendingImages()
+    }
+
+    private func flushPendingImages() {
+        for index in pendingImageIndexes {
+            items.append(.image(index))
+        }
+        pendingImageIndexes = []
     }
 }
 
@@ -227,17 +722,40 @@ private final class OdtDelegate: NSObject, XMLParserDelegate {
 
 /// PowerPoint parser — one chapter per slide, slide ORDER resolved through
 /// ppt/presentation.xml + its relationships (rIds), numeric-name sort as
-/// the fallback. Speaker notes are out of scope for v1.
+/// the fallback. Slide media comes from each slide's own rels part
+/// (ppt/slides/_rels/slideN.xml.rels). Speaker notes are out of scope.
 public enum PptxParser {
     public static func parse(archive: Data) throws -> [DocumentChapter] {
+        try parseFull(archive: archive).chapters
+    }
+
+    public static func parseFull(archive: Data) throws -> DocumentParseResult {
         let slidePaths = try orderedSlidePaths(archive: archive)
         guard !slidePaths.isEmpty else {
             throw DocumentParseError.malformed("no slides found")
         }
+        let pool = DocumentImagePool()
         var chapters: [DocumentChapter] = []
         for (index, path) in slidePaths.enumerated() {
+            // This slide's own relationships — targets are relative to
+            // ppt/slides/.
+            var relsByRID: [String: String] = [:]
+            let relsPath = (path as NSString).deletingLastPathComponent
+                + "/_rels/" + ((path as NSString).lastPathComponent as String) + ".rels"
+            if let relsData = try? ZipReader.readEntry(relsPath, in: archive) {
+                let grabber = AttributeGrabber(elements: ["Relationship"])
+                let parser = XMLParser(data: relsData)
+                parser.delegate = grabber
+                parser.parse()
+                for attrs in grabber.captured(for: "Relationship") {
+                    guard let id = attrs["Id"], let target = attrs["Target"] else { continue }
+                    guard attrs["TargetMode"] != "External" else { continue }
+                    relsByRID[id] = DocumentMedia.resolveTarget(baseDir: "ppt/slides", target)
+                }
+            }
+
             let xml = try ZipReader.readEntry(path, in: archive)
-            let delegate = SlideDelegate()
+            let delegate = SlideDelegate(relsByRID: relsByRID, pool: pool)
             let parser = XMLParser(data: xml)
             parser.delegate = delegate
             guard parser.parse() else {
@@ -246,11 +764,16 @@ public enum PptxParser {
             chapters.append(
                 DocumentChapter(
                     title: delegate.title ?? "Slide \(index + 1)",
-                    paragraphs: delegate.paragraphs
+                    blocks: delegate.items
                 )
             )
         }
-        return chapters
+        let images = DocumentMedia.resolvePool(pool, archive: archive)
+        return DocumentParseResult(
+            chapters: chapters,
+            images: images,
+            cover: DocumentMedia.embeddedThumbnail(archive: archive)
+        )
     }
 
     /// Reads ppt/presentation.xml's sldIdLst (rIds) and maps them through
@@ -307,13 +830,33 @@ public enum PptxParser {
     }
 }
 
-/// One slide's text: the title shape's first paragraph becomes the title,
-/// every other a:p becomes a body paragraph.
+/// One slide's content in document order: the title shape's first paragraph
+/// becomes the title, everything else becomes blocks (paragraphs, picture
+/// blocks, DrawingML tables).
 private final class SlideDelegate: NSObject, XMLParserDelegate {
+    private let relsByRID: [String: String]
+    private let pool: DocumentImagePool
+
     private(set) var title: String?
-    private(set) var paragraphs: [String] = []
+    private(set) var items: [DocumentItem] = []
     private var inTitleShape = false
     private var currentText: String?
+
+    // Table state (a:tbl inside p:graphicFrame)
+    private var tblDepth = 0
+    private var tableRows: [[DocumentTableCell]] = []
+    private var rowCells: [DocumentTableCell] = []
+    private var nextRowIsHeader = false
+    private var inCell = false
+    private var cellLines: [String] = []
+    private var cellLine = ""
+    private var cellSpan = 1
+    private var pendingImageIndexes: [Int] = []
+
+    init(relsByRID: [String: String], pool: DocumentImagePool) {
+        self.relsByRID = relsByRID
+        self.pool = pool
+    }
 
     func parser(
         _ parser: XMLParser,
@@ -327,16 +870,52 @@ private final class SlideDelegate: NSObject, XMLParserDelegate {
             let kind = attributeDict["type"] ?? ""
             inTitleShape = kind == "title" || kind == "ctrTitle"
         case "p":
-            currentText = ""
+            if tblDepth > 0, inCell {
+                cellLine = ""
+            } else {
+                currentText = ""
+            }
         case "t":
-            if currentText == nil { currentText = "" }
+            if currentText == nil && !(tblDepth > 0 && inCell) { currentText = "" }
+        case "blip":
+            if let rid = attributeDict["r:embed"] ?? attributeDict["r:link"],
+               let target = relsByRID[rid] {
+                pendingImageIndexes.append(pool.index(for: target, alt: ""))
+            }
+        case "pic":
+            break // images flush at the pic close, below
+        case "tbl":
+            tblDepth += 1
+            if tblDepth == 1 {
+                tableRows = []
+                nextRowIsHeader = false
+            }
+        case "tblPr":
+            if tblDepth == 1, (attributeDict["firstRow"] ?? "0") == "1" {
+                nextRowIsHeader = true
+            }
+        case "tr":
+            if tblDepth == 1 {
+                rowCells = []
+            }
+        case "tc":
+            if tblDepth == 1 {
+                inCell = true
+                cellLines = []
+                cellLine = ""
+                cellSpan = max(1, Int(attributeDict["gridSpan"] ?? "1") ?? 1)
+            }
         default:
             break
         }
     }
 
     func parser(_ parser: XMLParser, foundCharacters string: String) {
-        currentText? += string
+        if tblDepth > 0, inCell {
+            cellLine += string
+        } else {
+            currentText? += string
+        }
     }
 
     func parser(
@@ -347,18 +926,48 @@ private final class SlideDelegate: NSObject, XMLParserDelegate {
     ) {
         switch DocxDelegate.local(elementName) {
         case "p":
-            if var text = currentText {
+            if tblDepth > 0, inCell {
+                cellLines.append(cellLine)
+                cellLine = ""
+            } else if var text = currentText {
                 text = text.replacingOccurrences(of: "\u{00A0}", with: " ")
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 if !text.isEmpty {
                     if inTitleShape && title == nil {
                         title = text
                     } else {
-                        paragraphs.append(text)
+                        items.append(.paragraph(text))
                     }
                 }
             }
             currentText = nil
+        case "pic":
+            // The whole picture shape ended — its image lands as a block.
+            for index in pendingImageIndexes {
+                items.append(.image(index))
+            }
+            pendingImageIndexes = []
+        case "tc":
+            if inCell, tblDepth == 1 {
+                let text = cellLines
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+                    .joined(separator: "\n")
+                rowCells.append(DocumentTableCell(text: text, columnSpan: cellSpan, isHeader: nextRowIsHeader))
+                inCell = false
+            }
+        case "tr":
+            if tblDepth == 1, !rowCells.isEmpty {
+                tableRows.append(rowCells)
+                rowCells = []
+                nextRowIsHeader = false
+            }
+        case "tbl":
+            tblDepth = max(0, tblDepth - 1)
+            if tblDepth == 0, !tableRows.isEmpty {
+                items.append(.table(tableRows))
+                tableRows = []
+            }
         case "sp":
             inTitleShape = false
         default:
@@ -398,32 +1007,61 @@ private final class AttributeGrabber: NSObject, XMLParserDelegate {
 // MARK: - ODP (slides as chapters)
 
 /// OpenDocument Presentation parser — one chapter per draw:page; the frame
-/// marked presentation:class="title" provides the chapter title.
+/// marked presentation:class="title" provides the chapter title. Page media
+/// (draw:image frames) and tables ride along like the ODT parser's.
 public enum OdpParser {
     public static func parse(archive: Data) throws -> [DocumentChapter] {
+        try parseFull(archive: archive).chapters
+    }
+
+    public static func parseFull(archive: Data) throws -> DocumentParseResult {
         let contentXML: Data
         do {
             contentXML = try ZipReader.readEntry("content.xml", in: archive)
         } catch let ZipReader.ZipError.entryNotFound(name) {
             throw DocumentParseError.missingEntry(name)
         }
-        let delegate = OdpDelegate()
+        let pool = DocumentImagePool()
+        let delegate = OdpDelegate(pool: pool)
         let parser = XMLParser(data: contentXML)
         parser.delegate = delegate
         guard parser.parse() else {
             throw DocumentParseError.malformed(parser.parserError?.localizedDescription ?? "XML error")
         }
-        return delegate.pages
+        let images = DocumentMedia.resolvePool(pool, archive: archive)
+        return DocumentParseResult(
+            chapters: delegate.pages,
+            images: images,
+            cover: DocumentMedia.embeddedThumbnail(archive: archive)
+        )
     }
 }
 
 private final class OdpDelegate: NSObject, XMLParserDelegate {
+    private let pool: DocumentImagePool
+
     private(set) var pages: [DocumentChapter] = []
     private var currentTitle: String?
-    private var currentParagraphs: [String] = []
+    private var pageBlocks: [DocumentBlock] = []
     private var inTitleFrame = false
     private var inPage = false
     private var currentText: String?
+    private var pendingImageIndexes: [Int] = []
+
+    // Table state — same shape as ODT's
+    private var tblDepth = 0
+    private var inHeaderRows = false
+    private var tableRows: [[DocumentTableCell]] = []
+    private var rowCells: [DocumentTableCell] = []
+    private var inCell = false
+    private var cellIsCovered = false
+    private var cellLines: [String] = []
+    private var cellLine = ""
+    private var cellSpan = 1
+
+    init(pool: DocumentImagePool) {
+        self.pool = pool
+    }
 
     func parser(
         _ parser: XMLParser,
@@ -436,18 +1074,59 @@ private final class OdpDelegate: NSObject, XMLParserDelegate {
         case "page":
             inPage = true
             currentTitle = nil
-            currentParagraphs = []
+            pageBlocks = []
         case "frame":
             inTitleFrame = inPage && (attributeDict["presentation:class"] == "title")
         case "h", "p":
-            if inPage { currentText = "" }
+            if inPage {
+                if tblDepth > 0, inCell {
+                    cellLine = ""
+                } else {
+                    currentText = ""
+                }
+            }
+        case "image":
+            // Cell images are dropped for the same block-ordering reason.
+            if inPage, tblDepth == 0,
+               let href = attributeDict["xlink:href"] ?? attributeDict["href"], !href.isEmpty {
+                let target = DocumentMedia.resolveTarget(baseDir: "", href)
+                pendingImageIndexes.append(pool.index(for: target, alt: ""))
+            }
+        case "table":
+            tblDepth += 1
+            if tblDepth == 1 { tableRows = [] }
+        case "table-header-rows":
+            inHeaderRows = true
+        case "table-row":
+            if tblDepth == 1 { rowCells = [] }
+        case "table-cell":
+            if tblDepth == 1 {
+                inCell = true
+                cellIsCovered = false
+                cellLines = []
+                cellLine = ""
+                let raw = attributeDict["table:number-columns-spanned"] ?? "1"
+                cellSpan = max(1, Int(raw) ?? 1)
+            }
+        case "covered-table-cell":
+            if tblDepth == 1 {
+                inCell = true
+                cellIsCovered = true
+                cellLines = []
+                cellLine = ""
+                cellSpan = 1
+            }
         default:
             break
         }
     }
 
     func parser(_ parser: XMLParser, foundCharacters string: String) {
-        currentText? += string
+        if tblDepth > 0, inCell {
+            cellLine += string
+        } else {
+            currentText? += string
+        }
     }
 
     func parser(
@@ -458,25 +1137,58 @@ private final class OdpDelegate: NSObject, XMLParserDelegate {
     ) {
         switch DocxDelegate.local(elementName) {
         case "h", "p":
-            if var text = currentText {
+            if tblDepth > 0, inCell {
+                cellLines.append(cellLine)
+                cellLine = ""
+            } else if var text = currentText {
                 text = text.replacingOccurrences(of: "\u{00A0}", with: " ")
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 if !text.isEmpty {
                     if inTitleFrame && currentTitle == nil {
                         currentTitle = text
                     } else {
-                        currentParagraphs.append(text)
+                        pageBlocks.append(.paragraph(text))
                     }
                 }
             }
             currentText = nil
+        case "table-cell", "covered-table-cell":
+            if inCell, tblDepth == 1 {
+                if !cellIsCovered {
+                    let text = cellLines
+                        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                        .filter { !$0.isEmpty }
+                        .joined(separator: "\n")
+                    rowCells.append(DocumentTableCell(text: text, columnSpan: cellSpan, isHeader: inHeaderRows))
+                }
+                inCell = false
+                cellIsCovered = false
+            }
+        case "table-row":
+            if tblDepth == 1, !rowCells.isEmpty {
+                tableRows.append(rowCells)
+                rowCells = []
+            }
+        case "table-header-rows":
+            inHeaderRows = false
+        case "table":
+            tblDepth = max(0, tblDepth - 1)
+            if tblDepth == 0, !tableRows.isEmpty {
+                pageBlocks.append(.table(tableRows))
+                tableRows = []
+            }
         case "frame":
             inTitleFrame = false
+            // Page images can sit in frames with no text around them.
+            for index in pendingImageIndexes {
+                pageBlocks.append(.image(index))
+            }
+            pendingImageIndexes = []
         case "page":
             if inPage {
                 let chapter = DocumentChapter(
                     title: currentTitle ?? "Slide \(pages.count + 1)",
-                    paragraphs: currentParagraphs
+                    blocks: pageBlocks
                 )
                 pages.append(chapter)
             }
@@ -489,43 +1201,62 @@ private final class OdpDelegate: NSObject, XMLParserDelegate {
 
 // MARK: - Chapterization (shared)
 
-/// Turns a flat paragraph stream (legacy .doc text) into ~150-paragraph
-/// chapters — the headless path of chapterize().
+/// Turns a flat item stream (legacy .doc text) into ~150-item chapters —
+/// the headless path of chapterize().
 public extension DocumentEpubConverter {
     static func chunk(paragraphs: [String]) -> [DocumentChapter] {
-        chapterize(paragraphs.map { DocxDelegate.Paragraph(text: $0, headingLevel: 0) })
+        chapterize(paragraphs.map { DocumentItem.paragraph($0) })
     }
 }
 
-/// Splits a heading-annotated paragraph stream into chapters: a level 1-2
+/// Splits a heading-annotated item stream into chapters: a level 1-2
 /// heading opens a chapter; deeper headings only open one when nothing is
 /// open yet (documents whose only structure is h3+). Headless documents (a
-/// contract, a lecture note) chunk into ~150-paragraph chapters so the
-/// reader's one-chapter-at-a-time memory bound still holds.
-private func chapterize(_ paragraphs: [DocxDelegate.Paragraph]) -> [DocumentChapter] {
+/// contract, a lecture note) chunk into ~150-item chapters (paragraphs,
+/// images and tables each count one) so the reader's one-chapter-at-a-time
+/// memory bound still holds.
+private func chapterize(_ items: [DocumentItem]) -> [DocumentChapter] {
     var chapters: [DocumentChapter] = []
     var currentTitle: String?
-    var currentParagraphs: [String] = []
+    var currentBlocks: [DocumentBlock] = []
 
     func flush() {
-        if !currentParagraphs.isEmpty || currentTitle != nil {
-            chapters.append(DocumentChapter(title: currentTitle, paragraphs: currentParagraphs))
+        if !currentBlocks.isEmpty || currentTitle != nil {
+            chapters.append(DocumentChapter(title: currentTitle, blocks: currentBlocks))
         }
         currentTitle = nil
-        currentParagraphs = []
+        currentBlocks = []
     }
 
-    for paragraph in paragraphs {
-        let opensChapter = paragraph.headingLevel > 0
-            && (paragraph.headingLevel <= 2 || currentTitle == nil)
-        if opensChapter {
-            flush()
-            currentTitle = paragraph.text
-        } else {
-            currentParagraphs.append(paragraph.text)
-            if currentParagraphs.count >= 150 {
+    for item in items {
+        switch item {
+        case .heading(let text, let level):
+            let opensChapter = level <= 2 || currentTitle == nil
+            if opensChapter {
+                flush()
+                currentTitle = text
+            } else {
+                currentBlocks.append(.paragraph(text))
+            }
+        case .paragraph(let text):
+            currentBlocks.append(.paragraph(text))
+            if currentBlocks.count >= 150 {
                 // Carry the section title onto the continuation chapter so
                 // the TOC doesn't show "Chapter N" mid-section.
+                let carried = currentTitle
+                flush()
+                currentTitle = carried
+            }
+        case .image(let index):
+            currentBlocks.append(.image(index))
+            if currentBlocks.count >= 150 {
+                let carried = currentTitle
+                flush()
+                currentTitle = carried
+            }
+        case .table(let rows):
+            currentBlocks.append(.table(rows))
+            if currentBlocks.count >= 150 {
                 let carried = currentTitle
                 flush()
                 currentTitle = carried
@@ -545,12 +1276,28 @@ private func chapterize(_ paragraphs: [DocxDelegate.Paragraph]) -> [DocumentChap
 /// Turns DocumentChapters into a valid EPUB 3 (with NCX fallback) the
 /// existing import pipeline, epub.js reader and TTS spine pipeline consume
 /// unchanged. Store-only zip, mimetype first.
+///
+/// v1.7.2: image blocks become real `<img>` elements backed by packaged
+/// media entries, tables become bordered HTML tables, and an optional cover
+/// rides the manifest with `properties="cover-image"` so EpubParser (and
+/// thus the shelf) picks it up automatically.
 public enum DocumentEpubConverter {
     public static func epubData(
         chapters: [DocumentChapter],
         title: String,
         author: String?,
         identifier: String = UUID().uuidString
+    ) -> Data {
+        epubData(chapters: chapters, title: title, author: author, identifier: identifier, images: [], cover: nil)
+    }
+
+    public static func epubData(
+        chapters: [DocumentChapter],
+        title: String,
+        author: String?,
+        identifier: String = UUID().uuidString,
+        images: [DocumentImage],
+        cover: DocumentImage?
     ) -> Data {
         let language = "en"
         var manifestItems = ""
@@ -572,6 +1319,21 @@ public enum DocumentEpubConverter {
             ),
         ]
 
+        // Media entries first (chapters reference them by href).
+        var imageHREFs: [String] = []
+        for (index, image) in images.enumerated() {
+            let ext = DocumentMedia.fileExtension(forMime: image.mime)
+            let href = "images/img\(index + 1).\(ext)"
+            imageHREFs.append(href)
+            manifestItems += "<item id=\"img\(index + 1)\" href=\"\(href)\" media-type=\"\(image.mime)\"/>\n"
+            files.append((name: "OEBPS/\(href)", data: image.data))
+        }
+        if let cover {
+            let ext = DocumentMedia.fileExtension(forMime: cover.mime)
+            manifestItems += "<item id=\"cover-image\" href=\"cover.\(ext)\" media-type=\"\(cover.mime)\" properties=\"cover-image\"/>\n"
+            files.append((name: "OEBPS/cover.\(ext)", data: cover.data))
+        }
+
         for (index, chapter) in chapters.enumerated() {
             let id = "ch\(index + 1)"
             let href = "\(id).xhtml"
@@ -585,7 +1347,7 @@ public enum DocumentEpubConverter {
                   <content src="\(href)"/>
                 </navPoint>
                 """
-            files.append((name: "OEBPS/\(href)", data: Data(chapterXHTML(chapter, index: index + 1).utf8)))
+            files.append((name: "OEBPS/\(href)", data: Data(chapterXHTML(chapter, index: index + 1, imageHREFs: imageHREFs).utf8)))
         }
 
         let creatorLine = author.map { "<dc:creator>\(escape($0))</dc:creator>" } ?? ""
@@ -642,24 +1404,66 @@ public enum DocumentEpubConverter {
         return ZipWriter.archive(entries: files)
     }
 
-    private static func chapterXHTML(_ chapter: DocumentChapter, index: Int) -> String {
+    /// Document-reader CSS: images run the reader's full content width the
+    /// way note previews do, and tables get real collapsed borders — the
+    /// office pipeline's output should look like the document, not like
+    /// run-on text.
+    private static let chapterCSS = """
+        <style>
+          img.doc-image { max-width: 100%; height: auto; display: block; margin: 0.6em auto; }
+          table.doc-table { border-collapse: collapse; width: 100%; margin: 0.8em 0; }
+          table.doc-table th, table.doc-table td { border: 1px solid #8a8a8a; padding: 4px 7px; text-align: left; vertical-align: top; }
+          table.doc-table th { background: rgba(128, 128, 128, 0.15); font-weight: 600; }
+        </style>
+        """
+
+    private static func chapterXHTML(_ chapter: DocumentChapter, index: Int, imageHREFs: [String]) -> String {
         var body = ""
         if let title = chapter.title {
             body += "<h1>\(escape(title))</h1>\n"
         }
-        for paragraph in chapter.paragraphs {
-            body += "<p>\(escape(paragraph))</p>\n"
+        for block in chapter.blocks {
+            switch block {
+            case .paragraph(let text):
+                body += "<p>\(escape(text))</p>\n"
+            case .image(let poolIndex):
+                guard imageHREFs.indices.contains(poolIndex) else { continue }
+                body += "<p class=\"doc-image-wrap\"><img class=\"doc-image\" src=\"\(imageHREFs[poolIndex])\" alt=\"\"/></p>\n"
+            case .table(let rows):
+                body += tableXHTML(rows)
+            }
         }
         return """
         <?xml version="1.0" encoding="utf-8"?>
         <!DOCTYPE html>
         <html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en">
-          <head><meta charset="utf-8"/><title>Chapter \(index)</title></head>
+          <head><meta charset="utf-8"/>\(chapterCSS)<title>Chapter \(index)</title></head>
           <body>
             \(body)
           </body>
         </html>
         """
+    }
+
+    /// Rows → XHTML. `colspan` keeps columns aligned when documents merge
+    /// cells; header cells render as `th` (the TTS extractor reads td/th the
+    /// same, comma-joined, so speech is unaffected by the distinction).
+    private static func tableXHTML(_ rows: [[DocumentTableCell]]) -> String {
+        var html = "<table class=\"doc-table\">\n"
+        for row in rows {
+            html += "<tr>\n"
+            for cell in row {
+                let tag = cell.isHeader ? "th" : "td"
+                let span = cell.columnSpan > 1 ? " colspan=\"\(cell.columnSpan)\"" : ""
+                // Multi-line cell text keeps its line breaks.
+                let content = escape(cell.text)
+                    .replacingOccurrences(of: "\n", with: "<br/>")
+                html += "<\(tag)\(span)>\(content)</\(tag)>\n"
+            }
+            html += "</tr>\n"
+        }
+        html += "</table>\n"
+        return html
     }
 
     /// XML 1.0 text-node escape.
