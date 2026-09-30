@@ -22,6 +22,8 @@ struct BooksView: View {
         UTType(importedAs: "org.oasis.opendocument.text"),
         UTType(importedAs: "org.openxmlformats.presentationml.presentation"),
         UTType(importedAs: "org.oasis.opendocument.presentation"),
+        // Legacy Word 97-2003 — best-effort binary text extraction.
+        UTType(importedAs: "com.microsoft.word.doc"),
     ]
 
     // App-level store (SpeechnotesApp) — BookDrop imports land on the same

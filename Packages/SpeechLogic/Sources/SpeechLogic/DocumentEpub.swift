@@ -489,6 +489,14 @@ private final class OdpDelegate: NSObject, XMLParserDelegate {
 
 // MARK: - Chapterization (shared)
 
+/// Turns a flat paragraph stream (legacy .doc text) into ~150-paragraph
+/// chapters — the headless path of chapterize().
+public extension DocumentEpubConverter {
+    static func chunk(paragraphs: [String]) -> [DocumentChapter] {
+        chapterize(paragraphs.map { DocxDelegate.Paragraph(text: $0, headingLevel: 0) })
+    }
+}
+
 /// Splits a heading-annotated paragraph stream into chapters: a level 1-2
 /// heading opens a chapter; deeper headings only open one when nothing is
 /// open yet (documents whose only structure is h3+). Headless documents (a

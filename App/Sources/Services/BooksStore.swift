@@ -346,6 +346,9 @@ final class BooksStore: ObservableObject {
         // unchanged, so downstream nothing ever knows the difference.
         // Presentations become one chapter per slide.
         case "docx", "odt", "pptx", "odp": format = .epub
+        // Legacy Word: best-effort binary text extraction, then the same
+        // normalize-to-EPUB path (headless chunking — no heading info).
+        case "doc": format = .epub
         default:
             format = nil
         }
@@ -365,7 +368,7 @@ final class BooksStore: ObservableObject {
             // which sniffs content, kept playing fine — hiding the damage).
             let destinationExtension = format == .audio ? ext : format.rawValue
             let destination = dir.appendingPathComponent("original.\(destinationExtension)")
-            if ext == "docx" || ext == "odt" || ext == "pptx" || ext == "odp" {
+            if ext == "docx" || ext == "odt" || ext == "pptx" || ext == "odp" || ext == "doc" {
                 // Normalize-to-EPUB: parse the office XML into chapters and
                 // emit a real EPUB the reader + TTS pipeline already speak.
                 do {
@@ -375,7 +378,15 @@ final class BooksStore: ObservableObject {
                     case "docx": chapters = try DocxParser.parse(archive: sourceData)
                     case "odt": chapters = try OdtParser.parse(archive: sourceData)
                     case "pptx": chapters = try PptxParser.parse(archive: sourceData)
-                    default: chapters = try OdpParser.parse(archive: sourceData)
+                    case "odp": chapters = try OdpParser.parse(archive: sourceData)
+                    default:
+                        // .doc — plain text out of the binary, no headings.
+                        let text = try LegacyDocParser.extractText(archive: sourceData)
+                        let paragraphs = text
+                            .components(separatedBy: CharacterSet.newlines)
+                            .map { $0.trimmingCharacters(in: .whitespaces) }
+                            .filter { !$0.isEmpty }
+                        chapters = DocumentEpubConverter.chunk(paragraphs: paragraphs)
                     }
                     let title = (sourceURL.lastPathComponent as NSString).deletingPathExtension
                         .replacingOccurrences(of: "_", with: " ")

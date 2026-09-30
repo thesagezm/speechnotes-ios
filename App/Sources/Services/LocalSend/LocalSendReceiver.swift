@@ -42,9 +42,8 @@ final class LocalSendReceiver: ObservableObject {
     @Published private(set) var lastError: String?
     @Published private(set) var history: [BookDropRecord] = []
 
-    /// Extensions we accept, route and import today. Legacy DOC joins when
-    /// its best-effort parser lands.
-    static let acceptedExtensions: Set<String> = ["epub", "pdf", "m4b", "m4a", "mp4", "mp3", "jex", "docx", "odt", "pptx", "odp"]
+    /// Extensions we accept, route and import today.
+    static let acceptedExtensions: Set<String> = ["epub", "pdf", "m4b", "m4a", "mp4", "mp3", "jex", "docx", "odt", "pptx", "odp", "doc"]
 
     private let server = LocalSendHTTPServer()
     private var sessions: [String: Session] = [:]

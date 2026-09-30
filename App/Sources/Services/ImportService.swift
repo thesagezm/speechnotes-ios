@@ -32,7 +32,7 @@ final class ImportService {
     static func canImport(_ url: URL) -> Bool {
         guard url.isFileURL else { return false }
         let pathExtension = url.pathExtension.lowercased()
-        if ["txt", "text", "md", "markdown", "pdf", "docx", "odt"].contains(pathExtension) { return true }
+        if ["txt", "text", "md", "markdown", "pdf", "docx", "odt", "pptx", "odp", "doc"].contains(pathExtension) { return true }
         guard let type = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType else {
             // No extension and no type metadata (common before security scope
             // is granted) — let the reader decide; it fails with a log if the
@@ -58,7 +58,7 @@ final class ImportService {
         switch kind {
         case "pdf":
             raw = pdfText(from: url)
-        case "docx", "odt", "pptx", "odp":
+        case "docx", "odt", "pptx", "odp", "doc":
             // Office documents extract to plain text for NOTES (the Books
             // shelf normalizes the same files to EPUB instead).
             raw = officeDocumentText(from: url, kind: kind)
@@ -96,7 +96,13 @@ final class ImportService {
             case "docx": chapters = try DocxParser.parse(archive: data)
             case "odt": chapters = try OdtParser.parse(archive: data)
             case "pptx": chapters = try PptxParser.parse(archive: data)
-            default: chapters = try OdpParser.parse(archive: data)
+            case "odp": chapters = try OdpParser.parse(archive: data)
+            default:
+                let text = try LegacyDocParser.extractText(archive: data)
+                chapters = [DocumentChapter(title: nil, paragraphs: text
+                    .components(separatedBy: CharacterSet.newlines)
+                    .map { $0.trimmingCharacters(in: .whitespaces) }
+                    .filter { !$0.isEmpty })]
             }
             let lines = chapters.flatMap { chapter -> [String] in
                 var out: [String] = []
