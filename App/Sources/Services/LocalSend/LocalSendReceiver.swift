@@ -259,7 +259,7 @@ final class LocalSendReceiver: ObservableObject {
         case .memory(let data):
             guard Int64(data.count) == meta.size else { return .unsupported() }
             if let expected = meta.sha256, !expected.isEmpty,
-               digestHex(SHA256.hash(data: data)) != expected.lowercased() {
+               Self.digestHex(SHA256.hash(data: data)) != expected.lowercased() {
                 return .unsupported()
             }
             let url = FileManager.default.temporaryDirectory
