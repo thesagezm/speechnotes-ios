@@ -531,10 +531,9 @@ struct GoalDetailView: View {
                             Circle()
                                 .trim(from: 0, to: max(0.001, min(1, fraction)))
                                 .stroke(
-                                    AngularGradient(
+                                    LinearGradient(
                                         colors: [palette.0, palette.1],
-                                        center: .startAngle,
-                                        endAngle: .endAngle
+                                        startPoint: .top, endPoint: .bottom
                                     ),
                                     style: StrokeStyle(lineWidth: 12, lineCap: .round)
                                 )
