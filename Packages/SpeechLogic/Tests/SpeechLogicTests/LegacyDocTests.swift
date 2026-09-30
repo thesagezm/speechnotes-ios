@@ -127,10 +127,18 @@ final class LegacyDocTests: XCTestCase {
         data.replaceSubrange(offset..<offset + 8, with: withUnsafeBytes(of: value.littleEndian) { Data($0) })
     }
 
+    /// Unbuffered stderr trace — print() is block-buffered through the CI
+    /// pipe and its lines are lost when the process dies on a trap.
+    private func trace(_ message: String) {
+        FileHandle.standardError.write(Data(("[doc-test] " + message + "\n").utf8))
+    }
+
     func testExtractsBothPieceEncodings() throws {
-        let text = try LegacyDocParser.extractText(
-            archive: buildDoc(compressedText: "Hello from Word 97.\r", utf16Text: "Second piece \u{00E9}\u{2014}here.\r")
-        )
+        trace("building fixture")
+        let archive = buildDoc(compressedText: "Hello from Word 97.\r", utf16Text: "Second piece \u{00E9}\u{2014}here.\r")
+        trace("fixture built: \(archive.count) bytes")
+        let text = try LegacyDocParser.extractText(archive: archive)
+        trace("extracted \(text.count) chars: \(text.prefix(80).debugDescription)")
         XCTAssertTrue(text.contains("Hello from Word 97."), "CP1252 piece missing: \(text)")
         XCTAssertTrue(text.contains("Second piece \u{00E9}\u{2014}here."), "UTF-16 piece missing: \(text)")
         // Word's \r paragraph separators survive for the caller to split on.

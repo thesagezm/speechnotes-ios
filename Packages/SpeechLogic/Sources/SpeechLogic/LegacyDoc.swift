@@ -148,7 +148,12 @@ public enum LegacyDocParser {
             let pcdOffset = (pieceCount + 1) * 4 + piece * 8
             let fcField = u32(plc, pcdOffset + 2)
             let isCompressed = (fcField & 0x4000_0000) != 0
-            let offset = Int(fcField & 0x3FFF_FFFF) / (isCompressed ? 2 : 1)
+            // FcCompressed: the 30-bit field is the byte offset when
+            // uncompressed, and byteOffset/2 when compressed — recover with
+            // a doubling, never a halving.
+            let offset = isCompressed
+                ? Int(fcField & 0x3FFF_FFFF) * 2
+                : Int(fcField & 0x3FFF_FFFF)
             let byteLength = isCompressed ? length : length * 2
             guard offset >= 0, offset + byteLength <= wordDoc.count else { continue }
             let chunk = wordDoc.subdata(in: offset..<offset + byteLength)
