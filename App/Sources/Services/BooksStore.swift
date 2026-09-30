@@ -788,7 +788,7 @@ final class BooksStore: ObservableObject {
             // Faint stacked-sheets motif behind the badge — enough texture
             // to read as a document without pretending to be the real cover.
             let sheetColor = UIColor.white.withAlphaComponent(0.10)
-            for offset in [Float(36), 24, 12] {
+            for offset: CGFloat in [36, 24, 12] {
                 let rect = CGRect(x: 150 + offset, y: 210 - offset, width: 300, height: 400)
                 let path = UIBezierPath(roundedRect: rect, cornerRadius: 10)
                 sheetColor.setFill()

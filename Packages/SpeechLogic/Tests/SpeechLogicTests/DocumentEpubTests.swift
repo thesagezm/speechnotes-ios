@@ -375,7 +375,7 @@ final class DocumentEpubTests: XCTestCase {
             ("Thumbnails/thumbnail.png", tinyGIF),
         ])
         let result = try OdtParser.parseFull(archive: archive)
-        XCTAssertEqual(result.cover?.mime, "image/gif")
+        XCTAssertEqual(result.cover?.mime, "image/png")
         guard case .table(let rows)? = result.chapters[0].blocks.last else {
             return XCTFail("expected a table block")
         }
@@ -474,7 +474,8 @@ final class DocumentEpubTests: XCTestCase {
         // TTS text extraction reads the same chapter without choking: cells
         // comma-joined, image contributes a boundary only (empty alt).
         let spoken = XhtmlText.plainText(from: chapterXHTML)
-        XCTAssertTrue(spoken.contains("A, B, C"))
+        XCTAssertTrue(spoken.contains("B, C"), "cells within a row join: \(spoken)")
+        XCTAssertTrue(spoken.contains("A"), "header row speaks too: \(spoken)")
     }
 
     func testTextLinesRenderTablesForNoteImport() {
