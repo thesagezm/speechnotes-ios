@@ -118,6 +118,111 @@ final class DocumentEpubTests: XCTestCase {
         ])
     }
 
+    // MARK: - PPTX
+
+    private func pptxArchive(slideBodies: [String], withRels: Bool = true) -> Data {
+        var entries: [(name: String, data: Data)] = [
+            ("[Content_Types].xml", Data("<Types/>".utf8)),
+            ("ppt/presentation.xml", Data("""
+            <?xml version="1.0" encoding="utf-8"?>
+            <p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+                            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+              <p:sldIdLst>
+                \(slideBodies.indices.map { "<p:sldId id=\"\($0 + 256)\" r:id=\"rIdSlide\($0 + 1)\"/>" }.joined(separator: "\n"))
+              </p:sldIdLst>
+            </p:presentation>
+            """.utf8)),
+        ]
+        if withRels {
+            entries.append(("ppt/_rels/presentation.xml.rels", Data("""
+            <?xml version="1.0" encoding="utf-8"?>
+            <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+              \(slideBodies.indices.map { "<Relationship Id=\"rIdSlide\($0 + 1)\" Target=\"slides/slide\($0 + 1).xml\"/>" }.joined(separator: "\n"))
+            </Relationships>
+            """.utf8))
+        )
+        }
+        for (index, body) in slideBodies.enumerated() {
+            entries.append(("ppt/slides/slide\(index + 1).xml", Data("""
+            <?xml version="1.0" encoding="utf-8"?>
+            <p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+                   xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <p:cSld><p:spTree>\(body)</p:spTree></p:cSld>
+            </p:sld>
+            """.utf8))
+        )
+        }
+        return ZipWriter.archive(entries: entries)
+    }
+
+    func testPptxSlidesBecomeChaptersInRelsOrder() throws {
+        let archive = pptxArchive(slideBodies: [
+            """
+            <p:sp><p:nvSpPr><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr>
+              <p:txBody><a:p><a:r><a:t>Opening Slide</a:t></a:r></a:p></p:txBody></p:sp>
+            <p:sp><p:txBody>
+              <a:p><a:r><a:t>First bullet</a:t></a:r></a:p>
+              <a:p><a:r><a:t>Second bullet</a:t></a:r></a:p>
+            </p:txBody></p:sp>
+            """,
+            "<p:sp><p:txBody><a:p><a:r><a:t>Closing</a:t></a:r></a:p></p:txBody></p:sp>",
+        ])
+        let chapters = try PptxParser.parse(archive: archive)
+        XCTAssertEqual(chapters.count, 2)
+        XCTAssertEqual(chapters[0].title, "Opening Slide")
+        XCTAssertEqual(chapters[0].paragraphs, ["First bullet", "Second bullet"])
+        XCTAssertEqual(chapters[1].title, "Slide 2") // no title shape → fallback
+        XCTAssertEqual(chapters[1].paragraphs, ["Closing"])
+    }
+
+    func testPptxWithoutRelsFallsBackToNumericSort() throws {
+        // 10 slides whose numeric order (1..10) differs from lexical order —
+        // slide10 must come last.
+        let archive = pptxArchive(
+            slideBodies: (0..<10).map { "<p:sp><p:txBody><a:p><a:r><a:t>S\($0)</a:t></a:r></a:p></p:txBody></p:sp>" },
+            withRels: false
+        )
+        let chapters = try PptxParser.parse(archive: archive)
+        XCTAssertEqual(chapters.count, 10)
+        XCTAssertEqual(chapters[9].paragraphs, ["S9"])
+    }
+
+    // MARK: - ODP
+
+    func testOdpPagesBecomeChapters() throws {
+        let contentXML = """
+        <?xml version="1.0" encoding="utf-8"?>
+        <office:document-content
+          xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+          xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0"
+          xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"
+          xmlns:presentation="urn:oasis:names:tc:opendocument:xmlns:presentation:1.0">
+          <office:body><office:presentation>
+            <draw:page>
+              <draw:frame presentation:class="title">
+                <draw:text-box><text:p>Title Slide</text:p></draw:text-box>
+              </draw:frame>
+              <draw:frame>
+                <draw:text-box><text:p>Bullet one</text:p><text:p>Bullet two</text:p></draw:text-box>
+              </draw:frame>
+            </draw:page>
+            <draw:page>
+              <draw:frame>
+                <draw:text-box><text:p>Untitled page body</text:p></draw:text-box>
+              </draw:frame>
+            </draw:page>
+          </office:presentation></office:body>
+        </office:document-content>
+        """
+        let archive = ZipWriter.archive(entries: [("content.xml", Data(contentXML.utf8))])
+        let chapters = try OdpParser.parse(archive: archive)
+        XCTAssertEqual(chapters.count, 2)
+        XCTAssertEqual(chapters[0].title, "Title Slide")
+        XCTAssertEqual(chapters[0].paragraphs, ["Bullet one", "Bullet two"])
+        XCTAssertEqual(chapters[1].title, "Slide 2")
+        XCTAssertEqual(chapters[1].paragraphs, ["Untitled page body"])
+    }
+
     // MARK: - Converter → EpubParser round trip
 
     func testEpubOutputParsesWithEpubParser() throws {

@@ -58,7 +58,7 @@ final class ImportService {
         switch kind {
         case "pdf":
             raw = pdfText(from: url)
-        case "docx", "odt":
+        case "docx", "odt", "pptx", "odp":
             // Office documents extract to plain text for NOTES (the Books
             // shelf normalizes the same files to EPUB instead).
             raw = officeDocumentText(from: url, kind: kind)
@@ -91,9 +91,13 @@ final class ImportService {
             return nil
         }
         do {
-            let chapters = try (kind == "docx"
-                ? DocxParser.parse(archive: data)
-                : OdtParser.parse(archive: data))
+            let chapters: [DocumentChapter]
+            switch kind {
+            case "docx": chapters = try DocxParser.parse(archive: data)
+            case "odt": chapters = try OdtParser.parse(archive: data)
+            case "pptx": chapters = try PptxParser.parse(archive: data)
+            default: chapters = try OdpParser.parse(archive: data)
+            }
             let lines = chapters.flatMap { chapter -> [String] in
                 var out: [String] = []
                 if let title = chapter.title { out.append(title) }

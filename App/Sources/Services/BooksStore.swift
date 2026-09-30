@@ -344,7 +344,8 @@ final class BooksStore: ObservableObject {
         // Office documents normalize to EPUB at import (DocumentEpub): the
         // reader, the TOC and the TTS spine pipeline all consume the result
         // unchanged, so downstream nothing ever knows the difference.
-        case "docx", "odt": format = .epub
+        // Presentations become one chapter per slide.
+        case "docx", "odt", "pptx", "odp": format = .epub
         default:
             format = nil
         }
@@ -364,14 +365,18 @@ final class BooksStore: ObservableObject {
             // which sniffs content, kept playing fine — hiding the damage).
             let destinationExtension = format == .audio ? ext : format.rawValue
             let destination = dir.appendingPathComponent("original.\(destinationExtension)")
-            if ext == "docx" || ext == "odt" {
+            if ext == "docx" || ext == "odt" || ext == "pptx" || ext == "odp" {
                 // Normalize-to-EPUB: parse the office XML into chapters and
                 // emit a real EPUB the reader + TTS pipeline already speak.
                 do {
                     let sourceData = try Data(contentsOf: sourceURL, options: .mappedIfSafe)
-                    let chapters = try (ext == "docx"
-                        ? DocxParser.parse(archive: sourceData)
-                        : OdtParser.parse(archive: sourceData))
+                    let chapters: [DocumentChapter]
+                    switch ext {
+                    case "docx": chapters = try DocxParser.parse(archive: sourceData)
+                    case "odt": chapters = try OdtParser.parse(archive: sourceData)
+                    case "pptx": chapters = try PptxParser.parse(archive: sourceData)
+                    default: chapters = try OdpParser.parse(archive: sourceData)
+                    }
                     let title = (sourceURL.lastPathComponent as NSString).deletingPathExtension
                         .replacingOccurrences(of: "_", with: " ")
                     let epub = DocumentEpubConverter.epubData(chapters: chapters, title: title, author: nil)

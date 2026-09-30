@@ -223,6 +223,270 @@ private final class OdtDelegate: NSObject, XMLParserDelegate {
     }
 }
 
+// MARK: - PPTX (slides as chapters)
+
+/// PowerPoint parser — one chapter per slide, slide ORDER resolved through
+/// ppt/presentation.xml + its relationships (rIds), numeric-name sort as
+/// the fallback. Speaker notes are out of scope for v1.
+public enum PptxParser {
+    public static func parse(archive: Data) throws -> [DocumentChapter] {
+        let slidePaths = try orderedSlidePaths(archive: archive)
+        guard !slidePaths.isEmpty else {
+            throw DocumentParseError.malformed("no slides found")
+        }
+        var chapters: [DocumentChapter] = []
+        for (index, path) in slidePaths.enumerated() {
+            let xml = try ZipReader.readEntry(path, in: archive)
+            let delegate = SlideDelegate()
+            let parser = XMLParser(data: xml)
+            parser.delegate = delegate
+            guard parser.parse() else {
+                throw DocumentParseError.malformed("slide \(index + 1): \(parser.error?.localizedDescription ?? "XML error")")
+            }
+            chapters.append(
+                DocumentChapter(
+                    title: delegate.title ?? "Slide \(index + 1)",
+                    paragraphs: delegate.paragraphs
+                )
+            )
+        }
+        return chapters
+    }
+
+    /// Reads ppt/presentation.xml's sldIdLst (rIds) and maps them through
+    /// ppt/_rels/presentation.xml.rels to slide files. Any deck that ships
+    /// without one of the two falls back to natural numeric sort of
+    /// ppt/slides/slideN.xml.
+    private static func orderedSlidePaths(archive: Data) throws -> [String] {
+        let entries = try ZipReader.entries(in: archive)
+        let names = Set(entries.map(\.name))
+
+        var rels: [String: String] = [:] // rId -> target path
+        if names.contains("ppt/_rels/presentation.xml.rels") {
+            let data = try ZipReader.readEntry("ppt/_rels/presentation.xml.rels", in: archive)
+            let delegate = AttributeGrabber(elements: ["Relationship"])
+            let parser = XMLParser(data: data)
+            parser.delegate = delegate
+            parser.parse()
+            for attrs in delegate.captured(for: "Relationship") {
+                guard let id = attrs["Id"], let target = attrs["Target"] else { continue }
+                // Targets are relative to ppt/ (e.g. "slides/slide1.xml").
+                rels[id] = target.hasPrefix("/") ? String(target.dropFirst()) : "ppt/" + target
+            }
+        }
+
+        var ordered: [String] = []
+        if names.contains("ppt/presentation.xml") {
+            let data = try ZipReader.readEntry("ppt/presentation.xml", in: archive)
+            let delegate = AttributeGrabber(elements: ["sldId"])
+            let parser = XMLParser(data: data)
+            parser.delegate = delegate
+            parser.parse()
+            for attrs in delegate.captured(for: "sldId") {
+                // r:id is the namespaced attribute; XMLParser hands the
+                // qualified name through.
+                if let rId = attrs["r:id"] ?? attrs["id"], let path = rels[rId] {
+                    ordered.append(path)
+                }
+            }
+        }
+        ordered = ordered.filter { names.contains($0) }
+
+        if ordered.isEmpty {
+            ordered = names
+                .filter { $0.hasPrefix("ppt/slides/slide") && $0.hasSuffix(".xml") }
+                .sorted { slideNumber($0) < slideNumber($1) }
+        }
+        return ordered
+    }
+
+    private static func slideNumber(_ path: String) -> Int {
+        let stem = (path as NSString).deletingPathExtension
+        let digits = stem.split(separator: "/").last.map { String($0).filter(\.isNumber) } ?? ""
+        return Int(digits) ?? Int.max
+    }
+}
+
+/// One slide's text: the title shape's first paragraph becomes the title,
+/// every other a:p becomes a body paragraph.
+private final class SlideDelegate: NSObject, XMLParserDelegate {
+    private(set) var title: String?
+    private(set) var paragraphs: [String] = []
+    private var inTitleShape = false
+    private var currentText: String?
+
+    func parser(
+        _ parser: XMLParser,
+        didStartElement elementName: String,
+        namespaceURI: String?,
+        qualifiedName qName: String?,
+        attributes attributeDict: [String: String] = [:]
+    ) {
+        switch DocxDelegate.local(elementName) {
+        case "ph":
+            let kind = attributeDict["type"] ?? ""
+            inTitleShape = kind == "title" || kind == "ctrTitle"
+        case "p":
+            currentText = ""
+        case "t":
+            if currentText == nil { currentText = "" }
+        default:
+            break
+        }
+    }
+
+    func parser(_ parser: XMLParser, foundCharacters string: String) {
+        currentText? += string
+    }
+
+    func parser(
+        _ parser: XMLParser,
+        didEndElement elementName: String,
+        namespaceURI: String?,
+        qualifiedName qName: String?
+    ) {
+        switch DocxDelegate.local(elementName) {
+        case "p":
+            if var text = currentText {
+                text = text.replacingOccurrences(of: "\u{00A0}", with: " ")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !text.isEmpty {
+                    if inTitleShape && title == nil {
+                        title = text
+                    } else {
+                        paragraphs.append(text)
+                    }
+                }
+            }
+            currentText = nil
+        case "sp":
+            inTitleShape = false
+        default:
+            break
+        }
+    }
+}
+
+/// Minimal attribute collector for relationship/ordering XML — captures the
+/// attribute dictionaries of the named elements (local-name matched).
+private final class AttributeGrabber: NSObject, XMLParserDelegate {
+    private let targets: Set<String>
+    private var captured: [String: [[String: String]]] = [:]
+
+    init(elements: [String]) {
+        targets = Set(elements)
+    }
+
+    func captured(for element: String) -> [[String: String]] {
+        captured[element] ?? []
+    }
+
+    func parser(
+        _ parser: XMLParser,
+        didStartElement elementName: String,
+        namespaceURI: String?,
+        qualifiedName qName: String?,
+        attributes attributeDict: [String: String] = [:]
+    ) {
+        let local = DocxDelegate.local(elementName)
+        if targets.contains(local) {
+            captured[local, default: []].append(attributeDict)
+        }
+    }
+}
+
+// MARK: - ODP (slides as chapters)
+
+/// OpenDocument Presentation parser — one chapter per draw:page; the frame
+/// marked presentation:class="title" provides the chapter title.
+public enum OdpParser {
+    public static func parse(archive: Data) throws -> [DocumentChapter] {
+        let contentXML: Data
+        do {
+            contentXML = try ZipReader.readEntry("content.xml", in: archive)
+        } catch let ZipReader.ZipError.entryNotFound(name) {
+            throw DocumentParseError.missingEntry(name)
+        }
+        let delegate = OdpDelegate()
+        let parser = XMLParser(data: contentXML)
+        parser.delegate = delegate
+        guard parser.parse() else {
+            throw DocumentParseError.malformed(parser.error?.localizedDescription ?? "XML error")
+        }
+        return delegate.pages
+    }
+}
+
+private final class OdpDelegate: NSObject, XMLParserDelegate {
+    private(set) var pages: [DocumentChapter] = []
+    private var currentTitle: String?
+    private var currentParagraphs: [String] = []
+    private var inTitleFrame = false
+    private var inPage = false
+    private var currentText: String?
+
+    func parser(
+        _ parser: XMLParser,
+        didStartElement elementName: String,
+        namespaceURI: String?,
+        qualifiedName qName: String?,
+        attributes attributeDict: [String: String] = [:]
+    ) {
+        switch DocxDelegate.local(elementName) {
+        case "page":
+            inPage = true
+            currentTitle = nil
+            currentParagraphs = []
+        case "frame":
+            inTitleFrame = inPage && (attributeDict["presentation:class"] == "title")
+        case "h", "p":
+            if inPage { currentText = "" }
+        default:
+            break
+        }
+    }
+
+    func parser(_ parser: XMLParser, foundCharacters string: String) {
+        currentText? += string
+    }
+
+    func parser(
+        _ parser: XMLParser,
+        didEndElement elementName: String,
+        namespaceURI: String?,
+        qualifiedName qName: String?
+    ) {
+        switch DocxDelegate.local(elementName) {
+        case "h", "p":
+            if var text = currentText {
+                text = text.replacingOccurrences(of: "\u{00A0}", with: " ")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !text.isEmpty {
+                    if inTitleFrame && currentTitle == nil {
+                        currentTitle = text
+                    } else {
+                        currentParagraphs.append(text)
+                    }
+                }
+            }
+            currentText = nil
+        case "frame":
+            inTitleFrame = false
+        case "page":
+            if inPage {
+                let chapter = DocumentChapter(
+                    title: currentTitle ?? "Slide \(pages.count + 1)",
+                    paragraphs: currentParagraphs
+                )
+                pages.append(chapter)
+            }
+            inPage = false
+        default:
+            break
+        }
+    }
+}
+
 // MARK: - Chapterization (shared)
 
 /// Splits a heading-annotated paragraph stream into chapters: a level 1-2

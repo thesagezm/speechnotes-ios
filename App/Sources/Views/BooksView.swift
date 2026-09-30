@@ -16,9 +16,12 @@ struct BooksView: View {
     /// drift apart.
     private static let importableBookTypes: [UTType] = [
         .epub, .pdf, .mpeg4Audio, .mp3,
-        // Office documents normalize to EPUB at import (DocumentEpub).
+        // Office documents normalize to EPUB at import (DocumentEpub);
+        // presentations become one chapter per slide.
         UTType(importedAs: "org.openxmlformats.wordprocessingml.document"),
         UTType(importedAs: "org.oasis.opendocument.text"),
+        UTType(importedAs: "org.openxmlformats.presentationml.presentation"),
+        UTType(importedAs: "org.oasis.opendocument.presentation"),
     ]
 
     // App-level store (SpeechnotesApp) — BookDrop imports land on the same
