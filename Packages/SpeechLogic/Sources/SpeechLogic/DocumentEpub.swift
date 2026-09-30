@@ -260,6 +260,43 @@ enum DocumentMedia {
         return nil
     }
 
+    /// Pixel dimensions straight from the file headers (PNG IHDR, GIF
+    /// logical screen, BMP DIB header, JPEG SOF scan). Full-width display
+    /// is decided from these: real figures/photos get the reader's whole
+    /// content width; small icons/logos keep their natural size.
+    static func pixelSize(of data: Data) -> (width: Int, height: Int)? {
+        let bytes = [UInt8](data.prefix(64))
+        func be(_ i: Int) -> Int { bytes.count > i + 3 ? (Int(bytes[i]) << 24 | Int(bytes[i+1]) << 16 | Int(bytes[i+2]) << 8 | Int(bytes[i+3])) : 0 }
+        func le(_ i: Int) -> Int { bytes.count > i + 1 ? Int(bytes[i]) | (Int(bytes[i+1]) << 8) : 0 }
+        // PNG
+        if bytes.count > 24, bytes[0...7].elementsEqual([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) {
+            return (be(16), be(20))
+        }
+        // GIF
+        if bytes.count > 10, String(decoding: bytes[0...2], as: UTF8.self) == "GIF" {
+            return (le(6), le(8))
+        }
+        // BMP
+        if bytes.count > 26, bytes[0] == 0x42, bytes[1] == 0x4D {
+            return (le(18), le(22))
+        }
+        // JPEG: walk markers to the first SOF
+        if bytes.count > 4, bytes[0] == 0xFF, bytes[1] == 0xD8 {
+            var i = 2
+            let all = [UInt8](data.prefix(256 * 1024))
+            while i + 9 < all.count {
+                guard all[i] == 0xFF, all[i+1] != 0x00, all[i+1] != 0xFF else { i += 1; continue }
+                let marker = all[i+1]
+                if (0xC0...0xCF).contains(marker), marker != 0xC4, marker != 0xC8, marker != 0xCC {
+                    return (Int(all[i+7]) << 8 | Int(all[i+8]), Int(all[i+5]) << 8 | Int(all[i+6]))
+                }
+                let length = Int(all[i+2]) << 8 | Int(all[i+3])
+                i += 2 + length
+            }
+        }
+        return nil
+    }
+
     /// 1×1 transparent GIF — the placeholder that keeps the image pool
     /// index-aligned when a media entry cannot be loaded (a corrupt archive
     /// must not shift every later image onto the wrong block).
@@ -1332,12 +1369,18 @@ public enum DocumentEpubConverter {
             ),
         ]
 
-        // Media entries first (chapters reference them by href).
+        // Media entries first (chapters reference them by href). A class
+        // per image: real figures go full width, small icons keep size.
         var imageHREFs: [String] = []
+        var imageClasses: [String] = []
         for (index, image) in images.enumerated() {
             let ext = DocumentMedia.fileExtension(forMime: image.mime)
             let href = "images/img\(index + 1).\(ext)"
             imageHREFs.append(href)
+            let size = DocumentMedia.pixelSize(of: image.data)
+            imageClasses.append(
+                size?.width ?? 0 >= 320 && size?.height ?? 0 >= 320 ? "doc-image" : "doc-image-inline"
+            )
             manifestItems += "<item id=\"img\(index + 1)\" href=\"\(href)\" media-type=\"\(image.mime)\"/>\n"
             files.append((name: "OEBPS/\(href)", data: image.data))
         }
@@ -1360,7 +1403,7 @@ public enum DocumentEpubConverter {
                   <content src="\(href)"/>
                 </navPoint>
                 """
-            files.append((name: "OEBPS/\(href)", data: Data(chapterXHTML(chapter, index: index + 1, imageHREFs: imageHREFs).utf8)))
+            files.append((name: "OEBPS/\(href)", data: Data(chapterXHTML(chapter, index: index + 1, imageHREFs: imageHREFs, imageClasses: imageClasses).utf8)))
         }
 
         let creatorLine = author.map { "<dc:creator>\(escape($0))</dc:creator>" } ?? ""
@@ -1424,6 +1467,7 @@ public enum DocumentEpubConverter {
     private static let chapterCSS = """
         <style>
           img.doc-image { width: 100%; height: auto; display: block; margin: 0.6em auto; }
+          img.doc-image-inline { max-width: 100%; height: auto; display: block; margin: 0.6em auto; }
           div.doc-table-wrap { overflow-x: auto; width: 100%; }
           table.doc-table { border-collapse: collapse; margin: 0.8em 0; }
           table.doc-table th, table.doc-table td { border: 1px solid #8a8a8a; padding: 4px 7px; text-align: left; vertical-align: top; }
@@ -1431,7 +1475,7 @@ public enum DocumentEpubConverter {
         </style>
         """
 
-    private static func chapterXHTML(_ chapter: DocumentChapter, index: Int, imageHREFs: [String]) -> String {
+    private static func chapterXHTML(_ chapter: DocumentChapter, index: Int, imageHREFs: [String], imageClasses: [String]) -> String {
         var body = ""
         if let title = chapter.title {
             body += "<h1>\(escape(title))</h1>\n"
@@ -1442,7 +1486,8 @@ public enum DocumentEpubConverter {
                 body += "<p>\(escape(text))</p>\n"
             case .image(let poolIndex):
                 guard imageHREFs.indices.contains(poolIndex) else { continue }
-                body += "<p class=\"doc-image-wrap\"><img class=\"doc-image\" src=\"\(imageHREFs[poolIndex])\" alt=\"\"/></p>\n"
+                let cls = imageClasses.indices.contains(poolIndex) ? imageClasses[poolIndex] : "doc-image-inline"
+                body += "<p class=\"doc-image-wrap\"><img class=\"\(cls)\" src=\"\(imageHREFs[poolIndex])\" alt=\"\"/></p>\n"
             case .table(let rows):
                 body += "<div class=\"doc-table-wrap\">\n" + tableXHTML(rows) + "</div>\n"
             }
