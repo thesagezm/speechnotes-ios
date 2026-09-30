@@ -467,7 +467,9 @@ final class DocumentEpubTests: XCTestCase {
         // The image entry is packaged and the chapter references it.
         XCTAssertEqual(try ZipReader.readEntry("OEBPS/images/img1.gif", in: epub), tinyGIF)
         let chapterXHTML = String(decoding: try ZipReader.readEntry(info.spine[0], in: epub), as: UTF8.self)
-        XCTAssertTrue(chapterXHTML.contains("<img class=\"doc-image\" src=\"images/img1.gif\""))
+        // The fixture image is 1x1 — the size sniffer classes it inline
+        // (natural size, capped), not full width.
+        XCTAssertTrue(chapterXHTML.contains("<img class=\"doc-image-inline\" src=\"images/img1.gif\""))
         XCTAssertTrue(chapterXHTML.contains("<table class=\"doc-table\">"))
         XCTAssertTrue(chapterXHTML.contains("<th>A</th>"))
         XCTAssertTrue(chapterXHTML.contains("B<br/>C"))
