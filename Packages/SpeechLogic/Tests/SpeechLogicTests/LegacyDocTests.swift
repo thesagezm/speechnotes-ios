@@ -96,6 +96,9 @@ final class LegacyDocTests: XCTestCase {
         dirEntry("Root Entry", type: 5, start: 0xFFFF_FFFE, size: 0)
         dirEntry("WordDocument", type: 2, start: 2, size: UInt64(wordDoc.count))
         dirEntry("1Table", type: 2, start: 10, size: UInt64(table.count))
+        // CFB directory streams occupy WHOLE sectors — pad to 512 bytes so
+        // the sector layout (and every file offset) stays aligned.
+        directory.append(Data(count: 512 - directory.count))
 
         // Assemble: header + sector 0 (FAT) + 1 (dir) + 2..9 (word) + 10..17 (table).
         var header = Data(count: 512)

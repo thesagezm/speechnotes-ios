@@ -266,15 +266,14 @@ private struct CFBReader {
         let dirChain = chain(start: Self.u32(archive, 48))
         var directory = Data()
         for sector in dirChain {
-            let base = self.offset(of: sector)
-            directory.append(archive.subdata(in: archive.startIndex + base..<archive.startIndex + base + sectorSize))
+            if let data = sectorData(sector) { directory.append(data) }
         }
 
         let miniFatStart = Self.u32(archive, 60)
         if miniFatStart != Self.endOfChain && miniFatStart != Self.freeSector {
             for sector in chain(start: miniFatStart) {
-                let base = self.offset(of: sector)
                 for i in 0..<(sectorSize / 4) {
+                    let base = self.offset(of: sector)
                     miniFat.append(Self.u32(archive, base + i * 4))
                 }
             }
@@ -284,8 +283,7 @@ private struct CFBReader {
             if rootStart >= 0 {
                 miniContainer = Data()
                 for sector in chain(start: UInt32(rootStart)) {
-                    let base = self.offset(of: sector)
-                    miniContainer.append(archive.subdata(in: archive.startIndex + base..<archive.startIndex + base + sectorSize))
+                    if let data = sectorData(sector) { miniContainer.append(data) }
                 }
             }
         }
@@ -296,8 +294,7 @@ private struct CFBReader {
     func stream(named name: String) throws -> Data? {
         var directory = Data()
         for sector in chain(start: Self.u32(archive, 48)) {
-            let base = offset(of: sector)
-            directory.append(archive.subdata(in: archive.startIndex + base..<archive.startIndex + base + sectorSize))
+            if let data = sectorData(sector) { directory.append(data) }
         }
         var offsetInDir = 0
         while offsetInDir + 128 <= directory.count {
@@ -364,9 +361,11 @@ private struct CFBReader {
         while cursor != Self.endOfChain && remaining > 0 {
             guardCounter += 1
             if guardCounter > 1_000_000 { throw DocumentParseError.malformed("chain loop") }
-            let base = offset(of: cursor)
-            let take = min(sectorSize, remaining)
-            out.append(archive.subdata(in: archive.startIndex + base..<archive.startIndex + base + take))
+            guard let data = sectorData(cursor) else {
+                throw DocumentParseError.malformed("chain sector past end of file")
+            }
+            let take = min(data.count, remaining)
+            out.append(data.prefix(take))
             remaining -= take
             cursor = fat.indices.contains(Int(cursor)) ? fat[Int(cursor)] : Self.endOfChain
         }
