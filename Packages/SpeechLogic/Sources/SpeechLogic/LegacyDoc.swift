@@ -289,6 +289,15 @@ private struct CFBReader {
         }
     }
 
+    /// One whole sector's bytes, or nil past EOF — malformed/truncated
+    /// compound files must throw, never trap on an out-of-bounds subdata.
+    private func sectorData(_ sector: UInt32) -> Data? {
+        let base = 512 + Int(sector) * sectorSize
+        guard base < archive.count else { return nil }
+        let end = min(base + sectorSize, archive.count)
+        return archive.subdata(in: archive.startIndex + base..<archive.startIndex + end)
+    }
+
     /// All streams whose name matches — a linear scan instead of walking
     /// the red-black directory tree (stream names we need are unique).
     func stream(named name: String) throws -> Data? {
