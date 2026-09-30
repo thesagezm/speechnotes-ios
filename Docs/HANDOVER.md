@@ -1133,3 +1133,15 @@ Branch `sage-upgrades`, build 1.7.2/40. Builds on the first v1.7.2 batch
 
 CI-only compilation discipline unchanged: green comes from `gh run list`,
 latest run wins (each dispatch supersedes the previous).
+
+## 2026-09-30 addendum #20 — reading goals (Stats tab)
+
+`ReadingGoalsView.swift`: GoalStore persists goals to
+Documents/reading-goals.json (book + start + deadline). Progress derives
+LIVE from the book's position (EPUB chapters, PDF pages, audio elapsed via
+the chapter table) — nothing about progress is stored, so goals advance in
+whichever reader moved the book. Status = linear expectation between the
+two dates (±5%/10% bands). Goal cards render from a snapshot title when
+the book was deleted. Duolingo-style visuals: stable per-goal gradient
+(from UUID bytes — NOT hashValue, which randomizes per process), rounded
+progress bars, status pills, pace verdict in the detail ring.

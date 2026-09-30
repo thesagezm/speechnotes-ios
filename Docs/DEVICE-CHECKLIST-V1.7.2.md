@@ -70,3 +70,19 @@ Anx-style page-turn settings. Everything below is testable without tools.
     (or both) leaves tap-to-hide on the whole page as before.
 18. Swipe gestures honor "Swipe to turn" — off means swiping does nothing.
 19. In Scroll mode the section is disabled (footer explains why).
+
+## Reading goals (Stats tab)
+
+20. Statistics tab → top card **Goals** with a green "+" — visible even
+    with no stats yet.
+21. "+" → pick a book, set Start reading and Finish by, Create Goal → the
+    card appears with a colored gradient, a thick progress bar, and a
+    status pill (On track / Ahead / Behind / Overdue).
+22. Open the book and read/listen a little → reopen Statistics: the bar
+    and % advanced (EPUB = chapters, PDF = pages, audiobook = position in
+    the file).
+23. Tap a goal → detail ring, Started / Finish by / Time left, a pace
+    verdict, and Delete goal.
+24. Cross the finish line → the status flips to 🎉 Done and stays done.
+25. Delete the book from the shelf → its goal card stays, marked "Book
+    removed", and can be deleted.
