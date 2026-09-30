@@ -33,6 +33,8 @@ struct BooksView: View {
     @EnvironmentObject private var audioBooks: AudioBookPlayer
     @State private var showingImporter = false
     @State private var bookToDelete: Book?
+    /// Long-press "Add a goal" — pushes that book into the goal editor.
+    @State private var bookToGoal: Book?
     @State private var searchText = ""
     @State private var showingRecycleBin = false
     /// Pushed reader — set by the mini-player's book jump.
@@ -88,6 +90,13 @@ struct BooksView: View {
                     }
                     .disabled(store.isImporting)
                 }
+            }
+            .sheet(item: $bookToGoal) { goalBook in
+                GoalEditorView(presetBook: goalBook) { book, start, deadline in
+                    GoalStore.shared.add(book: book, start: start, deadline: deadline)
+                    ToastCenter.shared.show("Goal set for \(book.title.prefix(28))")
+                }
+                .environmentObject(store)
             }
             .fileImporter(
                 isPresented: $showingImporter,
@@ -182,6 +191,12 @@ struct BooksView: View {
                         }
                         .buttonStyle(.plain)
                         .contextMenu {
+                            Button {
+                                Haptics.tap()
+                                bookToGoal = book
+                            } label: {
+                                Label("Add a goal", systemImage: "target")
+                            }
                             Button(role: .destructive) {
                                 bookToDelete = book
                             } label: {

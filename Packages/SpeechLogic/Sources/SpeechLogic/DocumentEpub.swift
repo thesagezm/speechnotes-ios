@@ -1423,8 +1423,9 @@ public enum DocumentEpubConverter {
     /// run-on text.
     private static let chapterCSS = """
         <style>
-          img.doc-image { max-width: 100%; height: auto; display: block; margin: 0.6em auto; }
-          table.doc-table { border-collapse: collapse; width: 100%; margin: 0.8em 0; }
+          img.doc-image { width: 100%; height: auto; display: block; margin: 0.6em auto; }
+          div.doc-table-wrap { overflow-x: auto; width: 100%; }
+          table.doc-table { border-collapse: collapse; margin: 0.8em 0; }
           table.doc-table th, table.doc-table td { border: 1px solid #8a8a8a; padding: 4px 7px; text-align: left; vertical-align: top; }
           table.doc-table th { background: rgba(128, 128, 128, 0.15); font-weight: 600; }
         </style>
@@ -1443,7 +1444,7 @@ public enum DocumentEpubConverter {
                 guard imageHREFs.indices.contains(poolIndex) else { continue }
                 body += "<p class=\"doc-image-wrap\"><img class=\"doc-image\" src=\"\(imageHREFs[poolIndex])\" alt=\"\"/></p>\n"
             case .table(let rows):
-                body += tableXHTML(rows)
+                body += "<div class=\"doc-table-wrap\">\n" + tableXHTML(rows) + "</div>\n"
             }
         }
         return """

@@ -183,7 +183,11 @@ private struct EdgeSnappingBubble<Bubble: View>: View {
 
             bubble()
                 .position(x: liveX, y: liveY)
-                .simultaneousGesture(
+                // NOT simultaneous: a simultaneous drag still lets the
+                // Button fire on release, so every drag END expanded the
+                // bar. With a plain gesture the drag owns the touch and the
+                // button only sees genuine taps.
+                .gesture(
                     DragGesture(minimumDistance: 10)
                         .onChanged { value in
                             dragOffset = value.translation

@@ -32,6 +32,10 @@ struct ReadingGoal: Identifiable, Codable, Equatable {
 /// handful of goals never justify a database).
 @MainActor
 final class GoalStore: ObservableObject {
+    /// One shared instance — goals are created from the Stats tab AND the
+    /// shelf's long-press menu, and both must see the same list.
+    static let shared = GoalStore()
+
     @Published private(set) var goals: [ReadingGoal] = []
 
     static var fileURL: URL {
@@ -179,7 +183,7 @@ enum GoalMath {
 /// celebratory state when the finish line is crossed.
 struct GoalsCard: View {
     @EnvironmentObject private var books: BooksStore
-    @StateObject private var goalStore = GoalStore()
+    @ObservedObject private var goalStore = GoalStore.shared
     @State private var showingEditor = false
     @State private var selectedGoal: ReadingGoal?
 
@@ -393,6 +397,9 @@ struct GoalEditorView: View {
     @Environment(\.dismiss) private var dismiss
 
     var onCreate: (Book, Date, Date) -> Void
+    /// Set when the editor opens from a book's long-press menu — the book
+    /// is pre-chosen and the picker section hides.
+    var presetBook: Book? = nil
 
     @State private var selectedBook: Book?
     @State private var startDate = Date()
@@ -416,6 +423,7 @@ struct GoalEditorView: View {
     var body: some View {
         NavigationStack {
             Form {
+                if presetBook == nil {
                 Section("Book") {
                     if candidateBooks.isEmpty {
                         Text(books.books.isEmpty
@@ -446,6 +454,7 @@ struct GoalEditorView: View {
                             }
                         }
                     }
+                }
                 }
 
                 Section {
@@ -500,6 +509,7 @@ struct GoalEditorView: View {
                     Button("Cancel") { dismiss() }
                 }
             }
+            .onAppear { if selectedBook == nil { selectedBook = presetBook } }
         }
         .presentationDetents([.large])
     }

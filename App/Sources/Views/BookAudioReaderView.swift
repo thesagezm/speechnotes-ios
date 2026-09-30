@@ -585,6 +585,22 @@ struct BookAudioReaderView: View {
         .shadow(color: .black.opacity(0.12), radius: 14, y: 4)
         .padding(.horizontal, 10)
         .frame(maxHeight: .infinity, alignment: .center)
+        .overlay(alignment: .topTrailing) {
+            // Minimize — the PlaybackRail's chevron affordance (the shared
+            // preference, so the strip matches the other surfaces).
+            Button {
+                Haptics.tap()
+                railMinimized = true
+            } label: {
+                Image(systemName: "chevron.compact.right")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Minimize playback rail")
+        }
     }
 
     /// Elapsed/chapter position — tap flips to whole-book remaining.
