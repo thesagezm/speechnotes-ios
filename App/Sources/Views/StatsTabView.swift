@@ -78,16 +78,45 @@ struct StatsTabView: View {
 
     var body: some View {
         NavigationStack {
-            Group {
-                if hasAnyData {
-                    dashboard
-                } else {
-                    ContentUnavailableView(
-                        "No statistics yet",
-                        systemImage: "chart.bar.xaxis",
-                        description: Text("Time you spend reading books and listening shows up here.")
-                    )
+            // Goals live at the top of this tab regardless of whether any
+            // stats exist yet — a fresh install can still set a reading
+            // goal before the charts have anything to chart.
+            ScrollView {
+                VStack(spacing: 14) {
+                    GoalsCard()
+                    if hasAnyData {
+                        headerCards
+                        Picker("Range", selection: $range) {
+                            ForEach(RangeOption.allCases) { option in
+                                Text(option.rawValue).tag(option)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .padding(.horizontal, -2)
+
+                        activityCard
+                        heatmapCard
+                        subjectsCard
+                    } else {
+                        VStack(spacing: 10) {
+                            Image(systemName: "chart.bar.xaxis")
+                                .font(.system(size: 30))
+                                .foregroundStyle(.secondary)
+                            Text("No statistics yet")
+                                .font(.headline)
+                            Text("Time you spend reading books and listening shows up here.")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 28)
+                        .padding(.horizontal, 16)
+                        .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(Color(.secondarySystemGroupedBackground)))
+                    }
                 }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
             }
             .background(Color(.systemGroupedBackground))
             .navigationTitle("Statistics")
@@ -98,27 +127,6 @@ struct StatsTabView: View {
     }
 
     // MARK: - Dashboard
-
-    private var dashboard: some View {
-        ScrollView {
-            VStack(spacing: 14) {
-                headerCards
-                Picker("Range", selection: $range) {
-                    ForEach(RangeOption.allCases) { option in
-                        Text(option.rawValue).tag(option)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .padding(.horizontal, -2)
-
-                activityCard
-                heatmapCard
-                subjectsCard
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-        }
-    }
 
     private var headerCards: some View {
         HStack(spacing: 10) {
