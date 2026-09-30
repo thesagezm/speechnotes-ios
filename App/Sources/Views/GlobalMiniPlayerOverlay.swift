@@ -50,12 +50,15 @@ struct GlobalMiniPlayerOverlay: ViewModifier {
             Group {
                 if activeBar != .none {
                     if miniPlayerCollapsed {
-                        collapsedBar
-                            .frame(maxWidth: .infinity, alignment: .trailing)
-                            .padding(.horizontal, 16)
-                            .padding(.bottom, 49 + 34 + 8)
-                            .transition(.scale(scale: 0.85, anchor: .bottomTrailing).combined(with: .opacity))
-                            .zIndex(1)
+                        // v1.7.2: the round bubble is USER-MOVABLE — drag it
+                        // anywhere; release snaps it to the nearest edge and
+                        // persists the spot. The old hard-coded bottom-right
+                        // placement is the default it starts from.
+                        EdgeSnappingBubble {
+                            collapsedBar
+                        }
+                        .transition(.scale(scale: 0.85, anchor: .bottomTrailing).combined(with: .opacity))
+                        .zIndex(1)
                     } else {
                         expandedBar
                             .padding(.bottom, 49 + 34)
@@ -128,6 +131,88 @@ struct GlobalMiniPlayerOverlay: ViewModifier {
 extension View {
     func globalMiniPlayer() -> some View {
         modifier(GlobalMiniPlayerOverlay())
+    }
+}
+
+/// The user-movable floating bubble (v1.7.2, user ask: "move it to any edge
+/// location, not just the bottom right").
+///
+/// The bubble's CENTER lives in a normalized (0…1, 0…1) spot of the usable
+/// area — persisted, so the chosen corner survives relaunch and rotation.
+/// Dragging moves it freely; releasing SNAPS it to the nearest of the four
+/// edges (keeping the along-edge coordinate), which is what keeps the
+/// bubble one-thumb reachable instead of drifting into the middle of
+/// content.
+///
+/// Tap vs drag: the bubble stays a Button (tap expands back to the bar);
+/// the drag gesture needs 10 pt of travel before it claims the touch, so a
+/// tap never turns into a micro-drag and a drag never fires the tap.
+private struct EdgeSnappingBubble<Bubble: View>: View {
+    @ViewBuilder let bubble: () -> Bubble
+
+    @AppStorage("miniBubbleX") private var storedX: Double = 1
+    @AppStorage("miniBubbleY") private var storedY: Double = 1
+    @State private var dragOffset: CGSize = .zero
+
+    /// Half the bubble's size (all three bubble variants are ~58 pt) and
+    /// the breathing margin from the screen edges.
+    private static let radius: CGFloat = 29
+    private static let margin: CGFloat = 12
+    /// The tab bar (49 pt) plus breathing room: the bottom edge stops above
+    /// the tab bar so a parked bubble never covers its right-hand tabs.
+    private static let bottomReserve: CGFloat = 57
+
+    var body: some View {
+        GeometryReader { geo in
+            let insets = geo.safeAreaInsets
+            let minX = insets.left + Self.margin + Self.radius
+            let maxX = geo.size.width - insets.right - Self.margin - Self.radius
+            // Bottom clamps above the tab bar; the other three edges keep
+            // the plain safe-area margin.
+            let minY = insets.top + Self.margin + Self.radius
+            let maxY = geo.size.height - insets.bottom - Self.bottomReserve - Self.margin - Self.radius
+            let baseX = minX + (maxX - minX) * min(max(storedX, 0), 1)
+            let baseY = minY + (maxY - minY) * min(max(storedY, 0), 1)
+            let liveX = min(max(baseX + dragOffset.width, minX), maxX)
+            let liveY = min(max(baseY + dragOffset.height, minY), maxY)
+
+            bubble()
+                .position(x: liveX, y: liveY)
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 10)
+                        .onChanged { value in
+                            dragOffset = value.translation
+                        }
+                        .onEnded { value in
+                            let x = min(max(baseX + value.translation.width, minX), maxX)
+                            let y = min(max(baseY + value.translation.height, minY), maxY)
+                            // Snap to the nearest edge; the other coordinate
+                            // keeps its (clamped) place along that edge.
+                            let toLeft = x - minX
+                            let toRight = maxX - x
+                            let toTop = y - minY
+                            let toBottom = maxY - y
+                            let nearest = min(toLeft, toRight, toTop, toBottom)
+                            var snappedX = x
+                            var snappedY = y
+                            if nearest == toLeft {
+                                snappedX = minX
+                            } else if nearest == toRight {
+                                snappedX = maxX
+                            } else if nearest == toTop {
+                                snappedY = minY
+                            } else {
+                                snappedY = maxY
+                            }
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
+                                dragOffset = .zero
+                                storedX = maxX > minX ? Double((snappedX - minX) / (maxX - minX)) : 1
+                                storedY = maxY > minY ? Double((snappedY - minY) / (maxY - minY)) : 1
+                            }
+                        }
+                )
+        }
+        .ignoresSafeArea()
     }
 }
 

@@ -266,6 +266,9 @@ final class AudioBookPlayer: ObservableObject {
             wireSessionObserversOnce()
             NowPlayingCenter.shared.configure()
             NowPlayingCenter.shared.setChapterSkipEnabled(chapters.count > 1)
+            // The lock screen's ±15 s skip buttons live only while an
+            // audiobook owns playback (v1.7.2).
+            NowPlayingCenter.shared.setSkipBackForwardEnabled(true, interval: 15)
             // AVPlayer seeks before play so the first rendered frame is
             // already the chapter start; a seek during playback would be
             // the pre-roll glitch VLC avoids.
@@ -376,6 +379,7 @@ final class AudioBookPlayer: ObservableObject {
         sleepAtChapterEnd = false
         NowPlayingCenter.shared.clear()
         NowPlayingCenter.shared.setChapterSkipEnabled(false)
+        NowPlayingCenter.shared.setSkipBackForwardEnabled(false)
     }
 
     /// The shelf's delete path: stop only when THIS book is the active one.
@@ -664,11 +668,10 @@ final class AudioBookPlayer: ObservableObject {
         lastTickAt = Date()
 
         guard chapterIsFinished, !userPaused else {
-            // Playing, mid-chapter: a slow-cadence refresh of the lock
-            // surface and the persisted position. Between publishes iOS
-            // extrapolates elapsed time from rate + elapsed, so 10 s is
-            // plenty (VLC publishes absolute seconds on state changes and
-            // lets the system tick in between).
+            // Playing, mid-chapter: a refresh of the lock surface and the
+            // persisted position. publishNowPlaying throttles itself to a
+            // 1 s cadence — the lock-screen clock ticks in seconds, so the
+            // cadence must match what the user watches.
             if isPlaying {
                 publishNowPlaying()
                 persistPosition()
@@ -736,6 +739,10 @@ final class AudioBookPlayer: ObservableObject {
                 self.stepChapter(-1)
             case .nextChapter:
                 self.stepChapter(1)
+            case .skipBackward:
+                self.seekBy(-15)
+            case .skipForward:
+                self.seekBy(15)
             }
             return true
         }
@@ -748,7 +755,12 @@ final class AudioBookPlayer: ObservableObject {
     /// chapter affordances.
     private func publishNowPlaying(force: Bool = false) {
         let now = Date()
-        if !force, let last = lastPublishAt, now.timeIntervalSince(last) < 10 { return }
+        // 1 s cadence (v1.7.2, user ask): the lock screen's clock must tick
+        // in SECONDS. The old 10 s VLC-style cadence relied on iOS
+        // extrapolating from rate + elapsed — which held on some builds but
+        // left the lock-screen readout jumping in 10-second lumps on this
+        // one. One dictionary write per second is nothing next to decoding.
+        if !force, let last = lastPublishAt, now.timeIntervalSince(last) < 1 { return }
         lastPublishAt = now
         guard let book = activeBook else { return }
         let chapterTitle = chapters.indices.contains(chapterIndex) ? chapters[chapterIndex].title : nil

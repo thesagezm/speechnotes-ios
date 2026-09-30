@@ -29,6 +29,10 @@ final class NowPlayingCenter {
         /// Chapter-granular skips — the reader's Previous/Next buttons.
         case previousChapter
         case nextChapter
+        /// ±N-second skips — the lock screen's skip buttons (audiobooks
+        /// only; synthesized speech is not seconds-addressable).
+        case skipBackward
+        case skipForward
     }
 
     /// Set by SpeechPlayer once — decides what each remote command does.
@@ -44,8 +48,16 @@ final class NowPlayingCenter {
     var audioBookHandler: ((Command) -> Bool)?
 
     private func dispatch(_ command: Command) {
-        if let audioBookHandler, audioBookHandler(command) { return }
-        onCommand?(command)
+        switch command {
+        case .skipBackward, .skipForward:
+            // Seconds-addressable content only: a ±15 s seek into
+            // synthesized speech is a lie (it's generated per sentence
+            // chunk), so these never fall through to SpeechPlayer.
+            if let audioBookHandler { _ = audioBookHandler(command) }
+        default:
+            if let audioBookHandler, audioBookHandler(command) { return }
+            onCommand?(command)
+        }
     }
 
     /// Set by SpeechPlayer/BookPlaybackController when a book chapter starts
@@ -94,6 +106,24 @@ final class NowPlayingCenter {
         commands.nextTrackCommand.addTarget { [weak self] _ in
             guard let self else { return .commandFailed }
             self.dispatch(.nextChapter)
+            return .success
+        }
+
+        // The lock screen's skip buttons (v1.7.2, audiobooks): iOS shows
+        // them only while the commands are enabled AND the published info
+        // carries MPNowPlayingInfoPropertyPreferredIntervals. Disabled by
+        // default; AudioBookPlayer enables them on play and disables on
+        // stop (synthesized speech gets chapter buttons instead).
+        commands.skipBackwardCommand.isEnabled = false
+        commands.skipForwardCommand.isEnabled = false
+        commands.skipBackwardCommand.addTarget { [weak self] _ in
+            guard let self else { return .commandFailed }
+            self.dispatch(.skipBackward)
+            return .success
+        }
+        commands.skipForwardCommand.addTarget { [weak self] _ in
+            guard let self else { return .commandFailed }
+            self.dispatch(.skipForward)
             return .success
         }
 
@@ -198,6 +228,9 @@ final class NowPlayingCenter {
         if let chapterNumber {
             info[MPNowPlayingInfoPropertyChapterNumber] = chapterNumber
         }
+        if let skipInterval {
+            info[MPNowPlayingInfoPropertyPreferredIntervals] = [skipInterval]
+        }
         infoCenter.nowPlayingInfo = info
     }
 
@@ -208,6 +241,34 @@ final class NowPlayingCenter {
         let commands = MPRemoteCommandCenter.shared()
         commands.previousTrackCommand.isEnabled = enabled
         commands.nextTrackCommand.isEnabled = enabled
+    }
+
+    /// The ±N-second lock-screen skip buttons (audiobooks). Enabled state
+    /// rides the audiobook's own lifecycle; `interval` goes out with every
+    /// publish so iOS labels the buttons ("15s") — without the intervals
+    /// property the system hides them.
+    private var skipInterval: TimeInterval?
+
+    func setSkipBackForwardEnabled(_ enabled: Bool, interval: TimeInterval = 15) {
+        let commands = MPRemoteCommandCenter.shared()
+        commands.skipBackwardCommand.isEnabled = enabled
+        commands.skipForwardCommand.isEnabled = enabled
+        skipInterval = enabled ? interval : nil
+        republish()
+    }
+
+    /// Re-issues the last publish (same metadata) — used when the skip
+    /// buttons' availability changes, so the lock screen reflects it at
+    /// once instead of on the next cadence tick.
+    private func republish() {
+        guard let info = infoCenter.nowPlayingInfo else { return }
+        var updated = info
+        if let skipInterval {
+            updated[MPNowPlayingInfoPropertyPreferredIntervals] = [skipInterval]
+        } else {
+            updated.removeValue(forKey: MPNowPlayingInfoPropertyPreferredIntervals)
+        }
+        infoCenter.nowPlayingInfo = updated
     }
 
     /// Clear the lock-screen surface (speech finished, stopped, or reset).

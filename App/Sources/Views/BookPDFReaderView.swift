@@ -109,7 +109,9 @@ struct BookPDFReaderView: View {
     }
 
     /// Trailing rail for landscape — PDF twin of the editor's rail, plus the
-    /// per-chapter export button the portrait bar carries.
+    /// per-chapter export button the portrait bar carries. The page stepper
+    /// rides the rail (v1.7.2): the portrait pageBar has the chevrons, the
+    /// landscape layout has no bottom band, and prev/next were missing here.
     private var railPlayerBar: some View {
         PlaybackRail(
             action: PlaybackRail.Action(
@@ -126,7 +128,12 @@ struct BookPDFReaderView: View {
                 onToggleReadAlong: { readAlongEnabled.toggle() },
                 readAlongOn: readAlongEnabled,
                 rate: player.rateMultiplier,
-                onRateChange: { player.rateMultiplier = $0 }
+                onRateChange: { player.rateMultiplier = $0 },
+                onStepBack: { goToPage(currentPage - 1) },
+                onStepForward: { goToPage(currentPage + 1) },
+                stepLabel: pageCount > 0 ? "Page \(currentPage + 1)/\(pageCount)" : nil,
+                stepBackEnabled: currentPage > 0,
+                stepForwardEnabled: pageCount == 0 || currentPage < pageCount - 1
             ),
             voiceLabel: player.currentVoiceDescription,
             progress: player.progress,

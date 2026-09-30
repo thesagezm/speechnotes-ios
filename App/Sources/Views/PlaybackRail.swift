@@ -45,6 +45,15 @@ struct PlaybackRail: View {
         /// Live speech rate — the shared SpeechPlayer preference.
         var rate: Double
         var onRateChange: (Double) -> Void
+        /// Landscape prev/next for the surface's unit (chapter or page) —
+        /// portrait carries these in its bottom chapter/page bar, landscape
+        /// has no bottom band (round 6 removed it), so the rail is the one
+        /// place they can live. nil hides the stepper.
+        var onStepBack: (() -> Void)? = nil
+        var onStepForward: (() -> Void)? = nil
+        var stepLabel: String? = nil
+        var stepBackEnabled: Bool = true
+        var stepForwardEnabled: Bool = true
 
         static func base(
             rate: Double,
@@ -224,11 +233,57 @@ struct PlaybackRail: View {
 
     // MARK: - Zones
 
-    /// Progress capsule + voice chip — pinned to the panel's top.
+    /// Progress capsule + chapter/page stepper + voice chip — pinned to the
+    /// panel's top.
     private var topGroup: some View {
         VStack(spacing: 10) {
             progressStrip
+            stepStrip
             voiceChip
+        }
+    }
+
+    /// Landscape prev/next stepper for the reader's unit (chapter or page) —
+    /// compact chevrons flanking the live position, mirroring the portrait
+    /// chapter/page bar that round 6 removed from this orientation.
+    @ViewBuilder
+    private var stepStrip: some View {
+        if let onStepBack = action.onStepBack, let onStepForward = action.onStepForward {
+            HStack(spacing: 8) {
+                Button {
+                    Haptics.tap()
+                    onStepBack()
+                } label: {
+                    Image(systemName: "chevron.left")
+                        .font(.footnote.weight(.semibold))
+                        .frame(width: 30, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(!action.stepBackEnabled)
+                .accessibilityLabel("Previous")
+
+                Text(action.stepLabel ?? "")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                    .frame(maxWidth: .infinity)
+
+                Button {
+                    Haptics.tap()
+                    onStepForward()
+                } label: {
+                    Image(systemName: "chevron.right")
+                        .font(.footnote.weight(.semibold))
+                        .frame(width: 30, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(!action.stepForwardEnabled)
+                .accessibilityLabel("Next")
+            }
+            .foregroundStyle(Color.accentColor)
         }
     }
 

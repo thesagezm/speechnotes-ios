@@ -128,6 +128,9 @@ struct BookReaderView: View {
     }
 
     /// Trailing rail for landscape — the book twin of the note editor's rail.
+    /// The chapter stepper rides the rail too (v1.7.2): portrait keeps its
+    /// bottom chapter bar, landscape has none, and the user asked for
+    /// prev/next there as well.
     private var railPlayerBar: some View {
         PlaybackRail(
             action: PlaybackRail.Action(
@@ -144,7 +147,12 @@ struct BookReaderView: View {
                 onToggleReadAlong: { readAlongEnabled.toggle() },
                 readAlongOn: readAlongEnabled,
                 rate: player.rateMultiplier,
-                onRateChange: { player.rateMultiplier = $0 }
+                onRateChange: { player.rateMultiplier = $0 },
+                onStepBack: { goChapter(chapterIndex - 1) },
+                onStepForward: { goChapter(chapterIndex + 1) },
+                stepLabel: totalChapters > 0 ? "Ch \(chapterIndex + 1)/\(totalChapters)" : nil,
+                stepBackEnabled: chapterIndex > 0,
+                stepForwardEnabled: totalChapters == 0 || chapterIndex < totalChapters - 1
             ),
             voiceLabel: player.currentVoiceDescription,
             progress: player.progress,

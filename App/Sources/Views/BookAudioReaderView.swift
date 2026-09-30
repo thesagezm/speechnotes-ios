@@ -101,7 +101,18 @@ struct BookAudioReaderView: View {
                             Spacer(minLength: 0)
                             if blockedReason != nil { blockedBanner }
                         }
-                        audioRail
+                        // Speed + sleep do NOT ride inside the rail (user:
+                        // "they should be near/under the playback controls")
+                        // — they float in a row directly beneath it, where
+                        // the trailing column has room to spare.
+                        ZStack(alignment: .bottom) {
+                            audioRail
+                            HStack(spacing: 10) {
+                                railSpeedMenu
+                                railSleepMenu
+                            }
+                            .padding(.bottom, 18)
+                        }
                     }
                     .transition(.opacity.combined(with: .move(edge: .trailing)))
                 } else {
@@ -553,11 +564,6 @@ struct BookAudioReaderView: View {
                 .accessibilityLabel("Forward 15 seconds")
             }
             .foregroundStyle(Color.accentColor)
-
-            HStack(spacing: 10) {
-                railSpeedMenu
-                railSleepMenu
-            }
 
             Spacer(minLength: 0)
 
