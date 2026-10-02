@@ -398,12 +398,17 @@ final class HtmlReader {
     ///
     /// `XhtmlText.namedEntities` is the shared table (identical decoding on
     /// both the EPUB and HTML paths) and XML's five predefined entities pass
-    /// through it. The handful it lacks are added here — `&iuml;`, `&yacute;`,
-    /// `&alpha;` and friends are common in older HTML books, and dropping them
-    /// silently mangled the word ("Caf&iuml; — na&iuml;ve" became "Caf —
-    /// nave", which is what the first run's test caught). Unknown names keep
-    /// their bare text: losing a glyph beats losing the rest of the document.
+    /// through it. The handful it lacks are added here — `&alpha;` and the
+    /// Latin Extended-A accents are common in older HTML books, and dropping
+    /// them silently mangled the word ("Caf&eacute; — na&iuml;ve" became
+    /// "Caf — nave", which is what the first run's test caught). Unknown
+    /// names keep their whole `&name;` token verbatim: the reader sees (and
+    /// TTS says) the same stray token the source had, rather than an invented
+    /// word formed from the entity name. Losing the document is what the
+    /// EPUB path's strict parser risks with ANY undefined entity — the
+    /// lenient tokenizer here keeps the readable middle either way.
     private func readEntity() -> String {
+        let entityStart = index
         var name = ""
         var cursor = index + 1
         while cursor < source.count, name.count < 32 {
@@ -433,15 +438,14 @@ final class HtmlReader {
         if name == "gt" { return ">" }
         if name == "quot" { return "\"" }
         if name == "apos" { return "'" }
-        // Unknown names keep their bare text — `&weirdname;` reads as
-        // "weirdname" rather than vanishing. Losing the whole token is what
-        // the EPUB path's pre-pass does (a strict parser treats ANY undefined
-        // entity as fatal and one bad name truncates the rest of the chapter),
-        // but here the surrounding words survive anyway, so the readable
-        // middle is the better outcome.
+        // Unknown names keep their whole `&weirdname;` token — the source's
+        // own stray markup, not an invented word. (The EPUB path's pre-pass
+        // strips these, because a strict parser treats ANY undefined entity
+        // as fatal and one bad name truncates the rest of the chapter; the
+        // lenient tokenizer here has no such constraint.)
         if let known = XhtmlText.namedEntities[name] { return known }
         if let known = HtmlReader.extraEntities[name] { return known }
-        return name
+        return String(source[entityStart...cursor])
     }
 
     /// Named entities `XhtmlText.namedEntities` does not carry but real
@@ -480,7 +484,7 @@ final class HtmlReader {
         "Scedilla": "\u{015E}", "scedilla": "\u{015F}", "Tcaron": "\u{0164}", "tcaron": "\u{0165}",
         "Utilde": "\u{0168}", "utilde": "\u{0169}", "Umacr": "\u{016A}", "umacr": "\u{016B}",
         "Uring": "\u{016E}", "uring": "\u{016F}", "Uuml": "\u{0170}", "uuml": "\u{0171}",
-        "Yacute": "\u{0177}", "yacute": "\u{00FD}", "Zacute": "\u{0179}", "zacute": "\u{017A}",
+        "Yacute": "\u{00DD}", "yacute": "\u{00FD}", "Zacute": "\u{0179}", "zacute": "\u{017A}",
         "Zdot": "\u{017B}", "zdot": "\u{017C}", "Zcaron": "\u{017D}", "zcaron": "\u{017E}",
         // Greek.
         "alpha": "\u{03B1}", "beta": "\u{03B2}", "gamma": "\u{03B3}", "delta": "\u{03B4}",
