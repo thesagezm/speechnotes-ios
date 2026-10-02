@@ -109,9 +109,11 @@ struct BookPDFReaderView: View {
     }
 
     /// Trailing rail for landscape — PDF twin of the editor's rail, plus the
-    /// per-chapter export button the portrait bar carries. The page stepper
-    /// rides the rail (v1.7.2): the portrait pageBar has the chevrons, the
-    /// landscape layout has no bottom band, and prev/next were missing here.
+    /// per-chapter export button the portrait bar carries. The stepper rides
+    /// the rail and steps CHAPTERS (the EPUB reader's semantics, user
+    /// request): the chapter is the unit the player speaks, and portrait
+    /// carries the same chevrons in its chapter bar. Page stepping stays in
+    /// PDFKit's own scroll/swipe and the Contents sheet.
     private var railPlayerBar: some View {
         PlaybackRail(
             action: PlaybackRail.Action(
@@ -129,11 +131,12 @@ struct BookPDFReaderView: View {
                 readAlongOn: readAlongEnabled,
                 rate: player.rateMultiplier,
                 onRateChange: { player.rateMultiplier = $0 },
-                onStepBack: { goToPage(currentPage - 1) },
-                onStepForward: { goToPage(currentPage + 1) },
-                stepLabel: pageCount > 0 ? "Page \(currentPage + 1)/\(pageCount)" : nil,
-                stepBackEnabled: currentPage > 0,
-                stepForwardEnabled: pageCount == 0 || currentPage < pageCount - 1
+                onStepBack: { goChapter(currentChapterIndex - 1) },
+                onStepForward: { goChapter(currentChapterIndex + 1) },
+                stepLabel: railStepLabel,
+                stepBackEnabled: currentChapterIndex > 0,
+                stepForwardEnabled: totalChapters == 0
+                    || currentChapterIndex < totalChapters - 1
             ),
             voiceLabel: player.currentVoiceDescription,
             progress: player.progress,
@@ -171,6 +174,51 @@ struct BookPDFReaderView: View {
 
     private var chapterIsActive: Bool {
         player.nowPlayingBookId == book.id.uuidString
+    }
+
+    /// The manifest chapter the visible page sits in, CLAMPED to the shelf —
+    /// the stepper must always have a current value even when the page sits
+    /// before the first chapter or in a gap between two of them.
+    private var currentChapterIndex: Int {
+        guard let chapters = book.pdfChapters, !chapters.isEmpty else { return 0 }
+        if let index = chapters.firstIndex(where: { currentPage >= $0.startPage && currentPage <= $0.endPage }) {
+            return index
+        }
+        // Before the first chapter (cover/colophon): step from its start.
+        return currentPage < (chapters.first?.startPage ?? 0) ? 0 : chapters.count - 1
+    }
+
+    private var totalChapters: Int { book.pdfChapters?.count ?? 0 }
+
+    /// "Ch 3/9 · p 42" — the landscape rail's position readout.
+    private var railStepLabel: String? {
+        guard totalChapters > 0 else {
+            return pageCount > 0 ? "p \(currentPage + 1)/\(pageCount)" : nil
+        }
+        var label = "Ch \(currentChapterIndex + 1)/\(totalChapters)"
+        if pageCount > 0 { label += " · p \(currentPage + 1)" }
+        return label
+    }
+
+    /// "Chapter 3 of 9 — The Reunion" (portrait chapter bar), or the page
+    /// count alone when the PDF resolved no chapters.
+    private var chapterBarLabel: String {
+        guard let chapters = book.pdfChapters, !chapters.isEmpty else {
+            return pageCount > 0 ? "Page \(currentPage + 1) of \(pageCount)" : "PDF"
+        }
+        let number = "Chapter \(currentChapterIndex + 1) of \(chapters.count)"
+        let label = chapters[currentChapterIndex].label
+        return label.isEmpty ? number : "\(number) — \(label)"
+    }
+
+    /// "pp. 42–51" under the chapter label — where the chapter starts and
+    /// ends, so the bar doubles as the page readout the old bar carried.
+    private var chapterRangeLabel: String? {
+        guard let chapters = book.pdfChapters, !chapters.isEmpty else { return nil }
+        let chapter = chapters[currentChapterIndex]
+        return chapter.endPage > chapter.startPage
+            ? "Pages \(chapter.startPage + 1)–\(chapter.endPage + 1)"
+            : "Page \(chapter.startPage + 1)"
     }
 
     var body: some View {
@@ -333,17 +381,64 @@ struct BookPDFReaderView: View {
 
     // MARK: - Page bar
 
+    /// The portrait chapter bar — the EPUB reader's exact shape, on the PDF's
+    /// own chapter list (outline / headings / page ranges). Stepping is by
+    /// CHAPTER; the chapter's page range rides under the label so the page
+    /// readout the old bar carried is not lost. Falls back to the page count
+    /// alone when the book resolved no chapters at all.
     private var pageBar: some View {
-        HStack {
-            Spacer()
-            Text(pageCount > 0 ? "Page \(currentPage + 1) of \(pageCount)" : "PDF")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
-            Spacer()
+        VStack(spacing: 0) {
+            if totalChapters > 0 {
+                HStack(spacing: 16) {
+                    Button {
+                        Haptics.tap()
+                        goChapter(currentChapterIndex - 1)
+                    } label: {
+                        Image(systemName: "chevron.left")
+                    }
+                    .disabled(currentChapterIndex <= 0)
+                    .accessibilityLabel("Previous chapter")
+
+                    Spacer()
+                    VStack(spacing: 1) {
+                        Text(chapterBarLabel)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                        if let range = chapterRangeLabel {
+                            Text(range)
+                                .font(.caption2.monospacedDigit())
+                                .foregroundStyle(.tertiary)
+                                .lineLimit(1)
+                        }
+                    }
+                    Spacer()
+
+                    Button {
+                        Haptics.tap()
+                        goChapter(currentChapterIndex + 1)
+                    } label: {
+                        Image(systemName: "chevron.right")
+                    }
+                    .disabled(totalChapters > 0 && currentChapterIndex >= totalChapters - 1)
+                    .accessibilityLabel("Next chapter")
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+            } else {
+                HStack {
+                    Spacer()
+                    Text(pageCount > 0 ? "Page \(currentPage + 1) of \(pageCount)" : "PDF")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                    Spacer()
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+            }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
         .background(.bar)
     }
 
@@ -517,6 +612,16 @@ struct BookPDFReaderView: View {
     /// "TOC taps don't go to the page, in-book links do" report). The page
     /// index is instance-independent; resolving it in the reader's own
     /// document always lands.
+    /// Steps to the FIRST page of the chapter at `index` — the EPUB reader's
+    /// chapter chevrons, on the PDF's page-range chapters. Clamped, and the
+    /// position write follows the page jump so reopening stays put.
+    private func goChapter(_ index: Int) {
+        guard let chapters = book.pdfChapters, !chapters.isEmpty else { return }
+        let clamped = max(0, min(chapters.count - 1, index))
+        guard clamped != currentChapterIndex || currentPage < chapters[clamped].startPage else { return }
+        goToPage(chapters[clamped].startPage)
+    }
+
     private func goToPage(_ index: Int) {
         guard let pdfView, let document = pdfView.document,
               index >= 0, index < document.pageCount,
