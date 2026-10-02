@@ -195,8 +195,8 @@ private final class RtfReader {
         // An `\info` field's text arrives as raw bytes inside the group that
         // held it, never through the builder (the builder is bypassed while
         // skipDepth > 0) — so it is captured at the group's close.
-        if infoKey != nil, !infoBytes.isEmpty {
-            captureInfo(key: infoKey, raw: Data(infoBytes))
+        if let key = infoKey, !infoBytes.isEmpty {
+            captureInfo(key: key, raw: Data(infoBytes))
             infoBytes = []
         }
         guard let state = stack.popLast() else {
@@ -212,7 +212,7 @@ private final class RtfReader {
 
     // MARK: Control words
 
-    private func controlWord() throws {
+    private func controlWord() {
         var word = ""
         while index < bytes.count {
             let byte = bytes[index]

@@ -150,7 +150,7 @@ public enum PlainTextBookParser {
     /// A heading's spoken text: the `#` markers go, the words stay.
     static func tidyHeading(_ block: String) -> String {
         guard block.hasPrefix("#") else { return block }
-        let withoutMarks = block.drop { $0 == "#" }
+        let withoutMarks = String(block.drop { $0 == "#" })
         return stripMarkdownInline(withoutMarks)
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -199,8 +199,9 @@ public enum PlainTextBookParser {
             return min(max(level, 1), 6)
         }
         guard block.count <= 80, block.count >= 2 else { return nil }
-        if runningHeading.matches(block) { return 2 }
-        if numberedHeading.matches(block) { return 2 }
+        let range = NSRange(block.startIndex..., in: block)
+        if runningHeading.firstMatch(in: block, range: range) != nil { return 2 }
+        if numberedHeading.firstMatch(in: block, range: range) != nil { return 2 }
         return nil
     }
 

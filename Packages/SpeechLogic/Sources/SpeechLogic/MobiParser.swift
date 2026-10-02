@@ -433,9 +433,7 @@ public enum MobiParser {
             }
         }
 
-        for match in blockBoundaryRegex.matches(
-            in: working, range: NSRange(working.startIndex..., in: working)
-        ) {
+        for match in matches(of: blockBoundaryRegex, in: working) {
             guard let range = Range(match.range, in: working) else { continue }
             let chunk = String(working[cursor..<range.lowerBound])
             cursor = range.upperBound
@@ -488,7 +486,7 @@ public enum MobiParser {
     /// reader's one-chapter-at-a-time memory bound still holds.
     static func chapters(from items: [Item], wholeBook html: String) -> [MobiChapter] {
         guard !items.isEmpty else {
-            let whole = sanitize(replacing(Self.anyTagPattern, in: html, with: " "))
+            let whole = sanitize(replacing(anyTagRegex, in: html, with: " "))
             return [MobiChapter(title: nil, text: whole)]
         }
 
@@ -525,7 +523,7 @@ public enum MobiParser {
         }
         flush()
         if result.isEmpty {
-            let whole = sanitize(replacing(Self.anyTagPattern, in: html, with: " "))
+            let whole = sanitize(replacing(anyTagRegex, in: html, with: " "))
             return [MobiChapter(title: nil, text: whole)]
         }
         return result
@@ -606,6 +604,17 @@ public enum MobiParser {
         guard let regex else { return text }
         let range = NSRange(text.startIndex..., in: text)
         return regex.stringByReplacingMatches(in: text, range: range, withTemplate: replacement)
+    }
+
+    /// Regex matches over a whole string, tolerating a pattern that failed to
+    /// compile (which would be a developer error — the patterns above are
+    /// literals — but must not take a book import down with it).
+    private static func matches(
+        of regex: NSRegularExpression?,
+        in text: String
+    ) -> [NSTextCheckingResult] {
+        guard let regex else { return [] }
+        return regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
     }
 
     // MARK: - EXTH

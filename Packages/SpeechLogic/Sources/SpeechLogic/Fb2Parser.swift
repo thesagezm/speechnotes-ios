@@ -141,6 +141,7 @@ private final class Fb2Delegate: NSObject, XMLParserDelegate {
     private var seriesBuffer = ""
     private var capturingSeries = false
     private var nameBuffer = ""
+    private var capturingName = false
     private var authorParts: [String] = []
     private(set) var titleText: String?
     private(set) var authorText: String?
@@ -258,7 +259,7 @@ private final class Fb2Delegate: NSObject, XMLParserDelegate {
         case "p", "v", "text", "subtitle":
             closeTextElement(named: name)
         case "level":
-            let value = Fb2Parser.tidy(buffer)
+            let value = Fb2Delegate.tidy(buffer)
             buffer = ""
             if let level = Int(value), level > 0 { titleLevel = level }
         case "title":
@@ -268,7 +269,7 @@ private final class Fb2Delegate: NSObject, XMLParserDelegate {
         case "strong", "emphasis":
             emphasisDepth = max(0, emphasisDepth - 1)
         case "th", "td":
-            let text = Fb2Parser.tidy(buffer)
+            let text = Fb2Delegate.tidy(buffer)
             buffer = ""
             if tableDepth > 0 {
                 rowCells.append(DocumentTableCell(text: text, columnSpan: 1, isHeader: inHeaderCell))
@@ -294,19 +295,19 @@ private final class Fb2Delegate: NSObject, XMLParserDelegate {
             inBody = false
             resolveCover()
         case "book-title":
-            let value = Fb2Parser.tidy(titleBuffer)
+            let value = Fb2Delegate.tidy(titleBuffer)
             if !value.isEmpty, titleText == nil { titleText = value }
             capturingTitle = false
         case "lang":
-            let value = Fb2Parser.tidy(languageBuffer)
+            let value = Fb2Delegate.tidy(languageBuffer)
             if !value.isEmpty, languageText == nil { languageText = value }
             capturingLanguage = false
         case "series":
-            let value = Fb2Parser.tidy(seriesBuffer)
+            let value = Fb2Delegate.tidy(seriesBuffer)
             if !value.isEmpty, seriesText == nil { seriesText = value }
             capturingSeries = false
         case "first-name", "middle-name", "last-name", "nick":
-            let value = Fb2Parser.tidy(nameBuffer)
+            let value = Fb2Delegate.tidy(nameBuffer)
             if !value.isEmpty { authorParts.append(value) }
             capturingName = false
             if authorText == nil, !authorParts.isEmpty {
@@ -331,7 +332,7 @@ private final class Fb2Delegate: NSObject, XMLParserDelegate {
             base64Encoded: binaryBuffer,
             options: .ignoreUnknownCharacters
         ), !data.isEmpty else { return }
-        guard let mime = Fb2Parser.displayableMime(for: binaryMime) else { return }
+        guard let mime = Fb2Delegate.displayableMime(for: binaryMime) else { return }
         if let existing = imagePool[id] {
             images[existing] = DocumentImage(data: data, mime: mime, alt: "")
         } else {
@@ -348,7 +349,7 @@ private final class Fb2Delegate: NSObject, XMLParserDelegate {
     }
 
     private func closeTextElement(named name: String) {
-        let text = Fb2Parser.tidy(buffer)
+        let text = Fb2Delegate.tidy(buffer)
         buffer = ""
         let wasCandidate = firstParagraphIsCandidate
         firstParagraphIsCandidate = false
