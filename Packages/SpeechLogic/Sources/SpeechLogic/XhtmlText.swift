@@ -96,6 +96,70 @@ public enum XhtmlText {
         return out
     }
 
+    /// Lenient entity decoding for the reader paths that have NO strict XML
+    /// parser after them (MOBI's HTML is one) — there `&amp;` must decode
+    /// HERE, or the book reads "amp" mid-sentence. Known names and numeric
+    /// references decode; an unknown `&name;` keeps its whole token verbatim
+    /// (nothing downstream fatals on it, the way the EPUB path's XMLParser
+    /// would).
+    public static func decodingEntitiesLeniently(_ text: String) -> String {
+        guard text.contains("&") else { return text }
+        var out = ""
+        out.reserveCapacity(text.count)
+        var i = text.startIndex
+        while i < text.endIndex {
+            let c = text[i]
+            if c == "&" {
+                var j = text.index(after: i)
+                var name = ""
+                var closed = false
+                while j < text.endIndex, name.count < 32 {
+                    let cj = text[j]
+                    if cj == ";" { closed = true; break }
+                    guard cj.isLetter || cj.isNumber || cj == "#" else { break }
+                    name.append(cj)
+                    j = text.index(after: j)
+                }
+                if closed, !name.isEmpty {
+                    var decoded: String?
+                    if name.hasPrefix("#") {
+                        let digits = name.dropFirst()
+                        let scalar: Unicode.Scalar?
+                        if digits.first == "x" || digits.first == "X" {
+                            scalar = UInt32(digits.dropFirst(), radix: 16).flatMap(Unicode.Scalar.init)
+                        } else {
+                            scalar = UInt32(digits).flatMap(Unicode.Scalar.init)
+                        }
+                        decoded = scalar.map { String(Character($0)) }
+                    } else if let known = namedEntities[name] {
+                        decoded = known
+                    } else {
+                        switch name {
+                        case "amp": decoded = "&"
+                        case "lt": decoded = "<"
+                        case "gt": decoded = ">"
+                        case "quot": decoded = "\""
+                        case "apos": decoded = "'"
+                        default: break
+                        }
+                    }
+                    if let decoded {
+                        out += decoded
+                        i = text.index(after: j)
+                        continue
+                    }
+                    // Unknown: the source's own stray token, verbatim.
+                    out += text[i...j]
+                    i = text.index(after: j)
+                    continue
+                }
+            }
+            out.append(c)
+            i = text.index(after: i)
+        }
+        return out
+    }
+
     /// Extracts speech text from serialized XHTML. Returns "" for input with
     /// no extractable text (a cover-only spine item, for instance).
     public static func plainText(from xhtml: Data) -> String {

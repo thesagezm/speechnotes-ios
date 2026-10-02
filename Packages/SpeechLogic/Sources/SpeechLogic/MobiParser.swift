@@ -107,9 +107,10 @@ public enum MobiParser {
             )
         }
         switch header.compression {
-        case 1, 2, 17480:
-            break  // 17480 is the "no compression" marker some writers emit
-        case 65, 68:  // 'A', 'D' — the first byte of Huff/CDIC's "DH"
+        case 1, 2:
+            break
+        case 17480:  // 0x4448 'DH' — Huff/CDIC tables, NOT "no compression";
+                     // reading its bitstream as raw bytes is binary noise.
             throw MobiError.unsupportedVariant(
                 "This book uses Huff/CDIC compression, which isn't supported yet."
             )
@@ -329,13 +330,16 @@ public enum MobiParser {
     static func trailingEntryBytes(in record: Data, extraFlags: UInt16) -> Int {
         guard extraFlags != 0, !record.isEmpty else { return 0 }
         var total = 0
-        var flags = extraFlags >> 1
-        while flags != 0 {
-            if flags & 1 == 1 {
+        // Entries occur in bit order — bit 1 (0x1, multibyte) nearest the
+        // text, higher bits stacked toward the record's end — so peeling
+        // from the END means the highest varint bit comes off first.
+        var bit = 15
+        while bit >= 1 {
+            if extraFlags & (1 << bit) != 0 {
                 guard record.count > total else { return 0 }
                 total += trailingCount(in: record, upTo: record.count - total)
             }
-            flags >>= 1
+            bit -= 1
         }
         if extraFlags & 1 == 1 {
             let offset = record.count - total - 1
@@ -354,7 +358,7 @@ public enum MobiParser {
     /// the output, is skipped rather than clamped, exactly as the reference
     /// implementation does: clamping would splice unrelated bytes into prose.
     static func decompress(_ input: Data, compression: UInt16) -> Data {
-        if compression == 1 || compression == 17480 { return input }
+        if compression == 1 { return input }
         let bytes = [UInt8](input)
         var out = [UInt8]()
         out.reserveCapacity(min(bytes.count * 4, maxTextBytes))
@@ -450,7 +454,12 @@ public enum MobiParser {
             guard range.lowerBound >= cursor else { continue }
             let chunk = String(working[cursor..<range.lowerBound])
             cursor = range.upperBound
-            let text = sanitize(replacing(anyTagRegex, in: chunk, with: " "))
+            // What's left after the boundary tags are INLINE tags (font, em,
+            // span, a…). They vanish — browsers render inline markup without
+            // whitespace, and replacing it with a space shredded words:
+            // "<font>a</font>sh" decoded as "a sh" (the artifact the
+            // word-diff against calibre's own conversion caught).
+            let text = sanitize(XhtmlText.decodingEntitiesLeniently(replacing(anyTagRegex, in: chunk, with: "")))
 
             // Group 2 is a heading LEVEL, which only an OPENING `<hN …>` has.
             if match.range(at: 2).location != NSNotFound,
@@ -483,7 +492,7 @@ public enum MobiParser {
             flushParagraph()
         }
 
-        let tail = sanitize(replacing(anyTagRegex, in: String(working[cursor...]), with: " "))
+        let tail = sanitize(XhtmlText.decodingEntitiesLeniently(replacing(anyTagRegex, in: String(working[cursor...]), with: "")))
         if !tail.isEmpty {
             if pendingHeading { items.append(.heading(tail)) }
             else { paragraph.append(tail) }
@@ -499,7 +508,7 @@ public enum MobiParser {
     /// reader's one-chapter-at-a-time memory bound still holds.
     static func chapters(from items: [Item], wholeBook html: String) -> [MobiChapter] {
         guard !items.isEmpty else {
-            let whole = sanitize(replacing(anyTagRegex, in: html, with: " "))
+            let whole = sanitize(XhtmlText.decodingEntitiesLeniently(replacing(anyTagRegex, in: html, with: "")))
             return [MobiChapter(title: nil, text: whole)]
         }
 
@@ -536,7 +545,7 @@ public enum MobiParser {
         }
         flush()
         if result.isEmpty {
-            let whole = sanitize(replacing(anyTagRegex, in: html, with: " "))
+            let whole = sanitize(XhtmlText.decodingEntitiesLeniently(replacing(anyTagRegex, in: html, with: "")))
             return [MobiChapter(title: nil, text: whole)]
         }
         return result
@@ -683,17 +692,21 @@ public enum MobiParser {
 
     // MARK: - Byte helpers
 
+    /// PalmDB/MOBI structure fields are stored BIG-endian (68k-era format).
+    /// The first draft read these little-endian — every header field decoded
+    /// as a byte-swapped value (a 574-record book counted as 15874), so no
+    /// real book could parse past the record list.
     static func u16(_ data: Data, _ offset: Int) -> UInt16 {
         guard offset + 2 <= data.count else { return 0 }
-        return UInt16(data[data.startIndex + offset])
-            | (UInt16(data[data.startIndex + offset + 1]) << 8)
+        return (UInt16(data[data.startIndex + offset]) << 8)
+            | UInt16(data[data.startIndex + offset + 1])
     }
 
     static func u32(_ data: Data, _ offset: Int) -> UInt32 {
         guard offset + 4 <= data.count else { return 0 }
         var value: UInt32 = 0
         for index in 0..<4 {
-            value |= UInt32(data[data.startIndex + offset + index]) << (8 * index)
+            value = (value << 8) | UInt32(data[data.startIndex + offset + index])
         }
         return value
     }
@@ -786,15 +799,17 @@ struct PalmDatabase {
         return true
     }
 
-    /// Record bytes, 2-byte checksum stripped. A deleted record (offset 0, or
+    /// Record bytes at the entry's offset. A deleted record (offset 0, or
     /// the sentinel a truncated list produced) reads as nil rather than a
-    /// slice at a nonsense index.
+    /// slice at a nonsense index. There is NO per-record checksum in the
+    /// format — an earlier draft stripped two bytes, which shifted every
+    /// real book's records and broke the header magic.
     func record(_ index: Int) -> Data? {
         guard offsets.indices.contains(index) else { return nil }
         let start = offsets[index]
-        guard start > 78, start + 8 <= archive.count else { return nil }
+        guard start > 78, start < archive.count else { return nil }
         let end = offsets.indices.contains(index + 1) ? offsets[index + 1] : archive.count
         guard end > start, end <= archive.count else { return nil }
-        return Data(archive[(start + 2)..<end])
+        return Data(archive[start..<end])
     }
 }
