@@ -32,17 +32,27 @@ final class MobiParserTests: XCTestCase {
         var cursor = listEnd + 2 // +2 for the next-IDs list's terminating zero
         for record in records {
             offsets.append(cursor)
-            payload.append(contentsOf: [0, 0])   // 2-byte checksum
+            // Records are contiguous bytes at their offset — NO per-record
+            // checksum (an earlier draft prefixed [0,0] and had the reader
+            // strip it; real files have no such bytes, so the reader was
+            // fixed, and this fixture must mirror the format).
             payload.append(record)
-            cursor += record.count + 2
+            cursor += record.count
         }
 
         var list = Data(count: listSize)
         for (index, offset) in offsets.enumerated() {
-            put(UInt32(offset), at: 78 + index * 8, in: &list)
+            // Local list offsets — `78 + index * 8` would write at the PDB's
+            // absolute offset into a listSize-byte buffer, and
+            // replaceSubrange past endIndex is a runtime trap (signal 5).
+            // The 78 lands in the concatenation below instead.
+            put(UInt32(offset), at: index * 8, in: &list)
         }
-        var padding = Data(count: 2)
-        padding.append(contentsOf: [0, 0])
+        // The next-IDs list's terminating zero: exactly TWO bytes. (An
+        // earlier draft allocated 2 and appended 2 more — 4 — which put
+        // every record offset 2 bytes off; the bogus checksum strip used
+        // to cancel it, and both were removed together.)
+        let padding = Data(count: 2)
         return header + list + padding + payload
     }
 
@@ -67,18 +77,31 @@ final class MobiParserTests: XCTestCase {
         exthAuthor: String? = nil,
         headerLength: Int = 232
     ) -> Data {
-        var exth = Data("EXTH".utf8)
+        // EXTH records are built with appends: the `put` helper wraps
+        // Data.replaceSubrange, which TRAPS when the range extends past
+        // endIndex — appending to fresh/4-byte Data that way is a runtime
+        // crash (signal 5), not a write. (`put` stays for the in-bounds
+        // fixed-offset fields below.)
+        func appended(_ value: UInt32, to data: inout Data) {
+            data.append(contentsOf: withUnsafeBytes(of: value.bigEndian) { Data($0) })
+        }
+
         var entries: [Data] = []
         for (type, value) in [(503, exthTitle), (100, exthAuthor)] {
             guard let value, !value.isEmpty else { continue }
             var entry = Data()
-            put(UInt32(type), at: 0, in: &entry)
-            put(UInt32(8 + value.utf8.count), at: 4, in: &entry)
+            appended(UInt32(type), to: &entry)
+            appended(UInt32(8 + value.utf8.count), to: &entry)
             entry.append(contentsOf: Array(value.utf8))
             entries.append(entry)
         }
-        put(UInt32(8 + entries.reduce(0) { $0 + $1.count }), at: 4, in: &exth)
-        put(UInt32(entries.count), at: 8, in: &exth)
+        let exthPayloadBytes = entries.reduce(0) { $0 + $1.count }
+        var exth = Data("EXTH".utf8)
+        // The declared EXTH header length includes the 8 bytes after the
+        // magic (magic 4 + length 4 + count 4 + entries — the "12 +" is not
+        // an error; a real reader validates entries against it).
+        appended(UInt32(12 + exthPayloadBytes), to: &exth)
+        appended(UInt32(entries.count), to: &exth)
         for entry in entries { exth.append(entry) }
 
         // The fixed header is `headerLength` bytes; EXTH starts at
@@ -102,9 +125,11 @@ final class MobiParserTests: XCTestCase {
         // UInt16 and UInt32 overloads, and the ambiguity only shows up in a
         // Swift 6 compiler, not in review.)
         put(UInt32(0x40), at: 0x80, in: &record)
-        if headerLength > 0x84 {
-            record.removeSubrange(0x84..<(16 + headerLength))
-        }
+        // The header keeps its full `headerLength` bytes — a real MOBI6
+        // header is 232 bytes and EXTH follows it at 16 + headerLength. (An
+        // earlier draft trimmed bytes 0x84..<248 to shrink the fixture,
+        // which moved the EXTH block and broke the reader's primary
+        // extraction path.)
         record.append(exth)
         return record
     }
@@ -159,9 +184,10 @@ final class MobiParserTests: XCTestCase {
     }
 
     func testSpacePlusAsciiShorthand() {
-        // 0xC1 → ' ' then 0x41 'A'; 0xE9 → ' ' then 0x69 'i'.
+        // 0xC0-0xFF is the byte-pair form: ' ' then (byte ^ 0x80) —
+        // 0xC1 → " A", 0xE9 → " i" (mobile-read wiki, PalmDOC).
         let out = MobiParser.decompress(Data([0xC1, 0xE9]), compression: 2)
-        XCTAssertEqual(String(decoding: out, as: UTF8.self), "A i")
+        XCTAssertEqual(String(decoding: out, as: UTF8.self), " A i")
     }
 
     func testBackReferenceRepeatsEarlierBytes() {
@@ -188,22 +214,27 @@ final class MobiParserTests: XCTestCase {
     func testUncompressedCompressionReturnsInput() {
         let input = Data("plain text".utf8)
         XCTAssertEqual(MobiParser.decompress(input, compression: 1), input)
-        XCTAssertEqual(MobiParser.decompress(input, compression: 17480), input)
+        // 17480 ('DH', Huff/CDIC) is NOT a pass-through — parse() rejects it
+        // as an unsupported variant rather than decoding its bitstream as
+        // PalmDOC commands and producing noise.
     }
 
     // MARK: - Trailing entries
 
     func testTrailingEntryBytesAreStripped() {
-        // extraFlags 3 = one variable-length count + a final 1-or-2-byte
-        // count. A record ending `…A\x05\x02` carries 2 trailing bytes: the
-        // 0x05 (top bit clear, low 7 bits = 5? no — read from the END) …
-        // concretely: trailing = 1 byte whose top bit is set (value 2) plus a
-        // final count of 1 → 3 bytes.
+        // extraFlags 3 = the multibyte overlap (0x1, nearest the text) plus
+        // one backward-varint entry (0x2, toward the record's end). Real
+        // record tails look exactly like this — calibre books end
+        // `…<text> 00 81`: a 0x00 multibyte count (N = 0) and a one-byte
+        // size varint 0x81 (high bit = terminator, value 1).
+        //
+        // Here the varint entry carries one data byte. Entries peel from the
+        // END, and bit 0 (multibyte) sits nearest the text, so the byte
+        // order is [text][multibyte][entry data][size varint]:
         var record = Data("body".utf8)
-        record.append(0x02)   // variable count: top bit set, value 2
-        record.append(0x01)   // final count byte, & 0x3 + 1 = 2
-        record.append(0x00)
-        // flags = 3: one bit-0 count of 2, then bit 0 adds (0 & 3) + 1 = 1.
+        record.append(0x00)   // multibyte count byte: N = (0x00 >> 1) & 3 = 0
+        record.append(0x41)   // the entry's one data byte
+        record.append(0x82)   // size varint: high bit set, value 2
         let cut = MobiParser.trailingEntryBytes(in: record, extraFlags: 3)
         XCTAssertEqual(cut, 3)
         XCTAssertEqual(String(decoding: record.prefix(record.count - cut), as: UTF8.self), "body")
@@ -309,8 +340,9 @@ final class MobiParserTests: XCTestCase {
     }
 
     func testHuffCDICBookSaysSoRatherThanProducingNoise() {
-        // 'DH' = 0x44 0x48.
-        let header = makeHeaderRecord(compression: 0x44, textLength: 10, textRecordCount: 1)
+        // 'DH' = 0x4448 = 17480 — the compression word IS the two ASCII
+        // bytes, read big-endian.
+        let header = makeHeaderRecord(compression: 17480, textLength: 10, textRecordCount: 1)
         let pdb = makePDB(records: [header, Data("x".utf8)])
         XCTAssertThrowsError(try MobiParser.parse(book: pdb)) { error in
             guard case MobiParser.MobiError.unsupportedVariant(let message) = error else {
