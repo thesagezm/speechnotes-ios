@@ -10,21 +10,52 @@ import UniformTypeIdentifiers
 /// book's reader.
 struct BooksView: View {
     /// What the importer offers. `.mpeg4Audio` covers M4B/M4A/MP4 (the same
-    /// UTType family), `.mp3` the ID3-chaptered MP3s, and `.epub`/`.pdf` the
-    /// read-along books. The UTType set lives here rather than in BooksStore
-    /// so the picker's contents and the store's accepted extensions cannot
-    /// drift apart.
-    private static let importableBookTypes: [UTType] = [
-        .epub, .pdf, .mpeg4Audio, .mp3,
-        // Office documents normalize to EPUB at import (DocumentEpub);
-        // presentations become one chapter per slide.
-        UTType(importedAs: "org.openxmlformats.wordprocessingml.document"),
-        UTType(importedAs: "org.oasis.opendocument.text"),
-        UTType(importedAs: "org.openxmlformats.presentationml.presentation"),
-        UTType(importedAs: "org.oasis.opendocument.presentation"),
-        // Legacy Word 97-2003 — best-effort binary text extraction.
-        UTType(importedAs: "com.microsoft.word.doc"),
-    ]
+    /// UTType family), `.mp3` the ID3-chaptered MP3s, `.audioFileContent` the
+    /// Opus/Ogg containers, and `.epub`/`.pdf` the read-along books. The
+    /// document formats are named as IMPORTED UTTypes by their UTI or by
+    /// filename extension, because several (azw3, pdb, htmlz, markdown) have
+    /// no system type at all — asking for one greys the file out of the
+    /// picker. The UTType list lives here rather than in BooksStore so the
+    /// picker's contents and the store's accepted extensions cannot drift
+    /// apart; `DocumentBook.supportedExtensions` is the single source for the
+    /// document half of both.
+    private static let importableBookTypes: [UTType] = {
+        var types: [UTType] = [.epub, .pdf, .mpeg4Audio, .mp3, .audioFileContent]
+        // By UTI first (resolves to the system's type when it has one), then
+        // by extension for everything that doesn't.
+        let byUTI: [String: String] = [
+            "docx": "org.openxmlformats.wordprocessingml.document",
+            "doc": "com.microsoft.word.doc",
+            "odt": "org.oasis.opendocument.text",
+            "pptx": "org.openxmlformats.presentationml.presentation",
+            "odp": "org.oasis.opendocument.presentation",
+            "rtf": "com.apple.rtf",
+            "html": "public.html",
+            "htm": "public.html",
+            "md": "net.daringfireball.markdown",
+            "markdown": "net.daringfireball.markdown",
+            "txt": "public.plain-text",
+            "text": "public.plain-text",
+            "mobi": "com.apple.mobibook",
+            "azw": "com.amazon.azw",
+        ]
+        var seen = Set<String>()
+        for (ext, uti) in byUTI.sorted(by: { $0.key < $1.key }) {
+            let type = UTType(importedAs: uti)
+            let id = type.identifier
+            guard seen.insert(id).inserted else { continue }
+            types.append(type)
+            _ = ext
+        }
+        // Extensions with no system type: named as imported UTTypes so the
+        // picker shows them rather than silently hiding the file.
+        for ext in DocumentBook.exoticExtensions.sorted() where !byUTI.keys.contains(ext) {
+            let type = UTType(filenameExtension: ext) ?? UTType(importedAs: "org.speechnotes.\(ext)")
+            guard seen.insert(type.identifier).inserted else { continue }
+            types.append(type)
+        }
+        return types
+    }()
 
     // App-level store (SpeechnotesApp) — BookDrop imports land on the same
     // instance, so received books appear on this shelf without a reload.

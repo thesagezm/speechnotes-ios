@@ -147,8 +147,9 @@ extension Book {
     }
 
     /// What kind of document a shelf item really is, from the ORIGINAL file
-    /// extension (office formats normalize to EPUB at import, so the plain
-    /// format read "EPUB" for a Word doc). nil for genuine EPUBs.
+    /// extension (every document format normalizes to EPUB at import, so the
+    /// plain format read "EPUB" for a Word doc — and for a Kindle book).
+    /// nil for genuine EPUBs.
     var docKindLabel: String? {
         guard format == .epub else { return nil }
         switch (originalFileName as NSString).pathExtension.lowercased() {
@@ -157,6 +158,14 @@ extension Book {
         case "odt": return "ODT"
         case "pptx": return "Slides"
         case "odp": return "ODP"
+        case "mobi": return "Mobipocket"
+        case "azw", "azw3": return "Kindle"
+        case "prc": return "PalmDoc"
+        case "fb2": return "FictionBook"
+        case "rtf": return "RTF"
+        case "html", "htm", "htmlz": return "Web page"
+        case "txt", "text": return "Text"
+        case "md", "markdown": return "Markdown"
         default: return nil
         }
     }

@@ -32,7 +32,15 @@ final class ImportService {
     static func canImport(_ url: URL) -> Bool {
         guard url.isFileURL else { return false }
         let pathExtension = url.pathExtension.lowercased()
-        if ["txt", "text", "md", "markdown", "pdf", "docx", "odt", "pptx", "odp", "doc"].contains(pathExtension) { return true }
+        // Every document the Books shelf normalizes also makes an excellent
+        // NOTE: the same chapters flatten to prose here, which is what a user
+        // who drags an .azw3 onto the notes list expects.
+        if pathExtension == "pdf" { return true }
+        if DocumentBook.canNormalize(pathExtension) { return true }
+        if pathExtension == "txt" || pathExtension == "text"
+            || pathExtension == "md" || pathExtension == "markdown" {
+            return true
+        }
         guard let type = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType else {
             // No extension and no type metadata (common before security scope
             // is granted) — let the reader decide; it fails with a log if the
@@ -58,10 +66,12 @@ final class ImportService {
         switch kind {
         case "pdf":
             raw = pdfText(from: url)
-        case "docx", "odt", "pptx", "odp", "doc":
-            // Office documents extract to plain text for NOTES (the Books
-            // shelf normalizes the same files to EPUB instead).
-            raw = officeDocumentText(from: url, kind: kind)
+        case _ where DocumentBook.canNormalize(kind):
+            // Every document format — the office set plus the mobipocket,
+            // FictionBook, RTF, HTML and plain-text readers — flattens to the
+            // same note text. ONE call site now, instead of a switch that had
+            // to be extended at every import.
+            raw = documentText(from: url, kind: kind)
         default:
             raw = plainText(from: url)
         }
@@ -83,27 +93,17 @@ final class ImportService {
         return (title.isEmpty ? "Imported note" : String(title.prefix(60)), text)
     }
 
-    /// DOCX/ODT → speakable note text: parse, join paragraphs with blank
-    /// lines (chapter structure is a Books-side concern; notes want prose).
-    private static func officeDocumentText(from url: URL, kind: String) -> String? {
+    /// Any document format → speakable note text: parse, join paragraphs with
+    /// blank lines (chapter structure is a Books-side concern; notes want
+    /// prose). One dispatch for every format, so adding a reader means editing
+    /// `DocumentBook` and nothing here.
+    private static func documentText(from url: URL, kind: String) -> String? {
         guard let data = coordinatedData(from: url) else {
             Log.shared.error("ImportService: could not read \(kind) data from \(url.lastPathComponent)")
             return nil
         }
         do {
-            let chapters: [DocumentChapter]
-            switch kind {
-            case "docx": chapters = try DocxParser.parse(archive: data)
-            case "odt": chapters = try OdtParser.parse(archive: data)
-            case "pptx": chapters = try PptxParser.parse(archive: data)
-            case "odp": chapters = try OdpParser.parse(archive: data)
-            default:
-                let text = try LegacyDocParser.extractText(archive: data)
-                chapters = [DocumentChapter(title: nil, paragraphs: text
-                    .components(separatedBy: CharacterSet.newlines)
-                    .map { $0.trimmingCharacters(in: .whitespaces) }
-                    .filter { !$0.isEmpty })]
-            }
+            let chapters = try DocumentBook.parse(fileExtension: kind, data: data).chapters
             let lines = chapters.flatMap { chapter -> [String] in
                 var out: [String] = []
                 if let title = chapter.title { out.append(title) }

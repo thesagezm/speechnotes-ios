@@ -79,11 +79,41 @@ targets:
           - CFBundleTypeName: EPUB document
             LSHandlerRank: Alternate
             LSItemContentTypes: [org.idpf.epub-container]
-          # Audiobooks: an M4B/M4A is mpeg4 audio, an MP3 is public.mp3. The
-          # Books importer reads chapters from the file's own metadata.
+          # Audiobooks: an M4B/M4A is mpeg4 audio, an MP3 is public.mp3, and the
+          # Opus/Ogg containers are what store books arrive in when no
+          # DRM-less M4B exists. The importer reads chapters from the file's
+          # own metadata.
           - CFBundleTypeName: Audiobook
             LSHandlerRank: Alternate
-            LSItemContentTypes: [public.mpeg4-audio, public.mp3]
+            LSItemContentTypes: [public.mpeg4-audio, public.mp3, org.opus-audio, org.xiph.ogg]
+          # Document formats that normalize to EPUB at import (DocumentBook):
+          # the office set plus the mobipocket/Kindle, FictionBook, RTF, web
+          # and plain-text readers. Declared so "Open In" can hand them here —
+          # the ones with no system UTI are declared as app-owned types, which
+          # is the only way to claim them.
+          - CFBundleTypeName: Word document
+            LSHandlerRank: Alternate
+            LSItemContentTypes:
+              [org.openxmlformats.wordprocessingml.document, com.microsoft.word.doc]
+          - CFBundleTypeName: OpenDocument text
+            LSHandlerRank: Alternate
+            LSItemContentTypes: [org.oasis.opendocument.text]
+          - CFBundleTypeName: Presentation
+            LSHandlerRank: Alternate
+            LSItemContentTypes:
+              [org.openxmlformats.presentationml.presentation, org.oasis.opendocument.presentation]
+          - CFBundleTypeName: Kindle book
+            LSHandlerRank: Alternate
+            LSItemContentTypes: [com.amazon.azw, com.amazon.azw3, com.apple.mobibook]
+          - CFBundleTypeName: FictionBook
+            LSHandlerRank: Alternate
+            LSItemContentTypes: [com.fictionbook.fb2, org.speechnotes.fb2]
+          - CFBundleTypeName: Rich Text document
+            LSHandlerRank: Alternate
+            LSItemContentTypes: [com.apple.rtf]
+          - CFBundleTypeName: Web page
+            LSHandlerRank: Alternate
+            LSItemContentTypes: [public.html, org.speechnotes.htmlz]
         CFBundleURLTypes:
           - CFBundleURLName: com.speechnotes.ios
             CFBundleURLSchemes: [speechnotes]

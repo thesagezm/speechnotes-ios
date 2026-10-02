@@ -53,7 +53,8 @@ final class BooksStore: ObservableObject {
     /// the audio format.
     nonisolated static func resolveAudioOriginalURL(book: Book) -> URL {
         let dir = bookDirectory(book.id)
-        for ext in ["m4b", "m4a", "mp3", "mp4"] where FileManager.default.fileExists(atPath: dir.appendingPathComponent("original.\(ext)").path) {
+        for ext in ["m4b", "m4a", "mp3", "mp4", "opus", "ogg", "oga"]
+        where FileManager.default.fileExists(atPath: dir.appendingPathComponent("original.\(ext)").path) {
             return dir.appendingPathComponent("original.\(ext)")
         }
         return dir.appendingPathComponent("original.audio")
@@ -346,18 +347,18 @@ final class BooksStore: ObservableObject {
         switch ext {
         case "epub": format = .epub
         case "pdf": format = .pdf
-        // Audiobooks: M4B/M4A are mpeg4 containers, and an MP3 with ID3 CHAP
-        // frames is the other one that carries chapters. Anything else is not
-        // a book.
-        case "m4b", "m4a", "mp4", "mp3": format = .audio
-        // Office documents normalize to EPUB at import (DocumentEpub): the
-        // reader, the TOC and the TTS spine pipeline all consume the result
+        // Audiobooks: the containers that carry chapters. M4B/M4A/MP4 are
+        // MPEG-4, an MP3 uses ID3 CHAP frames. Opus (.opus) and Ogg Vorbis
+        // (.ogg/.oga) join them in this round: they are the format Google
+        // Books / Libby hand out when a store book has no DRM-less M4B, and
+        // refusing them was a "the importer skipped my book" report.
+        case "m4b", "m4a", "mp4", "mp3", "opus", "ogg", "oga": format = .audio
+        // Everything else that normalizes to EPUB at import
+        // (DocumentBook): the office formats, the mobipocket/Kindle family,
+        // FictionBook, RTF, HTML/HTMLZ and plain text/Markdown. The reader,
+        // the TOC and the TTS spine pipeline all consume the generated EPUB
         // unchanged, so downstream nothing ever knows the difference.
-        // Presentations become one chapter per slide.
-        case "docx", "odt", "pptx", "odp": format = .epub
-        // Legacy Word: best-effort binary text extraction, then the same
-        // normalize-to-EPUB path (headless chunking — no heading info).
-        case "doc": format = .epub
+        case _ where DocumentBook.canNormalize(ext): format = .epub
         default:
             format = nil
         }
@@ -377,43 +378,43 @@ final class BooksStore: ObservableObject {
             // which sniffs content, kept playing fine — hiding the damage).
             let destinationExtension = format == .audio ? ext : format.rawValue
             let destination = dir.appendingPathComponent("original.\(destinationExtension)")
-            if ext == "docx" || ext == "odt" || ext == "pptx" || ext == "odp" || ext == "doc" {
-                // Normalize-to-EPUB: parse the office XML into chapters and
-                // emit a real EPUB the reader + TTS pipeline already speak.
-                // v1.7.2: the parse carries the document's images and tables
-                // too — images are packaged into the EPUB (rendered
-                // full-width by the reader), tables become real bordered
-                // HTML tables, and an embedded thumbnail (or the first
-                // image) rides along as the shelf cover.
+            if DocumentBook.canNormalize(ext) {
+                // Normalize-to-EPUB: parse the document into chapters and emit
+                // a real EPUB the reader + TTS pipeline already speak. One
+                // dispatch for every format (DocumentBook) — the office set
+                // plus the mobipocket/Kindle, FictionBook, RTF, HTML/HTMLZ and
+                // plain-text readers. The parse carries the document's images
+                // and tables too: images are packaged into the EPUB (rendered
+                // full-width by the reader), tables become real bordered HTML
+                // tables, and a cover (embedded thumbnail, the book's own art,
+                // or the first image) rides along as the shelf cover.
                 do {
-                    let sourceData = try Data(contentsOf: sourceURL, options: .mappedIfSafe)
-                    let result: DocumentParseResult
-                    switch ext {
-                    case "docx": result = try DocxParser.parseFull(archive: sourceData)
-                    case "odt": result = try OdtParser.parseFull(archive: sourceData)
-                    case "pptx": result = try PptxParser.parseFull(archive: sourceData)
-                    case "odp": result = try OdpParser.parseFull(archive: sourceData)
-                    default:
-                        // .doc — plain text out of the binary, no headings,
-                        // no media.
-                        let text = try LegacyDocParser.extractText(archive: sourceData)
-                        let paragraphs = text
-                            .components(separatedBy: CharacterSet.newlines)
-                            .map { $0.trimmingCharacters(in: .whitespaces) }
-                            .filter { !$0.isEmpty }
-                        result = DocumentParseResult(
-                            chapters: DocumentEpubConverter.chunk(paragraphs: paragraphs)
+                    // Read + parse OFF the main actor. A 50 MB `.azw3` spends
+                    // real seconds decompressing, and this used to run inline
+                    // on the main actor — the "the app freezes while importing
+                    // a book" report.
+                    let epub = try await Task.detached(priority: .userInitiated) { () -> Data in
+                        let sourceData = try Data(contentsOf: sourceURL, options: .mappedIfSafe)
+                        let result = try DocumentBook.parse(fileExtension: ext, data: sourceData)
+                        // The document's own title/author beat the filename when
+                        // the format carries them (every new format does).
+                        let meta = DocumentBook.metadata(fileExtension: ext, data: sourceData)
+                        let fallback = (sourceURL.lastPathComponent as NSString).deletingPathExtension
+                            .replacingOccurrences(of: "_", with: " ")
+                        let title = meta?.title?.isEmpty == false ? meta!.title! : fallback
+                        let author = meta?.author?.isEmpty == false ? meta!.author : nil
+                        Log.shared.info(
+                            "BooksStore: normalized .\(ext) — \(result.chapters.count) chapter(s), "
+                            + "\(result.images.count) image(s), cover \(result.cover == nil ? "none" : "yes")"
                         )
-                    }
-                    let title = (sourceURL.lastPathComponent as NSString).deletingPathExtension
-                        .replacingOccurrences(of: "_", with: " ")
-                    let epub = DocumentEpubConverter.epubData(
-                        chapters: result.chapters,
-                        title: title,
-                        author: nil,
-                        images: result.images,
-                        cover: result.cover
-                    )
+                        return DocumentEpubConverter.epubData(
+                            chapters: result.chapters,
+                            title: title,
+                            author: author,
+                            images: result.images,
+                            cover: result.cover
+                        )
+                    }.value
                     try epub.write(to: destination, options: .atomic)
                 } catch {
                     importError = "Could not read the \(ext.uppercased()) document: \(error.localizedDescription)"
@@ -741,13 +742,16 @@ final class BooksStore: ObservableObject {
         return thumbnail.jpegData(compressionQuality: 0.85)
     }
 
-    // MARK: Office document covers
+    // MARK: Document covers
 
-    /// True when an originalFileName is one of the office formats the
-    /// import normalizes to EPUB.
+    /// True when an originalFileName is one of the documents the import
+    /// normalizes to EPUB — every one of them, not just the office set: a
+    /// `.mobi`, `.fb2`, `.rtf`, `.htmlz` or `.txt` with no extractable cover
+    /// gets the same synthesized tile (a real `.azw3` without a first image
+    /// record is exactly as cover-less as a `.docx` without a thumbnail).
     nonisolated static func isOfficeDocument(_ fileName: String) -> Bool {
         let ext = (fileName as NSString).pathExtension.lowercased()
-        return ["docx", "doc", "odt", "pptx", "odp"].contains(ext)
+        return DocumentBook.canNormalize(ext)
     }
 
     /// A stylized shelf tile for office documents with no embedded
@@ -765,7 +769,19 @@ final class BooksStore: ObservableObject {
         case "PPTX", "ODP":
             (topColor, bottomColor, badge) = (UIColor(red: 0.86, green: 0.48, blue: 0.16, alpha: 1),
                                               UIColor(red: 0.62, green: 0.28, blue: 0.08, alpha: 1), "SLIDES")
-        default: // ODT
+        case "MOBI", "AZW", "AZW3", "PRC", "PDB":
+            (topColor, bottomColor, badge) = (UIColor(red: 0.13, green: 0.45, blue: 0.42, alpha: 1),
+                                              UIColor(red: 0.05, green: 0.26, blue: 0.30, alpha: 1), "EBOOK")
+        case "FB2":
+            (topColor, bottomColor, badge) = (UIColor(red: 0.48, green: 0.24, blue: 0.60, alpha: 1),
+                                              UIColor(red: 0.28, green: 0.12, blue: 0.40, alpha: 1), "FB2")
+        case "RTF":
+            (topColor, bottomColor, badge) = (UIColor(red: 0.30, green: 0.34, blue: 0.40, alpha: 1),
+                                              UIColor(red: 0.16, green: 0.19, blue: 0.24, alpha: 1), "RTF")
+        case "HTML", "HTM", "HTMLZ":
+            (topColor, bottomColor, badge) = (UIColor(red: 0.85, green: 0.36, blue: 0.28, alpha: 1),
+                                              UIColor(red: 0.58, green: 0.18, blue: 0.16, alpha: 1), "WEB")
+        default: // ODT and the plain-text/Markdown family
             (topColor, bottomColor, badge) = (UIColor(red: 0.36, green: 0.32, blue: 0.72, alpha: 1),
                                               UIColor(red: 0.22, green: 0.18, blue: 0.48, alpha: 1), "TEXT")
         }
