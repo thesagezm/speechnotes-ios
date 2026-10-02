@@ -12,30 +12,40 @@ import Foundation
 /// stall are themselves on that same thread, so nothing observes the hang
 /// and nothing recovers.
 ///
-/// How it works: a dedicated thread (never main) ticks at `interval` and
-/// publishes a MainActor check each time. The check stamps the time it ran;
-/// the next tick measures how long ago that stamp was. A gap larger than
-/// `threshold` means the main actor did not run the check in time — the
-/// thread was blocked. What it can then do is limited by definition (the
-/// main thread is the only thing that can fix the UI), so this watchdog
-/// does the three things that are actually safe and useful:
+/// How it works: a dedicated thread (never main) dispatches a check onto the
+/// main actor every second. Each check measures the gap since the PREVIOUS
+/// check actually ran on main — that gap is the real stall, measured exactly
+/// where the truth is (a check that ran on main cannot have waited through
+/// the block, and one that waited long did). A gap over `threshold` is one
+/// incident:
 ///
-///   1. **Report** — one log line per incident, with the gap, so a device
-///      log names the stall precisely instead of "froze".
-///   2. **Shed work** — the shelf backfill is cancelled mid-flight (its
-///      loop checks the token), which is the heaviest main-adjacent work in
-///      the app and the one that was blocking it.
-///   3. **Recover the surface** — nothing on main is touched, so no risk of
-///      re-entering a wedged state; when the block lifts, the next tick
-///      logs "cleared" and the shelf is refreshed once from scratch.
+///   1. **Report** — one log line naming the gap, so a device log says
+///      "main thread blocked ~12.4s" instead of "froze".
+///   2. **Shed work** — `onBlocked` fires (the shelf backfill, the heaviest
+///      main-adjacent work in the app, listens and cancels; it retries on
+///      the next shelf open).
+///   3. **Clear** — the next check ~1 s later sees a normal gap and logs
+///      that the thread is responsive again.
+///
+/// Suspension is NOT a stall. While the app is backgrounded the whole
+/// process — probe thread included — is frozen; the first check after
+/// resume then measures the entire backgrounded wall-clock as one gap.
+/// That is exactly what the device log's impossible "~4632s / ~4716s
+/// blocked" lines were: two long suspensions, not two freezes — and every
+/// one of them fired `onBlocked`, cancelling the shelf backfill each time
+/// ("repeated shelf-backfill cancels"). So the app arms the watchdog only
+/// while foregrounded (`setActive` from the scene-phase handler) and every
+/// re-arm stamps a fresh baseline, which keeps a suspension out of every
+/// measurement by construction.
 ///
 /// Deliberately NOT done: killing and relaunching the UI, or force-quitting
 /// the process. Both are worse than the freeze — the user loses their
 /// place and the app "crashes" from their side. The honest goal is that a
 /// freeze now takes seconds to clear instead of a hard restart.
 ///
-/// Threading: the ticker is a plain `Thread` subclassInstance; it must
-/// never touch main state directly, only hop.
+/// Threading: the ticker is a plain `Thread` subclass; it must never touch
+/// main state directly, only hop. All bookkeeping (gap math, incident
+/// flags) lives on the main actor inside the dispatched check.
 @MainActor
 final class HangWatchdog {
     static let shared = HangWatchdog()
@@ -44,14 +54,10 @@ final class HangWatchdog {
     /// cover renders and shelf refreshes legitimately take ~1 s on device.
     private let threshold: TimeInterval = 4.0
 
-    /// Main-actor stamp, updated by every check.
+    /// When the previous check RAN on main — the measurement anchor.
     private var lastCheckAt: ContinuousClock.Instant = .now
-    private var blockedSince: ContinuousClock.Instant?
+    private var isBlocked = false
     private var worker: Thread?
-
-    /// Set true while a main-thread block is being reported — cleared when
-    /// the main actor runs again.
-    private(set) var isBlocked: Bool = false
 
     /// Work the watchdog can cancel when it sees a block. The heavy,
     /// self-checking loops (BooksStore's backfill) register here.
@@ -61,27 +67,27 @@ final class HangWatchdog {
 
     func start() {
         guard worker == nil else { return }
-        let worker = MainThreadProbeThread(
-            check: { [weak self] in
-                Task { @MainActor in
-                    guard let self else { return }
-                    self.lastCheckAt = ContinuousClock.now
-                    if self.isBlocked {
-                        Log.shared.info("HangWatchdog: main thread responsive again after \(self.blockedDurationText())")
-                        self.isBlocked = false
-                        self.blockedSince = nil
-                    }
-                }
-            },
-            onBlocked: { [weak self] gap in
-                Task { @MainActor in
-                    guard let self, !self.isBlocked else { return }
+        // Fresh baseline on every (re)arm: the gap across the foreground
+        // pause must never enter a measurement.
+        lastCheckAt = .now
+        isBlocked = false
+        let worker = MainThreadProbeThread(check: { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                let now = ContinuousClock.now
+                let gap = Self.seconds(from: self.lastCheckAt, to: now)
+                self.lastCheckAt = now
+                if gap >= self.threshold {
+                    guard !self.isBlocked else { return }
                     self.isBlocked = true
-                    self.blockedSince = ContinuousClock.now
                     Log.shared.error("HangWatchdog: main thread blocked ~\(String(format: "%.1f", gap))s — cancelling shelf work and reporting")
                     self.onBlocked?()
+                } else if self.isBlocked {
+                    self.isBlocked = false
+                    Log.shared.info("HangWatchdog: main thread responsive again")
                 }
-            })
+            }
+        })
         worker.name = "com.speechnotes.hang-watchdog"
         worker.start()
         self.worker = worker
@@ -93,9 +99,13 @@ final class HangWatchdog {
         worker = nil
     }
 
-    private func blockedDurationText() -> String {
-        guard let since = blockedSince else { return "?" }
-        return String(format: "%.1fs", Self.seconds(from: since, to: ContinuousClock.now))
+    /// Scene-phase hook: foregrounded arms the probe (with a fresh
+    /// baseline), backgrounded disarms it — a suspended process cannot
+    /// observe anything, and measuring across the suspension is precisely
+    /// the bug that logged hours-long "blocks" and cancelled the shelf
+    /// backfill on every resume.
+    func setActive(_ active: Bool) {
+        if active { start() } else { stop() }
     }
 
     private static func seconds(from a: ContinuousClock.Instant, to b: ContinuousClock.Instant) -> Double {
@@ -105,62 +115,32 @@ final class HangWatchdog {
     }
 }
 
-/// The worker: wakes every interval, hops to main with a check, and
-/// measures the gap between the check running and the previous one. A gap
-/// over the threshold is a blocked main thread.
+/// The worker: wakes every second and dispatches a check onto the main
+/// actor. It measures nothing — the check itself measures, on main, the gap
+/// to the previous check that ran there. (Earlier drafts measured on this
+/// thread, either around the sleep — reporting every ordinary tick as a
+/// ~1.4 s block — or dispatch-to-dispatch, which stays ~1 s even while main
+/// is wedged and so could never detect a real stall.)
 private final class MainThreadProbeThread: Thread {
-    /// Both are plain (non-isolated) closures that hop to main internally:
-    /// a blocking main thread is precisely when the hop cannot run, so the
+    /// A plain (non-isolated) closure that hops to main internally: a
+    /// blocking main thread is precisely when the hop cannot run, so the
     /// worker must never call an isolated function synchronously.
     private let check: () -> Void
-    private let onBlocked: (_ gapSeconds: Double) -> Void
 
-    init(check: @escaping () -> Void, onBlocked: @escaping (_ gapSeconds: Double) -> Void) {
+    init(check: @escaping () -> Void) {
         self.check = check
-        self.onBlocked = onBlocked
         super.init()
     }
 
     override func main() {
-        var previousCheck: ContinuousClock.Instant? = nil
         while !isCancelled {
-            let dispatchedAt = ContinuousClock.now
             check()
-            // Sleep in small slices so cancellation is prompt — a blocked
-            // main thread also blocks the run loop this thread would
-            // otherwise wait on.
+            // Sleep in small slices so cancellation is prompt.
             var waited = 0.0
             while waited < 1.0, !isCancelled {
                 Thread.sleep(forTimeInterval: 0.1)
                 waited += 0.1
             }
-            if isCancelled { return }
-            let now = ContinuousClock.now
-            // Measure only the time from DISPATCHING the check to the next
-            // dispatch — the worker's own sleep is not main-thread time, and
-            // counting it reported every ordinary tick as a ~1 s block.
-            //
-            // The gap between `previousCheck` (when main actually RAN the
-            // previous check) and `dispatchedAt` (when this one was queued) is
-            // the real stall. Measuring around the sleep instead — the
-            // original shape — is what produced the log's impossible
-            // "main thread blocked ~4632.2s" lines: that figure is
-            // wall-clock time between two ticks, so an app that was simply
-            // suspended overnight (watchdog thread asleep with it) reported
-            // the hours as one continuous block, and every 1 s tick looked
-            // like a 1.4 s block. The stall the device report describes is
-            // real, but these numbers were measuring something else entirely.
-            if let previousCheck {
-                let interval = previousCheck.duration(to: dispatchedAt)
-                let gap = Double(interval.components.seconds)
-                    + Double(interval.components.attoseconds) / 1_000_000_000_000_000_000
-                // One tick of scheduler slack (1 s sleep + dispatch jitter)
-                // is not a stall.
-                if gap >= 2.5 {
-                    self.onBlocked(gap)
-                }
-            }
-            previousCheck = dispatchedAt
         }
     }
 }

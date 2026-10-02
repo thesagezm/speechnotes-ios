@@ -185,6 +185,14 @@ struct SpeechnotesApp: App {
                 // could be suspended is the one moment a pending write must
                 // not be lost.
                 .onChange(of: scenePhase) { phase in
+                    // The watchdog is armed only while foregrounded: a
+                    // suspended process freezes the probe thread with it,
+                    // and measuring across the pause is what logged hours
+                    // as one "blocked" incident and cancelled the shelf
+                    // backfill on every resume. setActive re-arms with a
+                    // fresh baseline, so the pause never enters a
+                    // measurement.
+                    HangWatchdog.shared.setActive(phase == .active)
                     if phase != .active {
                         notes.flushNow()
                         // Notebooks mirror the notes flush: a rename or delete
