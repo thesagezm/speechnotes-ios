@@ -98,7 +98,10 @@ final class MobiParserTests: XCTestCase {
             put(extraFlags, at: 0xF2, in: &record)
         }
         // The EXTH flag word at 0x80 tells a reader to look for the block.
-        put(0x40, at: 0x80, in: &record)
+        // (Spelled `UInt32` — a bare integer literal is ambiguous between the
+        // UInt16 and UInt32 overloads, and the ambiguity only shows up in a
+        // Swift 6 compiler, not in review.)
+        put(UInt32(0x40), at: 0x80, in: &record)
         if headerLength > 0x84 {
             record.removeSubrange(0x84..<(16 + headerLength))
         }

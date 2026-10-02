@@ -1,17 +1,37 @@
 import AVFoundation
+import SpeechLogic
 
-/// Apple's built-in text-to-speech. Placeholder engine until Kokoro arrives in
-/// Phase 2 — and after that, a useful "fallback when no Kokoro model is present".
+/// Apple's built-in text-to-speech, and the app's fallback whenever a neural
+/// model is missing or unplayable.
+///
+/// ## Why this is chunked (2026-10-02 device report)
+///
+/// It used to hand the WHOLE text to `AVSpeechSynthesizer.speak` as one
+/// utterance. That works for a paragraph and fails for a chapter:
+/// AVSpeechSynthesizer buffers a very long utterance internally before it
+/// starts producing audio, and — the part the user reported — **it can sit
+/// silent for a minute or more mid-session** before resuming. On a 200 kB
+/// book chapter that is most of a chapter read as dead air.
+///
+/// So this engine now runs the same sentence-chunk pipeline the ONNX engines
+/// use (`SentenceChunker.chunks`) and keeps ONE utterance in flight at a
+/// time, starting the next as the previous finishes. Apple's synthesizer
+/// starts a short utterance in tens of milliseconds, so the gaps between
+/// chunks are inaudible, and no chunk is ever large enough to stall.
+///
+/// The consequences that had to be handled:
+/// - `onProgress` / `onPlayedChars` must address the WHOLE text, so every
+///   chunk carries the UTF-16 offset it starts at.
+/// - `pause()` at a chunk boundary must not let the queue run on: the
+///   in-flight chunk is paused (at a word) and the next one is not started.
+/// - A rate change mid-session re-queues from the current chunk, keeping the
+///   same base offsets so the read-along highlight never rewinds.
 final class SystemEngine: NSObject, SpeechEngine {
     let name = "Apple (system)"
 
     var onStateChanged: ((SpeechState) -> Void)?
     var onProgress: ((Double) -> Void)?
-    /// Play-time signal — willSpeakRangeOfSpeechString fires per word as the
-    /// audio sounds, so this is exact (see SpeechEngine.onPlayedChars).
     var onPlayedChars: ((Int) -> Void)?
-    /// Natural completion (AVSpeechSynthesizerDelegate.didFinish) — exact,
-    /// unlike the ONNX engines' buffer-completion signal.
     var onFinished: (() -> Void)?
 
     private let synthesizer = AVSpeechSynthesizer()
@@ -21,36 +41,57 @@ final class SystemEngine: NSObject, SpeechEngine {
     /// identifier no longer resolves (voice deleted from the device).
     var voiceIdentifier: String?
 
-    /// Mid-utterance rate changes: AVSpeechSynthesizer cannot vary the rate
-    /// of an utterance that is already running, so a slider move would
-    /// otherwise wait for the note to end. Instead it re-pitches the
-    /// CURRENT position at the new rate — the user hears the rest of the
-    /// sentence change speed, not the whole note restart.
+    /// Mid-session rate changes. AVSpeechSynthesizer cannot re-rate an
+    /// utterance that is already running, so the remainder of the current
+    /// chunk is re-queued at the new rate from the current word — the user
+    /// hears the rest of the sentence change speed, not the whole chapter
+    /// restart.
     var speed: Float = 1.0 {
         didSet {
             guard speed != oldValue else { return }
-            restartAtCurrentPosition()
+            requeueCurrentChunkAtNewRate()
         }
     }
 
-    /// Every async state jump carries the utterance epoch it belongs to —
-    /// a `speak`/`stop` interleave used to let a stale queued `idle`/`speaking`
+    /// Every async state jump carries the utterance epoch it belongs to — a
+    /// `speak`/`stop` interleave used to let a stale queued `idle`/`speaking`
     /// clobber the newer state (M15). Bumped on each speak() and stop().
     private var epoch = 0
 
-    /// The text currently being spoken (the LAST speak()'s string). Kept
-    /// only so a rate change mid-playback can re-speak from the current
-    /// character offset.
-    private var activeUtteranceText: String?
+    // MARK: - The chunk queue
 
-    /// UTF-16 offset where the CURRENT utterance begins inside the whole
-    /// spoken string (0 for a fresh speak; the pitch boundary after a
-    /// mid-playback rate change). onPlayedChars adds it so the bookmark and
-    /// the read-along keep addressing the note's own char space — without
-    /// it a re-pitched remainder would restart the highlight and the resume
-    /// position from char 0.
-    private var spokenOffsetInActiveText: Int = 0
-    private var lastRangeOffset: Int = 0
+    /// UTF-16 base offset and text of each queued chunk.
+    private struct Queued {
+        let offset: Int
+        let text: String
+    }
+
+    private var queue: [Queued] = []
+    private var nextIndex = 0
+    /// The chunk currently in flight, and how many characters of it have
+    /// sounded (`willSpeakRangeOfSpeechString` gives the latter).
+    private var current: Queued?
+    private var currentCharsDone = 0
+    /// Total UTF-16 length of the whole spoken string — the denominator for
+    /// progress.
+    private var totalChars = 1
+    /// The whole text this session is speaking. Kept so a rate change can
+    /// re-queue the current chunk's remainder.
+    private var activeUtteranceText: String?
+    /// Pause intent: a pause that lands between chunks must stop the queue,
+    /// not just the one utterance in flight.
+    private var pauseRequested = false
+
+    /// Per-word progress callbacks coalesced to ~3.3 Hz — each one publishes
+    /// progress and invalidates observing views; word-rate emissions were
+    /// measurable churn for long notes. Strictly-INCREASING counts only, so a
+    /// re-queued chunk can never move the highlight backwards.
+    private var lastSignalAt: Date = .distantPast
+    private var lastEmittedChars = 0
+
+    /// The effective multiplier the session started with — passed back into
+    /// the re-queue on a rate change.
+    private var lastEffectiveRate: Double = 1.0
 
     private var state: SpeechState = .idle {
         didSet {
@@ -60,16 +101,6 @@ final class SystemEngine: NSObject, SpeechEngine {
             }
         }
     }
-
-    /// Per-word progress callbacks coalesced to ~3.3 Hz — each one
-    /// publishes progress and invalidates observing views; word-rate
-    /// emissions were measurable churn for long notes. The FINAL range is
-    /// always emitted so completion progress reaches 1.0, and only
-    /// STRICTLY-INCREASING counts pass the throttle so a mid-playback rate
-    /// change (which re-speaks a remainder with a fresh range counter) can
-    /// never move the read-along highlight backwards.
-    private var lastSignalAt: Date = .distantPast
-    private var lastEmittedChars: Int = 0
 
     private var interruptionObserver: NSObjectProtocol?
 
@@ -93,8 +124,8 @@ final class SystemEngine: NSObject, SpeechEngine {
             queue: .main
         ) { [weak self] notification in
             guard let self else { return }
-            let typeRaw = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
-            let optionsRaw = notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
+            let typeRaw = notification.userInfo?[AVAudioSession.interruptionTypeKey] as? UInt
+            let optionsRaw = notification.userInfo?[AVAudioSession.interruptionOptionKey] as? UInt ?? 0
             if typeRaw == AVAudioSession.InterruptionType.began.rawValue {
                 if self.state == .speaking { self.pause() }
             } else if typeRaw == AVAudioSession.InterruptionType.ended.rawValue,
@@ -102,7 +133,7 @@ final class SystemEngine: NSObject, SpeechEngine {
                 if self.state == .paused { self.resume() }
             }
         }
-        Log.shared.info("SystemEngine ready")
+        Log.shared.info("SystemEngine ready (chunked)")
     }
 
     deinit {
@@ -111,43 +142,72 @@ final class SystemEngine: NSObject, SpeechEngine {
         }
     }
 
+    // MARK: - SpeechEngine
+
     func speak(_ text: String, rateMultiplier: Double) {
         let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
         synthesizer.stopSpeaking(at: .immediate)
         configureAudioSessionIfNeeded()
         epoch += 1
-        let epochAtSpeak = epoch
 
-        let utterance = AVSpeechUtterance(string: clean)
         activeUtteranceText = clean
-        // The position accounting carries over ONLY for a re-pitch remainder:
-        // restartAtCurrentPosition sets `spokenOffsetInActiveText = pitch
-        // boundary` immediately before calling speak(remainder) — WITHOUT
-        // bumping the epoch. A fresh note speak() always bumps the epoch
-        // first, so it is the only caller that must zero the accumulator.
-        // Distinguishing on the epoch keeps the remainder's char math
-        // continuous instead of restarting the highlight and the resume
-        // position from char 0.
-        if epoch == epochAtSpeak {
-            spokenOffsetInActiveText = 0
-        }
+        totalChars = max(1, clean.utf16.count)
         lastRangeOffset = 0
-        // Live speed wins over the call-site multiplier once set.
-        let effectiveRate = speed == 1.0 ? rateMultiplier : Double(speed)
-        lastEffectiveRate = effectiveRate
-        // AVSpeechUtterance.rate: 0.0...1.0, default 0.5 — map our
-        // multiplier onto it. The old mapping was `0.5 * multiplier`, so the
-        // DEFAULT (1.0) spoke at 0.5 — half the system voice's normal pace —
-        // and a 2× request only ever reached 1.0 (normal). Apple's scale is
-        // 0.5 = the "average human" rate at which a voice is designed to be
-        // intelligible; anything below it begins halving and the user's
-        // "slower than Supertonic" report follows directly. Map so 1.0 →
-        // AVSpeechUtteranceDefaultSpeechRate (0.5) and 2.0 → 1.0.
-        let mapped = Double(AVSpeechUtteranceDefaultSpeechRate)
-            + (effectiveRate - 1.0) * (Double(AVSpeechUtteranceMaximumSpeechRate) - Double(AVSpeechUtteranceDefaultSpeechRate))
-        utterance.rate = Float(min(Double(AVSpeechUtteranceMaximumSpeechRate),
-                                   max(Double(AVSpeechUtteranceMinimumSpeechRate), mapped)))
+        lastEmittedChars = 0
+        pauseRequested = false
+        lastEffectiveRate = speed == 1.0 ? rateMultiplier : Double(speed)
+
+        // The chunker packs to `batchMaxChars` per chunk. Apple's synthesizer
+        // handles a few hundred characters per utterance without a
+        // perceptible gap; going much wider is what brings the stall back.
+        let chunks = SentenceChunker.chunks(
+            for: clean,
+            firstMaxChars: 120,   // fast start: the first sentence sounds now
+            batchMaxChars: 320
+        )
+        guard !chunks.isEmpty else { return }
+
+        queue = Self.expanded(chunks)
+        nextIndex = 0
+        current = nil
+        currentCharsDone = 0
+        startNextChunk()
+        // State flips to .speaking via the didStart delegate callback.
+    }
+
+    /// Chunks carry `text` plus a UTF-16 `offset` into the string they came
+    /// from (see `Chunk`), so progress and the read-along can address the
+    /// WHOLE text rather than the chunk. `Chunk.text` is already the literal
+    /// slice, so it is used directly — no re-slicing, no drift.
+    private static func expanded(_ chunks: [SentenceChunker.Chunk]) -> [Queued] {
+        chunks
+            .filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .map { Queued(offset: $0.offset, text: $0.text) }
+    }
+
+    /// Starts the next queued chunk. Called on the main actor only (the
+    /// delegate callbacks hop there, and speak()/pause() are main-actor).
+    private func startNextChunk() {
+        guard !pauseRequested, nextIndex < queue.count else { return }
+        let item = queue[nextIndex]
+        nextIndex += 1
+        current = item
+        currentCharsDone = 0
+
+        let utterance = AVSpeechUtterance(string: item.text)
+        // Apple's rate scale: 0.5 is "average human" — the pace a voice is
+        // designed for. Map so our 1.0 → 0.5 and our 2.0 → 1.0. (The old
+        // mapping was `0.5 × multiplier`, so the DEFAULT spoke at half pace
+        // and 2× could only ever reach normal.)
+        let rate = min(
+            Double(AVSpeechUtteranceMaximumSpeechRate),
+            max(Double(AVSpeechUtteranceMinimumSpeechRate),
+                Double(AVSpeechUtteranceDefaultSpeechRate)
+                    + (lastEffectiveRate - 1.0)
+                    * (Double(AVSpeechUtteranceMaximumSpeechRate) - Double(AVSpeechUtteranceDefaultSpeechRate)))
+        )
+        utterance.rate = Float(rate)
         if let identifier = voiceIdentifier,
            let voice = AVSpeechSynthesisVoice(identifier: identifier) {
             utterance.voice = voice
@@ -155,18 +215,25 @@ final class SystemEngine: NSObject, SpeechEngine {
             utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
         }
         synthesizer.speak(utterance)
-        // State flips to .speaking via the didStart delegate callback.
     }
 
     func pause() {
-        guard synthesizer.isSpeaking else { return }
+        guard synthesizer.isSpeaking || !queue.isEmpty else { return }
+        pauseRequested = true
         synthesizer.pauseSpeaking(at: .word)
         DispatchQueue.main.async { self.state = .paused }
     }
 
     func resume() {
-        guard synthesizer.isPaused else { return }
-        synthesizer.continueSpeaking()
+        // A pause taken BETWEEN chunks (the utterance finished, the queue was
+        // held) has nothing to continue — the next chunk is started instead.
+        if synthesizer.isPaused {
+            pauseRequested = false
+            synthesizer.continueSpeaking()
+        } else {
+            pauseRequested = false
+            startNextChunk()
+        }
         DispatchQueue.main.async { self.state = .speaking }
     }
 
@@ -175,43 +242,71 @@ final class SystemEngine: NSObject, SpeechEngine {
         let epochAtStop = epoch
         synthesizer.stopSpeaking(at: .immediate)
         activeUtteranceText = nil
+        queue = []
+        nextIndex = 0
+        current = nil
+        currentCharsDone = 0
         lastRangeOffset = 0
+        pauseRequested = false
         DispatchQueue.main.async { [weak self] in
             guard let self, self.epoch == epochAtStop else { return }
             self.state = .idle
         }
     }
 
-    /// Re-speaks from the current character offset at the new rate. Only
-    /// runs while actually speaking; a pause/idle session picks the rate up
-    /// on its next utterance.
-    private func restartAtCurrentPosition() {
-        guard synthesizer.isSpeaking, let full = activeUtteranceText else { return }
-        let units = Array(full.utf16)
-        guard lastRangeOffset > 0, lastRangeOffset < units.count else { return }
-        let remainder = String(decoding: units[lastRangeOffset...], as: UTF16.self)
+    /// Re-queues the CURRENT chunk's unsounded remainder at the new rate.
+    /// Only runs while a chunk is actually in flight; a pause/idle session
+    /// picks the rate up on its next utterance, and the remaining queue is
+    /// unaffected (each chunk is built when it starts).
+    private func requeueCurrentChunkAtNewRate() {
+        guard state == .speaking,
+              let chunk = current,
+              currentCharsDone > 0,
+              currentCharsDone < chunk.text.utf16.count else { return }
+        let units = Array(chunk.text.utf16)
+        let remainder = String(decoding: units[currentCharsDone...], as: UTF16.self)
         guard !remainder.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        // Do NOT bump the epoch: this is the same utterance continuing, and
-        // the state callbacks must keep firing for it. Set the accumulator
-        // BEFORE the recursive speak(): speak() zeroes it for a fresh call,
-        // so ordering matters — credit first, then hand over the remainder.
-        spokenOffsetInActiveText = lastRangeOffset
-        lastRangeOffset = 0
+        // Same text, new rate: replace the current chunk in place so the
+        // chunk's base offset is unchanged and the read-along cursor cannot
+        // rewind.
+        let index = max(0, nextIndex - 1)
+        queue[index] = Queued(offset: chunk.offset + currentCharsDone, text: remainder)
+        current = queue[index]
+        currentCharsDone = 0
+        lastEffectiveRate = Double(speed)
         synthesizer.stopSpeaking(at: .immediate)
-        speak(remainder, rateMultiplier: lastEffectiveRate)
+        speakQueued(index: index)
     }
 
-    /// The effective multiplier the utterance was started with — passed back
-    /// into speak() on a mid-playback rate change so the remainder keeps
-    /// whatever the LIVE speed says (speed != 1.0 wins) or the original
-    /// call-site value (speed == 1.0).
-    private var lastEffectiveRate: Double = 1.0
+    /// Re-speaks one queued chunk immediately (used by the rate re-queue).
+    private func speakQueued(index: Int) {
+        let item = queue[index]
+        current = item
+        currentCharsDone = 0
+        let utterance = AVSpeechUtterance(string: item.text)
+        let rate = min(
+            Double(AVSpeechUtteranceMaximumSpeechRate),
+            max(Double(AVSpeechUtteranceMinimumSpeechRate),
+                Double(AVSpeechUtteranceDefaultSpeechRate)
+                    + (lastEffectiveRate - 1.0)
+                    * (Double(AVSpeechUtteranceMaximumSpeechRate) - Double(AVSpeechUtteranceDefaultSpeechRate)))
+        )
+        utterance.rate = Float(rate)
+        if let identifier = voiceIdentifier,
+           let voice = AVSpeechSynthesisVoice(identifier: identifier) {
+            utterance.voice = voice
+        } else {
+            utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
+        }
+        synthesizer.speak(utterance)
+    }
+
+    /// The word position inside the current chunk, for a re-queue.
+    private var lastRangeOffset = 0
 
     /// AVSpeechSynthesizer's real liveness — see SpeechEngine.hasLiveSession.
-    /// Our own `state` is an approximation (it flips on delegate callbacks);
-    /// the synthesizer's flags are ground truth for the player's self-heal.
     var hasLiveSession: Bool {
-        synthesizer.isSpeaking || synthesizer.isPaused
+        synthesizer.isSpeaking || synthesizer.isPaused || !queue.isEmpty
     }
 }
 
@@ -226,46 +321,65 @@ extension SystemEngine: AVSpeechSynthesizerDelegate {
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            self.onFinished?()
-            self.state = .idle
+            // Progress reaches exactly 1.0 on the last chunk before the
+            // completion signal fires.
+            if self.nextIndex >= self.queue.count {
+                self.onProgress?(1.0)
+                self.onPlayedChars?(self.totalChars)
+            }
+            if self.pauseRequested {
+                // Held between chunks: publish the boundary, start nothing.
+                return
+            }
+            if self.nextIndex < self.queue.count {
+                self.startNextChunk()
+            } else {
+                self.onFinished?()
+                self.state = .idle
+            }
         }
     }
 
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            self.state = .idle
+            // A cancel from stop() is not a completion. A cancel with the queue
+            // still holding work means an interruption killed the utterance —
+            // run the rest rather than leaving the UI claiming speech.
+            if !self.queue.isEmpty, self.nextIndex < self.queue.count, self.state != .idle {
+                self.startNextChunk()
+            } else {
+                self.state = .idle
+            }
         }
     }
 
     /// Fires before each spoken word-range; location+length ≈ chars spoken
-    /// so far — feeds SpeechPlayer's resume bookmark. `lastRangeOffset` is
-    /// stamped here too: it is the re-pitch start point for a mid-utterance
-    /// rate change.
+    /// so far. Offset by the current chunk's base so the value addresses the
+    /// WHOLE text (and so the bookmark / read-along / progress stay in one
+    /// coordinate space across chunk boundaries).
     func speechSynthesizer(
         _ synthesizer: AVSpeechSynthesizer,
         willSpeakRangeOfSpeechString characterRange: NSRange,
         utterance: AVSpeechUtterance
     ) {
+        guard let chunk = current else { return }
         let total = (utterance.speechString as NSString).length
         guard total > 0, characterRange.location + characterRange.length > 0 else { return }
-        let charsDone = characterRange.location + characterRange.length
+        currentCharsDone = characterRange.location
         lastRangeOffset = characterRange.location
+        let charsDone = chunk.offset + characterRange.location + characterRange.length
         let now = Date()
-        // Coalesced to ~3.3 Hz AND monotonic: a re-pitched remainder starts
-        // its own range counter at 0, which would otherwise momentarily move
-        // the highlight/percentage BACKWARDS until the next word fires.
-        // The only emissions that beat the throttle are strictly-increasing
-        // ones, so the cursor never rewinds on screen.
-        guard charsDone >= total || (now.timeIntervalSince(lastSignalAt) >= 0.3 && charsDone > lastEmittedChars) else { return }
+        // Coalesced to ~3.3 Hz AND monotonic, so the cursor never rewinds and
+        // the views are not invalidated at word rate.
+        guard charsDone >= self.totalChars
+            || (now.timeIntervalSince(lastSignalAt) >= 0.3 && charsDone > lastEmittedChars) else { return }
         lastSignalAt = now
         lastEmittedChars = charsDone
-        let fraction = Double(charsDone) / Double(total)
+        let fraction = Double(charsDone) / Double(totalChars)
         DispatchQueue.main.async {
             self.onProgress?(min(1.0, fraction))
-            // Add the remainder's base so a re-pitched tail reports its
-            // position inside the WHOLE note, not inside its own substring.
-            self.onPlayedChars?(self.spokenOffsetInActiveText + charsDone)
+            self.onPlayedChars?(charsDone)
         }
     }
 }
