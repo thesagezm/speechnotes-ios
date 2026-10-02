@@ -44,7 +44,7 @@ final class LocalSendReceiver: ObservableObject {
     @Published private(set) var history: [BookDropRecord] = []
 
     /// Extensions we accept, route and import today.
-    static let acceptedExtensions: Set<String> = [
+    static let acceptedExtensions: Set<String> = Set([
         "epub", "pdf", "m4b", "m4a", "mp4", "mp3", "jex",
         // Opus/Ogg audiobook containers (the format store books arrive in
         // when no DRM-less M4B exists) — refusing them read as "BookDrop
@@ -53,7 +53,7 @@ final class LocalSendReceiver: ObservableObject {
         // Every document the Books importer normalizes to EPUB. The office set
         // plus the mobipocket/Kindle, FictionBook, RTF, HTML/HTMLZ and
         // plain-text/Markdown readers.
-    ].union(SpeechLogic.DocumentBook.supportedExtensions)
+    ]).union(SpeechLogic.DocumentBook.supportedExtensions)
 
     private let server = LocalSendHTTPServer()
     private var sessions: [String: Session] = [:]
