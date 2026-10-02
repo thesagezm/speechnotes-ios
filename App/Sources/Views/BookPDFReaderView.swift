@@ -647,6 +647,9 @@ private struct BookPDFView: UIViewRepresentable {
 
     func updateUIView(_ pdfView: PDFView, context: Context) {
         context.coordinator.onPageChange = onPageChange
+        // A background open that landed before this view joined the
+        // hierarchy is applied now (see Coordinator.load).
+        context.coordinator.applyOpened(startPageIndex: startPageIndex)
         // Width re-fit: the surface's slot changed (rotation, landscape
         // rail) — recompute the scale against the new width. Guarded by a
         // width delta so ordinary state-driven updates don't touch the
@@ -672,11 +675,19 @@ private struct BookPDFView: UIViewRepresentable {
     /// via numberOfChildren/child(at:) — this SDK's PDFOutline has no
     /// `children` array (CI-caught). Entries whose destination does not
     /// resolve to a page are skipped: every row must be navigable.
+    ///
+    /// The document and the outline are two independent results. A PDF with
+    /// no outline (every scanned book, most page-scan dumps) returns
+    /// `(document, [])` — returning nil here was the "book opens blank" bug:
+    /// the caller's `guard let opened` then skipped `pdfView.document =
+    /// …` for exactly those files, leaving a white page while TTS (which
+    /// opens its own PDFDocument) kept working.
     fileprivate static func openWithOutline(url: URL) -> (document: PDFDocument, rows: [OutlineRow])? {
-        guard let document = PDFDocument(url: url),
-              document.pageCount > 0,
-              let root = document.outlineRoot else { return nil }
+        guard let document = PDFDocument(url: url) else { return nil }
         var rows: [OutlineRow] = []
+        guard document.pageCount > 0, let root = document.outlineRoot else {
+            return (document, rows)
+        }
         func walk(_ outline: PDFOutline, depth: Int) {
             if let dest = outline.destination, let page = dest.page {
                 let index = document.index(for: page)
@@ -754,6 +765,16 @@ private struct BookPDFView: UIViewRepresentable {
         /// can deliver a page-changed notification for page 0 between the
         /// document landing and the saved page being applied — the saved
         /// position can't be overwritten by the initial report.
+        ///
+        /// The delivery does NOT require the view to be in a window: a
+        /// background open on a large scanned book lands AFTER SwiftUI has
+        /// called makeUIView but BEFORE the view joins the hierarchy, and the
+        /// old `pdfView.window != nil` guard threw that result away — the
+        /// surface stayed white forever while TTS (which opens its own
+        /// PDFDocument) kept working. That is the "PDFs don't display" report:
+        /// the big TOC-less page dumps are exactly the ones slow enough to
+        /// lose that race. `applyOpened` re-applies the result if the first
+        /// delivery arrived too early.
         func load(
             url: URL,
             startPageIndex: Int,
@@ -765,23 +786,38 @@ private struct BookPDFView: UIViewRepresentable {
                 let opened = BookPDFView.openWithOutline(url: url)
                 if Task.isCancelled { return }
                 await MainActor.run { [weak self] in
+                    // The loading state clears whatever happened — a document
+                    // that never lands must not leave the spinner up forever.
                     onLoaded()
-                    guard let self,
-                          let opened,
-                          let pdfView = self.pdfView,
-                          pdfView.window != nil else { return }
-                    pdfView.document = opened.document
-                    // Width-fit BEFORE the saved-page jump, so go(to:)
-                    // lands on a page already at its final scale.
-                    BookPDFView.applyWidthFit(pdfView, width: self.fitWidth)
-                    if startPageIndex > 0,
-                       startPageIndex < opened.document.pageCount,
-                       let page = opened.document.page(at: startPageIndex) {
-                        pdfView.go(to: page)
-                    }
-                    onOutline(opened.rows)
+                    guard let self else { return }
+                    self.opened = opened
+                    self.applyOpened(startPageIndex: startPageIndex)
+                    onOutline(opened?.rows ?? [])
                 }
             }
+        }
+
+        /// The open result, kept so a delivery that arrived before the view
+        /// joined the hierarchy can be re-applied.
+        fileprivate var opened: (document: PDFDocument, rows: [OutlineRow])?
+
+        /// Puts the opened document in the view (once) and applies the saved
+        /// page. No-ops when there is nothing to show, or the document is
+        /// already in place.
+        func applyOpened(startPageIndex: Int) {
+            guard let opened,
+                  let pdfView,
+                  pdfView.document !== opened.document else { return }
+            pdfView.document = opened.document
+            // Width-fit BEFORE the saved-page jump, so go(to:) lands on a page
+            // already at its final scale.
+            BookPDFView.applyWidthFit(pdfView, width: fitWidth)
+            if startPageIndex > 0,
+               startPageIndex < opened.document.pageCount,
+               let page = opened.document.page(at: startPageIndex) {
+                pdfView.go(to: page)
+            }
+            self.opened = nil
         }
 
         private func report() {
