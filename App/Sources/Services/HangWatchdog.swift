@@ -122,8 +122,9 @@ private final class MainThreadProbeThread: Thread {
     }
 
     override func main() {
-        var previous = ContinuousClock.now
+        var previousCheck: ContinuousClock.Instant? = nil
         while !isCancelled {
+            let dispatchedAt = ContinuousClock.now
             check()
             // Sleep in small slices so cancellation is prompt — a blocked
             // main thread also blocks the run loop this thread would
@@ -135,16 +136,31 @@ private final class MainThreadProbeThread: Thread {
             }
             if isCancelled { return }
             let now = ContinuousClock.now
-            let interval = previous.duration(to: now)
-            let gap = Double(interval.components.seconds)
-                + Double(interval.components.attoseconds) / 1_000_000_000_000_000_000
-            previous = now
-            // The gap is measured around the MAIN-actor check plus the
-            // worker's own sleep; if the main hop did not run inside it,
-            // the difference is the main thread's block.
-            if gap >= 1.4 {
-                self.onBlocked(gap)
+            // Measure only the time from DISPATCHING the check to the next
+            // dispatch — the worker's own sleep is not main-thread time, and
+            // counting it reported every ordinary tick as a ~1 s block.
+            //
+            // The gap between `previousCheck` (when main actually RAN the
+            // previous check) and `dispatchedAt` (when this one was queued) is
+            // the real stall. Measuring around the sleep instead — the
+            // original shape — is what produced the log's impossible
+            // "main thread blocked ~4632.2s" lines: that figure is
+            // wall-clock time between two ticks, so an app that was simply
+            // suspended overnight (watchdog thread asleep with it) reported
+            // the hours as one continuous block, and every 1 s tick looked
+            // like a 1.4 s block. The stall the device report describes is
+            // real, but these numbers were measuring something else entirely.
+            if let previousCheck {
+                let interval = previousCheck.duration(to: dispatchedAt)
+                let gap = Double(interval.components.seconds)
+                    + Double(interval.components.attoseconds) / 1_000_000_000_000_000_000
+                // One tick of scheduler slack (1 s sleep + dispatch jitter)
+                // is not a stall.
+                if gap >= 2.5 {
+                    self.onBlocked(gap)
+                }
             }
+            previousCheck = dispatchedAt
         }
     }
 }

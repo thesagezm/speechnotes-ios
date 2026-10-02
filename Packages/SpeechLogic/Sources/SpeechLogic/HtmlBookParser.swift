@@ -271,17 +271,38 @@ final class HtmlReader {
                 continue
             }
             if char == "&" {
-                buffer.append(readEntity())
+                appendLiteral(readEntity())
                 index += 1
                 continue
             }
-            buffer.append(char)
+            appendLiteral(char)
             index += 1
         }
         flushText()
     }
 
-    /// Consumes one tag (and, for script/style/head/comment, its whole body).
+    /// One character of document text. While a `<title>` is open it goes to
+    /// the title buffer instead of the paragraph buffer — without this the
+    /// title never accumulated at all (it was declared, set to "" on the open
+    /// tag, and nothing ever wrote to it), which is why every HTML book came
+    /// in with a blank title.
+    private func appendLiteral(_ value: String) {
+        if inTitle {
+            titleBuffer += value
+        } else {
+            buffer += value
+        }
+    }
+
+    private func appendLiteral(_ value: Character) {
+        if inTitle {
+            titleBuffer.append(value)
+        } else {
+            buffer.append(value)
+        }
+    }
+
+    /// Consumes one tag (and, for script/style/comment, its whole body).
     private func readTag() {
         guard index + 1 < source.count else { index = source.count; return }
         // Comment.
@@ -299,6 +320,12 @@ final class HtmlReader {
             }
             return
         }
+        // `<!DOCTYPE …>` and other declarations without the comment shape.
+        if source[index + 1] == "!" {
+            while index < source.count, source[index] != ">" { index += 1 }
+            index = min(source.count, index + 1)
+            return
+        }
         index += 1
         var name = ""
         var isClosing = false
@@ -314,6 +341,16 @@ final class HtmlReader {
         }
         // Attributes: consume to the closing '>', honouring quoted strings so
         // an `alt="a > b"` cannot end the tag early.
+        //
+        // The `break` on the else-branch is load-bearing. Without it, a tag
+        // with NO attributes (the overwhelmingly common case: `<p>`,
+        // `</h3>`) leaves the cursor on '>' with nothing consumed — the name
+        // loop stops there, the `=` test fails, and the `else if` that would
+        // have advanced it tests `source[index] != ">"` and is therefore also
+        // false. The outer loop then spins forever on the same character.
+        // That is the infinite loop the first CI run died on (signal 5 in
+        // `testDeepHeadingsStayInsideTheirChapter`, the first test to reach a
+        // bare `<h3>`).
         var attributes: [String: String] = [:]
         while index < source.count, source[index] != ">" {
             var attributeName = ""
@@ -334,7 +371,10 @@ final class HtmlReader {
                         value.append(source[index])
                         index += 1
                     }
-                    index += 1  // closing quote
+                    // Past the closing quote. An unterminated value leaves the
+                    // cursor at the end, where the outer bounds check stops
+                    // the scan — never `index += 1` on a past-the-end index.
+                    if index < source.count { index += 1 }
                 } else {
                     while index < source.count, source[index] != ">", !source[index].isWhitespace {
                         value.append(source[index])
@@ -344,6 +384,10 @@ final class HtmlReader {
                 if !attributeName.isEmpty { attributes[attributeName] = value }
             } else if index < source.count, source[index] != ">" {
                 index += 1
+            } else {
+                // On '>' with no attribute name and no '=': the tag has no
+                // attributes left. Leave the loop.
+                break
             }
         }
         index = min(source.count, index + 1)  // '>'
@@ -351,8 +395,14 @@ final class HtmlReader {
     }
 
     /// One named entity (`&nbsp;`-style) or numeric reference, decoded.
-    /// Unknown names keep their bare text — losing a glyph beats losing the
-    /// rest of the document to a strict parser.
+    ///
+    /// `XhtmlText.namedEntities` is the shared table (identical decoding on
+    /// both the EPUB and HTML paths) and XML's five predefined entities pass
+    /// through it. The handful it lacks are added here — `&iuml;`, `&yacute;`,
+    /// `&alpha;` and friends are common in older HTML books, and dropping them
+    /// silently mangled the word ("Caf&iuml; — na&iuml;ve" became "Caf —
+    /// nave", which is what the first run's test caught). Unknown names keep
+    /// their bare text: losing a glyph beats losing the rest of the document.
     private func readEntity() -> String {
         var name = ""
         var cursor = index + 1
@@ -383,20 +433,80 @@ final class HtmlReader {
         if name == "gt" { return ">" }
         if name == "quot" { return "\"" }
         if name == "apos" { return "'" }
-        return XhtmlText.namedEntities[name] ?? ""
+        // Unknown names keep their bare text — `&weirdname;` reads as
+        // "weirdname" rather than vanishing. Losing the whole token is what
+        // the EPUB path's pre-pass does (a strict parser treats ANY undefined
+        // entity as fatal and one bad name truncates the rest of the chapter),
+        // but here the surrounding words survive anyway, so the readable
+        // middle is the better outcome.
+        if let known = XhtmlText.namedEntities[name] { return known }
+        if let known = HtmlReader.extraEntities[name] { return known }
+        return name
     }
+
+    /// Named entities `XhtmlText.namedEntities` does not carry but real
+    /// books use — the Latin-1 supplement, Latin Extended-A accents and the
+    /// Greek letters a scientific book reaches for. Every one of these
+    /// appears in ordinary prose: the first test run caught `&iuml;` turning
+    /// "na&iuml;ve" into "nave", which is a word the reader then said out
+    /// loud. No invented aliases (the earlier draft carried "oacute2",
+    /// "ecaron2" placeholders) — every key here is a real HTML entity name.
+    private static let extraEntities: [String: String] = [
+        // Latin-1 supplement gaps.
+        "iexcl": "\u{00A1}", "curren": "\u{00A4}", "brvbar": "\u{00A6}", "sect": "\u{00A7}",
+        "uml": "\u{00A8}", "ordf": "\u{00AA}", "laquo": "\u{00AB}", "not": "\u{00AC}",
+        "shy": "\u{00AD}", "macr": "\u{00AF}", "deg": "\u{00B0}", "plusmn": "\u{00B1}",
+        "sup2": "\u{00B2}", "sup3": "\u{00B3}", "acute": "\u{00B4}", "micro": "\u{00B5}",
+        "para": "\u{00B6}", "middot": "\u{00B7}", "cedil": "\u{00B8}", "sup1": "\u{00B9}",
+        "ordm": "\u{00BA}", "raquo": "\u{00BB}", "frac14": "\u{00BC}", "frac12": "\u{00BD}",
+        "frac34": "\u{00BE}", "times": "\u{00D7}", "divide": "\u{00F7}",
+        // Latin Extended-A.
+        "Amacr": "\u{0100}", "amacr": "\u{0101}", "Abreve": "\u{0102}", "abreve": "\u{0103}",
+        "Aogon": "\u{0104}", "aogon": "\u{0105}", "Cacute": "\u{0106}", "cacute": "\u{0107}",
+        "Ccirc": "\u{0108}", "ccirc": "\u{0109}", "Cdot": "\u{010A}", "cdot": "\u{010B}",
+        "Ccaron": "\u{010C}", "ccaron": "\u{010D}", "Dcaron": "\u{010E}", "dcaron": "\u{010F}",
+        "Dcroat": "\u{0110}", "dcroat": "\u{0111}", "Emacr": "\u{0112}", "emacr": "\u{0113}",
+        "Ebreve": "\u{0114}", "ebreve": "\u{0115}", "Ecirc": "\u{0116}", "ecirc": "\u{0117}",
+        "Eogon": "\u{0118}", "eogon": "\u{0119}", "Ecaron": "\u{011A}", "ecaron": "\u{011B}",
+        "Gcirc": "\u{011C}", "gcirc": "\u{011D}", "Gbreve": "\u{011E}", "gbreve": "\u{011F}",
+        "Hcirc": "\u{0124}", "hcirc": "\u{0125}", "Itilde": "\u{0128}", "itilde": "\u{0129}",
+        "Imacr": "\u{012A}", "imacr": "\u{012B}", "Iogon": "\u{012E}", "iogon": "\u{012F}",
+        "Idot": "\u{0130}", "imath": "\u{0131}", "inodot": "\u{0131}",
+        "Jcirc": "\u{0134}", "jcirc": "\u{0135}", "Lacute": "\u{0139}", "lacute": "\u{013A}",
+        "Lcaron": "\u{013D}", "lcaron": "\u{013E}", "Lmidot": "\u{013F}", "lmidot": "\u{0140}",
+        "Nacute": "\u{0143}", "nacute": "\u{0144}", "Ncaron": "\u{0147}", "ncaron": "\u{0148}",
+        "Ohungar": "\u{0150}", "ohungar": "\u{0151}", "Racute": "\u{0154}", "racute": "\u{0155}",
+        "Rcaron": "\u{0158}", "rcaron": "\u{0159}", "Sacute": "\u{015A}", "sacute": "\u{015B}",
+        "Scedilla": "\u{015E}", "scedilla": "\u{015F}", "Tcaron": "\u{0164}", "tcaron": "\u{0165}",
+        "Utilde": "\u{0168}", "utilde": "\u{0169}", "Umacr": "\u{016A}", "umacr": "\u{016B}",
+        "Uring": "\u{016E}", "uring": "\u{016F}", "Uuml": "\u{0170}", "uuml": "\u{0171}",
+        "Yacute": "\u{0177}", "yacute": "\u{00FD}", "Zacute": "\u{0179}", "zacute": "\u{017A}",
+        "Zdot": "\u{017B}", "zdot": "\u{017C}", "Zcaron": "\u{017D}", "zcaron": "\u{017E}",
+        // Greek.
+        "alpha": "\u{03B1}", "beta": "\u{03B2}", "gamma": "\u{03B3}", "delta": "\u{03B4}",
+        "pi": "\u{03C0}", "mu": "\u{03BC}", "sigma": "\u{03C3}", "omega": "\u{03C9}",
+    ]
 
     // MARK: Semantics
 
     private func handle(tag: String, isClosing: Bool, attributes: [String: String]) {
         switch tag {
-        case "script", "style", "head":
+        case "script", "style":
             // The whole body of these is unreadable noise for a reader —
             // `skipUntilClose` consumes it to the matching close tag.
+            //
+            // `<head>` is deliberately NOT skipped: it carries the only
+            // `<title>` and `<meta name=author>` a saved page has, and
+            // skipping it (as the first draft did) meant every HTML book
+            // imported with a blank title and no author — while its other
+            // contents (`<meta charset>` with no text, `<link>` with no text)
+            // contribute nothing to the paragraph stream anyway.
             if !isClosing {
                 flushText()
                 skipUntilClose(tag)
             }
+        case "head":
+            break
         case "title":
             if isClosing {
                 let value = tidy(titleBuffer)
@@ -423,8 +533,10 @@ final class HtmlReader {
                 pendingHeadingLevel = level
             }
         case "p", "div", "li", "tr", "blockquote", "section", "article",
-             "dd", "dt", "pre", "figcaption", "table":
+             "dd", "dt", "pre", "figcaption":
             if isClosing { closeBlock() }
+        case "table":
+            if isClosing { closeBlock(isTable: true) }
         case "br", "hr":
             if pendingHeadingLevel > 0 {
                 closeHeading()
@@ -519,8 +631,15 @@ final class HtmlReader {
         }
     }
 
-    /// A closing block tag: text first, then the cell/row/table bookkeeping.
-    private func closeBlock() {
+    /// A closing block tag: text first, then the cell/row bookkeeping.
+    ///
+    /// `<tr>` closes a ROW, and `<table>` closes the TABLE — two different
+    /// boundaries, and the first draft conflated them: only `</table>`
+    /// flushed, and by then every `</tr>` had already reset `rowCells`, so the
+    /// row list was empty at the emit and the table never became a table
+    /// block. Every table came out as run-on paragraphs ("NameQty",
+    /// "Apples12") — the exact regression the test suite caught.
+    private func closeBlock(isTable: Bool = false) {
         flushText()
         if inCell {
             let text = tidy(cellBuffer)
@@ -529,7 +648,11 @@ final class HtmlReader {
             inCell = false
             inHeaderCell = false
         }
-        if !tableRows.isEmpty {
+        if !rowCells.isEmpty {
+            tableRows.append(rowCells)
+            rowCells = []
+        }
+        if isTable, !tableRows.isEmpty {
             items.append(.table(tableRows))
             tableRows = []
         }
