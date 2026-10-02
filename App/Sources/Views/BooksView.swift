@@ -1,3 +1,4 @@
+import SpeechLogic
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -10,17 +11,20 @@ import UniformTypeIdentifiers
 /// book's reader.
 struct BooksView: View {
     /// What the importer offers. `.mpeg4Audio` covers M4B/M4A/MP4 (the same
-    /// UTType family), `.mp3` the ID3-chaptered MP3s, `.audioFileContent` the
-    /// Opus/Ogg containers, and `.epub`/`.pdf` the read-along books. The
-    /// document formats are named as IMPORTED UTTypes by their UTI or by
-    /// filename extension, because several (azw3, pdb, htmlz, markdown) have
+    /// UTType family), `.mp3` the ID3-chaptered MP3s, and `.audio` the Opus/Ogg
+    /// containers (there is no opus/ogg system UTType — public.audio is the
+    /// family the Files picker resolves them to; the store's accepted-
+    /// extensions list decides what actually imports). `.epub`/`.pdf` are the
+    /// read-along books. The document formats are named as IMPORTED UTTypes
+    /// by their UTI or by filename extension, because several
+    /// (azw3, pdb, htmlz, markdown) have
     /// no system type at all — asking for one greys the file out of the
     /// picker. The UTType list lives here rather than in BooksStore so the
     /// picker's contents and the store's accepted extensions cannot drift
     /// apart; `DocumentBook.supportedExtensions` is the single source for the
     /// document half of both.
     private static let importableBookTypes: [UTType] = {
-        var types: [UTType] = [.epub, .pdf, .mpeg4Audio, .mp3, .audioFileContent]
+        var types: [UTType] = [.epub, .pdf, .mpeg4Audio, .mp3, .audio]
         // By UTI first (resolves to the system's type when it has one), then
         // by extension for everything that doesn't.
         let byUTI: [String: String] = [

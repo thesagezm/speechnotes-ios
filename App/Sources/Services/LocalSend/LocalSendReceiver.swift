@@ -2,6 +2,7 @@ import Combine
 import CryptoKit
 import Foundation
 import Network
+import SpeechLogic
 import UIKit
 
 /// One completed (or routed) transfer, for the BookDrop history list.

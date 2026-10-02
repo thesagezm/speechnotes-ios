@@ -124,8 +124,8 @@ final class SystemEngine: NSObject, SpeechEngine {
             queue: .main
         ) { [weak self] notification in
             guard let self else { return }
-            let typeRaw = notification.userInfo?[AVAudioSession.interruptionTypeKey] as? UInt
-            let optionsRaw = notification.userInfo?[AVAudioSession.interruptionOptionKey] as? UInt ?? 0
+            let typeRaw = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
+            let optionsRaw = notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
             if typeRaw == AVAudioSession.InterruptionType.began.rawValue {
                 if self.state == .speaking { self.pause() }
             } else if typeRaw == AVAudioSession.InterruptionType.ended.rawValue,
@@ -180,7 +180,7 @@ final class SystemEngine: NSObject, SpeechEngine {
     /// from (see `Chunk`), so progress and the read-along can address the
     /// WHOLE text rather than the chunk. `Chunk.text` is already the literal
     /// slice, so it is used directly — no re-slicing, no drift.
-    private static func expanded(_ chunks: [SentenceChunker.Chunk]) -> [Queued] {
+    private static func expanded(_ chunks: [Chunk]) -> [Queued] {
         chunks
             .filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             .map { Queued(offset: $0.offset, text: $0.text) }
