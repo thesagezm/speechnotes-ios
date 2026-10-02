@@ -261,8 +261,12 @@ private final class RtfReader {
             skipDepth += 1
             infoKey = nil
         case "title", "author", "subject", "keywords", "operator", "company",
-             "category", "doccomm" where skipDepth > 0:
-            // An `\info` child: capture its text, but never read it aloud.
+             "category", "doccomm":
+            // An `\info` child: capture its text, but never read it aloud. The
+            // `where` belongs on the WHOLE case (a `where` after a comma-list
+            // applies to the last pattern only — the compiler warning, and
+            // the condition that would have been silently ignored).
+            guard skipDepth > 0 else { break }
             infoKey = word
             infoBytes = []
 

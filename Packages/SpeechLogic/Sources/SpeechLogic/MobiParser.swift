@@ -236,16 +236,22 @@ public enum MobiParser {
 
         /// Locates an EXTH block by its magic and validates the declared
         /// length. nil when there is no plausible one.
+        ///
+        /// Two `Data` details bite here and both are now spelled out:
+        /// `range(of:)` takes `Data` (not `[UInt8]`), and a Data SLICE keeps
+        /// its absolute indices — so the range found in `record[16…]` indexes
+        /// the original record directly and must NOT be offset by 16 again
+        /// (that was the `Data.Index`/`String` subscript error CI caught).
         static func exthBlob(in record: Data) -> Data? {
             guard record.count > 28 else { return nil }
-            let magic: [UInt8] = [0x45, 0x58, 0x54, 0x48]  // "EXTH"
+            let magic = Data([0x45, 0x58, 0x54, 0x48])  // "EXTH"
             guard let range = record[16...].range(of: magic) else { return nil }
-            let base = 16 + range.lowerBound
+            let base = range.lowerBound
             let count = Int(u32(record, base + 8))
             let length = Int(u32(record, base + 4))
             guard count >= 0, count < 2_000,
                   length >= 12, length <= record.count - base else { return nil }
-            return Data(record[base..<(base + length)])
+            return record.subdata(in: base..<(base + length))
         }
     }
 

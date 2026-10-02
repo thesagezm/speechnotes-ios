@@ -68,15 +68,13 @@ public enum HtmlBookParser {
         let htmlData = try ZipReader.readEntry(htmlName, in: archive)
         let chapters = try parse(html: htmlData)
 
-        var title: String?
-        var author: String?
         var cover: DocumentImage?
         if let opfEntry = indexEntry.first(where: { $0.name.lowercased().hasSuffix(".opf") })?.name,
            let opfData = try? ZipReader.readEntry(opfEntry, in: archive) {
-            (title, author) = Self.metadataFromOPF(opfData)
-        }
-        if title == nil, let htmlTitle = Self.metadata(html: htmlData).title {
-            title = htmlTitle
+            // The OPF's title/author are read by the CALLER through
+            // `metadata(fileExtension:data:)` — this path only needs the
+            // cover, and duplicating the lookup here meant an unused local.
+            _ = Self.metadataFromOPF(opfData)
         }
         if let coverEntry = indexEntry.first(where: {
             $0.name.lowercased().hasSuffix(".jpg") || $0.name.lowercased().hasSuffix(".jpeg")
