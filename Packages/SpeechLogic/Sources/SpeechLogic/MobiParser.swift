@@ -441,6 +441,13 @@ public enum MobiParser {
 
         for match in matches(of: blockBoundaryRegex, in: working) {
             guard let range = Range(match.range, in: working) else { continue }
+            // A match that starts BEFORE the cursor would make
+            // `working[cursor..<range.lowerBound]` a reversed range — the
+            // slice traps or returns garbage, and a truncated back reference
+            // in the decompressed text can produce an unbalanced tag whose
+            // boundary match overlaps the previous one. Skip it and keep the
+            // cursor where it is rather than slicing backwards.
+            guard range.lowerBound >= cursor else { continue }
             let chunk = String(working[cursor..<range.lowerBound])
             cursor = range.upperBound
             let text = sanitize(replacing(anyTagRegex, in: chunk, with: " "))
@@ -728,30 +735,64 @@ struct PalmDatabase {
         }
         recordCount = count
 
-        let listStart = 78
-        let narrowEnd = listStart + count * 8
-        // A zero first entry in the next-IDs list marks the padded layout.
-        let isPadded = narrowEnd + 2 <= archive.count
-            && MobiParser.u32(archive, narrowEnd) == 0
-        let entrySize = isPadded ? 4 : 8
-        offsets.reserveCapacity(count)
-        var cursor = listStart
-        for _ in 0..<count {
-            guard cursor + 4 <= archive.count else {
-                throw DBError.malformed("record list truncated")
-            }
-            // A zero offset marks a deleted record: keep the slot so every
-            // later index stays right, and let record() return nil for it.
-            offsets.append(Int(MobiParser.u32(archive, cursor)))
-            cursor += entrySize
+        // Two record-list layouts exist: 8 bytes per entry (offset, id,
+        // attributes) and 4 bytes per entry (offset only). The spec's hint —
+        // "a zero first entry in the next-IDs list means the list is padded" —
+        // is NOT usable: a normal book's next-IDs list is ALL ZEROS ("no next
+        // record"), so the hint is true for essentially every real `.azw3` and
+        // the 8-byte list then read as garbage (the first two tests passed only
+        // because their fixture wrote an empty next-IDs list too). Choosing by
+        // VALIDITY instead is undecidable-by-heuristic in the wrong direction
+        // and is what a real reader has to do: read both and keep the one whose
+        // offsets are all inside the file and non-decreasing.
+        let narrow = offsets(reading: 8, count: count)
+        let padded = offsets(reading: 4, count: count)
+        if looksValid(padded) && !looksValid(narrow) {
+            offsets = padded
+        } else {
+            offsets = narrow
         }
     }
 
-    /// Record bytes, 2-byte checksum stripped.
+    /// Reads `count` offsets with the given entry stride. An entry that runs
+    /// off the end yields a sentinel that `looksValid` rejects.
+    private func offsets(reading entrySize: Int, count: Int) -> [Int] {
+        var result: [Int] = []
+        result.reserveCapacity(count)
+        var cursor = 78
+        for _ in 0..<count {
+            guard cursor + 4 <= archive.count else {
+                result.append(-1)
+                cursor += entrySize
+                continue
+            }
+            let offset = Int(MobiParser.u32(archive, cursor))
+            result.append(offset > 0 ? offset : -1)
+            cursor += entrySize
+        }
+        return result
+    }
+
+    /// A layout is plausible when every offset is inside the file, the list
+    /// runs forwards (records are stored in order), and the stride still fits.
+    private func looksValid(_ candidate: [Int]) -> Bool {
+        guard !candidate.isEmpty else { return false }
+        var previous = 0
+        for offset in candidate {
+            guard offset >= 78, offset + 2 < archive.count else { return false }
+            guard offset >= previous else { return false }
+            previous = offset
+        }
+        return true
+    }
+
+    /// Record bytes, 2-byte checksum stripped. A deleted record (offset 0, or
+    /// the sentinel a truncated list produced) reads as nil rather than a
+    /// slice at a nonsense index.
     func record(_ index: Int) -> Data? {
         guard offsets.indices.contains(index) else { return nil }
         let start = offsets[index]
-        guard start > 0, start + 8 <= archive.count else { return nil }
+        guard start > 78, start + 8 <= archive.count else { return nil }
         let end = offsets.indices.contains(index + 1) ? offsets[index + 1] : archive.count
         guard end > start, end <= archive.count else { return nil }
         return Data(archive[(start + 2)..<end])
