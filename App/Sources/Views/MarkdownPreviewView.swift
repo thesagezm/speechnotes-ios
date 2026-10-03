@@ -441,23 +441,15 @@ struct MarkdownPreviewView: View {
     }
 
     /// Column math for one table: the widths, which columns are figures,
-    /// and whether the floors overflow the container.
+    /// and whether the floors overflow the container. Nested in the view
+    /// (not at file scope) because nothing outside needs it.
     private struct TableLayout {
-    var widths: [CGFloat]
-    /// A column whose every non-empty cell parses as a number.
-    var numeric: [Bool]
-    /// The columns cannot fit the container at their word floors.
-    var overflows: Bool
-    var horizontalPadding: CGFloat
-}
-
-private extension Text {
-    /// Monospaced digits for a column of figures, so 1,000 and 8 line up on
-    /// the same digit cell instead of jittering. A no-op for prose.
-    func monospacedDigit(_ enabled: Bool) -> Text {
-        enabled ? monospacedDigit() : self
+        var widths: [CGFloat]
+        var numeric: [Bool]
+        /// The columns cannot fit the container at their word floors.
+        var overflows: Bool
+        var horizontalPadding: CGFloat
     }
-}
 
     /// Equal shares over the word floors, with an honest overflow test.
     ///
@@ -782,27 +774,35 @@ extension EnvironmentValues {
     }
 }
 
-private extension Array {
-    /// Element at `index`, or nil — used for ragged table rows, where a row
-    /// may legitimately have fewer cells than the header.
-    subscript(safe index: Int) -> Element? {
-        indices.contains(index) ? self[index] : nil
-    }
-}
-
 /// The empty cells a ragged table produces, and the single-owner problem
 /// that comes with them.
 ///
-/// `tableView` builds `(0..<columnCount).map { row[safe: $0] ?? "" }` per
-/// row, which is correct but easy to get wrong by hand — and a ragged table
-/// is the normal case for anything imported from a PDF or a spreadsheet
-/// where the last column is optional. One place that pads, so every caller
-/// does the same thing.
+/// The table body pads every row to the column count in one place, so a row
+/// that legitimately has fewer cells than the header (normal for anything
+/// imported from a PDF or a spreadsheet with an optional last column) cannot
+/// be miscounted at a call site.
 extension Array where Element == String {
     /// `count` cells, padded with empty strings.
     func padded(to count: Int) -> [String] {
         guard self.count < count else { return self }
         return self + Array(repeating: "", count: count - self.count)
+    }
+}
+
+/// Element at `index`, or nil — the table rows are ragged by nature (a row
+/// may have fewer cells than the header), so every column read has to
+/// tolerate a short row.
+private extension Array {
+    subscript(safe index: Int) -> Element? {
+        indices.contains(index) ? self[index] : nil
+    }
+}
+
+/// Monospaced digits for a column of figures, so 1,000 and 8 line up on
+/// the same digit cell instead of jittering. A no-op for prose.
+private extension Text {
+    func monospacedDigit(_ enabled: Bool) -> Text {
+        enabled ? monospacedDigit() : self
     }
 }
 
