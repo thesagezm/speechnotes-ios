@@ -440,7 +440,9 @@ struct MarkdownPreviewView: View {
         .frame(width: max(1, width), alignment: numeric ? .trailing : .leading)
     }
 
-private struct TableLayout {
+    /// Column math for one table: the widths, which columns are figures,
+    /// and whether the floors overflow the container.
+    private struct TableLayout {
     var widths: [CGFloat]
     /// A column whose every non-empty cell parses as a number.
     var numeric: [Bool]
