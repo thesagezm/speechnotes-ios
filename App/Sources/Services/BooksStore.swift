@@ -60,6 +60,20 @@ final class BooksStore: ObservableObject {
         return dir.appendingPathComponent("original.audio")
     }
 
+    /// True when the file is an Ogg container — "OggS" magic, or one of the
+    /// Ogg extensions when the bytes cannot be read. iOS has no Ogg demuxer
+    /// at all, so this is the file that will never play here, whatever is
+    /// inside it.
+    nonisolated static func isOggContainer(_ url: URL) -> Bool {
+        if let head = slice(of: url, from: 0, length: 4),
+           head.count == 4,
+           head[0] == 0x4F, head[1] == 0x67, head[2] == 0x67, head[3] == 0x53 {
+            return true  // "OggS"
+        }
+        let ext = url.pathExtension.lowercased()
+        return ext == "ogg" || ext == "oga" || ext == "opus"
+    }
+
     /// Legacy `original.audio` → sniffed true extension (ID3 head → mp3,
     /// otherwise the MPEG-4 family → m4b). Renames once, at the manifest
     /// backfill, so AVURLAsset can actually read the file.

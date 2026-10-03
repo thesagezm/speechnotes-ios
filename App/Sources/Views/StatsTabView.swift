@@ -183,6 +183,15 @@ struct StatsTabView: View {
         .background(cardBackground)
     }
 
+    /// The bars must wear the legend's colours, not Swift Charts' own
+    /// categorical palette — otherwise "reading" is blue in the legend and
+    /// orange in the graph, which is the mismatch the goals tab inherited.
+    /// One definition (`ActivityKind.legendColor`) feeds both.
+    private static let activityColors: [String: Color] = [
+        ActivityKind.reading.label: ActivityKind.reading.legendColor,
+        ActivityKind.listening.label: ActivityKind.listening.legendColor,
+    ]
+
     @ViewBuilder
     private var activityChart: some View {
         switch range {
@@ -213,6 +222,7 @@ struct StatsTabView: View {
             .chartScrollableAxes(.horizontal)
             .chartXVisibleDomain(length: 60 * 60 * 24 * 10)
             .chartLegend(.hidden)
+            .chartForegroundStyleScale(Self.activityColors)
         case .year:
             Chart(yearSlices) { slice in
                 BarMark(
@@ -228,6 +238,7 @@ struct StatsTabView: View {
                 }
             }
             .chartLegend(.hidden)
+            .chartForegroundStyleScale(Self.activityColors)
         }
     }
 

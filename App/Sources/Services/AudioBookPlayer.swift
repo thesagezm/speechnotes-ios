@@ -312,6 +312,16 @@ final class AudioBookPlayer: ObservableObject {
     /// reader can show it instead of retrying forever.
     private static func unplayableReason(for error: Error, url: URL) -> String {
         let nsError = error as NSError
+        // Ogg is not a codec problem, it is a CONTAINER problem, and it never
+        // will be one: AVFoundation ships no Ogg demuxer on any Apple
+        // platform, so a .opus/.ogg/.oga file fails however it is encoded.
+        // (Opus itself is fine — in an MP4 or CAF container this same session
+        // plays it.) Saying "re-encode as AAC or MP3" for a file that was
+        // never going to work is the kind of advice that sends someone off
+        // to re-encode three times and still get nothing.
+        if BooksStore.isOggContainer(url) {
+            return "This book is an Ogg container (.opus/.ogg/.oga), which iOS cannot read at all — a VLC plugin or a desktop player is what plays these. Convert it to M4B/AAC or MP3 first (ffmpeg -i book.opus -c:a aac book.m4b), then send it over."
+        }
         // 1685348671 = kAudioFileInvalidChunkError: the container/codec walk
         // failed — in practice EAC3/Atmos or another software-undecodable
         // stream. Sniff the codec so the message is specific.
