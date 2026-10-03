@@ -544,7 +544,7 @@ struct NotesListView: View {
             return
         }
         Task.detached(priority: .userInitiated) {
-            let imported = ImportService.importText(from: url)
+            let imported = await ImportService.importText(from: url)
             await MainActor.run {
                 guard let imported else {
                     Haptics.warning()

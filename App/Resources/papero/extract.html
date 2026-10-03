@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>papero extractor</title>
+</head>
+<body>
+<script type="module">
+// The papero layout engine (a port of src/papero_extract/layout.py) running
+// on a vendored pdf.js, served from the app's own scheme. Nothing here talks
+// to the network: the page, the engine, pdf.js and the PDF itself are all
+// handed to the webview by the app.
+//
+// Native <-> JS:
+//   native -> JS   evaluateJavaScript("window.papero.extract(<url>, <opts>)")
+//   JS -> native   postMessage({type, ...}) on the "papero" channel
+import { extractDocument } from "./engine.js";
+
+// Block types the engine classifies as page furniture — running heads, page
+// numbers, footers. A reader never wants them; the engine keeps them because
+// its heading classifier needs them.
+const FURNITURE = new Set(["header", "footer", "page_number"]);
+
+const escapePipes = (cell) => String(cell ?? "").replace(/\|/g, "\\|").replace(/\n/g, " ");
+
+function blockToMarkdown(block) {
+  const text = (block.text ?? "").trim();
+  switch (block.type) {
+    case "heading": {
+      const level = Math.min(6, Math.max(1, block.level || 1));
+      return text ? "#".repeat(level) + " " + text : "";
+    }
+    case "list_item": {
+      // A numbered item keeps its number; everything else is a bullet.
+      const marker = block.number != null ? `${block.number}.` : "-";
+      return text ? `${marker} ${text}` : "";
+    }
+    case "table": {
+      const rows = block.rows;
+      if (!Array.isArray(rows) || !rows.length) return text ? escapePipes(text) : "";
+      const lines = rows.map((row) => `| ${row.map(escapePipes).join(" | ")} |`);
+      // A header separator only makes sense after a first row that is a
+      // header; papero's rows are already the table's grid, so the first row
+      // doubles as the header.
+      lines.splice(1, 0, `| ${rows[0].map(() => "---").join(" | ")} |`);
+      return lines.join("\n");
+    }
+    case "code":
+      return text ? "```\n" + text + "\n```" : "";
+    case "formula":
+      // `text` is the linearised reading of the formula, which is what a
+      // speech engine can say; `latex` is kept for anyone who wants it.
+      return text || block.latex || "";
+    case "caption":
+      return text ? "*" + text.replace(/\n/g, " ") + "*" : "";
+    case "figure":
+      // A figure's block text is its axis labels and legend fragments —
+      // noise when read aloud. Its caption is a separate block and is kept.
+      return "";
+    case "paragraph":
+    default:
+      return text;
+  }
+}
+
+function documentToMarkdown(doc) {
+  // The reader scrolls the PDF to the page that is sounding, which needs to
+  // know where each page's text STARTS in the joined string. Built here, in
+  // JS, while the pages are already separate — the Swift side would have no
+  // other way to recover it.
+  const out = [];
+  const pageOffsets = [];
+  for (const page of doc.pages ?? []) {
+    const start = out.length ? out.join("\n\n").length : 0;
+    for (const block of page.blocks ?? []) {
+      if (FURNITURE.has(block.type)) continue;
+      const markdown = blockToMarkdown(block);
+      if (markdown) out.push(markdown);
+    }
+    if (out.length) {
+      pageOffsets.push({ page: page.number ?? 0, offset: start });
+    }
+  }
+  return { markdown: out.join("\n\n"), pageOffsets };
+}
+
+function post(message) {
+  window.webkit.messageHandlers.papero.postMessage(message);
+}
+
+window.papero = {
+  // `url` is the app's own scheme URL for the PDF; `pageSpec` is the engine's
+  // "1-12" / "1,4,9" syntax, which is how the app extracts a document a few
+  // pages at a time instead of holding a whole book in this heap.
+  async extract(url, pageSpec) {
+    const started = performance.now();
+    try {
+      const response = await fetch(url);
+      if (!response.ok) throw new Error(`fetch failed: ${response.status}`);
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      const { doc } = await extractDocument(bytes, { pages: pageSpec });
+      const { markdown, pageOffsets } = documentToMarkdown(doc);
+      // The bytes are the biggest thing in this heap; let them go before the
+      // (potentially very large) markdown is posted across the bridge.
+      post({
+        type: "result",
+        markdown: markdown,
+        pageOffsets: pageOffsets,
+        pageCount: doc.page_count ?? 0,
+        pagesExtracted: doc.pages_extracted ?? 0,
+        likelyScanned: !!doc.likely_scanned,
+        metadata: doc.metadata ?? {},
+        elapsedMs: Math.round(performance.now() - started),
+      });
+    } catch (error) {
+      post({ type: "error", message: String(error?.message ?? error) });
+    }
+  },
+};
+
+post({ type: "ready" });
+</script>
+</body>
+</html>

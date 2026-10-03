@@ -53,7 +53,11 @@ final class ImportService {
     /// Reads and extracts plain text. Call off the main thread — files can be
     /// large, and iCloud downloads can take seconds. Returns nil (with a
     /// logged reason) when nothing useful could be extracted.
-    static func importText(from url: URL) -> (title: String, text: String)? {
+    ///
+    /// Async because the PDF branch may run papero's engine, which is a
+    /// webview and cannot be driven synchronously. The security scope taken
+    /// here stays open across that await — the `defer` below runs last.
+    static func importText(from url: URL) async -> (title: String, text: String)? {
         Log.shared.info("ImportService: reading \(url.lastPathComponent)")
         let scoped = url.startAccessingSecurityScopedResource()
         Log.shared.info("ImportService: security scope granted = \(scoped)")
@@ -65,7 +69,7 @@ final class ImportService {
         let raw: String?
         switch kind {
         case "pdf":
-            raw = pdfText(from: url)
+            raw = await pdfText(from: url)
         case _ where DocumentBook.canNormalize(kind):
             // Every document format — the office set plus the mobipocket,
             // FictionBook, RTF, HTML and plain-text readers — flattens to the
@@ -220,29 +224,21 @@ final class ImportService {
     private static let maxPdfPages = 150
     private static let maxPdfTextChars = 1_000_000
 
-    private static func pdfText(from url: URL) -> String? {
-        var extracted: String?
-        coordinatedRead(from: url) { readURL in
-            // Open by URL inside the coordinated read — PDFDocument(url:)
-            // parses the container without materializing the whole file the
-            // way PDFDocument(data:) would, and page content loads per page.
-            guard let document = PDFDocument(url: readURL), document.pageCount > 0 else { return }
-            var out = ""
-            let pageCount = min(document.pageCount, maxPdfPages)
-            for index in 0..<pageCount {
-                guard let page = document.page(at: index),
-                      let pageString = page.string,
-                      !pageString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
-                if !out.isEmpty { out += "\n\n" }
-                out += pageString
-                if out.utf16.count > maxPdfTextChars {
-                    out += "\n\n[Text truncated at \(maxPdfTextChars / 1000)k characters — import large PDFs on the Books tab instead.]"
-                    break
-                }
-            }
-            extracted = out.isEmpty ? nil : out
+    private static func pdfText(from url: URL) async -> String? {
+        // Which engine produces this is the user's setting (Settings →
+        // Storage): the built-in PDFKit path, papero's reading-order engine,
+        // or papero with a silent fallback. The caps below are the note
+        // importer's own and apply either way — a note import is not a book
+        // import.
+        let result = await PdfTextExtractor.text(
+            for: url,
+            maxPages: maxPdfPages,
+            maxCharacters: maxPdfTextChars
+        )
+        if let result {
+            Log.shared.info("ImportService: PDF text via \(result.engine.rawValue) (\(result.text.utf16.count) chars)")
         }
-        return extracted
+        return result?.text
     }
 
     // MARK: - Clipboard

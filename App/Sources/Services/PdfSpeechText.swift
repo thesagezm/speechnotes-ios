@@ -24,12 +24,37 @@ enum PdfSpeechText {
 
     /// One chapter's speech text + the per-page UTF-16 offsets that let the
     /// reader auto-scroll the PDFView to the sounding page.
+    ///
+    /// Which engine produced the text is the user's setting: the built-in
+    /// per-page PDFKit path, papero's reading-order engine, or papero with a
+    /// fallback. Whatever produced it, a page with no text layer is still
+    /// OCR'd here — papero reconstructs a text layer's reading order, it does
+    /// not read pixels, so the scan path stays ours.
     static func chapterText(book: Book, chapterIndex: Int) async -> (text: String, pageOffsets: [PdfPageOffset])? {
         guard let chapters = book.pdfChapters,
               chapterIndex >= 0, chapterIndex < chapters.count else { return nil }
         let chapter = chapters[chapterIndex]
         let documentURL = BooksStore.originalFileURL(book)
         let cachePrefix = book.id.uuidString
+
+        // Papero has its own page-window extraction; the built-in path works
+        // page by page so it can OCR a scan and keep the offsets in step.
+        // The facade decides whether papero could serve the chapter, so all
+        // this has to do is honour a hard failure in `.papero` mode.
+        let mode = PdfExtractionMode.current
+        if mode.prefersPapero {
+            let first = chapter.startPage + 1  // PdfPageOffset and the engine
+            let last = chapter.endPage + 1     // are both 1-based
+            if let result = await PdfTextExtractor.chapterText(
+                for: documentURL, firstPage: first, last: last
+            ) {
+                Log.shared.info("PdfSpeechText: chapter \(chapterIndex) via \(result.engine.rawValue) (\(result.text.utf16.count) chars)")
+                return (result.text, result.pageOffsets)
+            }
+            if mode == .papero { return nil }
+            Log.shared.info("PdfSpeechText: chapter \(chapterIndex) fell back to the built-in extractor")
+        }
+
         return await Task.detached(priority: .userInitiated) { () -> (String, [PdfPageOffset])? in
             guard let document = PDFDocument(url: documentURL) else { return nil }
             var text = ""
