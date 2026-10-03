@@ -247,7 +247,7 @@ private final class Session: NSObject, WKURLSchemeHandler, WKScriptMessageHandle
     }
 
     func runWindow(spec: String?) async throws -> [String: Any] {
-        guard let webView else { throw PaperoError.loadFailed("no extractor") }
+        guard let webView else { throw PaperoExtractorError.loadFailed("no extractor") }
         let specArgument = spec.map { "\"\($0)\"" } ?? "undefined"
         let script = "window.papero.extract(\"\(Self.scheme)://app/document.pdf\", \(specArgument))"
         return try await withTimeout(PaperoExtractor.windowTimeout) {
@@ -256,9 +256,9 @@ private final class Session: NSObject, WKURLSchemeHandler, WKScriptMessageHandle
     }
 
     func shutdown() {
-        readyWaiter?.resume(throwing: PaperoError.cancelled)
+        readyWaiter?.resume(throwing: PaperoExtractorError.cancelled)
         readyWaiter = nil
-        windowWaiter?.resume(throwing: PaperoError.cancelled)
+        windowWaiter?.resume(throwing: PaperoExtractorError.cancelled)
         windowWaiter = nil
         if let webView {
             webView.configuration.userContentController.removeScriptMessageHandler(forName: "papero")
@@ -285,7 +285,7 @@ private final class Session: NSObject, WKURLSchemeHandler, WKScriptMessageHandle
                 Task { @MainActor in
                     guard let self, let waiter = self.windowWaiter else { return }
                     self.windowWaiter = nil
-                    waiter.resume(throwing: PaperoError.engineError(error.localizedDescription))
+                    waiter.resume(throwing: PaperoExtractorError.engineError(error.localizedDescription))
                 }
             }
         }
@@ -301,10 +301,10 @@ private final class Session: NSObject, WKURLSchemeHandler, WKScriptMessageHandle
             group.addTask { try await body() }
             group.addTask {
                 try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-                throw PaperoError.loadFailed("timed out after \(Int(seconds))s")
+                throw PaperoExtractorError.loadFailed("timed out after \(Int(seconds))s")
             }
             guard let first = try await group.next() else {
-                throw PaperoError.loadFailed("no result")
+                throw PaperoExtractorError.loadFailed("no result")
             }
             group.cancelAll()
             return first
@@ -325,7 +325,7 @@ private final class Session: NSObject, WKURLSchemeHandler, WKScriptMessageHandle
             guard let waiter = windowWaiter else { return }
             windowWaiter = nil
             if type == "error" {
-                waiter.resume(throwing: PaperoError.engineError(
+                waiter.resume(throwing: PaperoExtractorError.engineError(
                     payload["message"] as? String ?? "unknown"
                 ))
             } else {

@@ -444,7 +444,18 @@ struct BookReaderView: View {
                     Button {
                         Haptics.tap()
                         showingTOC = false
-                        goToHref(row.entry.href)
+                        // Spine index first: the import already resolved it
+                        // against the book's own spine, and it always lands.
+                        // `display(href)` silently does nothing when the TOC
+                        // href and the spine href differ in a directory
+                        // prefix, percent-encoding or case — which is why
+                        // "the TOC is there but tapping a chapter does
+                        // nothing" was true for plenty of books.
+                        if let spineIndex = row.entry.spineIndex {
+                            goChapter(spineIndex)
+                        } else {
+                            goToHref(row.entry.href)
+                        }
                     } label: {
                         HStack {
                             Text(row.entry.label)
