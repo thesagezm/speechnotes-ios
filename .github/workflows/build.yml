@@ -257,6 +257,46 @@ jobs:
           path: epub-spike.log
           if-no-files-found: warn
 
+  papero-spike:
+    name: Papero spike (vendored engine vs a real PDF)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Blocking on purpose, unlike the other spikes: this one is fast, has no
+    # device variance, and it guards the vendored files the app serves to its
+    # webview. A CDN import creeping back into engine.js, or pdf.js moving,
+    # fails HERE instead of on the phone as "papero does nothing".
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # The same two-column ACL paper the PDF spike uses, plus the Linux
+      # From Scratch book (a real outline, real multi-column body).
+      - name: Download real PDFs
+        run: |
+          mkdir -p ~/papero-spike
+          curl -L --retry 3 --progress-bar -o ~/papero-spike/lfs.pdf \
+            "https://www.linuxfromscratch.org/lfs/downloads/12.1/LFS-BOOK-12.1.pdf"
+          curl -L --retry 3 --progress-bar -o ~/papero-spike/paper.pdf \
+            "https://aclanthology.org/P02-1040.pdf"
+          ls -lh ~/papero-spike
+
+      - name: Run papero spike
+        run: |
+          set -o pipefail
+          for pdf in ~/papero-spike/*.pdf; do
+            echo "== $pdf"
+            node Tests/PaperoSpike/papero-spike.mjs "$pdf"
+          done 2>&1 | tee papero-spike.log
+
+      - name: Show failure summary
+        if: always()
+        run: |
+          grep -E "PAPERO-SPIKE|Error|error:" papero-spike.log | tail -n 30 || true
+
   pdf-spike:
     name: PDF spike (PdfText vs real documents)
     runs-on: macos-latest
