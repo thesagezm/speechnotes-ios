@@ -167,7 +167,7 @@ struct MarkdownPreviewView: View {
     @ViewBuilder
     private func blockView(_ block: MarkdownText.MarkdownBlock) -> some View {
         switch block {
-        case .heading(_, _, let spans):
+        case .heading(let level, _, let spans):
             attributedText(spans)
                 .font(headingFont(level))
                 .padding(.top, level <= 2 ? ReaderSpacing.headingTopLevel1 * theme.readerBlockSpacing
@@ -357,7 +357,7 @@ struct MarkdownPreviewView: View {
             // Header. One fill + one rule under it, so the eye reads a
             // header band rather than a bold line of text.
             tableRow(
-                cells: headers.padded(to: columnCount),
+                cells: headers.padded(to: columnCount, with: []),
                 widths: widths,
                 numeric: numeric,
                 bold: true,
@@ -368,7 +368,7 @@ struct MarkdownPreviewView: View {
             )
             ForEach(Array(rows.enumerated()), id: \.offset) { index, row in
                 tableRow(
-                    cells: row.padded(to: columnCount),
+                    cells: row.padded(to: columnCount, with: []),
                     widths: widths,
                     numeric: numeric,
                     bold: false,
@@ -708,11 +708,12 @@ extension EnvironmentValues {
 /// that legitimately has fewer cells than the header (normal for anything
 /// imported from a PDF or a spreadsheet with an optional last column) cannot
 /// be miscounted at a call site.
-extension Array where Element == String {
-    /// `count` cells, padded with empty strings.
-    func padded(to count: Int) -> [String] {
+extension Array {
+    /// `count` cells, padded with `filler` — a ragged table row's missing
+    /// cells (every column read has to tolerate a short row either way).
+    func padded(to count: Int, with filler: @autoclosure () -> Element) -> [Element] {
         guard self.count < count else { return self }
-        return self + Array(repeating: "", count: count - self.count)
+        return self + Array(repeating: filler(), count: count - self.count)
     }
 }
 
