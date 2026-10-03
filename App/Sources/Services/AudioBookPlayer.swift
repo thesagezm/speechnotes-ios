@@ -134,13 +134,15 @@ final class AudioBookPlayer: ObservableObject {
     /// millisecond resolution is plenty for chapter-accurate scrubbing.
     private static let timeScale: CMTimeScale = 1000
 
-    private var player: AVPlayer?
-    private var statusObserver: NSKeyValueObservation?
-    private var durationObserver: NSKeyValueObservation?
+    /// The audio backend the loaded file plays through: `AVPlayerBackend`
+    /// for every container AVFoundation demuxes natively, `OpusAudioBackend`
+    /// (engine + own demux/decode) for Ogg Opus, which AVFoundation cannot
+    /// open at all. Created in `play` — see the backend-selection note there.
+    private var backend: BookAudioBackend?
     private var ticker: Timer?
-    /// Set true only by the item-creation branch in play(), and read right
-    /// after: a freshly created item commits its first seek immediately
-    /// (no coalescing window on a cold start).
+    /// Set true only by the backend-creation branch in play(), and read
+    /// right after: a freshly created backend commits its first seek
+    /// immediately (no coalescing window on a cold start).
     private var loadedItemJustCreated = false
     /// The file currently loaded — reload only when it actually changes.
     private var loadedURL: URL?
@@ -168,6 +170,10 @@ final class AudioBookPlayer: ObservableObject {
 
     /// Set when this book's file cannot be decoded by the player at all.
     var isBlocked: Bool { playbackBlockedReason != nil }
+
+    /// The one-per-book AVPlayer→engine retry for Opus-in-MP4 books (see
+    /// `handleBackendFailure`). Reset per play() like the blocked reason.
+    private var attemptedOpusEngineFallback = false
 
     /// Set by the audio reader on appear; position writes go through it.
     weak var store: BooksStore?
@@ -206,6 +212,7 @@ final class AudioBookPlayer: ObservableObject {
         activeBookID = book.id
         userPaused = false
         playbackBlockedReason = nil
+        attemptedOpusEngineFallback = false
         let url = BooksStore.resolveAudioOriginalURL(book: book)
         do {
             // Same one-shot session configuration every engine runs on first
@@ -214,49 +221,17 @@ final class AudioBookPlayer: ObservableObject {
             // mute switch and pauses when the app backgrounds, which looks
             // like "plays two seconds then dies" on device.
             AudioSessionSetup.configureIfNeeded(prefix: "AudioBookPlayer")
-            if loadedURL != url || player == nil {
-                // A failure must not leave the previous item's observers
+            if loadedURL != url || backend == nil {
+                // A failure must not leave the previous backend's callbacks
                 // attached to the new one.
-                statusObserver?.invalidate()
-                statusObserver = nil
-                durationObserver?.invalidate()
-                durationObserver = nil
-                player?.replaceCurrentItem(with: nil)
-                let item = AVPlayerItem(url: url)
-                // Watch the item's status: AVPlayer fails asynchronously
-                // (an un-decodable codec surfaces here, not at init), and
-                // this is where the honest message comes from.
-                statusObserver = item.observe(\.status, options: [.new]) { [weak self] item, _ in
-                    Task { @MainActor in
-                        guard let self, self.player?.currentItem === item else { return }
-                        if item.status == .failed {
-                            self.handleItemFailure(item.error)
-                        }
-                    }
-                }
-                // The file's length arrives by KVO: AVPlayerItem.duration
-                // starts indefinite and changes once the container is
-                // parsed. Caching it here keeps every transport read off
-                // the deprecated synchronous access (the one AVFoundation
-                // read documented as able to block the calling thread);
-                // the manifest's duration covers the gap until it lands.
-                durationObserver = item.observe(\.duration, options: [.new]) { [weak self] item, _ in
-                    let seconds = Self.seconds(of: item.duration)
-                    Task { @MainActor in
-                        guard let self, seconds != nil else { return }
-                        self.cachedFileDuration = seconds
-                    }
-                }
-                let p = AVPlayer(playerItem: item)
-                p.allowsExternalPlayback = false
-                p.defaultRate = Float(rate)
-                player = p
+                backend?.stop()
+                backend = try Self.makeBackend(url: url, rate: rate, into: self)
                 loadedURL = url
                 loadedItemJustCreated = true
                 cachedFileDuration = nil
                 cachedArtwork = Self.loadArtwork(book: book)
             }
-            guard let player else { return }
+            guard let backend else { return }
             let fileDuration = fileLength
             let start = clampToChapterStart(fraction: fraction, fileDuration: fileDuration)
             isPlaying = true
@@ -269,24 +244,24 @@ final class AudioBookPlayer: ObservableObject {
             // The lock screen's ±15 s skip buttons live only while an
             // audiobook owns playback (v1.7.2).
             NowPlayingCenter.shared.setSkipBackForwardEnabled(true, interval: 15)
-            // AVPlayer seeks before play so the first rendered frame is
+            // The backend seeks before play so the first rendered frame is
             // already the chapter start; a seek during playback would be
             // the pre-roll glitch VLC avoids.
             //
             // The commit is split by WHERE the press came from: a cold
-            // start (the item above was just created — the tap is already
+            // start (the backend above was just created — the tap is already
             // slow) and a fraction-carrying resume commit at once; a
-            // chapter jump on the LIVE item is the mash path — the UI
+            // chapter jump on the LIVE backend is the mash path — the UI
             // state above is already live, and the actual seek waits for
             // the presses to stop (see PendingSeek).
             if fraction != nil {
                 userPaused = false
-                player.play()
+                backend.play()
                 commitSeek(to: start, wasPlaying: true, fileDuration: fileDuration)
             } else if loadedItemJustCreated {
                 loadedItemJustCreated = false
                 userPaused = false
-                player.play()
+                backend.play()
                 commitSeek(to: start, wasPlaying: true, fileDuration: fileDuration)
             } else {
                 userPaused = false
@@ -308,20 +283,84 @@ final class AudioBookPlayer: ObservableObject {
         }
     }
 
+    /// Builds the right backend for a file.
+    ///
+    /// The Ogg check is by MAGIC, not extension: `.opus`/`.ogg`/`.oga` are
+    /// the Ogg extensions, but an Ogg stream wearing another extension
+    /// still needs the engine path, and a mislabeled file must keep the
+    /// AVPlayer path.
+    ///
+    /// The MP4-Opus check exists because the device log says so: a
+    /// `book.opus` whose import reports duration, cover and author is an
+    /// Opus-in-MP4 track — AVFoundation parses that container (that is how
+    /// the import read its metadata) but cannot DECODE the codec behind
+    /// AVPlayer. Routing it to AVPlayer would fail 100% of the time, so
+    /// the engine path (own demux via `Mp4OpusReader` + Apple's Opus codec)
+    /// takes it directly.
+    private static func makeBackend(
+        url: URL,
+        rate: Float,
+        into player: AudioBookPlayer
+    ) throws -> BookAudioBackend {
+        if BooksStore.isOggContainer(url) {
+            let opus = OpusAudioBackend()
+            opus.rate = rate
+            opus.onDuration = { seconds in
+                Task { @MainActor in
+                    player.cachedFileDuration = seconds
+                }
+            }
+            opus.onFailed = { error in
+                Task { @MainActor in
+                    player.handleBackendFailure(error)
+                }
+            }
+            // The whole-file read + parse runs off-main inside the backend;
+            // play() and the cold seek (committed right after this returns)
+            // queue behind it via pendingSeekTarget.
+            opus.loadOgg(url: url)
+            Log.shared.info("AudioBookPlayer: Ogg container — engine backend (own demux + decode)")
+            return opus
+        }
+        if Self.sniffsOpusInMp4(url: url) {
+            let opus = OpusAudioBackend()
+            opus.rate = rate
+            opus.onDuration = { seconds in
+                Task { @MainActor in
+                    player.cachedFileDuration = seconds
+                }
+            }
+            opus.onFailed = { error in
+                Task { @MainActor in
+                    player.handleBackendFailure(error)
+                }
+            }
+            opus.loadOpusInMp4(url: url)
+            Log.shared.info("AudioBookPlayer: Opus-in-MP4 track — engine backend (own demux + decode)")
+            return opus
+        }
+        let av = AVPlayerBackend(url: url, rate: rate)
+        av.onDuration = { seconds in
+            Task { @MainActor in
+                player.cachedFileDuration = seconds
+            }
+        }
+        av.onFailed = { error in
+            Task { @MainActor in
+                player.handleBackendFailure(error)
+            }
+        }
+        return av
+    }
+
     /// A codec-level failure is the file's, not a transient: name it so the
     /// reader can show it instead of retrying forever.
+    ///
+    /// This path only ever sees AVPlayer-backend failures now — Ogg files
+    /// play through `OpusAudioBackend`, whose own decode errors carry their
+    /// message straight from the decoder.
     private static func unplayableReason(for error: Error, url: URL) -> String {
         let nsError = error as NSError
-        // Ogg is not a codec problem, it is a CONTAINER problem, and it never
-        // will be one: AVFoundation ships no Ogg demuxer on any Apple
-        // platform, so a .opus/.ogg/.oga file fails however it is encoded.
-        // (Opus itself is fine — in an MP4 or CAF container this same session
-        // plays it.) Saying "re-encode as AAC or MP3" for a file that was
-        // never going to work is the kind of advice that sends someone off
-        // to re-encode three times and still get nothing.
-        if BooksStore.isOggContainer(url) {
-            return "This book is an Ogg container (.opus/.ogg/.oga), which iOS cannot read at all — a VLC plugin or a desktop player is what plays these. Convert it to M4B/AAC or MP3 first (ffmpeg -i book.opus -c:a aac book.m4b), then send it over."
-        }
         // 1685348671 = kAudioFileInvalidChunkError: the container/codec walk
         // failed — in practice EAC3/Atmos or another software-undecodable
         // stream. Sniff the codec so the message is specific.
@@ -333,6 +372,19 @@ final class AudioBookPlayer: ObservableObject {
             return "This file's audio format can't be decoded on this device. Re-encode it as AAC or MP3 and re-import."
         }
         return "Couldn't read this file (\(nsError.localizedDescription))."
+    }
+
+    /// True when the head slice looks like an MP4/M4A container whose
+    /// sample entry says Opus: an `ftyp` box plus the `Opus` fourCC (or the
+    /// `dOps` box the spec requires). The head slice is the same cheap read
+    /// `sniffedCodec` makes.
+    private static func sniffsOpusInMp4(url: URL) -> Bool {
+        guard let head = BooksStore.slice(of: url, from: 0, length: 256 * 1024) else { return false }
+        let isMp4 = head.range(of: Data("ftyp".utf8)) != nil
+            || head.range(of: Data("moov".utf8)) != nil
+        let saysOpus = head.range(of: Data("Opus".utf8)) != nil
+            || head.range(of: Data("dOps".utf8)) != nil
+        return isMp4 && saysOpus
     }
 
     /// The first audio stream's codec, read from the container's own
@@ -359,7 +411,7 @@ final class AudioBookPlayer: ObservableObject {
         // A press is pending its commit: it must not come back playing
         // over an explicit pause.
         pendingSeek?.wasPlaying = false
-        player?.pause()
+        backend?.pause()
         userPaused = true
         isPlaying = false
         persistPosition(force: true)
@@ -403,12 +455,12 @@ final class AudioBookPlayer: ObservableObject {
     /// is nothing to resume and it no-ops.
     func resumeCurrent() {
         guard let book = activeBook ?? boundBook else { return }
-        if player == nil {
+        if backend == nil {
             // Cold resume: start the last chapter at the last fraction.
             play(book: book, chapterIndex: chapterIndex, withinChapterFraction: lastFraction)
         } else {
             userPaused = false
-            player?.play()
+            backend?.play()
             applyRate(force: true)
             isPlaying = true
             publishNowPlaying(force: true)
@@ -434,13 +486,13 @@ final class AudioBookPlayer: ObservableObject {
     }
 
     private func applyRate(force: Bool = false) {
-        guard let player else { return }
-        player.defaultRate = Float(rate)
-        // After a play() call timeControlStatus may not have flipped yet —
-        // the force variant (used right after play) sets the live rate
+        guard let backend else { return }
+        backend.defaultRate = Float(rate)
+        // After a play() call isRendering may not have flipped yet — the
+        // force variant (used right after play) sets the live rate
         // regardless.
-        if force || player.timeControlStatus == .playing {
-            player.rate = Float(rate)
+        if force || backend.isRendering {
+            backend.rate = Float(rate)
         }
     }
 
@@ -488,8 +540,8 @@ final class AudioBookPlayer: ObservableObject {
     /// 75 s, not 15). The published playhead updates per press; one seek
     /// commits when the presses stop.
     func seekBy(_ seconds: Double) {
-        guard let player else { return }
-        let base = pendingSeek?.target ?? (Self.seconds(of: player.currentTime()) ?? 0)
+        guard let backend else { return }
+        let base = pendingSeek?.target ?? (backend?.currentTime ?? 0)
         let target = min(max(0, base + seconds), max(0, fileLength - 0.05))
         if let index = chapters.firstIndex(where: { target >= $0.startSeconds && target < $0.endSeconds }) {
             chapterIndex = index
@@ -547,14 +599,10 @@ final class AudioBookPlayer: ObservableObject {
         pendingSeek = nil
         seekCommitTimer?.invalidate()
         seekCommitTimer = nil
-        guard let player else { return }
-        player.seek(
-            to: Self.time(target),
-            toleranceBefore: Self.time(0.25),
-            toleranceAfter: Self.time(0.25)
-        )
+        guard let backend else { return }
+        backend.seek(to: target, tolerance: 0.25)
         if wasPlaying {
-            player.play()
+            backend.play()
             applyRate(force: true)
         }
         chapterProgress = chapterProgressValue
@@ -593,19 +641,19 @@ final class AudioBookPlayer: ObservableObject {
     }
 
     private var chapterProgressValue: Double {
-        guard let player, chapters.indices.contains(chapterIndex) else { return 0 }
+        guard let backend, chapters.indices.contains(chapterIndex) else { return 0 }
         let chapter = chapters[chapterIndex]
         guard let end = effectiveChapterEnd(fileDuration: fileLength) else { return 0 }
         let span = end - chapter.startSeconds
         guard span > 0 else { return 0 }
-        let here = Self.seconds(of: player.currentTime()) ?? chapter.startSeconds
+        let here = backend.currentTime ?? chapter.startSeconds
         return min(1, max(0, (here - chapter.startSeconds) / span))
     }
 
     private var chapterIsFinished: Bool {
-        guard let player else { return false }
+        guard let backend else { return false }
         guard let end = effectiveChapterEnd(fileDuration: fileLength) else { return false }
-        let here = Self.seconds(of: player.currentTime()) ?? 0
+        let here = backend.currentTime ?? 0
         return here >= end - 0.05
     }
 
@@ -641,7 +689,7 @@ final class AudioBookPlayer: ObservableObject {
     }
 
     private func tick() {
-        guard let player else { return }
+        guard let backend else { return }
         // A transport press is pending its commit: hold the surface steady
         // — the playhead is about to jump, so neither the published state
         // nor the chapter auto-advance may react to the pre-seek position
@@ -651,11 +699,11 @@ final class AudioBookPlayer: ObservableObject {
         // timeControlStatus is AVPlayer's "is it actually producing audio"
         // — .playing while rendering, .paused when paused, and
         // .waitingToPlayAtSpecifiedRate while buffering a big file.
-        let playing = player.timeControlStatus == .playing
+        let playing = backend.isRendering
         if isPlaying != playing { isPlaying = playing }
         let value = chapterProgressValue
         if chapterProgress != value { chapterProgress = value }
-        let now = Self.seconds(of: player.currentTime()) ?? 0
+        let now = backend.currentTime ?? 0
         if elapsed != now { elapsed = now }
         let duration = cachedFileDuration ?? 0
         if totalDuration != duration, duration > 0 { totalDuration = duration }
@@ -782,7 +830,7 @@ final class AudioBookPlayer: ObservableObject {
             isPlaying: isPlaying,
             progress: nil,
             rate: Float(rate),
-            elapsedSeconds: player.flatMap { Self.seconds(of: $0.currentTime()) },
+            elapsedSeconds: backend?.currentTime,
             durationSeconds: book.audioDuration ?? cachedFileDuration,
             chapterCount: chapters.count > 1 ? chapters.count : nil,
             chapterNumber: chapters.count > 1 ? chapterIndex + 1 : nil
@@ -799,13 +847,8 @@ final class AudioBookPlayer: ObservableObject {
     }
 
     private func teardownAudio() {
-        statusObserver?.invalidate()
-        statusObserver = nil
-        durationObserver?.invalidate()
-        durationObserver = nil
-        player?.pause()
-        player?.replaceCurrentItem(with: nil)
-        player = nil
+        backend?.stop()
+        backend = nil
         loadedURL = nil
         loadedItemJustCreated = false
         cachedFileDuration = nil
@@ -829,11 +872,52 @@ final class AudioBookPlayer: ObservableObject {
         CMTime(seconds: seconds, preferredTimescale: timeScale)
     }
 
-    /// AVPlayer's async failure path — an un-decodable codec surfaces here,
-    /// not at construction, so the honest banner comes from this hook too.
-    private func handleItemFailure(_ error: Error?) {
+    /// The backends' async failure path — an un-decodable codec surfaces
+    /// here, not at construction, so the honest banner comes from this hook
+    /// too. The backend's own decode errors (the Opus engine path) already
+    /// carry a user-facing message; AVPlayer's need the codec sniff.
+    private func handleBackendFailure(_ error: Error) {
         guard let url = loadedURL else { return }
-        let reason = Self.unplayableReason(for: error ?? URLError(.cannotDecodeContentData), url: url)
+        // Second chance, once per book: AVPlayer failed on a file whose
+        // codec sniff says Opus — the container-parse-but-cannot-decode
+        // case `makeBackend`'s sniff missed (e.g. the sample entry sits
+        // deeper than the head slice). Rebuild on the engine path at the
+        // playhead where the failure happened.
+        if backend is AVPlayerBackend, !attemptedOpusEngineFallback,
+           Self.sniffedCodec(url: url) == "Opus" {
+            attemptedOpusEngineFallback = true
+            let resumeAt = elapsed
+            Log.shared.info(
+                "AudioBookPlayer: AVPlayer cannot decode an Opus track — retrying through the engine path at \(Int(resumeAt))s"
+            )
+            let opus = OpusAudioBackend()
+            opus.rate = rate
+            opus.onDuration = { seconds in
+                Task { @MainActor in
+                    self.cachedFileDuration = seconds
+                }
+            }
+            opus.onFailed = { failed in
+                Task { @MainActor in
+                    self.handleBackendFailure(failed)
+                }
+            }
+            backend?.stop()
+            backend = opus
+            playbackBlockedReason = nil
+            isPlaying = true
+            startTicker()
+            opus.loadOpusInMp4(url: url)
+            opus.seek(to: resumeAt, tolerance: 0.25)
+            opus.play()
+            return
+        }
+        let reason: String
+        if backend is OpusAudioBackend {
+            reason = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        } else {
+            reason = Self.unplayableReason(for: error, url: url)
+        }
         Log.shared.error("AudioBookPlayer: \(url.lastPathComponent) failed to decode — \(reason)")
         playbackBlockedReason = reason
         isPlaying = false
@@ -916,7 +1000,7 @@ final class AudioBookPlayer: ObservableObject {
         // Headphones yanked: the system already paused the pipeline —
         // reflect it (auto-resuming onto the speaker would blast audio).
         if reason == .oldDeviceUnavailable, !userPaused {
-            isPlaying = player?.timeControlStatus == .playing
+            isPlaying = backend?.isRendering ?? false
         }
     }
 
@@ -946,7 +1030,7 @@ final class AudioBookPlayer: ObservableObject {
         } catch {
             Log.shared.error("AudioBookPlayer: session re-activate failed: \(error)")
         }
-        player?.play()
+        backend?.play()
         applyRate(force: true)
         isPlaying = true
         publishNowPlaying(force: true)
