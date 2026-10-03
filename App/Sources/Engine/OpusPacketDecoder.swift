@@ -215,7 +215,7 @@ public final class OpusPacketDecoder {
             descriptions[0] = AudioStreamPacketDescription(
                 mStartOffset: 0,
                 mVariableFramesInPacket: UInt32(Self.framesInPacket(opusPacket: bytes)),
-                mDataByteSize: count
+                mDataByteSize: UInt32(count)
             )
         }
     }
