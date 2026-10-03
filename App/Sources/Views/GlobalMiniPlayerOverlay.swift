@@ -163,7 +163,13 @@ private struct EdgeSnappingBubble<Bubble: View>: View {
 
     @AppStorage("miniBubbleX") private var storedX: Double = 1
     @AppStorage("miniBubbleY") private var storedY: Double = 1
-    @State private var dragOffset: CGSize = .zero
+    /// Where the bubble actually IS, while it is being dragged and while it
+    /// settles afterwards. This is one value, not a sum: the old code added
+    /// the drag translation on top of the stored position, then animated BOTH
+    /// terms to their new values at once with an underdamped spring — so they
+    /// overshot in opposite directions and the drop read as springy rather
+    /// than smooth. One animatable value, one animation, no fighting.
+    @State private var livePoint: CGPoint?
 
     var body: some View {
         GeometryReader { geo in
@@ -178,8 +184,10 @@ private struct EdgeSnappingBubble<Bubble: View>: View {
             let maxY = geo.size.height - insets.bottom - BubbleLayout.bottomReserve - BubbleLayout.margin - BubbleLayout.radius
             let baseX = minX + (maxX - minX) * min(max(storedX, 0), 1)
             let baseY = minY + (maxY - minY) * min(max(storedY, 0), 1)
-            let liveX = min(max(baseX + dragOffset.width, minX), maxX)
-            let liveY = min(max(baseY + dragOffset.height, minY), maxY)
+            // The live point wins while dragging or settling; otherwise the
+            // bubble sits where it was stored.
+            let liveX = min(max(livePoint?.x ?? baseX, minX), maxX)
+            let liveY = min(max(livePoint?.y ?? baseY, minY), maxY)
 
             bubble()
                 .position(x: liveX, y: liveY)
@@ -190,7 +198,13 @@ private struct EdgeSnappingBubble<Bubble: View>: View {
                 .gesture(
                     DragGesture(minimumDistance: 10)
                         .onChanged { value in
-                            dragOffset = value.translation
+                            // The gesture's translation is cumulative from
+                            // where the touch began, so the resting position
+                            // plus it is the finger's position.
+                            livePoint = CGPoint(
+                                x: min(max(baseX + value.translation.width, minX), maxX),
+                                y: min(max(baseY + value.translation.height, minY), maxY)
+                            )
                         }
                         .onEnded { value in
                             let x = min(max(baseX + value.translation.width, minX), maxX)
@@ -213,10 +227,20 @@ private struct EdgeSnappingBubble<Bubble: View>: View {
                             } else {
                                 snappedY = maxY
                             }
-                            withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
-                                dragOffset = .zero
-                                storedX = maxX > minX ? Double((snappedX - minX) / (maxX - minX)) : 1
-                                storedY = maxY > minY ? Double((snappedY - minY) / (maxY - minY)) : 1
+                            // Persist first, outside the animation: the
+                            // stored position and the live point then agree,
+                            // so clearing the live point afterwards is
+                            // invisible rather than a second jump.
+                            storedX = maxX > minX ? Double((snappedX - minX) / (maxX - minX)) : 1
+                            storedY = maxY > minY ? Double((snappedY - minY) / (maxY - minY)) : 1
+                            // Critically damped: the bubble glides to the
+                            // edge and stops. A bouncy spring here is what
+                            // made the drop feel like a rubber band.
+                            withAnimation(.easeOut(duration: 0.22)) {
+                                livePoint = CGPoint(x: snappedX, y: snappedY)
+                            }
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.24) {
+                                livePoint = nil
                             }
                         }
                 )
