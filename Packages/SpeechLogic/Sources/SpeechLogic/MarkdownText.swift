@@ -1,50 +1,101 @@
 import Foundation
+import Markdown
 
 /// Markdown → speech text + reading-view blocks.
 ///
-/// One scanner (`blocks`) drives both outputs:
+/// The parser underneath is cmark-gfm — GitHub's own engine, via
+/// apple/swift-markdown — so GFM syntax (tables, task lists, strikethrough,
+/// autolinks, reference links) parses by SPEC. The hand-rolled scanner this
+/// replaced drifted on exactly the constructs real notes carry (nested
+/// emphasis, tables with ragged rows, `*_mixed_` markers); a spec parser
+/// also gives the plugin work a real AST to hang off.
+///
+/// Two outputs come from the same parsed document:
 ///  • `plainText(_:)` — syntax-stripped text for TTS and the read-along view
 ///    (what the engine hears == what the read-along shows, so SentenceChunker
 ///    offsets stay in sync).
-///  • `blocks(_:)` — structured blocks for the preview; inline syntax stays
-///    intact for the display layer to style.
-///
-/// Handles ATX/setext headings, fenced code (matched fence char/length,
-/// language captured), lists with nesting ranks + task markers + lazy
-/// continuation, blockquotes, tables, reference links/images, autolinks,
-/// footnote-lite, thematic breaks, images, HTML comments/tags, backslash
-/// escapes. Unrecognized syntax passes through untouched.
+///  • `blocks(_:)` — structured blocks for the preview; paragraphs and
+///    headings carry `StyledSpan`s so the display layer styles emphasis from
+///    the AST instead of re-tokenizing with a regex (which styled inline
+///    code at a FIXED Dynamic Type size — the "font thickness/spacing is not
+///    uniform" report — and mangled whatever the regex misjudged).
 public enum MarkdownText {
 
     // MARK: - Public models
 
     public enum MarkdownBlock: Equatable {
-        case heading(level: Int, text: String)
-        /// Single line breaks are CONTENT here.
-        case paragraph(String)
+        case heading(level: Int, text: String, spans: [StyledSpan])
+        /// Single line breaks are CONTENT here (notes semantics — a soft
+        /// break is how people write lists of lines; GFM would render it as
+        /// a space).
+        case paragraph(text: String, spans: [StyledSpan])
         case bulletList(items: [ListItem])
         case orderedList(items: [ListItem])
-        case quote(String)
+        case quote(String, spans: [StyledSpan])
         case code(language: String?, text: String)
         case divider
         case image(alt: String, url: String)
-        case table(headers: [String], rows: [[String]])
+        case table(headers: [[StyledSpan]], rows: [[[StyledSpan]]])
     }
 
-    /// A list item. `level` is the nesting rank (0 = top level), computed
-    /// relative to the other indents in the same list — so 2-space and
-    /// 4-space nesting both work.
+    /// A list item. `level` is the nesting depth (0 = top level), straight
+    /// from the AST — the old indent-rank heuristic is gone.
     public struct ListItem: Equatable, Hashable, Sendable {
         public let level: Int
         public let text: String
         public let isTask: Bool
         public let isDone: Bool
-        public init(level: Int = 0, text: String, isTask: Bool = false, isDone: Bool = false) {
+        public let spans: [StyledSpan]
+        public init(level: Int = 0, text: String, isTask: Bool = false, isDone: Bool = false, spans: [StyledSpan] = []) {
             self.level = level
             self.text = text
             self.isTask = isTask
             self.isDone = isDone
+            self.spans = spans
         }
+    }
+
+    /// One styled piece of inline content, straight from the GFM AST.
+    /// Flags compose: a nested **_both_** arrives with `bold` AND `italic`.
+    /// `linkURL`/`image…` carry the runs the display layer turns into real
+    /// links and images.
+    public struct StyledSpan: Equatable, Hashable, Sendable {
+        public let text: String
+        public var bold: Bool
+        public var italic: Bool
+        public var code: Bool
+        public var strike: Bool
+        public var linkURL: String?
+        public var imageAlt: String?
+        public var imageURL: String?
+
+        public init(
+            text: String,
+            bold: Bool = false,
+            italic: Bool = false,
+            code: Bool = false,
+            strike: Bool = false,
+            linkURL: String? = nil,
+            imageAlt: String? = nil,
+            imageURL: String? = nil
+        ) {
+            self.text = text
+            self.bold = bold
+            self.italic = italic
+            self.code = code
+            self.strike = strike
+            self.linkURL = linkURL
+            self.imageAlt = imageAlt
+            self.imageURL = imageURL
+        }
+
+        /// A plain, unstyled span — the fallback every consumer uses when a
+        /// block carries no AST spans.
+        public static func plain(_ text: String) -> StyledSpan {
+            StyledSpan(text: text)
+        }
+
+        var isImage: Bool { imageURL != nil }
     }
 
     /// Inline run for the preview: text, native images, tappable links.
@@ -61,7 +112,8 @@ public enum MarkdownText {
         public let title: String?
     }
 
-    // MARK: - Regex cache (the old code recompiled every pattern per line)
+    // MARK: - Regex cache (speech-stripping and the editing layer still
+    // work on RAW text; the AST is the display parser)
 
     private static let regexLock = NSLock()
     private static var regexCache: [String: NSRegularExpression] = [:]
@@ -114,8 +166,8 @@ public enum MarkdownText {
     // MARK: - Speech text
 
     /// Markdown → plain text for speech + read-along. Derived from the same
-    /// block scan as the preview. Task items read "To do: …" / "Done: …",
-    /// tables read row-wise, code is kept verbatim.
+    /// parsed document as the preview. Task items read "To do: …" /
+    /// "Done: …", tables read row-wise, code is kept verbatim.
     ///
     /// The result passes through `SpeechSanitizer.clean` last: a note carries
     /// whatever a paste or an import brought in — soft hyphens from a copied
@@ -123,46 +175,78 @@ public enum MarkdownText {
     /// exactly those. Cleaning here rather than at the engine boundary keeps
     /// the read-along rendering equal to what is spoken.
     public static func plainText(_ markdown: String) -> String {
-        let refs = linkReferences(in: markdown)
-        let parsed = blocks(markdown, references: refs)
-        let spoken = parsed
+        // Speakability: an UNRESOLVED reference link stays literal in the
+        // AST (`[label][missing]`), and the engine reading bracket soup was
+        // the v1.5 report — speak the label instead. Resolved links are
+        // already clean (the AST carries their text).
+        let refs = Set(linkReferences(in: markdown).keys)
+        var spokenBlocks = blocks(markdown)
+        spokenBlocks = spokenBlocks.map { block in
+            guard case .paragraph(let text, let spans) = block else { return block }
+            let stripped = unresolvedReferences(text, defined: refs)
+            return stripped == text ? block : .paragraph(text: stripped, spans: spans)
+        }
+        let spoken = spokenBlocks
             .compactMap { block -> String? in
-                let text = speechText(for: block, references: refs)
+                let text = speechText(for: block)
                 return text.isEmpty ? nil : text
             }
             .joined(separator: "\n\n")
         return SpeechSanitizer.clean(spoken)
     }
 
-    private static func speechText(for block: MarkdownBlock, references refs: [String: LinkReference]) -> String {
+    /// `[label][key]` → `label` for every reference whose key is not
+    /// defined. A bare `[word]` stays literal (CommonMark leaves unresolved
+    /// shortcut references alone, and stripping every bracket would eat the
+    /// deliberate ones).
+    private static func unresolvedReferences(_ text: String, defined: Set<String>) -> String {
+        guard text.contains("][") else { return text }
+        return replaceMatches(in: text, pattern: #"(?<!!)\[([^\]]+)\]\[([^\]]*)\]"#) { match, ns in
+            let label = ns.substring(with: match.range(at: 1))
+            let key = ns.substring(with: match.range(at: 2)).lowercased()
+            let lookup = key.isEmpty ? label.lowercased() : key
+            return defined.contains(lookup) ? ns.substring(with: match.range) : label
+        }
+    }
+
+    private static func speechText(for block: MarkdownBlock) -> String {
+        // The AST already resolved every inline construct (escapes, links,
+        // emphasis) — the span text is what a reader sees, so it is what the
+        // engine says. No re-stripping: speechInline on resolved text would
+        // eat the LITERAL markers GFM deliberately kept (an escaped `\*`).
+        func plain(_ spans: [StyledSpan]) -> String {
+            spans.map(\.text).joined()
+        }
         switch block {
-        case .heading(_, let text), .paragraph(let text):
-            return speechInline(text, references: refs)
+        case .heading(_, let text, _), .paragraph(let text, _):
+            return text
         case .bulletList(let items), .orderedList(let items):
             return items.map { item -> String in
-                let body = speechInline(item.text, references: refs)
-                if item.isTask { return (item.isDone ? "Done: " : "To do: ") + body }
-                return body
+                if item.isTask { return (item.isDone ? "Done: " : "To do: ") + item.text }
+                return item.text
             }.joined(separator: "\n")
-        case .quote(let text):
-            return speechInline(text, references: refs)
+        case .quote(let text, _):
+            return text
         case .code(_, let text):
             return text
         case .divider:
             return ""
         case .image(let alt, _):
-            return speechInline(alt, references: refs)
+            return alt
         case .table(let headers, let rows):
-            var lines = [headers.map { speechInline($0, references: refs) }.joined(separator: ", ")]
+            func cell(_ spans: [StyledSpan]) -> String { spans.map(\.text).joined() }
+            var lines = [headers.map(cell).joined(separator: ", ")]
             for row in rows {
-                lines.append(row.map { speechInline($0, references: refs) }.joined(separator: ", "))
+                lines.append(row.map(cell).joined(separator: ", "))
             }
             return lines.joined(separator: "\n")
         }
     }
 
-    /// Strips inline syntax from one chunk of text. Escape-protected so
-    /// `\*never italic\*` survives emphasis stripping.
+    /// Strips inline syntax from one chunk of RAW text (the editing path —
+    /// speech while the draft is unrendered). AST-derived text is already
+    /// stripped, so this is only ever fed raw drafts and table cells.
+    /// Escape-protected so `\*never italic\*` survives emphasis stripping.
     public static func speechInline(_ text: String, references: [String: LinkReference] = [:]) -> String {
         guard !text.isEmpty else { return text }
 
@@ -272,324 +356,313 @@ public enum MarkdownText {
         return out
     }
 
-    // MARK: - Blocks (reading view)
+    // MARK: - Blocks (reading view) — the GFM AST
 
+    /// Parses `markdown` with cmark-gfm and maps the AST onto the reading
+    /// view's block model.
     public static func blocks(_ markdown: String) -> [MarkdownBlock] {
-        blocks(markdown, references: linkReferences(in: markdown))
-    }
-
-    public static func blocks(_ markdown: String, references refs: [String: LinkReference]) -> [MarkdownBlock] {
-        let lines = normalize(markdown).components(separatedBy: "\n")
+        // The AST parser handles \r\n itself; normalize anyway so the
+        // plain-text joiners here never meet a stray \r.
+        let document = Document(parsing: normalize(markdown))
         var result: [MarkdownBlock] = []
-        var paragraph: [String] = []
-        var quote: [String] = []
-        struct PendingItem { var indent: Int; var text: String; var isTask = false; var isDone = false }
-        var bullets: [PendingItem] = []
-        var ordered: [PendingItem] = []
-        var codeLines: [String] = []
-        var codeLanguage: String? = nil
-        var fence: (char: Character, length: Int)? = nil
-        var inHTMLComment = false
-
-        func finalized(_ item: PendingItem, among siblings: [PendingItem]) -> ListItem {
-            let distinct = Set(siblings.map(\.indent)).sorted()
-            return ListItem(
-                level: distinct.firstIndex(of: item.indent) ?? 0,
-                text: item.text, isTask: item.isTask, isDone: item.isDone
-            )
+        for child in document.children {
+            appendBlock(child, to: &result)
         }
-        func flushParagraph() {
-            guard !paragraph.isEmpty else { return }
-            let joined = paragraph.joined(separator: "\n")
-            if let (alt, url) = standaloneImage(joined, references: refs) {
-                result.append(.image(alt: alt, url: url))
-            } else {
-                result.append(.paragraph(joined))
-            }
-            paragraph = []
-        }
-        func flushQuote() {
-            if !quote.isEmpty { result.append(.quote(quote.joined(separator: "\n"))) }
-            quote = []
-        }
-        func flushLists() {
-            if !bullets.isEmpty {
-                result.append(.bulletList(items: bullets.map { finalized($0, among: bullets) }))
-                bullets = []
-            }
-            if !ordered.isEmpty {
-                result.append(.orderedList(items: ordered.map { finalized($0, among: ordered) }))
-                ordered = []
-            }
-        }
-        func flushCode() {
-            result.append(.code(language: codeLanguage, text: codeLines.joined(separator: "\n")))
-            codeLines = []
-            codeLanguage = nil
-        }
-        func flushAll() { flushParagraph(); flushQuote(); flushLists() }
-
-        var i = 0
-        while i < lines.count {
-            let raw = lines[i]
-            i += 1
-            let trimmedRaw = raw.trimmingCharacters(in: .whitespaces)
-
-            // ---- Fences (matched char + length) ----
-            if let f = fence {
-                if let info = fenceInfo(trimmedRaw), info.char == f.char,
-                   info.length >= f.length, info.canClose {
-                    fence = nil
-                    flushCode()
-                } else {
-                    codeLines.append(raw)
-                }
-                continue
-            }
-            if let info = fenceInfo(trimmedRaw) {
-                flushAll()
-                fence = (char: info.char, length: info.length)
-                codeLanguage = language(from: info.info)
-                continue
-            }
-
-            // ---- HTML comments (single and multi-line) ----
-            var line = raw
-            if inHTMLComment {
-                if let close = line.range(of: "-->") {
-                    inHTMLComment = false
-                    line = String(line[close.upperBound...])
-                } else {
-                    continue
-                }
-            }
-            if let open = line.range(of: "<!--") {
-                if let close = line.range(of: "-->", range: open.upperBound..<line.endIndex) {
-                    line = String(line[..<open.lowerBound]) + String(line[close.upperBound...])
-                } else {
-                    inHTMLComment = true
-                    line = String(line[..<open.lowerBound])
-                }
-            }
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.isEmpty {
-                flushAll()
-                continue
-            }
-
-            // ---- Setext underline (paragraph directly above becomes heading) ----
-            if !paragraph.isEmpty, isSetextUnderline(trimmed) {
-                flushQuote(); flushLists()
-                result.append(.heading(level: trimmed.hasPrefix("=") ? 1 : 2,
-                                       text: paragraph.joined(separator: "\n")))
-                paragraph = []
-                continue
-            }
-
-            // ---- Thematic break ----
-            if isThematicBreak(trimmed) {
-                flushAll()
-                result.append(.divider)
-                continue
-            }
-
-            // ---- Footnote definition (reads as a paragraph) / link refs (dropped) ----
-            if let footnote = footnoteBody(trimmed) {
-                flushAll()
-                paragraph.append(footnote)
-                continue
-            }
-            if isLinkReferenceDefinition(trimmed) {
-                flushAll()
-                continue
-            }
-
-            // ---- ATX heading (closing #'s stripped) ----
-            if let heading = headingInfo(trimmed) {
-                flushAll()
-                result.append(.heading(level: heading.level, text: heading.text))
-                continue
-            }
-
-            // ---- Table: this line is the header, next line the delimiter row ----
-            if trimmed.contains("|"), i < lines.count,
-               isTableDelimiterRow(lines[i].trimmingCharacters(in: .whitespaces)) {
-                flushParagraph(); flushQuote(); flushLists()
-                let headers = tableCells(trimmed)
-                i += 1 // skip delimiter row
-                var rows: [[String]] = []
-                while i < lines.count {
-                    let row = lines[i].trimmingCharacters(in: .whitespaces)
-                    if row.isEmpty || !row.contains("|") { break }
-                    rows.append(tableCells(row))
-                    i += 1
-                }
-                result.append(.table(headers: headers, rows: rows))
-                continue
-            }
-
-            // ---- Blockquote ----
-            if trimmed.hasPrefix(">") {
-                flushParagraph(); flushLists()
-                var content = trimmed
-                while content.hasPrefix(">") {
-                    content = String(content.dropFirst()).trimmingCharacters(in: .whitespaces)
-                }
-                quote.append(content)
-                continue
-            }
-
-            // ---- Lists ----
-            let indent = leadingSpaces(raw)
-            if let item = bulletItem(trimmed) {
-                flushParagraph(); flushQuote()
-                if !ordered.isEmpty { flushLists() }
-                bullets.append(PendingItem(indent: indent, text: item.text, isTask: item.isTask, isDone: item.isDone))
-                continue
-            }
-            if let item = orderedItem(trimmed) {
-                flushParagraph(); flushQuote()
-                if !bullets.isEmpty { flushLists() }
-                ordered.append(PendingItem(indent: indent, text: item.text, isTask: item.isTask, isDone: item.isDone))
-                continue
-            }
-
-            // ---- Lazy continuation (CommonMark): indented text extends the
-            // last list item; plain text continues an open quote. ----
-            if paragraph.isEmpty {
-                if !bullets.isEmpty, indent > bullets[bullets.count - 1].indent {
-                    bullets[bullets.count - 1].text += "\n" + trimmed
-                    continue
-                }
-                if !ordered.isEmpty, indent > ordered[ordered.count - 1].indent {
-                    ordered[ordered.count - 1].text += "\n" + trimmed
-                    continue
-                }
-                if !quote.isEmpty {
-                    quote.append(trimmed)
-                    continue
-                }
-            }
-
-            // ---- Paragraph ----
-            flushQuote(); flushLists()
-            paragraph.append(trimmed)
-        }
-
-        if fence != nil { flushCode() }
-        flushAll()
         return result
     }
 
-    // MARK: - Inline runs (preview)
+    private static func appendBlock(_ node: any Markup, to result: inout [MarkdownBlock]) {
+        switch node {
+        case let heading as Heading:
+            let spans = spans(of: heading.children)
+            result.append(.heading(
+                level: heading.level,
+                text: spans.map(\.text).joined(),
+                spans: spans
+            ))
 
-    /// Splits a line into text / image / link runs, resolving reference
-    /// links via `references` when provided. E.g. "See ![x](a.png) and
-    /// [docs](https://d.com)" → text, image, text, link, text.
+        case let paragraph as Paragraph:
+            let spans = spans(of: paragraph.children)
+            // A paragraph that is exactly one image renders as an image
+            // block — the alt text is not body copy.
+            let images = spans.filter(\.isImage)
+            if images.count == 1, spans.count == 1,
+               let alt = images[0].imageAlt, let url = images[0].imageURL {
+                result.append(.image(alt: alt, url: url))
+            } else if !spans.isEmpty {
+                result.append(.paragraph(text: spans.map(\.text).joined(), spans: spans))
+            }
+
+        case let list as OrderedList:
+            result.append(.orderedList(items: listItems(of: list)))
+
+        case let list as UnorderedList:
+            result.append(.bulletList(items: listItems(of: list)))
+
+        case let quote as BlockQuote:
+            // One source paragraph per line, WITH its spans — bold inside a
+            // blockquote stays bold on screen (the sample notes are full of
+            // emphasized blockquote leads).
+            var lines: [String] = []
+            var quoteSpans: [StyledSpan] = []
+            flattenQuote(quote, into: &lines, spans: &quoteSpans)
+            if !lines.isEmpty {
+                result.append(.quote(lines.joined(separator: "\n"), spans: quoteSpans))
+            }
+
+        case let code as CodeBlock:
+            // The fence's own trailing newline is structure, not content.
+            var body = code.code
+            if body.hasSuffix("\n") { body.removeLast() }
+            result.append(.code(language: code.language, text: body))
+
+        case is ThematicBreak:
+            result.append(.divider)
+
+        case is Table:
+            if let parsed = tableSpans(from: node) {
+                result.append(.table(headers: parsed.headers, rows: parsed.rows))
+            }
+
+        case is HTMLBlock:
+            // Raw HTML has no reading in a notes app — skipped, the same
+            // call the old scanner made for comments.
+            break
+
+        default:
+            // Anything unmodelled (definitions, directives) contributes its
+            // plain text as a paragraph rather than vanishing.
+            let text = plainInlineText(of: node.children)
+            if !text.isEmpty {
+                result.append(.paragraph(text: text, spans: [.plain(text)]))
+            }
+        }
+    }
+
+    private struct ParsedTable {
+        var headers: [[StyledSpan]]
+        var rows: [[[StyledSpan]]]
+    }
+
+    /// One span list per cell — each cell is a header or body CELL, and its
+    /// own emphasis (a bold term in a table) rides along.
+    private static func tableSpans(from node: any Markup) -> ParsedTable? {
+        guard let table = node as? Table else { return nil }
+        let head = table.head.children.compactMap { $0 as? Table.Cell }
+            .map { spans(of: $0.children) }
+        let rows: [[[StyledSpan]]] = table.body.children.compactMap { row in
+            guard let row = row as? Table.Row else { return nil }
+            return row.children.compactMap { $0 as? Table.Cell }
+                .map { spans(of: $0.children) }
+        }
+        guard !head.isEmpty else { return nil }
+        return ParsedTable(headers: head, rows: rows)
+    }
+
+    /// One `ListItem` per AST item, nested lists flattened to deeper levels
+    /// (the preview indents by `level`). A task marker is the item's first
+    /// inline child when the item is a GFM task.
+    private static func listItems(of list: any Markup) -> [ListItem] {
+        var items: [ListItem] = []
+        for child in list.children {
+            // `Markdown.ListItem`: the AST node (our own `ListItem` wins the
+            // unqualified name inside this file).
+            guard let item = child as? Markdown.ListItem else { continue }
+            flattenListItem(item, level: 0, into: &items)
+        }
+        return items
+    }
+
+    private static func flattenListItem(_ item: Markdown.ListItem, level: Int, into items: inout [ListItem]) {
+        // The GFM checkbox is a property of the list item itself in this
+        // parser — no marker node to strip from the paragraph.
+        let isTask = item.checkbox != nil
+        let isDone = item.checkbox == .checked
+
+        var textParts: [String] = []
+        var itemSpans: [StyledSpan] = []
+
+        func flush() {
+            let text = textParts.joined()
+            if !text.isEmpty || isTask {
+                items.append(ListItem(
+                    level: level, text: text,
+                    isTask: isTask, isDone: isDone, spans: itemSpans
+                ))
+            }
+            textParts = []
+            itemSpans = []
+        }
+
+        for child in item.children {
+            switch child {
+            case let paragraph as Paragraph:
+                let childSpans = spans(of: paragraph.children)
+                if !textParts.isEmpty { textParts.append("\n") }
+                textParts.append(childSpans.map(\.text).joined())
+                itemSpans.append(contentsOf: childSpans)
+            case let subList as UnorderedList:
+                flush()
+                flattenSubList(subList, level: level + 1, into: &items)
+            case let subList as OrderedList:
+                flush()
+                flattenSubList(subList, level: level + 1, into: &items)
+            case let code as CodeBlock:
+                if !textParts.isEmpty { textParts.append("\n") }
+                textParts.append(code.code)
+            default:
+                let text = plainInlineText(of: child.children)
+                if !text.isEmpty {
+                    if !textParts.isEmpty { textParts.append("\n") }
+                    textParts.append(text)
+                }
+            }
+        }
+        flush()
+    }
+
+    private static func flattenSubList(_ list: any Markup, level: Int, into items: inout [ListItem]) {
+        for child in list.children {
+            guard let item = child as? Markdown.ListItem else { continue }
+            flattenListItem(item, level: level, into: &items)
+        }
+    }
+
+    private static func flattenQuote(_ quote: BlockQuote, into lines: inout [String], spans out: inout [StyledSpan]) {
+        for child in quote.children {
+            switch child {
+            case let paragraph as Paragraph:
+                let paragraphSpans = spans(of: paragraph.children)
+                let text = paragraphSpans.map(\.text).joined()
+                if !text.isEmpty {
+                    if !lines.isEmpty { out.append(StyledSpan(text: "\n")) }
+                    lines.append(text)
+                    out.append(contentsOf: paragraphSpans)
+                }
+            case let nested as BlockQuote:
+                flattenQuote(nested, into: &lines, spans: &out)
+            case let code as CodeBlock:
+                lines.append(code.code)
+            default:
+                let text = plainInlineText(of: child.children)
+                if !text.isEmpty { lines.append(text) }
+            }
+        }
+    }
+
+    // MARK: - Inline spans (the AST walk)
+
+    /// The inline children of one block, as styled spans. Containers recurse
+    /// with their flags set; breaks become newlines; an image becomes an
+    /// image span the display layer lifts out.
+    private static func spans<S: Sequence>(of children: S) -> [StyledSpan] where S.Element == any Markup {
+        var out: [StyledSpan] = []
+        collectSpans(children, bold: false, italic: false, strike: false, into: &out)
+        return out.compactMap { span in
+            // Drop empty text spans except images (an empty alt is legal).
+            span.isImage || !span.text.isEmpty ? span : nil
+        }
+    }
+
+    private static func collectSpans<S: Sequence>(
+        _ children: S,
+        bold: Bool,
+        italic: Bool,
+        strike: Bool,
+        into out: inout [StyledSpan]
+    ) where S.Element == any Markup {
+        for child in children {
+            switch child {
+            case let text as Text:
+                out.append(StyledSpan(
+                    text: text.string, bold: bold, italic: italic,
+                    code: false, strike: strike
+                ))
+
+            case let strong as Strong:
+                collectSpans(strong.children, bold: true, italic: italic, strike: strike, into: &out)
+
+            case let emphasis as Emphasis:
+                collectSpans(emphasis.children, bold: bold, italic: true, strike: strike, into: &out)
+
+            case let code as InlineCode:
+                out.append(StyledSpan(
+                    text: code.code, bold: bold, italic: italic,
+                    code: true, strike: strike
+                ))
+
+            case let strikeNode as Strikethrough:
+                collectSpans(strikeNode.children, bold: bold, italic: italic, strike: true, into: &out)
+
+            case let link as Markdown.Link:
+                let inner = spans(of: link.children)
+                if inner.count == 1, !inner[0].isImage {
+                    var span = inner[0]
+                    span.linkURL = link.destination ?? ""
+                    out.append(span)
+                } else {
+                    out.append(StyledSpan(
+                        text: inner.map(\.text).joined(),
+                        bold: bold, italic: italic, code: false,
+                        strike: strike, linkURL: link.destination ?? ""
+                    ))
+                }
+
+            case let image as Markdown.Image:
+                let alt = plainInlineText(of: image.children)
+                out.append(StyledSpan(
+                    text: alt,
+                    bold: bold, italic: italic, code: false, strike: strike,
+                    imageAlt: alt, imageURL: image.source ?? ""
+                ))
+
+            case let soft as SoftBreak:
+                // Notes semantics: the author pressed return, so a line
+                // break it is (GFM would render a space).
+                out.append(StyledSpan(text: "\n"))
+
+            case let hard as LineBreak:
+                out.append(StyledSpan(text: "\n"))
+
+            case is InlineHTML:
+                // Raw inline tags have no display — skipped, as before.
+                break
+
+            default:
+                // Unknown inline container: descend with current flags so
+                // nothing inside is lost.
+                collectSpans(child.children, bold: bold, italic: italic, strike: strike, into: &out)
+            }
+        }
+    }
+
+    /// The plain text of inline children — for contexts that want one string
+    /// (table cells, image alt, fallbacks).
+    private static func plainInlineText<S: Sequence>(of children: S) -> String where S.Element == any Markup {
+        spans(of: children).map(\.text).joined()
+    }
+
+    // MARK: - Inline runs (preview) — same AST, the InlineRun shape
+
+    /// Splits a line into text / image / link runs via the AST. E.g. "See
+    /// ![x](a.png) and [docs](https://d.com)" → text, image, text, link,
+    /// text.
     public static func inlineRuns(_ line: String, references: [String: LinkReference] = [:]) -> [InlineRun] {
-        let ns = line as NSString
-        let full = NSRange(location: 0, length: ns.length)
-        guard let imageRx = rx(#"!\[([^\]]*)\](?:\(([^)]*)\)|\[([^\]]*)\])"#) else { return [.text(line)] }
-        let matches = imageRx.matches(in: line, options: [], range: full)
-        guard !matches.isEmpty else { return linkRuns(in: line, references: references) }
-        return splitRuns(in: line, matches: matches, ns: ns, make: { match, ns -> [InlineRun] in
-            let alt = ns.substring(with: match.range(at: 1))
-            var url = ""
-            if match.range(at: 2).location != NSNotFound {
-                url = cleanURL(ns.substring(with: match.range(at: 2)))
-            } else if match.range(at: 3).location != NSNotFound {
-                let ref = ns.substring(with: match.range(at: 3))
-                url = references[(ref.isEmpty ? alt : ref).lowercased()]?.url ?? ""
-            }
-            return url.isEmpty
-                ? [.text(ns.substring(with: match.range))]
-                : [.image(alt: alt, url: url)]
-        }, textSegment: { linkRuns(in: $0, references: references) })
-    }
-
-    private static func linkRuns(in text: String, references: [String: LinkReference]) -> [InlineRun] {
-        let ns = text as NSString
-        let full = NSRange(location: 0, length: ns.length)
-        if let autoRx = rx(#"<((?:https?://|mailto:)[^>\s]+)>"#) {
-            let autos = autoRx.matches(in: text, options: [], range: full)
-            if !autos.isEmpty {
-                return splitRuns(in: text, matches: autos, ns: ns, make: { match, ns -> [InlineRun] in
-                    let url = ns.substring(with: match.range(at: 1))
-                    return [.link(label: url, url: url)]
-                }, textSegment: { bracketLinkRuns($0, references) })
-            }
-        }
-        return bracketLinkRuns(text, references)
-    }
-
-    private static func bracketLinkRuns(_ text: String, _ references: [String: LinkReference]) -> [InlineRun] {
-        let ns = text as NSString
-        let full = NSRange(location: 0, length: ns.length)
-        guard let bracketRx = rx(#"\[([^\]]+)\](?:\(([^)]*)\)|\[([^\]]*)\])"#) else { return [.text(text)] }
-        let matches = bracketRx.matches(in: text, options: [], range: full)
-        guard !matches.isEmpty else { return [.text(text)] }
-        return splitRuns(in: text, matches: matches, ns: ns) { match, ns -> [InlineRun] in
-            let label = ns.substring(with: match.range(at: 1))
-            var url = ""
-            if match.range(at: 2).location != NSNotFound {
-                url = cleanURL(ns.substring(with: match.range(at: 2)))
-            } else if match.range(at: 3).location != NSNotFound {
-                let ref = ns.substring(with: match.range(at: 3))
-                url = references[(ref.isEmpty ? label : ref).lowercased()]?.url ?? ""
-            }
-            return url.isEmpty
-                ? [.text(ns.substring(with: match.range))]
-                : [.link(label: label, url: url)]
-        }
-    }
-
-    /// Shared splitter: emits `textSegment(...)` between matches, `make(...)`
-    /// for each match (in order).
-    private static func splitRuns(
-        in text: String,
-        matches: [NSTextCheckingResult],
-        ns: NSString,
-        make: (NSTextCheckingResult, NSString) -> [InlineRun],
-        textSegment: (String) -> [InlineRun] = { [.text($0)] }
-    ) -> [InlineRun] {
+        guard !line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
+        let spans = spans(of: Array(Document(parsing: line).children))
+        guard !spans.isEmpty else { return [.text(line)] }
         var runs: [InlineRun] = []
-        var cursor = 0
-        for match in matches {
-            if match.range.location > cursor {
-                let before = ns.substring(with: NSRange(location: cursor, length: match.range.location - cursor))
-                if !before.isEmpty { runs.append(contentsOf: textSegment(before)) }
+        for span in spans {
+            if let alt = span.imageAlt, let url = span.imageURL {
+                if !url.isEmpty { runs.append(.image(alt: alt, url: url)) }
+                else if !span.text.isEmpty { runs.append(.text(span.text)) }
+            } else if let url = span.linkURL, !url.isEmpty {
+                runs.append(.link(label: span.text, url: url))
+            } else if !span.text.isEmpty {
+                runs.append(.text(span.text))
             }
-            if match.range.length > 0 {
-                runs.append(contentsOf: make(match, ns))
-            }
-            cursor = match.range.location + match.range.length
         }
-        if cursor < ns.length {
-            let tail = ns.substring(from: cursor)
-            if !tail.isEmpty { runs.append(contentsOf: textSegment(tail)) }
-        }
-        return runs
-    }
-
-    /// `raw` is the `(...)` part of a link/image: trims whitespace, drops a
-    /// trailing `"title"`, unwraps `<…>`.
-    private static func cleanURL(_ raw: String) -> String {
-        var url = raw.trimmingCharacters(in: .whitespaces)
-        if let quote = url.firstIndex(of: "\"") {
-            url = String(url[..<quote]).trimmingCharacters(in: .whitespaces)
-        }
-        if url.hasPrefix("<"), url.hasSuffix(">"), url.count >= 2 {
-            url = String(url.dropFirst().dropLast())
-        }
-        return url
-    }
-
-    /// Paragraph that is JUST an image token → (alt, url).
-    private static func standaloneImage(_ joined: String, references: [String: LinkReference]) -> (alt: String, url: String)? {
-        let trimmed = joined.trimmingCharacters(in: .whitespacesAndNewlines)
-        let runs = inlineRuns(trimmed, references: references)
-        guard runs.count == 1, case .image(let alt, let url) = runs[0] else { return nil }
-        return (alt, url)
+        return runs.isEmpty ? [.text(line)] : runs
     }
 
     // MARK: - Reference definitions
@@ -669,7 +742,7 @@ public enum MarkdownText {
         return results
     }
 
-    // MARK: - Line-level helpers
+    // MARK: - Line-level helpers (the editing layer's fence scan)
 
     private static func fenceInfo(_ line: String) -> (char: Character, length: Int, info: String, canClose: Bool)? {
         guard let first = line.first, first == "`" || first == "~" else { return nil }
@@ -685,114 +758,16 @@ public enum MarkdownText {
         return (first, count, info, canClose: info.isEmpty)
     }
 
-    private static func language(from info: String) -> String? {
-        let trimmed = info.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else { return nil }
-        return trimmed.components(separatedBy: " ").first
-    }
-
-    private static func headingInfo(_ line: String) -> (level: Int, text: String)? {
-        guard line.hasPrefix("#") else { return nil }
-        var rest = Substring(line)
-        var marks = 0
-        while rest.first == "#" {
-            rest = rest.dropFirst()
-            marks += 1
+    /// `raw` is the `(...)` part of a link/image: trims whitespace, drops a
+    /// trailing `"title"`, unwraps `<…>`.
+    private static func cleanURL(_ raw: String) -> String {
+        var url = raw.trimmingCharacters(in: .whitespaces)
+        if let quote = url.firstIndex(of: "\"") {
+            url = String(url[..<quote]).trimmingCharacters(in: .whitespaces)
         }
-        guard (1...6).contains(marks), rest.first == " " || rest.first == "\t" else { return nil }
-        var text = String(rest).trimmingCharacters(in: .whitespaces)
-        // ATX closing sequence: "# Heading #" → "Heading".
-        if let closing = rx(#"[ \t]+#+[ \t]*$"#),
-           let m = closing.firstMatch(in: text, range: NSRange(location: 0, length: (text as NSString).length)) {
-            text = (text as NSString).substring(with: NSRange(location: 0, length: m.range.location))
-                .trimmingCharacters(in: .whitespaces)
+        if url.hasPrefix("<"), url.hasSuffix(">"), url.count >= 2 {
+            url = String(url.dropFirst().dropLast())
         }
-        return (marks, text)
-    }
-
-    private static func isSetextUnderline(_ line: String) -> Bool {
-        guard let first = line.first, first == "=" || first == "-" else { return false }
-        return line.allSatisfy { $0 == first }
-    }
-
-    private static func isThematicBreak(_ line: String) -> Bool {
-        guard line.count >= 3 else { return false }
-        let characters = Array(line)
-        let first = characters[0]
-        guard first == "-" || first == "*" || first == "_" else { return false }
-        var runs = 0
-        for character in characters {
-            if character == first { runs += 1 }
-            else if character != " " && character != "\t" { return false }
-        }
-        return runs >= 3
-    }
-
-    private static func footnoteBody(_ line: String) -> String? {
-        guard let rx = rx(#"^\[\^[^\]]+\]:[ \t]*(.*)$"#),
-              let m = rx.firstMatch(in: line, range: NSRange(location: 0, length: (line as NSString).length))
-        else { return nil }
-        return (line as NSString).substring(with: m.range(at: 1))
-    }
-
-    private static func isLinkReferenceDefinition(_ line: String) -> Bool {
-        guard let rx = rx(#"^\[[^\]^][^\]]*\]:"#
-        ) else { return false }
-        return rx.firstMatch(in: line, range: NSRange(location: 0, length: (line as NSString).length)) != nil
-    }
-
-    private static func tableCells(_ line: String) -> [String] {
-        var s = line.trimmingCharacters(in: .whitespaces)
-        if s.hasPrefix("|") { s.removeFirst() }
-        if s.hasSuffix("|") { s.removeLast() }
-        return s.components(separatedBy: "|").map { $0.trimmingCharacters(in: .whitespaces) }
-    }
-
-    /// Delimiter row: cells of `---`/`:--`/`--:`/`:-:`, at least one pipe.
-    private static func isTableDelimiterRow(_ line: String) -> Bool {
-        guard line.contains("|") else { return false }
-        let cells = tableCells(line)
-        guard !cells.isEmpty else { return false }
-        return cells.allSatisfy { cell in
-            !cell.isEmpty && cell.contains("-") && cell.allSatisfy { $0 == "-" || $0 == ":" }
-        }
-    }
-
-    private static func taskMarker(_ text: String) -> (isTask: Bool, isDone: Bool, remainder: String) {
-        let chars = Array(text)
-        guard chars.count >= 3, chars[0] == "[", chars[2] == "]" else { return (false, false, text) }
-        let mark = chars[1]
-        if mark == " " { return (true, false, String(chars[3...]).trimmingCharacters(in: .whitespaces)) }
-        if mark == "x" || mark == "X" { return (true, true, String(chars[3...]).trimmingCharacters(in: .whitespaces)) }
-        return (false, false, text)
-    }
-
-    private static func bulletItem(_ line: String) -> (text: String, isTask: Bool, isDone: Bool)? {
-        guard let first = line.first, first == "-" || first == "*" || first == "+" else { return nil }
-        let rest = line.dropFirst()
-        guard rest.first == " " || rest.first == "\t" else { return nil }
-        let text = String(rest).trimmingCharacters(in: .whitespaces)
-        let task = taskMarker(text)
-        return (task.remainder, task.isTask, task.isDone)
-    }
-
-    private static func orderedItem(_ line: String) -> (text: String, isTask: Bool, isDone: Bool)? {
-        guard let rx = rx(#"^\d{1,9}[.)][ \t]+"#),
-              let m = rx.firstMatch(in: line, range: NSRange(location: 0, length: (line as NSString).length))
-        else { return nil }
-        let text = (line as NSString).substring(from: m.range.length)
-            .trimmingCharacters(in: .whitespaces)
-        let task = taskMarker(text)
-        return (task.remainder, task.isTask, task.isDone)
-    }
-
-    private static func leadingSpaces(_ line: String) -> Int {
-        var count = 0
-        for character in line {
-            if character == " " { count += 1 }
-            else if character == "\t" { count += 4 }
-            else { break }
-        }
-        return count
+        return url
     }
 }

@@ -17,9 +17,36 @@ let package = Package(
             targets: ["SpeechLogic"]
         )
     ],
+    dependencies: [
+        // The C half of the GFM parser: cmark-gfm, GitHub's own engine. Its
+        // manifest is clean; swift-markdown's is not (a Windows-only
+        // unsafeFlags entry that SPM rejects in any package dependency), so
+        // swift-markdown's Swift AST is vendored at Sources/Markdown —
+        // same code, module name `Markdown`, no manifest politics.
+        .package(
+            url: "https://github.com/swiftlang/swift-cmark.git",
+            exact: "0.7.0"
+        )
+    ],
     targets: [
         .target(
+            name: "CAtomic",
+            path: "Sources/CAtomic"
+        ),
+        .target(
+            name: "Markdown",
+            dependencies: [
+                .product(name: "cmark-gfm", package: "swift-cmark"),
+                .product(name: "cmark-gfm-extensions", package: "swift-cmark"),
+                "CAtomic"
+            ],
+            path: "Sources/Markdown"
+        ),
+        .target(
             name: "SpeechLogic",
+            dependencies: [
+                "Markdown"
+            ],
             path: "Sources/SpeechLogic"
         ),
         .testTarget(

@@ -26,9 +26,10 @@ final class MarkdownTextTests: XCTestCase {
         * second
         1. third
         """
-        // Mixed bullet markers form one list; the ordered list is a separate
-        // block, so it gets a real paragraph break (better TTS prosody).
-        XCTAssertEqual(MarkdownText.plainText(input), "first\nsecond\n\nthird")
+        // Mixed bullet markers are TWO lists by CommonMark spec (a list's
+        // items share one bullet character), so each gets a paragraph
+        // break — better TTS prosody either way.
+        XCTAssertEqual(MarkdownText.plainText(input), "first\n\nsecond\n\nthird")
     }
 
     func testBlockquotesAndRules() {
@@ -95,7 +96,7 @@ final class MarkdownTextTests: XCTestCase {
 
     func testSetextHeadings() {
         let blocks = MarkdownText.blocks("Title text\n===========\n\nnext")
-        XCTAssertEqual(blocks.first, .heading(level: 1, text: "Title text"))
+        XCTAssertEqual(blocks.first, .heading(level: 1, text: "Title text", spans: [.plain("Title text")]))
     }
 
     func testTablesParseAndSpeakRowWise() {
@@ -106,7 +107,7 @@ final class MarkdownTextTests: XCTestCase {
         | Kitten | 82 MB |
         """
         let blocks = MarkdownText.blocks(input)
-        XCTAssertEqual(blocks.first, .table(headers: ["Name", "Size"], rows: [["Kokoro", "192 MB"], ["Kitten", "82 MB"]]))
+        XCTAssertEqual(blocks.first, .table(headers: [[.plain("Name")], [.plain("Size")]], rows: [[[.plain("Kokoro")], [.plain("192 MB")]], [[.plain("Kitten")], [.plain("82 MB")]]]))
         XCTAssertEqual(
             MarkdownText.plainText(input),
             "Name, Size\nKokoro, 192 MB\nKitten, 82 MB"
@@ -114,6 +115,8 @@ final class MarkdownTextTests: XCTestCase {
     }
 
     func testReferenceLinksResolve() {
+        // Resolved through a FULL document parse: reference definitions are
+        // a document-level concept, so a standalone line cannot see them.
         let input = """
         See [the docs][d] and [the site][site].
 
@@ -125,12 +128,13 @@ final class MarkdownTextTests: XCTestCase {
         let refs = MarkdownText.linkReferences(in: input)
         XCTAssertEqual(refs["d"]?.url, "https://example.com/docs")
 
-        let runs = MarkdownText.inlineRuns("See [the docs][d] now", references: refs)
-        XCTAssertEqual(runs, [
-            .text("See "),
-            .link(label: "the docs", url: "https://example.com/docs"),
-            .text(" now"),
-        ])
+        // The AST resolves the references: the paragraph's spans carry the
+        // link, which the preview renders as a tappable run.
+        guard case .paragraph(_, let spans)? = MarkdownText.blocks(input).first else {
+            XCTFail("expected a paragraph"); return
+        }
+        XCTAssertTrue(spans.contains { $0.linkURL == "https://example.com/docs" && $0.text == "the docs" },
+                      "reference link not resolved into a span: \(spans)")
     }
 
     /// Unresolved reference links speak their LABEL — the raw
@@ -180,28 +184,31 @@ final class MarkdownTextTests: XCTestCase {
     // MARK: - blocks() (reading view)
 
     func testBlocksRespectSingleLineBreaks() {
+        // (The spans may split at the soft break — the TEXT is the contract;
+        // the preview composes spans back into one flowing paragraph.)
         let blocks = MarkdownText.blocks("line one\nline two\n\nsecond paragraph")
-        XCTAssertEqual(blocks, [
-            .paragraph("line one\nline two"),
-            .paragraph("second paragraph"),
-        ])
+        let texts = blocks.compactMap { block -> String? in
+            if case .paragraph(let text, _) = block { return text }
+            return nil
+        }
+        XCTAssertEqual(texts, ["line one\nline two", "second paragraph"])
     }
 
     func testBlocksHeadingsAndDivider() {
         let blocks = MarkdownText.blocks("# Title\n\ntext\n\n---\n\n### Sub")
         XCTAssertEqual(blocks, [
-            .heading(level: 1, text: "Title"),
-            .paragraph("text"),
+            .heading(level: 1, text: "Title", spans: [.plain("Title")]),
+            .paragraph(text: "text", spans: [.plain("text")]),
             .divider,
-            .heading(level: 3, text: "Sub"),
+            .heading(level: 3, text: "Sub", spans: [.plain("Sub")]),
         ])
     }
 
     func testBlocksGroupLists() {
         let blocks = MarkdownText.blocks("- a\n- b\n\n1. one\n2. two")
         XCTAssertEqual(blocks, [
-            .bulletList(items: [MarkdownText.ListItem(text: "a"), MarkdownText.ListItem(text: "b")]),
-            .orderedList(items: [MarkdownText.ListItem(text: "one"), MarkdownText.ListItem(text: "two")]),
+            .bulletList(items: [MarkdownText.ListItem(text: "a", spans: [.plain("a")]), MarkdownText.ListItem(text: "b", spans: [.plain("b")])]),
+            .orderedList(items: [MarkdownText.ListItem(text: "one", spans: [.plain("one")]), MarkdownText.ListItem(text: "two", spans: [.plain("two")])]),
         ])
     }
 
@@ -211,8 +218,17 @@ final class MarkdownTextTests: XCTestCase {
     }
 
     func testBlocksQuoteStripsMarkersButKeepsInlineSyntax() {
+        // The GFM AST resolves `**bold**` — the quote's TEXT loses the
+        // markers and gains a bold span, which the preview renders bold.
+        // (The old hand parser kept the raw markers for the display layer
+        // to re-tokenize; the AST is the display layer now.)
         let blocks = MarkdownText.blocks("> quoted **bold**")
-        XCTAssertEqual(blocks, [.quote("quoted **bold**")])
+        guard case .quote(let text, let spans)? = blocks.first else {
+            XCTFail("expected a quote"); return
+        }
+        XCTAssertEqual(text, "quoted bold")
+        XCTAssertTrue(spans.contains { $0.bold && $0.text == "bold" },
+                      "bold inside the quote lost: \(spans)")
     }
 
     // MARK: - Inline images / links
@@ -230,13 +246,21 @@ final class MarkdownTextTests: XCTestCase {
         let blocks = MarkdownText.blocks("![my photo](p.png)\n\nafter")
         XCTAssertEqual(blocks, [
             .image(alt: "my photo", url: "p.png"),
-            .paragraph("after"),
+            .paragraph(text: "after", spans: [.plain("after")]),
         ])
     }
 
     func testImageMixedWithTextStaysParagraph() {
+        // (AST semantics: the image leaves the text and arrives as its own
+        // span; the preview lifts image spans out of the paragraph flow.)
         let blocks = MarkdownText.blocks("text ![in](x.png) more")
-        XCTAssertEqual(blocks, [.paragraph("text ![in](x.png) more")])
+        XCTAssertEqual(blocks.count, 1)
+        guard case .paragraph(let text, let spans)? = blocks.first else {
+            XCTFail("expected a paragraph"); return
+        }
+        XCTAssertEqual(text, "text in more")
+        XCTAssertTrue(spans.contains { $0.imageURL == "x.png" && $0.imageAlt == "in" },
+                      "inline image span missing: \(spans)")
     }
 
     func testPlainTextStripsImages() {
@@ -339,26 +363,26 @@ final class MarkdownTextTests: XCTestCase {
     /// text, so anything the parser drops is a character the user never sees.
     func testBlocksPreserveEmojiInParagraphs() {
         let blocks = MarkdownText.blocks("Hello 🎉 world — café ☕ done ✅")
-        XCTAssertEqual(blocks, [.paragraph("Hello 🎉 world — café ☕ done ✅")])
+        XCTAssertEqual(blocks, [.paragraph(text: "Hello 🎉 world — café ☕ done ✅", spans: [.plain("Hello 🎉 world — café ☕ done ✅")])])
     }
 
     func testBlocksPreserveEmojiInHeadingsListsQuotesAndTables() {
         let heading = MarkdownText.blocks("# 🗓 Agenda")
-        XCTAssertEqual(heading, [.heading(level: 1, text: "🗓 Agenda")])
+        XCTAssertEqual(heading, [.heading(level: 1, text: "🗓 Agenda", spans: [.plain("🗓 Agenda")])])
 
         let list = MarkdownText.blocks("- ✅ done\n- 🚧 wip")
         XCTAssertEqual(list, [
             .bulletList(items: [
-                MarkdownText.ListItem(text: "✅ done"),
-                MarkdownText.ListItem(text: "🚧 wip"),
+                MarkdownText.ListItem(text: "✅ done", spans: [.plain("✅ done")]),
+                MarkdownText.ListItem(text: "🚧 wip", spans: [.plain("🚧 wip")]),
             ])
         ])
 
         let quote = MarkdownText.blocks("> 💡 idea")
-        XCTAssertEqual(quote, [.quote("💡 idea")])
+        XCTAssertEqual(quote, [.quote("💡 idea", spans: [.plain("💡 idea")])])
 
         let table = MarkdownText.blocks("| a | b |\n|---|---|\n| 🎉 | ✅ |")
-        XCTAssertEqual(table, [.table(headers: ["a", "b"], rows: [["🎉", "✅"]])])
+        XCTAssertEqual(table, [.table(headers: [[.plain("a")], [.plain("b")]], rows: [[[.plain("🎉")], [.plain("✅")]]])])
     }
 
     /// Inline runs split text on links/images; emoji must stay inside the

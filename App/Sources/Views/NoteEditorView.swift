@@ -244,7 +244,11 @@ struct NoteEditorView: View {
                 if landscape {
                     HStack(spacing: 0) {
                         editorContent
+                        // Priority 1: the rail's 150pt frame is a promise
+                        // ("every layout partner reserves this") — no
+                        // greedy sibling may ever eat into it.
                         editorRail
+                            .layoutPriority(1)
                     }
                     .transition(.opacity.combined(with: .move(edge: .trailing)))
                 } else {
