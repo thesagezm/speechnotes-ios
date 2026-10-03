@@ -95,7 +95,7 @@ public enum MarkdownText {
             StyledSpan(text: text)
         }
 
-        var isImage: Bool { imageURL != nil }
+        public var isImage: Bool { imageURL != nil }
     }
 
     /// Inline run for the preview: text, native images, tappable links.

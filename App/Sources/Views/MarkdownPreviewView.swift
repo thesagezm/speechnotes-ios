@@ -307,8 +307,8 @@ struct MarkdownPreviewView: View {
 
     @ViewBuilder
     private func grid(
-        headers: [String],
-        rows: [[String]],
+        headers: [[MarkdownText.StyledSpan]],
+        rows: [[[MarkdownText.StyledSpan]]],
         columnCount: Int
     ) -> some View {
         // Widths come from the measured container width; fall back to the
@@ -440,7 +440,7 @@ struct MarkdownPreviewView: View {
         if bold {
             content = content.bold()
         }
-        content
+        return content
             .monospacedDigit(numeric)
             .multilineTextAlignment(numeric ? .trailing : .leading)
             .fixedSize(horizontal: false, vertical: true)

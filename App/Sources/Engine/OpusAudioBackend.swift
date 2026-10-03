@@ -236,7 +236,7 @@ final class OpusAudioBackend: BookAudioBackend {
         // A decode starting at the stream's first audio packet consumes the
         // pre-skip; a mid-stream start does not — its own granule already
         // places it on the timeline.
-        let drop = packetIndex <= firstAudio ? stream.info.preSkip : 0
+        let drop = packetIndex <= firstAudio ? stream.preSkip : 0
         do {
             decoder = try OpusPacketDecoder(
                 stream: stream,
@@ -250,8 +250,8 @@ final class OpusAudioBackend: BookAudioBackend {
         }
         // The first output sample of packet `packetIndex` sits where the
         // PREVIOUS packet's granule ended (its start), minus pre-skip.
-        let baseGranule: UInt64 = packetIndex > 0 ? stream.packets[packetIndex - 1].granule : UInt64(stream.info.preSkip)
-        baseSamples = max(0, Int64(baseGranule) - Int64(stream.info.preSkip))
+        let baseGranule: UInt64 = packetIndex > 0 ? stream.packets[packetIndex - 1].granule : UInt64(stream.preSkip)
+        baseSamples = max(0, Int64(baseGranule) - Int64(stream.preSkip))
 
         lock.lock()
         scheduledEndSamples = 0

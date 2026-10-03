@@ -195,9 +195,9 @@ enum RemoteImageStore {
             switch block {
             case .image(_, let url):
                 collect(url)
-            case .paragraph(let text):
-                for run in MarkdownText.inlineRuns(text) {
-                    if case .image(_, let url) = run { collect(url) }
+            case .paragraph(_, let spans):
+                for url in spans.compactMap(\.imageURL) {
+                    collect(url)
                 }
             default: break
             }

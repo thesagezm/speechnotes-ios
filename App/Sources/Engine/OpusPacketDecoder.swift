@@ -98,13 +98,11 @@ public final class OpusPacketDecoder {
         converter.primeMethod = .none
 
         let maxPacketSize = max(1, stream.packets.map { $0.payload.count }.max() ?? 1_275)
-        guard let inputBuffer = AVAudioCompressedBuffer(
+        let inputBuffer = AVAudioCompressedBuffer(
             format: opusFormat,
             packetCapacity: 1,
             maximumPacketSize: maxPacketSize
-        ) else {
-            throw OpusDecoderError.unavailable
-        }
+        )
 
         self.format = format
         self.converter = converter
@@ -207,9 +205,9 @@ public final class OpusPacketDecoder {
     /// packet description. The description's frame count comes from the
     /// packet's own TOC byte (RFC 6716 §3.1) — the ASBD's nominal 960 is
     /// what variable packets fall back to, not what they are.
-    private func stage(packet: OggReader.Packet) {
+    private func stage(packet: OpusPacketStream.Packet) {
         let bytes = packet.payload
-        let count = min(bytes.count, inputBuffer.byteLength)
+        let count = min(bytes.count, Int(inputBuffer.byteLength))
         bytes.copyBytes(to: inputBuffer.data.assumingMemoryBound(to: UInt8.self), count: count)
         inputBuffer.byteLength = UInt32(count)
         inputBuffer.packetCount = 1
