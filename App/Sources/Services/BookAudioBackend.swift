@@ -78,6 +78,14 @@ final class AVPlayerBackend: BookAudioBackend {
 
     init(url: URL, rate: Float) {
         item = AVPlayerItem(url: url)
+        // The player is fully built BEFORE the observers attach: the KVO
+        // closures capture self, and Swift's definite-initialization rules
+        // forbid that while a stored property is still unset. Both item
+        // states (failure, resolved duration) only ever surface
+        // asynchronously, so nothing is missed by attaching after.
+        player = AVPlayer(playerItem: item)
+        player.allowsExternalPlayback = false
+        player.defaultRate = rate
         statusObserver = item.observe(\.status, options: [.new]) { [weak self] observedItem, _ in
             guard let self, observedItem.status == .failed else { return }
             self.onFailed?(observedItem.error ?? URLError(.cannotDecodeContentData))
@@ -90,9 +98,6 @@ final class AVPlayerBackend: BookAudioBackend {
             guard let self, let seconds = AudioBookPlayer.seconds(of: observedItem.duration) else { return }
             self.onDuration?(seconds)
         }
-        player = AVPlayer(playerItem: item)
-        player.allowsExternalPlayback = false
-        player.defaultRate = rate
     }
 
     func play() { player.play() }
