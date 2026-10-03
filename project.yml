@@ -64,6 +64,15 @@ targets:
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
         ITSAppUsesNonExemptEncryption: false
+        # Files app: the app's Documents folder appears under
+        # "On My iPhone → Speechnotes" and can be worked with directly
+        # (Notes/, Books/, exports). UIFileSharingEnabled is what exposes
+        # the folder at all; LSSupportsOpeningDocumentsInPlace tells iOS to
+        # grant real in-place access instead of routing every file through
+        # an Inbox copy — without it, a file edited in Files would not be
+        # seen here.
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
         CFBundleDocumentTypes:
           - CFBundleTypeName: Text file
             LSHandlerRank: Alternate

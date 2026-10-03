@@ -48,8 +48,13 @@ public enum PlainTextBookParser {
     /// reached. UTF-16/32 are therefore only tried when their BOM is present;
     /// latin-1 is the floor (it never fails, and every byte maps to a glyph).
     static func decode(_ data: Data) -> String {
-        // 1. UTF-8 — validates strictly, so a Latin-1 file never decodes here.
+        // 1. UTF-8 — validates strictly, so a Latin-1 file never decodes
+        // here. The NUL test is what keeps UTF-16 out: a NUL byte is
+        // perfectly VALID UTF-8, so without it every UTF-16 file "decoded"
+        // here as the right-looking text with a NUL between each character
+        // and the UTF-16 branches below were never reached.
         if let text = String(data: data, encoding: .utf8),
+           !text.unicodeScalars.contains("\0"),
            !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return text
         }
@@ -82,12 +87,54 @@ public enum PlainTextBookParser {
                 return text
             }
         }
-        // 4. Latin-1 — total, and correct for the Western corpus.
+        // 4. UTF-16 with NO BOM — Gutenberg and Windows editors both ship
+        // these, and the battery's "UTF-16 only on a BOM" rule sent them to
+        // latin-1, where the file reads as spaced-out letters with the
+        // line breaks stripped (the test that caught it built its fixture
+        // with `.utf16BigEndian`, which appends no BOM). The tell is a null
+        // byte in every other position; the ambiguity guard refuses a file
+        // where both parities are null-heavy (that is binary, not text).
+        if let text = bomlessUTF16(data) { return text }
+        // 5. Latin-1 — total, and correct for the Western corpus.
         if let text = String(data: data, encoding: .isoLatin1),
            !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return text
         }
         return String(decoding: data, as: UTF8.self)
+    }
+
+    /// Decodes BOM-less UTF-16 by its null-byte pattern, or nil when `data`
+    /// is not that shape. Deliberately conservative: a file must look like
+    /// text once decoded, or it is left to the latin-1 floor.
+    private static func bomlessUTF16(_ data: Data) -> String? {
+        guard data.count >= 4 else { return nil }
+        let sample = [UInt8](data.prefix(4096))
+        let pairs = Double(sample.count / 2)
+        guard pairs >= 2 else { return nil }
+        var evenNulls = 0, oddNulls = 0
+        for (index, byte) in sample.enumerated() where byte == 0 {
+            if index % 2 == 0 { evenNulls += 1 } else { oddNulls += 1 }
+        }
+        let evenShare = Double(evenNulls) / pairs
+        let oddShare = Double(oddNulls) / pairs
+        // A little-endian file nulls the HIGH byte (odd positions); a
+        // big-endian one the low byte. Only one parity may look like text.
+        let bigEndian = evenShare > 0.3 && oddShare < 0.1
+        let littleEndian = oddShare > 0.3 && evenShare < 0.1
+        guard bigEndian != littleEndian else { return nil }
+        let encoding: String.Encoding = littleEndian ? .utf16LittleEndian : .utf16BigEndian
+        // No even-length requirement: a file can carry an odd number of
+        // code units, and refusing those helped nobody.
+        guard let text = String(data: data, encoding: encoding),
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        // Reject a "decode" that is mostly control characters — that means
+        // the pattern was a coincidence. The allowance is 1%, with a floor
+        // so a short, genuinely clean string is not rejected by rounding.
+        let controls = text.unicodeScalars.filter {
+            $0.value < 0x20 && $0 != "\n" && $0 != "\r" && $0 != "\t"
+        }.count
+        guard controls * 100 < max(text.count, 100) else { return nil }
+        return text
     }
 
     // MARK: - Chapters
@@ -160,6 +207,15 @@ public enum PlainTextBookParser {
     /// Paragraph blocks: blank-line separated, hard-wrapped lines joined.
     /// Markdown inline syntax is stripped here, once, so both the heading
     /// detector and the chapter text see clean prose.
+    ///
+    /// Three things end a block. A blank line. A Markdown heading. And a
+    /// line that ENDS A SENTENCE — a hard-wrapped paragraph only continues
+    /// onto the next line while its sentence is unfinished, so "Alpha
+    /// prose." / "Beta prose." are two paragraphs while "the lamp post
+    /// stood quiet." stays one. Joining unconditionally glued a Gutenberg
+    /// running heading to the prose under it: "Chapter One" + "Prose one."
+    /// became one block, which then matched the running-heading pattern in
+    /// full and swallowed both lines into the chapter title.
     static func textBlocks(from text: String) -> [String] {
         var out: [String] = []
         var paragraph: [String] = []
@@ -184,10 +240,33 @@ public enum PlainTextBookParser {
                 out.append(line)
                 continue
             }
+            // So is a short running/numbered heading — "Chapter 7", "PART
+            // TWO" — even when prose follows it on the very next line.
+            if headingLevel(of: line) != nil {
+                flush()
+                out.append(line)
+                continue
+            }
+            if let previous = paragraph.last, endsSentence(previous) {
+                flush()
+            }
             paragraph.append(line)
         }
         flush()
         return out
+    }
+
+    /// True when a line ends a sentence, so the next line opens a new
+    /// paragraph rather than continuing this one. Closing punctuation after
+    /// the full stop still counts — `"Go," she said.` ends the sentence.
+    private static func endsSentence(_ line: String) -> Bool {
+        for character in line.reversed() {
+            if character.isWhitespace { continue }
+            return "!?.".contains(character)
+                || character == "\u{201D}" || character == "\""
+                || character == ")" || character == "]"
+        }
+        return false
     }
 
     /// The heading level a block opens, or nil when it is prose.

@@ -6,6 +6,7 @@ import SpeechLogic
 /// the download-cache cleanup under Maintenance. The Storage TAB became the
 /// Books library, so this screen is now the only home for that content.
 struct StorageSettingsView: View {
+    @Environment(\.openURL) private var openURL
     @StateObject private var exports = ExportsStore()
     /// Shared so the global mini-player and this screen observe ONE playhead.
     @ObservedObject private var wavPlayer = WavPlayer.shared
@@ -48,6 +49,7 @@ struct StorageSettingsView: View {
     var body: some View {
         Form {
             usageSection
+            filesAppSection
             exportsSection
             imagesSection
             if !perNoteImages.isEmpty {
@@ -572,6 +574,28 @@ struct StorageSettingsView: View {
     private func clearAllImages() {
         RemoteImageStore.removeAll()
         ImageCache.shared.removeAll()
+    }
+
+    // MARK: - Files app
+
+    /// The app's Documents folder is exposed in the Files app ("On My iPhone
+    /// → Speechnotes"). This is the shortcut into it — `shareddocuments://`
+    /// is the scheme Files itself registers for "this app's documents"; when
+    /// it is refused nothing happens rather than failing loudly, and the
+    /// folder is still reachable by browsing.
+    private var filesAppSection: some View {
+        Section {
+            Button {
+                guard let url = URL(string: "shareddocuments://") else { return }
+                openURL(url)
+            } label: {
+                Label("Open in Files", systemImage: "folder")
+            }
+        } header: {
+            Text("Files app")
+        } footer: {
+            Text("Notes, books and exports live in this app's folder under \"On My iPhone → Speechnotes\". Files edited there are picked up here.")
+        }
     }
 
     // MARK: - Maintenance
