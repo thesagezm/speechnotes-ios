@@ -186,11 +186,15 @@ struct StatsTabView: View {
     /// The bars must wear the legend's colours, not Swift Charts' own
     /// categorical palette — otherwise "reading" is blue in the legend and
     /// orange in the graph, which is the mismatch the goals tab inherited.
-    /// One definition (`ActivityKind.legendColor`) feeds both.
-    private static let activityColors: [String: Color] = [
-        ActivityKind.reading.label: ActivityKind.reading.legendColor,
-        ActivityKind.listening.label: ActivityKind.listening.legendColor,
-    ]
+    /// One definition (`StatsKind.legendColor`) feeds both, via a scale the
+    /// charts name inline: `chartForegroundStyleScale` takes a
+    /// `KeyValuePairs` literal, not a dictionary.
+    private var activityColorScale: KeyValuePairs<String, Color> {
+        [
+            StatsKind.reading.label: StatsKind.reading.legendColor,
+            StatsKind.listening.label: StatsKind.listening.legendColor,
+        ]
+    }
 
     @ViewBuilder
     private var activityChart: some View {
@@ -210,6 +214,7 @@ struct StatsTabView: View {
                 }
             }
             .chartLegend(.hidden)
+            .chartForegroundStyleScale(activityColorScale)
         case .month:
             Chart(monthSlices) { slice in
                 BarMark(
@@ -222,7 +227,7 @@ struct StatsTabView: View {
             .chartScrollableAxes(.horizontal)
             .chartXVisibleDomain(length: 60 * 60 * 24 * 10)
             .chartLegend(.hidden)
-            .chartForegroundStyleScale(Self.activityColors)
+            .chartForegroundStyleScale(activityColorScale)
         case .year:
             Chart(yearSlices) { slice in
                 BarMark(
@@ -238,7 +243,7 @@ struct StatsTabView: View {
                 }
             }
             .chartLegend(.hidden)
-            .chartForegroundStyleScale(Self.activityColors)
+            .chartForegroundStyleScale(activityColorScale)
         }
     }
 
