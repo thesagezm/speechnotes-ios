@@ -42,6 +42,12 @@ public enum DocumentBlock: Equatable {
     /// Index into the parse result's image pool.
     case image(Int)
     case table([[DocumentTableCell]])
+    /// Format-native markup, written into the chapter VERBATIM (after
+    /// token substitution). The mobipocket reader produces this: the book's
+    /// text records ARE HTML, so the markup is the document — re-tokenizing
+    /// it into plain paragraphs is what made every mobi lose its italics,
+    /// headings and images (the "mobi renders badly" report).
+    case html(String)
 }
 
 /// One chapter of a parsed office document: an optional heading title and
@@ -91,6 +97,10 @@ public struct DocumentChapter: Equatable {
                     row.map { $0.text.replacingOccurrences(of: "\n", with: " ") }
                         .joined(separator: ", ")
                 }
+            case .html(let markup):
+                // Native markup speaks tag-free; the display keeps the tags.
+                let text = DocumentEpubConverter.strippedText(markup)
+                return text.isEmpty ? [] : [text]
             }
         }
     }
@@ -1490,6 +1500,12 @@ public enum DocumentEpubConverter {
                 body += "<p class=\"doc-image-wrap\"><img class=\"\(cls)\" src=\"\(imageHREFs[poolIndex])\" alt=\"\"/></p>\n"
             case .table(let rows):
                 body += "<div class=\"doc-table-wrap\">\n" + tableXHTML(rows) + "</div>\n"
+            case .html(let markup):
+                // Native markup (mobi): already HTML — the ONLY edits are
+                // the image tokens the parser left (`data-pool-index="N"`
+                // → the pool's real href) and a tidying pass that closes
+                // void tags so the XHTML never breaks the chapter.
+                body += DocumentEpubConverter.inlineMarkupXHTML(markup, imageHREFs: imageHREFs) + "\n"
             }
         }
         return """
@@ -1502,6 +1518,90 @@ public enum DocumentEpubConverter {
           </body>
         </html>
         """
+    }
+
+    /// Format-native markup → chapter body. Closes the void tags old HTML
+    /// leaves open (`<br>`, `<img …>`), escapes bare ampersands, and swaps
+    /// the parser's image tokens for real pool references. The epub.js
+    /// renderer injects chapter content through `innerHTML`, which parses
+    /// forgivingly — this pass covers the structural cases, not a full XML
+    /// rewrite.
+    static func inlineMarkupXHTML(_ markup: String, imageHREFs: [String]) -> String {
+        var out = markup
+        // Image tokens → pool hrefs. An unknown index becomes an empty src,
+        // which the reader ignores, rather than a dangling reference.
+        let tokenRegex = try? NSRegularExpression(pattern: #"data-pool-index="(\d+)""#)
+        out = replacing(tokenRegex, in: out) { [ns = out as NSString] match in
+            guard match.range(at: 1).location != NSNotFound,
+                  imageHREFs.indices.contains(Int(ns.substring(with: match.range(at: 1))) ?? -1)
+            else { return "" }
+            return imageHREFs[Int(ns.substring(with: match.range(at: 1)))!]
+        }
+        // Void tags → self-closing, attributes untouched.
+        let voidRegex = try? NSRegularExpression(
+            pattern: #"<(br|hr|img|meta|link)((?:[^>"]|"[^"]*")*?)(/?)>"#
+        )
+        out = replacing(voidRegex, in: out) { [ns = out as NSString] match in
+            guard match.range(at: 1).location != NSNotFound else { return ns.substring(with: match.range) }
+            let name = ns.substring(with: match.range(at: 1))
+            let attrs = match.range(at: 2).location != NSNotFound
+                ? ns.substring(with: match.range(at: 2)) : ""
+            return "<\(name)\(attrs)/>"
+        }
+        // Bare `&` → `&amp;` (an existing entity is left alone).
+        out = replacing(
+            try? NSRegularExpression(pattern: #"&(?!(?:[A-Za-z][A-Za-z0-9]*|#\d+|#x[0-9A-Fa-f]+);)"#),
+            in: out, with: "&amp;"
+        )
+        return out
+    }
+
+    /// Tag-stripped text of native markup — the speech path for `.html`
+    /// blocks.
+    static func strippedText(_ markup: String) -> String {
+        var out = replacing(
+            try? NSRegularExpression(pattern: "<[^>]*>"),
+            in: markup, with: " "
+        )
+        out = XhtmlText.decodingEntitiesLeniently(out)
+        return out
+            .replacingOccurrences(of: #"(?<=\S)\s+\n"#, with: "\n")
+            .replacingOccurrences(of: "\n{3,}", with: "\n\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    // MARK: Native-markup helpers
+
+    private static func replacing(
+        _ regex: NSRegularExpression?,
+        in text: String,
+        with replacement: String
+    ) -> String {
+        guard let regex else { return text }
+        let range = NSRange(text.startIndex..., in: text)
+        return regex.stringByReplacingMatches(in: text, range: range, withTemplate: replacement)
+    }
+
+    private static func replacing(
+        _ regex: NSRegularExpression?,
+        in text: String,
+        _ make: (NSTextCheckingResult) -> String
+    ) -> String {
+        guard let regex else { return text }
+        let ns = text as NSString
+        var out = ""
+        var cursor = 0
+        for match in regex.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
+            if match.range.location > cursor {
+                out += ns.substring(with: NSRange(location: cursor, length: match.range.location - cursor))
+            }
+            out += make(match)
+            cursor = match.range.location + match.range.length
+        }
+        if cursor < ns.length {
+            out += ns.substring(from: cursor)
+        }
+        return out
     }
 
     /// Rows → XHTML. `colspan` keeps columns aligned when documents merge

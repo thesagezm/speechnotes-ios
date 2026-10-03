@@ -377,3 +377,40 @@ final class MobiParserTests: XCTestCase {
         XCTAssertFalse(MobiParser.looksLikeMobi(Data()))
     }
 }
+
+// MARK: - Markup-preserving chapters (the display upgrade)
+
+/// The chapters cut at level-1/2 headings keep their own HTML — the model
+/// readest/Koodo/Anx render mobi sections with — so italics, headings and
+/// illustrations reach the generated EPUB instead of dying in a
+/// paragraph-only flatten.
+func testChapterSegmentsCutAtHeadingTags() {
+    let html = "<p>front matter</p><h1>One</h1><p>first</p><h2>Two</h2><p>second</p>"
+    let segments = MobiParser.chapterSegments(from: MobiParser.prepare(html))
+    XCTAssertEqual(segments.count, 3)
+    XCTAssertTrue(segments[0].contains("front matter"))
+    XCTAssertTrue(segments[1].contains("<h1>One</h1>"))
+    XCTAssertTrue(segments[2].contains("<h2>Two</h2>"))
+}
+
+func testChaptersFromMarkupKeepHTMLAndTitles() {
+    let html = "<h1>The Beginning</h1><p>It was <i>dark</i>.</p>"
+        + "<h1>The End</h1><p>Fin.</p>"
+    let chapters = MobiParser.chapters(from: html)
+    XCTAssertEqual(chapters.count, 2)
+    XCTAssertEqual(chapters[0].title, "The Beginning")
+    XCTAssertTrue(chapters[0].html.contains("<i>dark</i>"), "inline emphasis lost")
+    XCTAssertTrue(chapters[0].html.contains("<h1>The Beginning</h1>"))
+    XCTAssertEqual(chapters[1].title, "The End")
+    // Paragraphs (the TTS path) still carry the stripped prose.
+    XCTAssertTrue(chapters[0].paragraphs.contains("It was dark."))
+}
+
+func testHeadlessBookKeepsParagraphChunkingWithoutHTML() {
+    // No headings at all — the fallback chunks prose and carries no markup.
+    let html = String(repeating: "<p>" + String(repeating: "word ", count: 200) + "</p>", count: 8)
+    let chapters = MobiParser.chapters(from: html)
+    XCTAssertGreaterThan(chapters.count, 1)
+    XCTAssertTrue(chapters.allSatisfy { $0.html.isEmpty })
+    XCTAssertTrue(chapters.allSatisfy { !$0.paragraphs.isEmpty })
+}

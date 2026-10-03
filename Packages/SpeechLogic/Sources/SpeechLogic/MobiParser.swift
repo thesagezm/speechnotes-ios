@@ -59,19 +59,34 @@ public enum MobiParser {
         /// as a single unbroken paragraph, which is unreadable aloud and
         /// unscannable on the page.
         public let paragraphs: [String]
+        /// The chapter's own markup, verbatim — what the display path embeds
+        /// so italics, headings and illustrations survive the trip. Empty
+        /// for the headless fallback (chunked prose with no structure to
+        /// keep). Image references are `data-pool-index="N"` tokens into
+        /// `MobiBook.inlineImages`.
+        public let html: String
         /// The same paragraphs joined for callers that want prose as a
         /// string (shelf summaries, tests).
         public var text: String { paragraphs.joined(separator: "\n\n") }
 
-        public init(title: String?, paragraphs: [String]) {
+        public init(title: String?, paragraphs: [String], html: String = "") {
             self.title = title
             self.paragraphs = paragraphs
+            self.html = html
         }
 
         public init(title: String?, text: String) {
             self.title = title
             self.paragraphs = text.isEmpty ? [] : [text]
+            self.html = ""
         }
+    }
+
+    /// One image extracted from the book's resource records — the payload a
+    /// `recindex` reference in the text resolves to.
+    public struct MobiImage: Equatable {
+        public let data: Data
+        public let mime: String
     }
 
     /// Everything the shelf and the reader need, and nothing they don't.
@@ -84,6 +99,9 @@ public enum MobiParser {
         /// when the book has no image records.
         public let cover: Data?
         public let chapters: [MobiChapter]
+        /// Every image the text references, in pool order — the chapter
+        /// HTML's `data-pool-index` tokens point into this array.
+        public let inlineImages: [MobiImage]
         /// "mobi6" / "kf8" — which header flavour produced the chapters.
         public let variant: String
         /// First ~400 characters of prose, for a shelf card with no cover.
@@ -141,6 +159,10 @@ public enum MobiParser {
         // the same item stream (the summary pass used to re-walk the whole
         // book, doubling import time on a 2 MB `.azw3`).
         let items = Self.items(from: html)
+        // The display path keeps the book's own markup: `recindex` image
+        // references become pool tokens, chapters cut at their headings
+        // carry their verbatim HTML into the generated EPUB.
+        let (displayHTML, inlineImages) = extractImages(from: html, pdb: pdb, header: header)
 
         return MobiBook(
             title: meta.title ?? header.title,
@@ -148,7 +170,8 @@ public enum MobiParser {
             publisher: meta.publisher,
             language: meta.language,
             cover: coverImage(pdb: pdb, header: header),
-            chapters: chapters(from: items, wholeBook: html),
+            chapters: chapters(from: displayHTML),
+            inlineImages: inlineImages,
             variant: header.isKF8 ? "kf8" : "mobi6",
             summary: summary(from: items)
         )
@@ -518,49 +541,195 @@ public enum MobiParser {
     /// A book with no headings at all (older Kindle conversions, and the
     /// `.doc`-style fixture set) chunks into ~12 000-character spans so the
     /// reader's one-chapter-at-a-time memory bound still holds.
-    static func chapters(from items: [Item], wholeBook html: String) -> [MobiChapter] {
-        guard !items.isEmpty else {
-            let whole = sanitize(XhtmlText.decodingEntitiesLeniently(replacing(anyTagRegex, in: html, with: "")))
-            return [MobiChapter(title: nil, text: whole)]
+    /// The prepared book markup: the same element/pagebreak stripping the
+    /// item walk does, so chapters' HTML and their paragraphs always agree.
+    static func prepare(_ html: String) -> String {
+        var working = replacing(skippedElementsRegex, in: html, with: " ")
+        working = replacing(pageBreakRegex, in: working, with: "\n\n")
+        return working
+    }
+
+    /// The prepared markup cut at the level-1/2 heading tags — the same
+    /// boundaries the item walk opens chapters at — so a chapter's HTML and
+    /// its paragraphs cover exactly the same span of book.
+    static func chapterSegments(from prepared: String) -> [String] {
+        guard let headingRegex = try? NSRegularExpression(pattern: "(?i)<h[12]\\b[^>]*>") else {
+            return [prepared]
+        }
+        let ns = prepared as NSString
+        let matches = headingRegex.matches(
+            in: prepared, range: NSRange(location: 0, length: ns.length)
+        )
+        guard matches.count >= 2 else { return [prepared] }
+        var segments: [String] = []
+        var cursor = 0
+        for match in matches where match.range.location >= cursor {
+            if match.range.location > cursor {
+                segments.append(ns.substring(with: NSRange(location: cursor, length: match.range.location - cursor)))
+            } else if segments.isEmpty {
+                segments.append("")
+            }
+            cursor = match.range.location
+        }
+        if cursor < ns.length { segments.append(ns.substring(from: cursor)) }
+        return segments
+    }
+
+    /// Splits the book into chapters that keep their own markup.
+    ///
+    /// When the book carries at least two level-1/2 headings (every
+    /// chaptered book does — this is the readest/Koodo/Anx model too: the
+    /// foliate-js family renders each mobi SECTION as its own HTML file),
+    /// each chapter is one heading-delimited segment, verbatim — italics,
+    /// tables and illustrations come through. The title is the segment's
+    /// own opening heading text, never invented.
+    ///
+    /// A book with no headings at all (older Kindle conversions, and the
+    /// `.doc`-style fixture set) keeps the old path: headless chunking into
+    /// ~12 000-character spans of paragraphs, no HTML to preserve.
+    static func chapters(from html: String) -> [MobiChapter] {
+        let prepared = prepare(html)
+        let segments = chapterSegments(from: prepared)
+        if segments.count <= 1 {
+            let items = Self.items(from: prepared)
+            guard !items.isEmpty else {
+                let whole = sanitize(XhtmlText.decodingEntitiesLeniently(replacing(anyTagRegex, in: prepared, with: "")))
+                return [MobiChapter(title: nil, text: whole)]
+            }
+            var result: [MobiChapter] = []
+            var title: String?
+            var buffer: [String] = []
+            var characters = 0
+            func flush() {
+                let paragraphs = buffer.filter { !$0.isEmpty }
+                buffer = []
+                characters = 0
+                guard !paragraphs.isEmpty, result.count < maxChapters else { return }
+                result.append(MobiChapter(title: title, paragraphs: paragraphs))
+                title = nil
+            }
+            for item in items {
+                switch item {
+                case .heading(let text):
+                    flush()
+                    title = text
+                case .paragraph(let text):
+                    buffer.append(text)
+                    characters += text.utf16.count
+                    if characters >= chapterTargetCharacters {
+                        let carried = title
+                        flush()
+                        title = carried
+                    }
+                }
+            }
+            flush()
+            if result.isEmpty {
+                let whole = sanitize(XhtmlText.decodingEntitiesLeniently(replacing(anyTagRegex, in: prepared, with: "")))
+                return [MobiChapter(title: nil, text: whole)]
+            }
+            return result
         }
 
         var result: [MobiChapter] = []
-        var title: String?
-        var buffer: [String] = []
-        var characters = 0
-
-        func flush() {
-            let paragraphs = buffer.filter { !$0.isEmpty }
-            buffer = []
-            characters = 0
-            guard !paragraphs.isEmpty, result.count < maxChapters else { return }
-            result.append(MobiChapter(title: title, paragraphs: paragraphs))
-            title = nil
-        }
-
-        for item in items {
-            switch item {
-            case .heading(let text):
-                flush()
-                title = text
-            case .paragraph(let text):
-                buffer.append(text)
-                characters += text.utf16.count
-                if characters >= chapterTargetCharacters {
-                    // Carry the section title onto the continuation so the
-                    // contents list doesn't show "Chapter N" mid-section.
-                    let carried = title
-                    flush()
-                    title = carried
+        for segment in segments where result.count < maxChapters {
+            let items = Self.items(from: segment)
+            var title: String?
+            var paragraphs: [String] = []
+            for item in items {
+                switch item {
+                case .heading(let text):
+                    // The segment OPENED with this heading; anything after
+                    // is prose (h1/h2 open segments, so a second heading in
+                    // one segment cannot happen — but a malformed one is
+                    // prose, not a chapter split).
+                    if title == nil { title = text } else { paragraphs.append(text) }
+                case .paragraph(let text):
+                    paragraphs.append(text)
                 }
             }
+            if paragraphs.isEmpty && title == nil { continue }
+            result.append(MobiChapter(
+                title: title,
+                paragraphs: paragraphs,
+                html: segment
+            ))
         }
-        flush()
         if result.isEmpty {
-            let whole = sanitize(XhtmlText.decodingEntitiesLeniently(replacing(anyTagRegex, in: html, with: "")))
+            let whole = sanitize(XhtmlText.decodingEntitiesLeniently(replacing(anyTagRegex, in: prepared, with: "")))
             return [MobiChapter(title: nil, text: whole)]
         }
         return result
+    }
+
+    // MARK: - Inline images
+
+    /// Every image the text's `recindex` references point at, in first-use
+    /// order, with the references rewritten to `data-pool-index` tokens.
+    ///
+    /// `recindex` is 1-based over the resource records that follow the text
+    /// records. Writers disagree about the exact base — the mobiunpack
+    /// convention is `firstResource + n - 1` — so both bases are tried and
+    /// whichever lands on a real image payload wins. A reference that lands
+    /// on nothing (FLIS/FCIS records have the same position) drops its
+    /// image; the text never breaks.
+    static func extractImages(
+        from html: String,
+        pdb: PalmDatabase,
+        header: MobiHeader
+    ) -> (html: String, images: [MobiImage]) {
+        guard let refRegex = try? NSRegularExpression(pattern: #"(?i)recindex\s*=\s*"?(\d+)"?"#) else {
+            return (html, [])
+        }
+        let firstResource = 1 + header.textRecordCount
+        guard pdb.recordCount > firstResource else { return (html, []) }
+
+        var pool: [MobiImage] = []
+        var poolByRecord: [Int: Int] = [:]
+
+        func image(at recordNumber: Int) -> MobiImage? {
+            if let known = poolByRecord[recordNumber] { return pool[known] }
+            guard let record = pdb.record(recordNumber), record.count > 4 else { return nil }
+            let mime: String
+            if record[0] == 0xFF, record[1] == 0xD8 {
+                mime = "image/jpeg"
+            } else if record[0] == 0x89, record[1] == 0x50, record[2] == 0x4E, record[3] == 0x47 {
+                mime = "image/png"
+            } else if record[0] == 0x47, record[1] == 0x49, record[2] == 0x46 {
+                mime = "image/gif"
+            } else {
+                return nil
+            }
+            let image = MobiImage(data: record, mime: mime)
+            poolByRecord[recordNumber] = pool.count
+            pool.append(image)
+            return image
+        }
+
+        let ns = html as NSString
+        var out = ""
+        var cursor = 0
+        for match in refRegex.matches(in: html, range: NSRange(location: 0, length: ns.length)) {
+            guard match.range(at: 1).location != NSNotFound else { continue }
+            let numberText = ns.substring(with: match.range(at: 1))
+            guard let number = Int(numberText), number > 0 else { continue }
+            // Try the mobiunpack base, then the raw base.
+            let image = image(at: firstResource + number - 1) ?? image(at: firstResource + number)
+            if match.range.location > cursor {
+                out += ns.substring(with: NSRange(location: cursor, length: match.range.location - cursor))
+            }
+            if let image {
+                // `data-pool-index` is the attribute the converter swaps for
+                // the pool's real href; nothing in book HTML uses it.
+                out += #"data-pool-index="\#(pool.firstIndex(where: { $0 == image }) ?? 0)"#
+            } else {
+                // Unresolvable: keep the reference harmlessly inert.
+                out += #"data-pool-index="-1""#
+            }
+            cursor = match.range.location + match.range.length
+        }
+        if cursor < ns.length { out += ns.substring(from: cursor) }
+        return (out, pool)
     }
 
     /// Gutenberg's editorial furniture, which a reader would never say:

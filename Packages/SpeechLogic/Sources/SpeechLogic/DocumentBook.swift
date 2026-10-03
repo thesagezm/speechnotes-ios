@@ -77,17 +77,28 @@ public enum DocumentBook {
         // MARK: Mobipocket
         case "mobi", "azw", "azw3", "prc", "pdb":
             let book = try MobiParser.parse(book: data)
+            // The book's own markup IS the chapter: italics, headings and
+            // the recindex illustrations survive into the EPUB. Chapters
+            // without markup (the headless fallback) keep the paragraph
+            // blocks that read as one paragraph each. This is the same
+            // model readest/Koodo/Anx use — the foliate-js family renders
+            // each mobi section as its own HTML file; here each chapter is
+            // one EPUB XHTML file.
             return DocumentParseResult(
                 chapters: book.chapters.map { chapter in
-                    DocumentChapter(
-                        title: chapter.title,
-                        // One block per paragraph, not one per chapter: the
-                        // whole chapter in a single `.paragraph` is what made
-                        // every mobi read as one long wall of text.
-                        blocks: chapter.paragraphs.map { .paragraph($0) }
-                    )
+                    chapter.html.isEmpty
+                        ? DocumentChapter(
+                            title: chapter.title,
+                            blocks: chapter.paragraphs.map { .paragraph($0) }
+                        )
+                        : DocumentChapter(
+                            title: chapter.title,
+                            blocks: [.html(chapter.html)]
+                        )
                 },
-                images: [],
+                images: book.inlineImages.map { image in
+                    DocumentImage(data: image.data, mime: image.mime, alt: "Illustration")
+                },
                 cover: book.cover.map {
                     DocumentImage(
                         data: $0,
