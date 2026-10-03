@@ -67,15 +67,22 @@ function documentToMarkdown(doc) {
   // The reader scrolls the PDF to the page that is sounding, which needs to
   // know where each page's text STARTS in the joined string. Built here, in
   // JS, while the pages are already separate — the Swift side would have no
-  // other way to recover it.
+  // other way to recover it. The join length is tracked as blocks are pushed
+  // (a `join("\n\n")` per page made a 700-page book quadratic — seconds of
+  // main-thread JS before the first window ever returned).
   const out = [];
   const pageOffsets = [];
+  let running = 0;
   for (const page of doc.pages ?? []) {
-    const start = out.length ? out.join("\n\n").length : 0;
+    const start = running;
     for (const block of page.blocks ?? []) {
       if (FURNITURE.has(block.type)) continue;
       const markdown = blockToMarkdown(block);
-      if (markdown) out.push(markdown);
+      if (markdown) {
+        if (out.length) running += 2;   // the "\n\n" that will join
+        out.push(markdown);
+        running += markdown.length;
+      }
     }
     if (out.length) {
       pageOffsets.push({ page: page.number ?? 0, offset: start });

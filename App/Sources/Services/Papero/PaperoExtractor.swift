@@ -249,7 +249,17 @@ private final class Session: NSObject, WKURLSchemeHandler, WKScriptMessageHandle
     func runWindow(spec: String?) async throws -> [String: Any] {
         guard let webView else { throw PaperoExtractorError.loadFailed("no extractor") }
         let specArgument = spec.map { "\"\($0)\"" } ?? "undefined"
-        let script = "window.papero.extract(\"\(Self.scheme)://app/document.pdf\", \(specArgument))"
+        // `; true` is load-bearing: `window.papero.extract` is an async
+        // function, so the bare call evaluates to a PROMISE, and bridging
+        // that promise through evaluateJavaScript is exactly what fails on
+        // device with "JavaScript execution returned a result of an
+        // unsupported type" — instantly, before the engine has produced
+        // anything, taking the whole extraction with it. Evaluating the
+        // call AND a trailing `true` makes the script's result a boolean
+        // (fires the completion at once), while the extraction itself
+        // continues in the page and reports through the message channel —
+        // which is the only channel this class waits on anyway.
+        let script = "window.papero.extract(\"\(Self.scheme)://app/document.pdf\", \(specArgument)); true"
         return try await withTimeout(PaperoExtractor.windowTimeout) {
             try await self.waitForMessage(script: script, in: webView)
         }
