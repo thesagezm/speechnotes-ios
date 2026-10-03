@@ -438,10 +438,6 @@ nonisolated private func stream(handle: FileHandle, size: Int64, task: WKURLSche
         }
     }
 
-    /// The ONE completion path. Drops the task from the live set and marks it
-    /// completed in one locked step, so a `stop` WebKit sends in response to
-    /// our didFinish — or a second finish racing it — can never leave the
-    /// task delivered-to-twice.
     /// The ONE completion path, and it must run on the MAIN thread — which is
     /// where every WKURLSchemeHandler callback already runs. `stop` and this
     /// hop are therefore serialized against each other, and the live-set
@@ -451,15 +447,17 @@ nonisolated private func stream(handle: FileHandle, size: Int64, task: WKURLSche
     /// response to our didReceive) could land after our removal, and the
     /// didFinish would hit an already-stopped task.
     nonisolated private func complete(_ task: WKURLSchemeTask, _ id: ObjectIdentifier) {
+        let tasks = liveTasks
         DispatchQueue.main.async {
-            guard liveTasks.complete(id) else { return }
+            guard tasks.complete(id) else { return }
             task.didFinish()
         }
     }
 
     nonisolated private func fail(_ task: WKURLSchemeTask, _ id: ObjectIdentifier, _ error: Error) {
+        let tasks = liveTasks
         DispatchQueue.main.async {
-            guard liveTasks.complete(id) else { return }
+            guard tasks.complete(id) else { return }
             task.didFailWithError(error)
         }
     }
