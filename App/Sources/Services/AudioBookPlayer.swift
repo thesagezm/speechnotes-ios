@@ -225,7 +225,7 @@ final class AudioBookPlayer: ObservableObject {
                 // A failure must not leave the previous backend's callbacks
                 // attached to the new one.
                 backend?.stop()
-                backend = try Self.makeBackend(url: url, rate: rate, into: self)
+                backend = try Self.makeBackend(url: url, rate: Float(rate), into: self)
                 loadedURL = url
                 loadedItemJustCreated = true
                 cachedFileDuration = nil
@@ -304,7 +304,7 @@ final class AudioBookPlayer: ObservableObject {
     ) throws -> BookAudioBackend {
         if BooksStore.isOggContainer(url) {
             let opus = OpusAudioBackend()
-            opus.rate = rate
+            opus.rate = Float(rate)
             opus.onDuration = { seconds in
                 Task { @MainActor in
                     player.cachedFileDuration = seconds
@@ -339,7 +339,7 @@ final class AudioBookPlayer: ObservableObject {
             Log.shared.info("AudioBookPlayer: Opus-in-MP4 track — engine backend (own demux + decode)")
             return opus
         }
-        let av = AVPlayerBackend(url: url, rate: rate)
+        let av = AVPlayerBackend(url: url, rate: Float(rate))
         av.onDuration = { seconds in
             Task { @MainActor in
                 player.cachedFileDuration = seconds
@@ -541,7 +541,7 @@ final class AudioBookPlayer: ObservableObject {
     /// commits when the presses stop.
     func seekBy(_ seconds: Double) {
         guard let backend else { return }
-        let base = pendingSeek?.target ?? (backend?.currentTime ?? 0)
+        let base = pendingSeek?.target ?? (backend.currentTime ?? 0)
         let target = min(max(0, base + seconds), max(0, fileLength - 0.05))
         if let index = chapters.firstIndex(where: { target >= $0.startSeconds && target < $0.endSeconds }) {
             chapterIndex = index
@@ -863,12 +863,12 @@ final class AudioBookPlayer: ObservableObject {
 
     /// Position/duration in seconds, or nil when the value is indefinite
     /// (AVPlayer reports that before a stream is ready).
-    static func seconds(of time: CMTime?) -> Double? {
+    nonisolated static func seconds(of time: CMTime?) -> Double? {
         guard let time, time.isNumeric, !time.isIndefinite else { return nil }
         return time.seconds
     }
 
-    static func time(_ seconds: Double) -> CMTime {
+    nonisolated static func time(_ seconds: Double) -> CMTime {
         CMTime(seconds: seconds, preferredTimescale: timeScale)
     }
 
@@ -891,7 +891,7 @@ final class AudioBookPlayer: ObservableObject {
                 "AudioBookPlayer: AVPlayer cannot decode an Opus track — retrying through the engine path at \(Int(resumeAt))s"
             )
             let opus = OpusAudioBackend()
-            opus.rate = rate
+            opus.rate = Float(rate)
             opus.onDuration = { seconds in
                 Task { @MainActor in
                     self.cachedFileDuration = seconds

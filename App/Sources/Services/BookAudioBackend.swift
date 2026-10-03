@@ -53,7 +53,7 @@ protocol BookAudioBackend: AnyObject {
 final class AVPlayerBackend: BookAudioBackend {
 
     var onDuration: ((Double) -> Void)?
-    var onFailed: ((String) -> Void)?
+    var onFailed: ((Error) -> Void)?
 
     /// The item's failure surfaces through the status observer — that is
     /// where `AudioBookPlayer` gets its honest message today.

@@ -9,13 +9,17 @@ import XCTest
 /// Opus.
 final class OggReaderTests: XCTestCase {
 
-    private var fixtures: URL {
-        URL(fileURLWithPath: ProcessInfo.processInfo.environment["OGG_FIXTURES"]
-            ?? FileManager.default.currentDirectoryPath + "/fixtures")
-    }
-
+    /// The fixtures are package resources — in the test BUNDLE on Apple
+    /// platforms, a plain directory under OGG_FIXTURES for the Linux
+    /// scratch builds.
     private func load(_ name: String) throws -> Data {
-        try Data(contentsOf: fixtures.appendingPathComponent(name))
+        if let bundled = Bundle.module.url(forResource: name, withExtension: nil, subdirectory: "Fixtures/Ogg") {
+            return try Data(contentsOf: bundled)
+        }
+        if let dir = ProcessInfo.processInfo.environment["OGG_FIXTURES"] {
+            return try Data(contentsOf: URL(fileURLWithPath: dir).appendingPathComponent(name))
+        }
+        return try Data(contentsOf: URL(fileURLWithPath: name))
     }
 
     // MARK: - Opus
