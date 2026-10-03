@@ -81,7 +81,10 @@ public enum DocumentBook {
                 chapters: book.chapters.map { chapter in
                     DocumentChapter(
                         title: chapter.title,
-                        blocks: chapter.text.isEmpty ? [] : [.paragraph(chapter.text)]
+                        // One block per paragraph, not one per chapter: the
+                        // whole chapter in a single `.paragraph` is what made
+                        // every mobi read as one long wall of text.
+                        blocks: chapter.paragraphs.map { .paragraph($0) }
                     )
                 },
                 images: [],

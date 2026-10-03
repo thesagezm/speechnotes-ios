@@ -2,6 +2,26 @@ import Foundation
 import SpeechLogic
 import WebKit
 
+// MARK: - Errors
+
+/// File-scope so the webview session can name it; the extractor re-exports it
+/// as `PaperoExtractor.PaperoError` for callers.
+public enum PaperoExtractorError: LocalizedError, Sendable {
+    case loadFailed(String)
+    case engineError(String)
+    case emptyResult
+    case cancelled
+
+    public var errorDescription: String? {
+        switch self {
+        case .loadFailed(let detail): return "The PDF extractor could not load: \(detail)"
+        case .engineError(let detail): return "The PDF extractor failed: \(detail)"
+        case .emptyResult: return "The PDF extractor found no text in this document."
+        case .cancelled: return "The PDF extraction was cancelled."
+        }
+    }
+}
+
 /// Runs papero's layout engine on a PDF, on the device, with no network.
 ///
 /// ## Why a webview
@@ -27,21 +47,7 @@ import WebKit
 /// decides what it means: `.automatic` falls back to PDFKit, `.papero` reports.
 public actor PaperoExtractor {
 
-    public enum PaperoError: LocalizedError, Sendable {
-        case loadFailed(String)
-        case engineError(String)
-        case emptyResult
-        case cancelled
-
-        public var errorDescription: String? {
-            switch self {
-            case .loadFailed(let detail): return "The PDF extractor could not load: \(detail)"
-            case .engineError(let detail): return "The PDF extractor failed: \(detail)"
-            case .emptyResult: return "The PDF extractor found no text in this document."
-            case .cancelled: return "The PDF extraction was cancelled."
-            }
-        }
-    }
+    public typealias PaperoError = PaperoExtractorError
 
     public struct Result: Sendable {
         /// Papero's markdown: headings, tables, lists and formulas in
@@ -150,8 +156,8 @@ public actor PaperoExtractor {
             if let reported = message["pageCount"] as? Int, reported > 0, pageRange == nil {
                 total = reported
             }
-            if let first = window.lowerBound, window.upperBound != Int.max {
-                done = min(first - 1 + (window.upperBound - window.lowerBound + 1), total)
+            if window.upperBound != Int.max {
+                done = min(window.upperBound, total)
             } else {
                 done = total
             }
@@ -213,8 +219,11 @@ private final class Session: NSObject, WKURLSchemeHandler, WKScriptMessageHandle
 
     nonisolated static let scheme = "paperoscheme"
     private let ioQueue = DispatchQueue(label: "com.speechnotes.papero.io", qos: .userInitiated)
-    nonisolated private var liveTasks = Set<ObjectIdentifier>()
-    private let liveTasksLock = NSLock()
+    /// Scheme tasks are added on main and read from the IO queue, so the set
+    /// cannot be an actor-isolated stored property — it lives behind its own
+    /// lock, and `stop` removes the task because delivering to a stopped one
+    /// raises an exception.
+    nonisolated private let liveTasks = SchemeTaskRegistry()
 
     /// `nonisolated` so the owning actor can construct the session without
     /// hopping; nothing here touches main state.
@@ -234,7 +243,7 @@ private final class Session: NSObject, WKURLSchemeHandler, WKScriptMessageHandle
         webView.isHidden = true
         self.webView = webView
         webView.load(URLRequest(url: URL(string: "\(Self.scheme)://app/extract.html")!))
-        try await withTimeout(Self.loadTimeout) { try await self.waitForReady() }
+        try await withTimeout(PaperoExtractor.loadTimeout) { try await self.waitForReady() }
     }
 
     func runWindow(spec: String?) async throws -> [String: Any] {
@@ -335,7 +344,7 @@ private final class Session: NSObject, WKURLSchemeHandler, WKScriptMessageHandle
             return
         }
         let id = ObjectIdentifier(urlSchemeTask)
-        liveTasksLock.lock(); liveTasks.insert(id); liveTasksLock.unlock()
+        liveTasks.insert(id)
         let path = url.path.isEmpty || url.path == "/" ? "/extract.html" : url.path
         ioQueue.async { [weak self] in
             self?.serve(path: path, task: urlSchemeTask, id: id)
@@ -344,11 +353,10 @@ private final class Session: NSObject, WKURLSchemeHandler, WKScriptMessageHandle
 
     func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {
         let id = ObjectIdentifier(urlSchemeTask)
-        liveTasksLock.lock(); liveTasks.remove(id); liveTasksLock.unlock()
+        liveTasks.remove(id)
     }
 
     nonisolated private func isLive(_ id: ObjectIdentifier) -> Bool {
-        liveTasksLock.lock(); defer { liveTasksLock.unlock() }
         return liveTasks.contains(id)
     }
 
@@ -368,7 +376,7 @@ private final class Session: NSObject, WKURLSchemeHandler, WKScriptMessageHandle
             fail(task, id, URLError(.fileDoesNotExist))
             return
         }
-        send(response: response(url: task.request.url, mime: mime, length: data.count, ranges: false),
+        send(response: response(url: task.request.url, mime: mime, length: Int64(data.count), ranges: false),
              data: data, task: task, id: id)
     }
 
@@ -435,5 +443,27 @@ private final class Session: NSObject, WKURLSchemeHandler, WKScriptMessageHandle
         default: mime = "application/octet-stream"
         }
         return (data, mime)
+    }
+}
+
+
+/// The set of live scheme tasks, with its own lock: it is written on the main
+/// thread and read on the extraction's IO queue, which is exactly the data
+/// race the EPUB reader's registry documents.
+private final class SchemeTaskRegistry: @unchecked Sendable {
+    private var tasks = Set<ObjectIdentifier>()
+    private let lock = NSLock()
+
+    func insert(_ id: ObjectIdentifier) {
+        lock.lock(); tasks.insert(id); lock.unlock()
+    }
+
+    func remove(_ id: ObjectIdentifier) {
+        lock.lock(); tasks.remove(id); lock.unlock()
+    }
+
+    func contains(_ id: ObjectIdentifier) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return tasks.contains(id)
     }
 }

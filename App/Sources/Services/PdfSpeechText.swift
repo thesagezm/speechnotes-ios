@@ -46,7 +46,7 @@ enum PdfSpeechText {
             let first = chapter.startPage + 1  // PdfPageOffset and the engine
             let last = chapter.endPage + 1     // are both 1-based
             if let result = await PdfTextExtractor.chapterText(
-                for: documentURL, firstPage: first, last: last
+                for: documentURL, firstPage: first, lastPage: last
             ) {
                 Log.shared.info("PdfSpeechText: chapter \(chapterIndex) via \(result.engine.rawValue) (\(result.text.utf16.count) chars)")
                 return (result.text, result.pageOffsets)

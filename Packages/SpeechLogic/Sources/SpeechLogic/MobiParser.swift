@@ -54,11 +54,23 @@ public enum MobiParser {
     /// own words.
     public struct MobiChapter: Equatable {
         public let title: String?
-        public let text: String
+        /// The chapter's paragraphs, each a block of prose. The reader needs
+        /// them SEPARATE: handing it one joined string made every mobi read
+        /// as a single unbroken paragraph, which is unreadable aloud and
+        /// unscannable on the page.
+        public let paragraphs: [String]
+        /// The same paragraphs joined for callers that want prose as a
+        /// string (shelf summaries, tests).
+        public var text: String { paragraphs.joined(separator: "\n\n") }
+
+        public init(title: String?, paragraphs: [String]) {
+            self.title = title
+            self.paragraphs = paragraphs
+        }
 
         public init(title: String?, text: String) {
             self.title = title
-            self.text = text
+            self.paragraphs = text.isEmpty ? [] : [text]
         }
     }
 
@@ -518,11 +530,11 @@ public enum MobiParser {
         var characters = 0
 
         func flush() {
-            let body = buffer.filter { !$0.isEmpty }.joined(separator: "\n\n")
+            let paragraphs = buffer.filter { !$0.isEmpty }
             buffer = []
             characters = 0
-            guard !body.isEmpty, result.count < maxChapters else { return }
-            result.append(MobiChapter(title: title, text: body))
+            guard !paragraphs.isEmpty, result.count < maxChapters else { return }
+            result.append(MobiChapter(title: title, paragraphs: paragraphs))
             title = nil
         }
 
@@ -682,12 +694,23 @@ public enum MobiParser {
     /// writing it as `cover.jpg` would produce an undecodable file — so nil.
     static func coverImage(pdb: PalmDatabase, header: MobiHeader) -> Data? {
         let firstResource = 1 + header.textRecordCount
-        guard pdb.recordCount > firstResource,
-              let first = pdb.record(firstResource), first.count > 8 else { return nil }
-        let isJPEG = first[0] == 0xFF && first[1] == 0xD8
-        let isPNG = first[0] == 0x89 && first[1] == 0x50 && first[2] == 0x4E && first[3] == 0x47
-        guard isJPEG || isPNG else { return nil }
-        return first
+        guard pdb.recordCount > firstResource else { return nil }
+        // The first resource record is NOT the cover. In a real book it is
+        // usually the two-byte `INDX` index — which is exactly why no mobi
+        // ever showed a cover: the magic-byte check ran against `INDX` and
+        // gave up there. The resource records hold an index, a FLIS/FCIS
+        // pair, a DCTL and then the book's images, in no guaranteed order, so
+        // the cover is the first record that actually IS an image. EXTH
+        // 201/203 (the KF8 cover offsets) would be the precise answer, but
+        // plenty of writers — calibre among them — leave those unset.
+        for index in firstResource..<pdb.recordCount {
+            guard let record = pdb.record(index), record.count > 8 else { continue }
+            let isJPEG = record[0] == 0xFF && record[1] == 0xD8
+            let isPNG = record[0] == 0x89 && record[1] == 0x50
+                && record[2] == 0x4E && record[3] == 0x47
+            if isJPEG || isPNG { return record }
+        }
+        return nil
     }
 
     // MARK: - Byte helpers
