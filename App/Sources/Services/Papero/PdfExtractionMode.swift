@@ -50,11 +50,20 @@ public enum PdfExtractionMode: String, CaseIterable, Identifiable, Sendable {
 
     private static let key = "pdfExtractionMode"
 
-    /// The user's choice, defaulting to `automatic`.
+    /// The user's choice.
+    ///
+    /// Defaults to `builtin`. The papero webview path first shipped crashing
+    /// LiveContainer with "[WKURLSchemeTask taskDidCompleteWithError:] has
+    /// already been called" — the scheme handler finished a streamed PDF task
+    /// and then kept delivering chunks to it (fixed in PaperoExtractor, but
+    /// the phone is the only real bench for that handler). Until a build with
+    /// the fix has been exercised on the device, the default must not route
+    /// ordinary PDFs through a second WKWebView; papero stays one picker tap
+    /// away for anyone checking a document's fidelity.
     public static var current: PdfExtractionMode {
         get {
-            guard let raw = UserDefaults.standard.string(forKey: key) else { return .automatic }
-            return PdfExtractionMode(rawValue: raw) ?? .automatic
+            guard let raw = UserDefaults.standard.string(forKey: key) else { return .builtin }
+            return PdfExtractionMode(rawValue: raw) ?? .builtin
         }
         set { UserDefaults.standard.set(newValue.rawValue, forKey: key) }
     }

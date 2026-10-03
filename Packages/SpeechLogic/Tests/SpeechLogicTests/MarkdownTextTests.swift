@@ -303,8 +303,10 @@ final class MarkdownTextTests: XCTestCase {
         let t = MarkdownSlashMenu.detect(in: draft, caretOffset: caret)!
         let cmd = MarkdownSlashMenu.commands.first { $0.id == "table" }!
         let (out, newCaret, _) = MarkdownSlashMenu.apply(cmd, in: draft, trigger: t, caret: caret)
-        XCTAssertEqual(out, "note\n| |\n| --- |\n| |")
-        XCTAssertEqual(newCaret, out.utf16.count)
+        XCTAssertEqual(out, "note\n| H1 | H2 | H3 |\n| --- | --- | --- |\n|  |  |  |")
+        // The caret lands in the first header cell, which is 2 units past the
+        // start of the inserted table — i.e. just past "note\n| ".
+        XCTAssertEqual(newCaret, ("note\n| " as NSString).length)
     }
 
     func testSlashWrapCommandWrapsSelection() {

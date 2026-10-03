@@ -382,9 +382,15 @@ private final class Session: NSObject, WKURLSchemeHandler, WKScriptMessageHandle
 
     /// Streams the PDF in chunks — never holding the whole file on this side
     /// either, which is the whole point of the windowed design.
-    nonisolated private func stream(handle: FileHandle, size: Int64, task: WKURLSchemeTask, id: ObjectIdentifier) {
-        send(response: response(url: task.request.url, mime: "application/pdf", length: size, ranges: true),
-             data: nil, task: task, id: id)
+nonisolated private func stream(handle: FileHandle, size: Int64, task: WKURLSchemeTask, id: ObjectIdentifier) {
+        // The response goes out ALONE. `send` finishes the task, and a task
+        // that has been finished may not be delivered to again — calling
+        // didReceive on it raises
+        // "[WKURLSchemeTask taskDidCompleteWithError:] has already been
+        // called for this task", which is the NSException that took
+        // LiveContainer down the first time a PDF was read with papero.
+        sendResponse(response(url: task.request.url, mime: "application/pdf", length: size, ranges: true),
+                     task: task, id: id)
         let chunk: Int = 1 << 20
         var sent: Int64 = 0
         while sent < size, isLive(id) {
@@ -396,10 +402,7 @@ private final class Session: NSObject, WKURLSchemeHandler, WKScriptMessageHandle
             }
         }
         try? handle.close()
-        DispatchQueue.main.async { [weak self] in
-            guard let self, self.isLive(id) else { return }
-            task.didFinish()
-        }
+        complete(task, id)
     }
 
     nonisolated private func response(url: URL?, mime: String, length: Int64, ranges: Bool) -> HTTPURLResponse {
@@ -414,18 +417,49 @@ private final class Session: NSObject, WKURLSchemeHandler, WKScriptMessageHandle
                                headerFields: headers)!
     }
 
+    /// Response + body + completion, all in one main-thread hop, for the
+    /// small bundle resources.
     nonisolated private func send(response: HTTPURLResponse, data: Data?, task: WKURLSchemeTask, id: ObjectIdentifier) {
         DispatchQueue.main.async { [weak self] in
             guard let self, self.isLive(id) else { return }
             task.didReceive(response)
             if let data { task.didReceive(data) }
+            self.complete(task, id)
+        }
+    }
+
+    /// Response alone — the streaming path's first hop. It MUST NOT finish
+    /// the task: `stream` has chunks to deliver afterwards, and a finished
+    /// task raises on the next didReceive.
+    nonisolated private func sendResponse(_ response: HTTPURLResponse, task: WKURLSchemeTask, id: ObjectIdentifier) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.isLive(id) else { return }
+            task.didReceive(response)
+        }
+    }
+
+    /// The ONE completion path. Drops the task from the live set and marks it
+    /// completed in one locked step, so a `stop` WebKit sends in response to
+    /// our didFinish — or a second finish racing it — can never leave the
+    /// task delivered-to-twice.
+    /// The ONE completion path, and it must run on the MAIN thread — which is
+    /// where every WKURLSchemeHandler callback already runs. `stop` and this
+    /// hop are therefore serialized against each other, and the live-set
+    /// removal happens in the same critical section as the delivery, so no
+    /// interleaving can leave a task delivered-to twice. Doing the check on
+    /// the IO queue instead left a window where WebKit's `stop` (sent in
+    /// response to our didReceive) could land after our removal, and the
+    /// didFinish would hit an already-stopped task.
+    nonisolated private func complete(_ task: WKURLSchemeTask, _ id: ObjectIdentifier) {
+        DispatchQueue.main.async {
+            guard liveTasks.complete(id) else { return }
             task.didFinish()
         }
     }
 
     nonisolated private func fail(_ task: WKURLSchemeTask, _ id: ObjectIdentifier, _ error: Error) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self, self.isLive(id) else { return }
+        DispatchQueue.main.async {
+            guard liveTasks.complete(id) else { return }
             task.didFailWithError(error)
         }
     }
@@ -450,6 +484,13 @@ private final class Session: NSObject, WKURLSchemeHandler, WKScriptMessageHandle
 /// The set of live scheme tasks, with its own lock: it is written on the main
 /// thread and read on the extraction's IO queue, which is exactly the data
 /// race the EPUB reader's registry documents.
+///
+/// `complete` exists for a reason a plain `remove` cannot cover. `stop` and
+/// our own `didFinish` both arrive on the main thread, and a `stop` sent by
+/// WebKit in response to a `didReceive` can interleave with the completion
+/// hop. Whichever arrives twice must win exactly once: `complete` removes
+/// the id and reports whether IT was the one that removed it, so the caller
+/// delivers `didFinish` only on the `true` and drops it otherwise.
 private final class SchemeTaskRegistry: @unchecked Sendable {
     private var tasks = Set<ObjectIdentifier>()
     private let lock = NSLock()
@@ -465,5 +506,12 @@ private final class SchemeTaskRegistry: @unchecked Sendable {
     func contains(_ id: ObjectIdentifier) -> Bool {
         lock.lock(); defer { lock.unlock() }
         return tasks.contains(id)
+    }
+
+    /// Removes `id` and answers whether this call is the one that removed it.
+    @discardableResult
+    func complete(_ id: ObjectIdentifier) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return tasks.remove(id) != nil
     }
 }

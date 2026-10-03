@@ -104,14 +104,27 @@ final class MarkdownSlashMenuTests: XCTestCase {
 
     func testApplyInsertWithTypedFilterRemovesTheWholeToken() {
         // "/tbl" + Table: slash AND the typed filter are deleted, then the
-        // table snippet is inserted.
+        // table snippet is inserted. The snippet is a real THREE-column
+        // grid, and the caret lands in the first header cell (pinned: it
+        // used to be a one-column table with the caret at the very end).
         let draft = "/tbl"
         let command = MarkdownSlashMenu.commands.first { $0.id == "table" }!
         let result = MarkdownSlashMenu.apply(
             command, in: draft, trigger: makeTrigger(draft, slashUtf16: 0, cursorUtf16: 4), caret: 4, selection: nil
         )
-        XCTAssertEqual(result.draft, "| |\n| --- |\n| |")
-        XCTAssertEqual(result.caretUtf16, result.draft.utf16.count)
+        XCTAssertEqual(result.draft, "| H1 | H2 | H3 |\n| --- | --- | --- |\n|  |  |  |")
+        // "| " is two UTF-16 units, and the marker sits at offset 0, so the
+        // caret is 2 — inside the first header cell, ready to type.
+        XCTAssertEqual(result.caretUtf16, 2)
+        // The inserted grid must PARSE as a three-column table, which is the
+        // whole point: the old one-column snippet produced a single narrow
+        // column in the reader.
+        let blocks = MarkdownText.blocks(result.draft)
+        guard case .table(let headers, let rows)? = blocks.first else {
+            return XCTFail("slash-command table did not parse as a table: \(blocks)")
+        }
+        XCTAssertEqual(headers.count, 3)
+        XCTAssertEqual(rows.first?.count, 3)
     }
 
     func testApplyLinkSnippetInsertsBracketOnly() {

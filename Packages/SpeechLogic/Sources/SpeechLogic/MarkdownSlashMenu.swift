@@ -22,11 +22,17 @@ public enum MarkdownSlashMenu {
         public let placeholder: String?
         public let keywords: [String]
         public let kind: Kind
+        /// A token inside `snippet` the caret should land ON, rather than at
+        /// the snippet's end. A table is the case that needs it: `/table`
+        /// drops a two-column grid and the user expects the caret in the
+        /// first header cell, typing — not parked after the last `|`.
+        public let caretMarker: String?
 
         public init(
             id: String, label: String, symbol: String,
             snippet: String, placeholder: String? = nil,
-            keywords: [String] = [], kind: Kind = .insert
+            keywords: [String] = [], kind: Kind = .insert,
+            caretMarker: String? = nil
         ) {
             self.id = id
             self.label = label
@@ -35,6 +41,7 @@ public enum MarkdownSlashMenu {
             self.placeholder = placeholder
             self.keywords = keywords
             self.kind = kind
+            self.caretMarker = caretMarker
         }
     }
 
@@ -51,7 +58,16 @@ public enum MarkdownSlashMenu {
         .init(id: "code",     label: "Code block",    symbol: "curlybraces", snippet: "```\n", placeholder: "code\n```", keywords: ["fence", "snippet"]),
         .init(id: "codeinline", label: "Inline code", symbol: "chevron.left.forwardslash.chevron.right", snippet: "`code`", placeholder: "code", kind: .wrap(before: "`", after: "`")),
         .init(id: "divider",  label: "Divider",       symbol: "minus",      snippet: "\n---\n", keywords: ["hr", "rule", "separator", "line"]),
-        .init(id: "table",    label: "Table",         symbol: "tablecells", snippet: "| |\n| --- |\n| |", keywords: ["grid", "columns", "cols"]),
+        // A real three-column grid with a header, a delimiter row and one
+        // empty body row. The old snippet was "| |\n| --- |\n| |" — a
+        // ONE-column table, so the reader rendered a single narrow column no
+        // matter how wide the note was, which is what made tables look unlike
+        // every other notes app ("the tables in notes are not normal"). The
+        // caret marker sits between the first pair of pipes so the first
+        // header cell is where typing begins.
+        .init(id: "table",    label: "Table",         symbol: "tablecells",
+              snippet: "| H1 | H2 | H3 |\n| --- | --- | --- |\n|  |  |  |",
+              keywords: ["grid", "columns", "cols", "row"], caretMarker: "| "),
         .init(id: "link",     label: "Link",          symbol: "link",       snippet: "[", placeholder: "label](https://)", keywords: ["url", "href"]),
         .init(id: "image",    label: "Image",         symbol: "photo",      snippet: "![", placeholder: "alt](https://)", keywords: ["picture", "pic", "img", "embed"]),
         .init(id: "bold",     label: "Bold",          symbol: "bold",       snippet: "**bold**", placeholder: "bold", keywords: ["strong"], kind: .wrap(before: "**", after: "**")),
@@ -210,7 +226,15 @@ public enum MarkdownSlashMenu {
             let snippet = command.snippet
             updated.insert(contentsOf: snippet, at: slashIndex)
             var caretUtf16 = slashStart + snippet.utf16.count
-            if let placeholder = command.placeholder {
+            if let marker = command.caretMarker,
+               let markerRange = updated.range(of: marker, range: slashIndex..<updated.endIndex) {
+                // Just PAST the marker: for "| " that is the first cell's
+                // first character, not the pipe itself.
+                caretUtf16 = updated.utf16.distance(
+                    from: updated.startIndex,
+                    to: markerRange.upperBound
+                )
+            } else if let placeholder = command.placeholder {
                 let marker: String? =
                     placeholder.contains("](") ? "]("
                     : (placeholder.contains("]") ? "]" : nil)

@@ -233,13 +233,29 @@ struct MarkdownPreviewView: View {
         .padding(.bottom, blockGap)
     }
 
-    /// Tables. The old `Grid` gave every column the width of its WIDEST cell,
-    /// so one long sentence stretched the whole table sideways and pushed the
-    /// other columns off screen — and because the grid lived in a horizontal
-    /// ScrollView the reader had to pan to find them. What a reader expects is
-    /// a table that wraps: long cells break across lines, columns share the
-    /// width fairly, and the table only scrolls sideways when even a fair
-    /// share cannot fit (a genuinely wide table, not a long sentence).
+    /// Tables render the way a notes app draws one: a real grid inside the
+    /// available width, not a horizontally-scrolling card.
+    ///
+    /// What that means concretely, and why each part is here:
+    ///   * **Columns share the width.** A column's floor is its longest WORD
+    ///     (a word wraps; it never needs a column of its own), and whatever
+    ///     is left over is split evenly. The old code split the leftover by
+    ///     CONTENT WEIGHT, which gave a sentence column three times the
+    ///     space a one-word column needed and pushed the table wider than
+    ///     the screen.
+    ///   * **A header row that reads as one.** Bold text on a tinted fill,
+    ///     with a rule under it — the visual line that says "this is a
+    ///     header", which bold alone does not do at a glance.
+    ///   * **Hairlines between rows and columns**, plus a very light zebra
+    ///     stripe on alternate rows. That combination is what makes a
+    ///     wrapped multi-line cell readable when your eye has to track back
+    ///     across the row; without it a three-line cell reads as floating
+    ///     text.
+    ///   * **Numeric columns right-align** with monospaced digits, so a
+    ///     column of figures lines up on the decimal instead of jittering.
+    ///   * **Horizontal scrolling only as a last resort** — when the floors
+    ///     alone exceed the width, which is a genuinely wide table, not a
+    ///     long sentence.
     @ViewBuilder
     private func tableView(headers: [String], rows: [[String]]) -> some View {
         let columnCount = max(headers.count, rows.map(\.count).max() ?? 0)
@@ -250,15 +266,19 @@ struct MarkdownPreviewView: View {
         // foreground GeometryReader collapsed it to zero height — a
         // horizontally-scrollable table reports ~zero ideal height — and the
         // following block rendered on top of it.)
-        tableGrid(headers: headers, rows: rows, columnCount: columnCount)
-            .background(
-                GeometryReader { proxy in
-                    Color.clear
-                        .onAppear { measuredWidth = proxy.size.width }
-                        .onChange(of: proxy.size.width) { newValue in measuredWidth = newValue }
-                }
-            )
-            .frame(maxWidth: .infinity, alignment: .leading)
+        grid(
+            headers: headers,
+            rows: rows,
+            columnCount: columnCount
+        )
+        .background(
+            GeometryReader { proxy in
+                Color.clear
+                    .onAppear { measuredWidth = proxy.size.width }
+                    .onChange(of: proxy.size.width) { newValue in measuredWidth = newValue }
+            }
+        )
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     /// Last container width reported by the tables' measuring reader. Shared
@@ -267,8 +287,15 @@ struct MarkdownPreviewView: View {
     /// both correct and cheaper than per-table state).
     @State private var measuredWidth: CGFloat = 0
 
+    /// Grid lines and fills. On top of the system background so a table reads the
+    /// same in light and dark without a second branch per row — `.secondary`
+    /// is semantic, so one value covers both.
+    private static var ruleColor: Color { Color.secondary.opacity(0.25) }
+    private static var headerFill: Color { Color.secondary.opacity(0.12) }
+    private static var stripeFill: Color { Color.secondary.opacity(0.06) }
+
     @ViewBuilder
-    private func tableGrid(
+    private func grid(
         headers: [String],
         rows: [[String]],
         columnCount: Int
@@ -276,91 +303,263 @@ struct MarkdownPreviewView: View {
         // Widths come from the measured container width; fall back to the
         // screen-based estimate for the very first layout pass (measuredWidth
         // is still zero then) so nothing flashes un-sized.
-        let widths = cachedTableWidths(
+        let layout = cachedLayout(
             headers: headers,
             rows: rows,
             columnCount: columnCount,
             availableWidth: measuredWidth > 0 ? measuredWidth : (UIScreen.main.bounds.width - 32)
         )
-        ScrollView(.horizontal, showsIndicators: false) {
-            Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: tableRowSpacing) {
-                GridRow {
-                    ForEach(0..<columnCount, id: \.self) { index in
-                        styledText(headers[safe: index] ?? "")
-                            .bold()
-                            .frame(width: widths[safe: index], alignment: .leading)
-                    }
-                }
-                Divider()
-                ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                    GridRow {
-                        ForEach(0..<columnCount, id: \.self) { index in
-                            styledText(row[safe: index] ?? "")
-                                .frame(width: widths[safe: index], alignment: .leading)
-                        }
-                    }
-                }
-            }
-            .padding(tableCellPadding)
-            .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.08)))
+        let content = tableBody(
+            headers: headers,
+            rows: rows,
+            columnCount: columnCount,
+            widths: layout.widths,
+            numeric: layout.numeric,
+            ruleColor: Self.ruleColor,
+            headerFill: Self.headerFill,
+            stripeFill: Self.stripeFill,
+            horizontalPadding: layout.horizontalPadding,
+            rowSpacing: tableRowSpacing
+        )
+        if layout.overflows {
+            ScrollView(.horizontal, showsIndicators: false) { content }
+        } else {
+            content
         }
     }
 
-    /// (headers + rows joined, font size, available width) → column widths.
-    /// Bounded like the span cache; a clear-all on overflow is fine because
-    /// rebuilding a table's width list is a handful of boundingRect calls,
-    /// not a parse.
-    ///
-    /// The budget: a column gets its longest-word floor plus an equal share of
-    /// what is left. When the table genuinely cannot fit (a wide table), the
-    /// columns simply exceed the viewport and the horizontal ScrollView pans —
-    /// that case is rare by design (a long SENTENCE wraps; only a long WORD
-    /// pushes a column wide). The old code measured with UIScreen.main, which
-    /// is wrong in landscape and inside the reader's insets; it now uses the
-    /// container width passed in by the caller's GeometryReader.
-    private static var tableWidthCache: [String: [CGFloat]] = [:]
-    private static let tableWidthCacheLimit = 64
+    /// The grid itself. Split out of `grid` so the scrolling wrapper can be
+    /// conditional without duplicating the layout.
+    private func tableBody(
+        headers: [String],
+        rows: [[String]],
+        columnCount: Int,
+        widths: [CGFloat],
+        numeric: [Bool],
+        ruleColor: Color,
+        headerFill: Color,
+        stripeFill: Color,
+        horizontalPadding: CGFloat,
+        rowSpacing: CGFloat
+    ) -> some View {
+        VStack(spacing: 0) {
+            // Header. One fill + one rule under it, so the eye reads a
+            // header band rather than a bold line of text.
+            tableRow(
+                cells: headers.padded(to: columnCount),
+                widths: widths,
+                numeric: numeric,
+                bold: true,
+                fill: headerFill,
+                ruleColor: ruleColor,
+                horizontalPadding: horizontalPadding,
+                rowSpacing: rowSpacing
+            )
+            ForEach(Array(rows.enumerated()), id: \.offset) { index, row in
+                tableRow(
+                    cells: row.padded(to: columnCount),
+                    widths: widths,
+                    numeric: numeric,
+                    bold: false,
+                    // Zebra on odd rows only — a stripe under the header
+                    // would sit next to the header fill and read as one
+                    // thick band.
+                    fill: index % 2 == 1 ? stripeFill : .clear,
+                    ruleColor: ruleColor,
+                    horizontalPadding: horizontalPadding,
+                    rowSpacing: rowSpacing
+                )
+            }
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .strokeBorder(ruleColor, lineWidth: 0.5)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
 
-    private func cachedTableWidths(
+    /// One grid row: cells separated by hairline columns. Cells top-align —
+    /// a wrapped cell grows downward, never vertically centred against its
+    /// neighbours, which is what makes a ragged row look wrong.
+    private func tableRow(
+        cells: [String],
+        widths: [CGFloat],
+        numeric: [Bool],
+        bold: Bool,
+        fill: Color,
+        ruleColor: Color,
+        horizontalPadding: CGFloat,
+        rowSpacing: CGFloat
+    ) -> some View {
+        HStack(alignment: .top, spacing: 0) {
+            ForEach(0..<widths.count, id: \.self) { index in
+                if index > 0 {
+                    Rectangle()
+                        .fill(ruleColor)
+                        .frame(width: 0.5)
+                }
+                cell(
+                    cells[safe: index] ?? "",
+                    width: widths[index],
+                    numeric: numeric[safe: index] ?? false,
+                    bold: bold
+                )
+                .padding(.horizontal, horizontalPadding)
+                .padding(.vertical, rowSpacing / 2)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(fill)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(ruleColor)
+                .frame(height: 0.5)
+        }
+    }
+
+    /// One cell. `fixedSize(horizontal:false, vertical:true)` is what makes a
+    /// wrapped cell report its FULL height — without it SwiftUI proposes the
+    /// ideal (single-line) height and every row comes out one line tall with
+    /// the extra text spilling out of the cell.
+    @ViewBuilder
+    private func cell(_ text: String, width: CGFloat, numeric: Bool, bold: Bool) -> some View {
+        // `monospacedDigit(_:)` is a modifier, not a font replacement — the
+        // composed text may already carry bold/italic from inline emphasis,
+        // and a whole new font here would quietly drop the weight.
+        let content = styledText(text)
+            .monospacedDigit(numeric)
+            .multilineTextAlignment(numeric ? .trailing : .leading)
+        Group {
+            if bold {
+                content.bold()
+            } else {
+                content
+            }
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(width: max(1, width), alignment: numeric ? .trailing : .leading)
+    }
+
+private struct TableLayout {
+    var widths: [CGFloat]
+    /// A column whose every non-empty cell parses as a number.
+    var numeric: [Bool]
+    /// The columns cannot fit the container at their word floors.
+    var overflows: Bool
+    var horizontalPadding: CGFloat
+}
+
+private extension Text {
+    /// Monospaced digits for a column of figures, so 1,000 and 8 line up on
+    /// the same digit cell instead of jittering. A no-op for prose.
+    func monospacedDigit(_ enabled: Bool) -> Text {
+        enabled ? monospacedDigit() : self
+    }
+}
+
+    /// Equal shares over the word floors, with an honest overflow test.
+    ///
+    /// `minimums[i]` is the longest WORD in column i plus padding: a word is
+    /// the only thing that cannot wrap, so it is the only thing that sets a
+    /// hard floor. When the floors fit, whatever is left over is split
+    /// evenly — that is the notes-app rule, and the reason two ordinary
+    /// columns look like two ordinary columns instead of one wide one and
+    /// one cramped one. When they do not fit, the table is genuinely wide
+    /// and the caller pans it.
+    ///
+    /// Cached per (content, font, width) like the span cache: measuring a
+    /// column means a boundingRect per cell, and a body re-render (theme
+    /// tick, playback progress) would otherwise repeat that for every table
+    /// on screen. A clear-all on overflow is fine — this is a handful of
+    /// measurements, not a parse.
+    private static var tableLayoutCache: [String: TableLayout] = [:]
+    private static let tableLayoutCacheLimit = 64
+
+    private func cachedLayout(
         headers: [String],
         rows: [[String]],
         columnCount: Int,
         availableWidth: CGFloat
-    ) -> [CGFloat] {
+    ) -> TableLayout {
         let key = "\(headers.joined(separator: "\u{1}"))\u{2}\(rows.map { $0.joined(separator: "\u{1}") }.joined(separator: "\u{2}"))\u{3}\(bodyFontSize)\u{4}\(availableWidth)"
-        if let hit = Self.tableWidthCache[key] { return hit }
-        let minimums = (0..<columnCount).map { index -> CGFloat in
-            let cells = [headers[safe: index] ?? ""] + rows.compactMap { $0[safe: index] ?? "" }
+        if let hit = Self.tableLayoutCache[key] { return hit }
+        let layout = computeLayout(
+            headers: headers,
+            rows: rows,
+            columnCount: columnCount,
+            availableWidth: availableWidth
+        )
+        if Self.tableLayoutCache.count >= Self.tableLayoutCacheLimit {
+            Self.tableLayoutCache.removeAll()
+        }
+        Self.tableLayoutCache[key] = layout
+        return layout
+    }
+
+    private func computeLayout(
+        headers: [String],
+        rows: [[String]],
+        columnCount: Int,
+        availableWidth: CGFloat
+    ) -> TableLayout {
+        guard columnCount > 0 else {
+            return TableLayout(widths: [], numeric: [], overflows: false, horizontalPadding: tableCellPadding)
+        }
+        // Rules are hairline but they take layout width, so the border and
+        // the separators are part of "chrome" here — omitting them hands out
+        // ~1pt more than fits and the last column clips.
+        let horizontalPadding = min(tableCellPadding, 12)
+        let chrome = horizontalPadding * 2 * CGFloat(columnCount) + CGFloat(columnCount - 1) * 0.5
+        let usable = max(1, availableWidth - chrome)
+
+        let columns: [[String]] = (0..<columnCount).map { index in
+            [headers[safe: index] ?? ""] + rows.compactMap { $0[safe: index] ?? "" }
+        }
+        let floors: [CGFloat] = columns.map { cells in
             let longestWord = cells
-                .flatMap { $0.split(separator: " ").map(String.init) }
+                .flatMap { $0.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init) }
                 .map { $0.boundingWidth(at: bodyFontSize) }
                 .max() ?? 0
-            return min(longestWord + 2, 160)
+            // A cap keeps one absurd token (a base64 blob, a long URL) from
+            // claiming a whole screen; the text wraps or truncates instead.
+            return max(24, min(longestWord, 140))
         }
-        // Joplin-style distribution: the leftover is shared by CONTENT
-        // WEIGHT, not equally. Equal shares give a one-word status chip as
-        // much room as a sentence-long description, which is what made the
-        // old layout look cramped. Weight = average cell text length per
-        // column, so prose columns grow and code columns stay tight.
-        let chrome = 16 /*table cell padding both sides*/ + CGFloat(minimums.count + 1) * 8
-        let available = max(0, availableWidth - chrome)
-        let weights: [Double] = (0..<columnCount).map { index in
-            let cells = [headers[safe: index] ?? ""] + rows.compactMap { $0[safe: index] ?? "" }
-            let longest = cells.map { $0.count }.max() ?? 1
-            return Double(max(1, longest))
+        let numeric: [Bool] = columns.map { cells in
+            let values = cells.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            guard !values.isEmpty else { return false }
+            // Thousands separators, a leading sign and a trailing unit are
+            // all figures for a reader's purposes.
+            return values.allSatisfy { value in
+                var stripped = value.replacingOccurrences(of: ",", with: "")
+                stripped = stripped.replacingOccurrences(of: " ", with: "")
+                if stripped.hasPrefix("-") || stripped.hasPrefix("+") {
+                    stripped = String(stripped.dropFirst())
+                }
+                // Keep a decimal tail: "3.5" is numeric, "3.5 kg" is not
+                // (that column is prose that happens to start with a number).
+                if let dot = stripped.lastIndex(of: ".") {
+                    stripped = String(stripped[stripped.index(after: dot)...])
+                }
+                return !stripped.isEmpty && stripped.allSatisfy(\.isNumber)
+            }
         }
-        let totalWeight = weights.reduce(0, +)
-        let widths: [CGFloat] = (0..<columnCount).map { index in
-            guard totalWeight > 0 else { return available / CGFloat(max(1, columnCount)) }
-            let share = available * CGFloat(weights[index] / totalWeight)
-            // Never below the word floor — a long word must not be clipped.
-            return max(minimums[index], minimums[index] + share * 0.85)
+
+        let floorsTotal = floors.reduce(0, +)
+        let overflows = floorsTotal > usable
+        var widths: [CGFloat]
+        if overflows {
+            // Genuinely wide: every column gets its floor and the table pans.
+            widths = floors
+        } else {
+            let leftover = (usable - floorsTotal) / CGFloat(columnCount)
+            widths = floors.map { $0 + leftover }
         }
-        if Self.tableWidthCache.count >= Self.tableWidthCacheLimit {
-            Self.tableWidthCache.removeAll()
-        }
-        Self.tableWidthCache[key] = widths
-        return widths
+        return TableLayout(
+            widths: widths,
+            numeric: numeric,
+            overflows: overflows,
+            horizontalPadding: horizontalPadding
+        )
     }
 
     // MARK: - Inline runs
@@ -589,15 +788,30 @@ private extension Array {
     }
 }
 
+/// The empty cells a ragged table produces, and the single-owner problem
+/// that comes with them.
+///
+/// `tableView` builds `(0..<columnCount).map { row[safe: $0] ?? "" }` per
+/// row, which is correct but easy to get wrong by hand — and a ragged table
+/// is the normal case for anything imported from a PDF or a spreadsheet
+/// where the last column is optional. One place that pads, so every caller
+/// does the same thing.
+extension Array where Element == String {
+    /// `count` cells, padded with empty strings.
+    func padded(to count: Int) -> [String] {
+        guard self.count < count else { return self }
+        return self + Array(repeating: "", count: count - self.count)
+    }
+}
+
 private extension String {
-    /// Rendered width of the string at a font size. Used by the table layout
-    /// to find the narrowest width a column can take without clipping a word.
+    /// Rendered width of the string at a font size, measured on ONE line so a
+    /// cell that will wrap never inflates a column's floor. Used by the table
+    /// layout to find the narrowest width a column can take without clipping
+    /// a word.
     func boundingWidth(at fontSize: CGFloat) -> CGFloat {
-        (self as NSString).boundingRect(
-            with: CGSize(width: .greatestFiniteMagnitude, height: fontSize * 2),
-            options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: [.font: UIFont.systemFont(ofSize: fontSize)],
-            context: nil
+        (self as NSString).size(
+            withAttributes: [.font: UIFont.systemFont(ofSize: fontSize)]
         ).width
     }
 }
