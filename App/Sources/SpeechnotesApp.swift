@@ -13,6 +13,13 @@ struct SpeechnotesApp: App {
     @StateObject private var audioBooks = AudioBookPlayer()
     @StateObject private var theme = AppTheme()
     @Environment(\.scenePhase) private var scenePhase
+    /// The previous scene phase — the foreground reconcile must run ONLY on
+    /// a real background→active return. `.inactive → .active` blips (Control
+    /// Centre, Notification Centre, an app-switcher peek, a permission
+    /// dialog) never suspend the process, and reconciling on them would
+    /// auto-resume stale bookmarks over live sessions and hijack a book
+    /// chain mid-advance (the critique's P1).
+    @State private var lastScenePhase: ScenePhase = .active
     /// Selected tab — the global mini-player jumps here when the user taps
     /// the bar, then the notes list pushes the speaking note.
     @State private var selectedTab: Tab = .notes
@@ -199,6 +206,8 @@ struct SpeechnotesApp: App {
                 // could be suspended is the one moment a pending write must
                 // not be lost.
                 .onChange(of: scenePhase) { phase in
+                    let previous = lastScenePhase
+                    lastScenePhase = phase
                     // The watchdog is armed only while foregrounded: a
                     // suspended process freezes the probe thread with it,
                     // and measuring across the pause is what logged hours
@@ -221,11 +230,14 @@ struct SpeechnotesApp: App {
                         audioBooks.persistNow()
                     }
                     if phase == .active {
-                        // Returning from the app switcher / lock screen:
-                        // re-assert a live session, repair the "playing
-                        // nothing" wedge, and resume a recent bookmark
-                        // (notes AND books) if the process lost its engines.
-                        player.reconcileOnForeground()
+                        // Returning from a REAL backgrounding (not an
+                        // .inactive blip): re-assert a live session, repair
+                        // the "playing nothing" wedge, and resume a recent
+                        // bookmark (notes AND books) if the process lost
+                        // its engines.
+                        if previous == .background {
+                            player.reconcileOnForeground()
+                        }
                     }
                 }
                 // Environment injection is attached LAST (outermost) so

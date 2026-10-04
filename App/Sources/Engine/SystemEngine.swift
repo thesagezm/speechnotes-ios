@@ -140,25 +140,25 @@ final class SystemEngine: NSObject, SpeechEngine {
                 if self.state == .speaking { self.pause() }
             } else if typeRaw == AVAudioSession.InterruptionType.ended.rawValue,
                       optionsRaw & AVAudioSession.InterruptionOptions.shouldResume.rawValue != 0 {
-                // The session is DEACTIVATED here. Re-activating and starting
-                // the next chunk on the same synthesizer often works and
-                // often does not — after a call the old instance can go
+                // Two rules. (1) Only act when there is a paused session to
+                // bring back — re-activating with nothing to resume grabs
+                // the exclusive session and kills whatever the user played
+                // during the call. (2) The session is DEACTIVATED here, and
+                // resuming on the same synthesizer often works and often
+                // does not: after a call the old instance can go
                 // permanently silent with no error and no further delegate
-                // callbacks, which reads to the user as "speech died at the
-                // phone call and never came back". Recreating is cheap
-                // (a few ms) and is the documented recovery.
+                // callbacks. Recreating is cheap (a few ms) and is the
+                // documented recovery.
+                guard self.state == .paused else { return }
                 self.rebuildSynthesizer()
-                if self.state == .paused { self.resume() }
             }
         }
         Log.shared.info("SystemEngine ready (chunked)")
     }
 
-    /// Replace the synthesizer and re-drive the queue on it. The old
-    /// instance is stopped first so it cannot fire a late `didCancel` into
-    /// the new session's state.
+    /// Replace the synthesizer and re-drive the queue on it. Called only
+    /// while paused (see the interruption handler), on the main thread.
     private func rebuildSynthesizer() {
-        let hadWork = !queue.isEmpty
         synthesizer.stopSpeaking(at: .immediate)
         let fresh = AVSpeechSynthesizer()
         fresh.delegate = self
@@ -166,13 +166,22 @@ final class SystemEngine: NSObject, SpeechEngine {
         // Configured sessions do not survive a rebuilt synthesizer on some
         // routes; re-applying is a no-op when the category already matches.
         AudioSessionSetup.configureAndActivate(source: .tts, prefix: "SystemEngine")
-        if hadWork, state == .paused {
-            // `resume()` sees a synthesizer that is neither speaking nor
-            // paused, so it takes the startNextChunk() branch — the chunk
-            // that was cut off mid-sentence is re-spoken from its start
-            // rather than the queue silently stalling.
-            resume()
+        pauseRequested = false
+        // Re-queue the paused chunk's unsound remainder: startNextChunk()
+        // alone would begin the NEXT chunk, silently dropping the
+        // half-spoken sentence. Same math as the mid-session rate re-queue.
+        if let chunk = current, currentCharsDone > 0, currentCharsDone < chunk.text.utf16.count {
+            let units = Array(chunk.text.utf16)
+            let remainder = String(decoding: units[currentCharsDone...], as: UTF16.self)
+            if !remainder.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let index = max(0, nextIndex - 1)
+                queue[index] = Queued(offset: chunk.offset + currentCharsDone, text: remainder)
+                nextIndex = index
+                currentCharsDone = 0
+            }
         }
+        // State flips to .speaking via the new instance's didStart.
+        startNextChunk()
     }
 
     deinit {
@@ -350,16 +359,25 @@ final class SystemEngine: NSObject, SpeechEngine {
 }
 
 extension SystemEngine: AVSpeechSynthesizerDelegate {
+    /// Every callback carries a synthesizer-identity guard: `rebuildSynthesizer`
+    /// stops the OLD instance, whose enqueued `didCancel`/`didFinish` can land
+    /// AFTER the new one has started speaking — without the guard a stale
+    /// cancel would drive the NEW instance's queue (skipping a chunk or
+    /// double-starting one).
+    private func isCurrentSynthesizer(_ synthesizer: AVSpeechSynthesizer) -> Bool {
+        synthesizer === self.synthesizer
+    }
+
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didStart utterance: AVSpeechUtterance) {
         DispatchQueue.main.async { [weak self] in
-            guard let self, self.epoch > 0 else { return }
+            guard let self, self.isCurrentSynthesizer(synthesizer), self.epoch > 0 else { return }
             self.state = .speaking
         }
     }
 
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
         DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
+            guard let self, self.isCurrentSynthesizer(synthesizer) else { return }
             // Progress reaches exactly 1.0 on the last chunk before the
             // completion signal fires.
             if self.nextIndex >= self.queue.count {
@@ -381,7 +399,7 @@ extension SystemEngine: AVSpeechSynthesizerDelegate {
 
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
         DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
+            guard let self, self.isCurrentSynthesizer(synthesizer) else { return }
             // A cancel from stop() is not a completion. A cancel with the queue
             // still holding work means an interruption killed the utterance —
             // run the rest rather than leaving the UI claiming speech.
@@ -402,7 +420,7 @@ extension SystemEngine: AVSpeechSynthesizerDelegate {
         willSpeakRangeOfSpeechString characterRange: NSRange,
         utterance: AVSpeechUtterance
     ) {
-        guard let chunk = current else { return }
+        guard let chunk = current, isCurrentSynthesizer(synthesizer) else { return }
         let total = (utterance.speechString as NSString).length
         guard total > 0, characterRange.location + characterRange.length > 0 else { return }
         currentCharsDone = characterRange.location

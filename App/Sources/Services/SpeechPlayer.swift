@@ -450,6 +450,13 @@ final class SpeechPlayer: ObservableObject {
             }
         }
         guard state == .idle, auditioningVoice == nil else { return }
+        // A book chain (BookPlaybackController's auto-advance) owns its own
+        // recovery: its advance Task survives a suspension and continues on
+        // resume, and during the between-chapters gap `state` is .idle with
+        // the chain armed — auto-resuming here would hijack the chain into
+        // replaying an older chapter. Only reconcile when no chain claims
+        // the player.
+        guard onNaturalFinish == nil else { return }
         guard let (key, mark) = bookmarkStore.mostRecentBookmark(within: 30 * 60) else { return }
         if let noteId = mark.noteId, let note = notesProvider?(noteId) {
             Log.shared.info("SpeechPlayer: resuming bookmarked note after suspension")

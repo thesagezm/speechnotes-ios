@@ -274,6 +274,11 @@ final class AudioBookPlayer: ObservableObject {
                 chapterProgress = 0
                 scheduleSeekCommit(target: start, wasPlaying: true)
             }
+            // The chapter-gap grace has done its job the moment a chapter
+            // actually commits: real audio is (about to be) rendering, and
+            // holding the task longer spends the app's background-execution
+            // budget for nothing.
+            endChapterGapGrace()
         } catch {
             // ONE line, and a reason the UI can act on. The device log for
             // the EAC3 'Harry Potter' book showed this catch firing 30+
@@ -285,6 +290,7 @@ final class AudioBookPlayer: ObservableObject {
             // Leave the ticker running off; a dead ticker would keep
             // publishing a playhead that never moves.
             stopTicker()
+            endChapterGapGrace()
         }
     }
 
@@ -434,6 +440,9 @@ final class AudioBookPlayer: ObservableObject {
     func stop() {
         persistPosition(force: true)
         teardownAudio()
+        // Playback intent has ended; a grace armed for a chapter boundary
+        // must not ride to system expiration afterwards.
+        endChapterGapGrace()
         activeBookID = nil
         activeBook = nil
         isPlaying = false
@@ -912,17 +921,6 @@ final class AudioBookPlayer: ObservableObject {
     /// carry a user-facing message; AVPlayer's need the codec sniff.
     private func handleBackendFailure(_ error: Error) {
         guard let url = loadedURL else { return }
-        // The media server died under the engine backend: the session, the
-        // engine and every scheduled buffer are void. Rebuild the SAME
-        // backend at the playhead — the same cold recovery the AVPlayer path
-        // gets from handleMediaServicesReset.
-        if backend is OpusAudioBackend, error is OpusAudioBackend.MediaServicesResetError {
-            Log.shared.error("AudioBookPlayer: media services reset under the Opus backend — rebuilding at the playhead")
-            if let book = activeBook {
-                play(book: book, chapterIndex: chapterIndex, withinChapterFraction: chapterProgress)
-            }
-            return
-        }
         // Second chance, once per book: AVPlayer failed on a file whose
         // codec sniff says Opus — the container-parse-but-cannot-decode
         // case `makeBackend`'s sniff missed (e.g. the sample entry sits

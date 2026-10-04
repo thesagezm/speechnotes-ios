@@ -256,12 +256,23 @@ final class BooksStore: ObservableObject {
                 // never had chpl, and cover-less M4Bs that do carry art.
                 // Round 5: also every audio book whose manifest was read from
                 // a file AVURLAsset could not parse (the .audio extension).
-                || (book.format == .audio && (!book.hasCover
-                    || book.audioChapterSource == nil
-                    || book.audioChapterSource == "single"
-                    || book.audioChapterSource == "chpl"
-                    || book.audioChapterSource == "mp4"
-                    || book.audioChapterSource == "id3"))
+                //
+                // "-verified" is the terminal stamp the backfill writes after
+                // ONE re-read: without it a chapter-less or cover-less book
+                // matched this filter forever and its whole-file manifest
+                // build re-ran at every launch (the device log's repeated
+                // "Harry Potter" import and its 8–35 s main-thread hangs).
+                // The stamp gates the WHOLE audio clause, cover included —
+                // a file with no embedded art will never grow one, and
+                // re-walking 300 MB to confirm that is the hang, not a fix.
+                || (book.format == .audio
+                    && book.audioChapterSource?.hasSuffix("-verified") != true
+                    && (!book.hasCover
+                        || book.audioChapterSource == nil
+                        || book.audioChapterSource == "single"
+                        || book.audioChapterSource == "chpl"
+                        || book.audioChapterSource == "mp4"
+                        || book.audioChapterSource == "id3"))
         }
         guard !pending.isEmpty else { return }
         didBackfillLegacyBooks = true
@@ -314,17 +325,11 @@ final class BooksStore: ObservableObject {
                     Self.renameLegacyAudioFileIfNeeded(book: book, directory: dir)
                     let refreshed = Self.buildAudioManifest(book: book, directory: dir)
                     book = refreshed
-                    // TERMINAL MARKER. A book whose file genuinely carries no
-                    // chapter track gets "single" from the manifest builder —
-                    // which this pass's own pending-filter matches, so the
-                    // same whole-file map + box walk + metadata semaphore
-                    // re-ran at EVERY launch (the device log's "Harry Potter"
-                    // re-import and its 8–35 s main-thread hangs). One
-                    // verified re-read is the contract; stamp the result so
-                    // the filter never matches this book again.
-                    if book.audioChapterSource == "single" {
-                        book.audioChapterSource = "single-verified"
-                    }
+                    // TERMINAL STAMP. One verified re-read is the contract:
+                    // suffix the source so the pending filter above never
+                    // matches this book again — whatever was missing (a
+                    // chapter track, embedded art) is what the file has.
+                    book.audioChapterSource = (book.audioChapterSource ?? "single") + "-verified"
                 case .epub:
                     guard let data = try? Data(contentsOf: dir.appendingPathComponent("original.epub"), options: .mappedIfSafe),
                           let info = try? EpubParser.parse(archive: data), !info.spine.isEmpty else { continue }

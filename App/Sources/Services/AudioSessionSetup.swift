@@ -85,23 +85,34 @@ enum AudioSessionSetup {
             }
             return true
         }
-        configured = true
-        configuredBy = source
-
         // Non-mixable on purpose: no `.mixWithOthers`, no `.duckOthers`.
         // Both would make the session mixable, and a mixable session is
         // never elected the Now Playing app — the lock-screen card simply
         // does not appear.
+        //
+        // The flag latches ONLY on a successful apply: a ladder that fails
+        // outright (the known cold-start `-50` path) must not pin
+        // `configured` for the process lifetime — the next playback retries
+        // the ladder instead of trusting a category that was never applied
+        // and staying on the launch default (mute-switch-silenced,
+        // background-suspended).
         if apply(.playback, mode: .spokenAudio, options: [.allowBluetooth, .allowBluetoothA2DP], prefix: prefix) {
+            configured = true
+            configuredBy = source
             return true
         }
         // Some routes reject the A2DP option outright.
         if apply(.playback, mode: .spokenAudio, options: [.allowBluetooth], prefix: prefix) {
+            configured = true
+            configuredBy = source
             return true
         }
         // Last resort: the plainest category that any route accepts.
         if apply(.playback, mode: .default, options: [], prefix: prefix) {
+            configured = true
+            configuredBy = source
             Log.shared.info("\(prefix): fell back to the plain playback category — speech still works, without Bluetooth")
+            return true
         }
         return false
     }
@@ -170,17 +181,5 @@ enum AudioSessionSetup {
     static func invalidateConfiguration() {
         configured = false
         configuredBy = nil
-    }
-
-    /// The full reset path: re-apply the category AND activate, in the one
-    /// order that matters. Used by the media-services-reset handlers on both
-    /// playback stacks.
-    @discardableResult
-    static func reassert(
-        source: Source,
-        prefix: String = "AudioSession"
-    ) -> Bool {
-        invalidateConfiguration()
-        return configureAndActivate(source: source, prefix: prefix)
     }
 }

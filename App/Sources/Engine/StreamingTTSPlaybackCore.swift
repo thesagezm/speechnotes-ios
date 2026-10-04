@@ -278,18 +278,20 @@ final class StreamingTTSPlaybackCore: NSObject {
     private func handleInterruption(_ notification: Notification) {
         let typeRaw = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
         let optionsRaw = notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
-        if typeRaw == AVAudioSession.InterruptionType.began.rawValue {
+                if typeRaw == AVAudioSession.InterruptionType.began.rawValue {
             if state == .speaking { pause() }
         } else if typeRaw == AVAudioSession.InterruptionType.ended.rawValue,
                   optionsRaw & AVAudioSession.InterruptionOptions.shouldResume.rawValue != 0 {
             // iOS leaves the session INACTIVE after an interruption. Without
-            // re-activating, `playerNode.play()` succeeds, the node's clock
-            // advances and no sound comes out — and in the background the
-            // process is suspended seconds later. This mirrors
-            // AudioBookPlayer.resumeAfterSessionEvent(), which was the only
-            // place in the app that knew this.
+            // re-activating, `playerNode.play()` succeeds and no sound comes
+            // out — and in the background the process is suspended seconds
+            // later. But re-activating with nothing to resume grabs the
+            // exclusive session and kills whatever the user started during
+            // the interruption (Music after a call) while playing nothing of
+            // ours — so only activate when a resume will actually happen.
+            guard state == .paused else { return }
             AudioSessionSetup.activate(prefix: config.logPrefix)
-            if state == .paused { resume() }
+            resume()
         }
     }
 
@@ -304,20 +306,19 @@ final class StreamingTTSPlaybackCore: NSObject {
     /// pushed through `scheduleReadyChunks` again, because the schedule
     /// cursor stops advancing once the node stops draining.
     private func handleEngineConfigurationChange() {
-        let wasRendering = audioEngineRunning
+        let wasRunning = audioEngineRunning
         let format = connectedFormat
         Log.shared.info("\(config.logPrefix) engine configuration change (format \(format?.sampleRate ?? -1) Hz) — reconnecting")
-        guard wasRendering else { return }
+        guard wasRunning, state != .idle else { return }
 
         audioEngineRunning = false
+        // Force the reconnect: a configuration change can invalidate the
+        // graph even when the node→mixer format is unchanged, and
+        // `connect` is cheap idempotence compared to a silent node.
+        connectedFormat = nil
         if let format {
-            connectedFormat = nil
-            do {
-                audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: format)
-                connectedFormat = format
-            } catch {
-                Log.shared.error("\(config.logPrefix) reconnect after configuration change failed: \(error)")
-            }
+            audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: format)
+            connectedFormat = format
         }
         audioEngine.prepare()
         do {
@@ -328,13 +329,15 @@ final class StreamingTTSPlaybackCore: NSObject {
             state = .idle
             return
         }
-        if state == .speaking || state == .paused {
+        if state == .speaking {
             if !playerNode.isPlaying { playerNode.play() }
-            // Whatever the node had queued was already scheduled, so the
-            // cursor has not moved; re-drive it in case the node drained
-            // while it was misconfigured.
+            // Re-drive the schedule in case the node drained while it was
+            // misconfigured.
             scheduleReadyChunks(generation: playbackGeneration)
         }
+        // .paused stays paused: a route change must never restart speech in
+        // the user's pocket (the critique's P1 — the play button would also
+        // die, because resume() guards on !playerNode.isPlaying).
     }
 
     /// The media server died: the session category, the audio engine and
@@ -394,24 +397,37 @@ final class StreamingTTSPlaybackCore: NSObject {
         }
     }
 
-    /// Blocks until the playhead signals a scheduling slot, or the timeout
-    /// expires. Returns false on timeout (caller should skip the chunk) and
-    /// on a superseded generation.
+    /// Blocks until the playhead signals a scheduling slot. Returns false only
+    /// when the caller should skip the chunk: a superseded generation, or a
+    /// pipeline that is actually dead (.idle). A TIMEOUT IS NOT A SKIP.
+    ///
+    /// The ledger (verify before changing this): `scheduleReadyChunks`
+    /// signals once per schedule-cursor advance, and the cursor chases
+    /// generation one-to-one, so the first `generationAheadLimit` chunks
+    /// consume free lanes whose later signals leave a permanent surplus —
+    /// on a healthy session the producer NEVER blocks here, no matter how
+    /// slow synthesis or the playhead is. It blocks only when the main
+    /// thread has fallen more than `generationAheadLimit` chunks behind,
+    /// i.e. a transient stall — and the device log shows those run 8–35 s.
+    /// Skipping then would permanently lose the sentence; waiting costs
+    /// nothing the listener hears (the node holds ~L chunks of buffered
+    /// audio). The R9 fix this replaces needed a WAKEUP, not a surrender:
+    /// the loop re-checks the generation each pass, so a superseded or
+    /// stopped session always exits.
     private func waitForPacingSlot(generation: Int) -> Bool {
         if freeChunksRemaining > 0 {
             freeChunksRemaining -= 1
-            return true
+            return playbackGeneration == generation
         }
-        // Looped rather than a single timed wait: a `signal()` can land
-        // between the timeout expiring and the loop re-checking, and a
-        // missed signal must not cost the chunk.
+        var loggedExtension = false
         while true {
             let result = pacingGate?.wait(timeout: Self.pacingWaitTimeout)
             if playbackGeneration != generation { return false }
             if result == .success { return true }
-            if result == .timedOut {
-                Log.shared.error("\(config.logPrefix) producer timed out waiting for the playhead — skipping one chunk (suspended process, or the node stopped draining)")
-                return false
+            if state == .idle { return false }
+            if !loggedExtension {
+                loggedExtension = true
+                Log.shared.info("\(config.logPrefix) producer pacing wait extended — main thread stalled or the process suspended; holding the chunk rather than losing it")
             }
         }
     }

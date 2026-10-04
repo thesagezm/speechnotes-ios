@@ -57,10 +57,12 @@ classes differ on precisely this one point.
    cannot drive the new instance.
 6. **Bounded pacing wait** (2 s, looped, generation-checked): the producer
    can no longer park forever on a semaphore only the main queue signals
-   (the R9 mechanism). Timeout routes the chunk down the existing skip path
-   — a soft tone, one sentence, chain keeps advancing. Deliberate deviation
-   from the plan's "skip on timeout": content loss is worse than a pause;
-   the log line says which happened.
+   (the R9 mechanism). A timeout is NOT a skip — the producer only waits
+   when the main thread has fallen more than `generationAheadLimit` chunks
+   behind (a transient stall; the device log shows 8–35 s ones), and
+   skipping then would permanently lose the sentence. The loop re-checks
+   the generation each pass, so a superseded or stopped session always
+   exits; the skip path fires only for a genuinely dead (`.idle`) pipeline.
 7. **`SpeechPlayer.reconcileOnForeground()`** (called from the scenePhase
    hook): re-assert a live session; repair the "state claims speech, no live
    engine" wedge by keeping the bookmark and abandoning only the pipeline;
@@ -69,10 +71,12 @@ classes differ on precisely this one point.
 8. **Audiobook chapter-gap grace** (`AudioBookChapterGap`
    `beginBackgroundTask`), mirroring the TTS chain's — the between-chapters
    silence is the one window iOS may suspend an audio app.
-9. **Backfill terminal marker** (`single-verified`): a chapter-less audio
-   book matched the backfill filter forever, so its whole-file manifest
-   build re-ran every launch — the device log's repeated "Harry Potter"
-   import and the 8–35 s main-thread hangs beside it.
+9. **Backfill terminal stamp** (`-verified` suffix on `audioChapterSource`):
+   a chapter-less OR cover-less audio book matched the backfill filter
+   forever, so its whole-file manifest build re-ran every launch — the
+   device log's repeated "Harry Potter" import and the 8–35 s main-thread
+   hangs beside it. One re-read, then the suffix gates the whole audio
+   clause off.
 10. **CI guard**: the archived Info.plist's `UIBackgroundModes` must be
     exactly `[audio]` — drift in either direction fails the build.
 11. **Opus probe chain** (`playback start`, `first buffer scheduled`): the
@@ -118,7 +122,10 @@ classes differ on precisely this one point.
 Per surface — system voice, Kokoro, Supertonic, M4B, one 5.1 EAC3, one Opus:
 
 - Filter the log for `metrics`. Green: `audio` seconds ≈ `wall` seconds,
-  `gaps 0`, no `STALL`, no `session teardown`, no `pacing gate timed out`.
+  `gaps 0`, no `STALL`, no `session teardown`. A `pacing wait extended`
+  line is INFORMATION on a healthy session (it means the main thread
+  stalled briefly and the chunk was held, not lost); any `skipped` line
+  is a real event worth the log.
 - Interleave mid-sentence: lock screen, Control Centre, app switcher,
   **phone call**, Bluetooth connect/disconnect, headphone yank, alarm,
   Low Power Mode, warm device. The phone call is the highest-value single
