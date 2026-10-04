@@ -31,6 +31,13 @@ public struct OpusPacketStream: Sendable {
     }
 
     public let packets: [Packet]
+    /// The book's `OpusHead` packet, when the container carries one (Ogg
+    /// always does, as the stream's first packet). `OpusLib` needs it for
+    /// the channel-mapping family, the stream count and the channel map —
+    /// without them a 5.1 stream cannot be decoded at all. Nil only where
+    /// the container supplied the equivalent facts out of band (MP4's
+    /// `dOps`), and then a synthetic head is built by the reader.
+    public let headerPacket: [UInt8]?
     /// Opus' granule rate — 48 000 for every stream in practice; readers
     /// normalize to it.
     public let sampleRate: Int
@@ -39,8 +46,15 @@ public struct OpusPacketStream: Sendable {
     /// fraction of a second plays as a click.
     public let preSkip: Int
 
-    public init(packets: [Packet], sampleRate: Int, channels: Int, preSkip: Int) {
+    public init(
+        packets: [Packet],
+        headerPacket: [UInt8]? = nil,
+        sampleRate: Int,
+        channels: Int,
+        preSkip: Int
+    ) {
         self.packets = packets
+        self.headerPacket = headerPacket
         self.sampleRate = sampleRate > 0 ? sampleRate : 48_000
         self.channels = max(1, channels)
         self.preSkip = max(0, preSkip)

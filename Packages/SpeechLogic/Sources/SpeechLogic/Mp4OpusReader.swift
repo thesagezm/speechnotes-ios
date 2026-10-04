@@ -179,8 +179,25 @@ public enum Mp4OpusReader {
             }
         }
 
+        // MP4 carries channels + pre-skip in `dOps` rather than an OpusHead
+        // packet. Build the equivalent head so the decoder has ONE input
+        // shape — but only for the mappings `dOps` can actually express
+        // (family 0 is mono/stereo). Opus-in-MP4 above two channels has no
+        // stream map anywhere in the container, so it is refused with a
+        // reason rather than decoded wrong.
+        var syntheticHead: [UInt8]? = nil
+        if dOps.channels <= 2 {
+            var head: [UInt8] = Array("OpusHead".utf8)
+            head += [0, UInt8(dOps.channels)]
+            head += [UInt8(dOps.preSkip & 0xFF), UInt8((dOps.preSkip >> 8) & 0xFF)]
+            head += [0x80, 0xBB, 0x00, 0x00]           // 48000, LE
+            head += [0, 0]                              // gain 0
+            head += [0]                                 // mapping family 0
+            syntheticHead = head
+        }
         return OpusPacketStream(
             packets: packets,
+            headerPacket: syntheticHead,
             sampleRate: 48_000,
             channels: dOps.channels,
             preSkip: dOps.preSkip

@@ -33,6 +33,46 @@ let package = Package(
             name: "CAtomic",
             path: "Sources/CAtomic"
         ),
+        // libopus, the REFERENCE Opus decoder (BSD-3-clause), vendored whole.
+        // Apple's media stack has no Opus decoder we can reach, and the
+        // three previous attempts all routed through an
+        // AVAudioConverter/kAudioFormatOpus path that never produced a
+        // decoded sample. libopus is what VLC itself links, and copying
+        // VLC's exact flow (opus_header_parse -> multistream decoder ->
+        // opus_packet_get_nb_frames x samples_per_frame) is the one route
+        // known to decode 6-channel mapping-family-1 streams, which is
+        // exactly what the user's "Opus 5.1ch" books are.
+        //
+        // headerSearchPath rather than unsafeFlags: the sources include
+        // "opus.h", "celt.h", "main.h" and friends by bare name from
+        // four different directories.
+        .target(
+            name: "COpus",
+            path: "Sources/COpus",
+            // The portable top-level C only. silk/x86, celt/x86 and the
+            // NEON files are selected by libopus' own build per
+            // architecture; on arm64 those macros compile the include out
+            // and the generic files are what the reference build uses.
+            // The portable top-level C plus silk's float backend. The
+            // silk/x86 and celt/x86 .c files are selected per architecture
+            // by libopus' own build and are NOT compiled here (arm64);
+            // their HEADERS are kept, because pitch.h / SigProc_FIX.h
+            // reference them under feature macros and the include must
+            // resolve on every platform.
+            sources: ["src", "celt", "silk", "silk/float"],
+            publicHeadersPath: "include",
+            cSettings: [
+                .headerSearchPath("include"),
+                .headerSearchPath("celt"),
+                .headerSearchPath("silk"),
+                .headerSearchPath("src"),
+                .headerSearchPath("silk/float"),
+                // Fixed point is unused by the decoder; the runtime build
+                // libopus uses everywhere (VLC included) is float-only.
+                .define("OPUS_BUILD", to: "0"),
+                .define("FIXED_POINT", to: "0"),
+            ]
+        ),
         .target(
             name: "Markdown",
             dependencies: [
@@ -45,7 +85,8 @@ let package = Package(
         .target(
             name: "SpeechLogic",
             dependencies: [
-                "Markdown"
+                "Markdown",
+                "COpus"
             ],
             path: "Sources/SpeechLogic"
         ),

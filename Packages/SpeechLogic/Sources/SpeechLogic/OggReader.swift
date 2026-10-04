@@ -52,6 +52,9 @@ public enum OggReader {
         /// rather than assumed.
         public let sampleRate: Int
         public let channels: Int
+        /// The header's informational `input sample rate`, when the writer
+        /// put a sane value there. Never used for timing.
+        public let inputSampleRate: Int?
     }
 
     public enum OggError: LocalizedError, Equatable {
@@ -84,6 +87,7 @@ public enum OggReader {
         public var packetStream: OpusPacketStream {
             OpusPacketStream(
                 packets: packets.map { OpusPacketStream.Packet(payload: $0.payload, granule: $0.granule, index: $0.index) },
+                headerPacket: packets.first.map { [UInt8]($0.payload) },
                 sampleRate: info.sampleRate,
                 channels: info.channels,
                 preSkip: info.preSkip
@@ -344,21 +348,33 @@ public enum OggReader {
                 codec: .other(String(bytes: magic, encoding: .isoLatin1) ?? "?"),
                 preSkip: 0,
                 sampleRate: 48_000,
-                channels: 2
+                channels: 2,
+                inputSampleRate: nil
             )
         }
+        // OpusHead's multi-byte fields are LITTLE-endian (RFC 7845 §5.1) —
+        // the same order the Ogg page headers use. (A big-endian read of
+        // the fixtures' `38 01` yields 14337 where ffprobe reports
+        // initial_padding=312, which is how that was pinned down.)
         func le16(_ index: Int) -> Int { Int(bytes[index]) | (Int(bytes[index + 1]) << 8) }
         func le32(_ index: Int) -> Int {
             Int(bytes[index]) | (Int(bytes[index + 1]) << 8)
                 | (Int(bytes[index + 2]) << 16) | (Int(bytes[index + 3]) << 24)
         }
         let channels = Int(bytes[9])
-        let rate = le32(12)
+        // The header's `input sample rate` is INFORMATIONAL: it is whatever
+        // rate the encoder was fed (commonly 44100), while the granule axis
+        // every position in this app counts is Opus' fixed 48 kHz output.
+        // Reporting the input rate made durations and seek targets wrong on
+        // any 44.1 kHz encode, so it is kept only as metadata and the
+        // timeline rate is always 48 kHz.
+        let inputRate = le32(12)
         return StreamInfo(
             codec: .opus,
             preSkip: le16(10),
-            sampleRate: rate > 0 ? rate : 48_000,
-            channels: channels > 0 ? channels : 2
+            sampleRate: 48_000,
+            channels: channels > 0 ? channels : 2,
+            inputSampleRate: inputRate > 0 ? inputRate : nil
         )
     }
 
