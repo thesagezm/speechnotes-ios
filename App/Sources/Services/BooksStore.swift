@@ -563,8 +563,9 @@ final class BooksStore: ObservableObject {
     /// Bounded Ogg read: head for the identification header, tail for the
     /// last page's granule. nil for anything that is not an Ogg stream.
     nonisolated private static func oggSummary(url: URL) -> OggReader.Summary? {
-        guard let head = Self.slice(of: url, from: 0, length: Self.audioParseHeadBytes),
-              let size = Self.fileSize(of: url), size > Int64(Self.audioParseTailBytes),
+        let size = Self.fileSize(of: url)
+        guard size > Int64(Self.audioParseTailBytes),
+              let head = Self.slice(of: url, from: 0, length: Self.audioParseHeadBytes),
               let tail = Self.slice(of: url, from: size - Int64(Self.audioParseTailBytes),
                                     length: Self.audioParseTailBytes)
         else { return nil }
