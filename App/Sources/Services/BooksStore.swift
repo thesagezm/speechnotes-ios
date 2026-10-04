@@ -560,6 +560,30 @@ final class BooksStore: ObservableObject {
         return book
     }
 
+    /// Bounded Ogg read: head for the identification header, tail for the
+    /// last page's granule. nil for anything that is not an Ogg stream.
+    nonisolated private static func oggSummary(url: URL) -> OggReader.Summary? {
+        guard let head = Self.slice(of: url, from: 0, length: Self.audioParseHeadBytes),
+              let size = Self.fileSize(of: url), size > Int64(Self.audioParseTailBytes),
+              let tail = Self.slice(of: url, from: size - Int64(Self.audioParseTailBytes),
+                                    length: Self.audioParseTailBytes)
+        else { return nil }
+        return try? OggReader.summary(head: head, tail: tail)
+    }
+
+    /// Chapter starts every 30 minutes, starting at 0 — long enough to be
+    /// useful navigation, short enough that the contents list is not a
+    /// hundred rows. A shorter book yields a single chapter (the caller's
+    /// `count > 1` guard keeps the fallback out of the way).
+    nonisolated private static func uniformChapterBoundaries(duration: Double) -> [Double] {
+        let step: Double = 30 * 60
+        guard duration > step else { return [0] }
+        var out: [Double] = []
+        var position = 0.0
+        while position < duration - 60 { out.append(position); position += step }
+        return out
+    }
+
     /// Chapters through AVFoundation's own reader. `timeRange` carries each
     /// chapter's start AND duration, so ends are real, and the title comes
     /// from the group's metadata. Empty (not an error) when the file carries
@@ -592,6 +616,38 @@ final class BooksStore: ObservableObject {
     nonisolated private static func buildAudioManifest(book: Book, directory: URL) -> Book {
         var book = book
         let original = resolveAudioOriginalURL(book: book)
+
+        // Ogg first: AVFoundation cannot parse the container at all, so every
+        // AVURLAsset read below (duration, chapter groups, metadata) comes
+        // back empty and the book used to import as a zero-length "Full
+        // audiobook" with no tags. The container says all of it itself, and
+        // the read is bounded — an 8 MB head for the `OpusHead` header, an
+        // 8 MB tail for the final page's granule (the total sample count).
+        // A 664 MB book is read in 16 MB.
+        if Self.isOggContainer(original), let ogg = oggSummary(url: original) {
+            if book.audioDuration == nil, ogg.duration > 0 {
+                book.audioDuration = ogg.duration
+            }
+            // No muxer's Opus chapter table reaches us as chapter metadata,
+            // so the reader gets the same uniform hour-per-chapter the
+            // playback backend derives from packet granules — the contents
+            // list is real navigation instead of one unskippable row.
+            if book.audioChapters == nil, ogg.duration > 0 {
+                let boundaries = Self.uniformChapterBoundaries(duration: ogg.duration)
+                if boundaries.count > 1 {
+                    book.audioChapters = boundaries.enumerated().map { index, start in
+                        AudioChapter(
+                            title: "Part \(index + 1)",
+                            startSeconds: start,
+                            endSeconds: index + 1 < boundaries.count
+                                ? boundaries[index + 1] : ogg.duration
+                        )
+                    }
+                    book.audioChapterSource = "ogg-uniform"
+                }
+            }
+        }
+
         let asset = AVURLAsset(url: original, options: [AVURLAssetPreferPreciseDurationAndTimingKey: false])
         // Same awaited-load discipline as the metadata read below: the sync
         // `asset.duration` raced the async property load on device and could

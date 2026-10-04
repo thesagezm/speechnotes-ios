@@ -18,7 +18,6 @@ struct StorageSettingsView: View {
     @State private var showingAllExports = false
     @State private var showingClearConfirm = false
     /// Backs the PDF extractor picker; persisted to UserDefaults on change.
-    @State private var extractionMode: PdfExtractionMode = .current
     /// ~4 rows of an 84 pt adaptive grid before "See all" appears.
     private let imagePreviewLimit = 16
     private let exportPreviewLimit = 5
@@ -52,7 +51,6 @@ struct StorageSettingsView: View {
         Form {
             usageSection
             filesAppSection
-            extractionSection
             exportsSection
             imagesSection
             if !perNoteImages.isEmpty {
@@ -160,30 +158,6 @@ struct StorageSettingsView: View {
                 .foregroundStyle(.secondary)
         }
         .font(.subheadline)
-    }
-
-    // MARK: - PDF text extraction
-
-    /// Which engine turns a PDF into speech text. Papero reconstructs reading
-    /// order from glyph geometry, so a two-column paper or a table-heavy
-    /// report comes out in the order a person reads it; the built-in PDFKit
-    /// path is faster, and is still the one that OCRs a scanned document.
-    private var extractionSection: some View {
-        Section {
-            PdfExtractionModePicker(mode: $extractionMode)
-                .onChange(of: extractionMode) { _, mode in
-                    PdfExtractionMode.current = mode
-                    // Cached chapter text was extracted by the old engine.
-                    PdfTextExtractor.invalidateCache()
-                }
-            PdfExtractionModeBlurb(mode: extractionMode)
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-        } header: {
-            Text("PDF text extraction")
-        } footer: {
-            Text("Applies to PDFs imported into notes and to PDF books being read aloud. Papero runs entirely on this device; nothing is uploaded. Office documents keep their own reader.")
-        }
     }
 
     // MARK: - Exported audio

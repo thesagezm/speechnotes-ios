@@ -447,6 +447,29 @@ struct MarkdownPreviewView: View {
             .frame(width: max(1, width), alignment: numeric ? .trailing : .leading)
     }
 
+    /// The hard ceiling on one column's word floor, and how many words one
+    /// column may measure before the floor is considered settled. Both make
+    /// the main-thread column math bounded (see `computeLayout`).
+    private static let columnWidthCap: CGFloat = 140
+    private static let columnWordBudget = 400
+    /// Rows sampled per column to decide whether it is a figures column.
+    private static let numericRowBudget = 200
+
+    /// Memoized word measurement. Keyed by word + point size; bounded and
+    /// cleared wholesale like the layout cache it feeds, because the same
+    /// table measures itself again on every width change (every rotation).
+    private static var wordWidthCache: [String: CGFloat] = [:]
+    private static let wordWidthCacheLimit = 4_000
+
+    private static func wordWidth(_ word: String, at size: CGFloat) -> CGFloat {
+        let key = "\(size)|\(word)"
+        if let hit = wordWidthCache[key] { return hit }
+        let width = word.boundingWidth(at: size)
+        if wordWidthCache.count >= wordWidthCacheLimit { wordWidthCache.removeAll() }
+        wordWidthCache[key] = width
+        return width
+    }
+
     /// A cell's plain text — measurement and numeric-column detection read
     /// strings; the display reads spans.
     private func cellText(_ spans: [MarkdownText.StyledSpan]) -> String {
@@ -524,17 +547,46 @@ struct MarkdownPreviewView: View {
         let columns: [[String]] = (0..<columnCount).map { index in
             [headerTexts[safe: index] ?? ""] + rowTexts.compactMap { $0[safe: index] ?? "" }
         }
+        // Word-floor measurement, BOUNDED. This runs on the main thread
+        // inside the view body, and it used to measure every word of every
+        // cell of every table — thousands of `NSString.size(withAttributes:)`
+        // calls. A note with several long tables blocked the main thread for
+        // 20-30 s on rotation (the HangWatchdog "shelf backfill cancelled"
+        // / frozen-ui report), and rotation makes it worse every time: the
+        // layout cache is keyed by width, so every rotation misses it.
+        //
+        // Three bounds, none of which can change the result:
+        //   * measurements are memoized by (word, size) — a header word
+        //     repeated down a column costs one measurement, not forty;
+        //   * a column stops at the 140pt cap, which is where the floor is
+        //     clamped anyway, so measuring further is pure waste;
+        //   * a column stops after `wordBudget` distinct words — beyond that
+        //     the longest-word floor is already pinned by long content, and
+        //     the cap is what the layout uses.
         let floors: [CGFloat] = columns.map { cells in
-            let longestWord = cells
-                .flatMap { $0.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init) }
-                .map { $0.boundingWidth(at: bodyFontSize) }
-                .max() ?? 0
+            var longestWord: CGFloat = 0
+            var measured = 0
+            outer: for cell in cells {
+                for word in cell.split(whereSeparator: { $0 == " " || $0 == "\t" }) {
+                    let width = Self.wordWidth(String(word), at: bodyFontSize)
+                    if width > longestWord { longestWord = width }
+                    measured += 1
+                    if longestWord >= Self.columnWidthCap || measured >= Self.columnWordBudget { break outer }
+                }
+            }
             // A cap keeps one absurd token (a base64 blob, a long URL) from
             // claiming a whole screen; the text wraps or truncates instead.
-            return max(24, min(longestWord, 140))
+            return max(24, min(longestWord, Self.columnWidthCap))
         }
+        // Same bound as the word floors: numeric detection reads strings
+        // only (no layout cost), but a 4000-row table's column should not
+        // scan all of them to decide alignment. The first rows decide; a
+        // figure column is figures in its first rows.
         let numeric: [Bool] = columns.map { cells in
-            let values = cells.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            let values = cells
+                .prefix(Self.numericRowBudget)
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
             guard !values.isEmpty else { return false }
             // Thousands separators, a leading sign and a trailing unit are
             // all figures for a reader's purposes.

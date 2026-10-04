@@ -1394,10 +1394,31 @@ public enum DocumentEpubConverter {
             manifestItems += "<item id=\"img\(index + 1)\" href=\"\(href)\" media-type=\"\(image.mime)\"/>\n"
             files.append((name: "OEBPS/\(href)", data: image.data))
         }
+        var coverHREF: String?
         if let cover {
             let ext = DocumentMedia.fileExtension(forMime: cover.mime)
             manifestItems += "<item id=\"cover-image\" href=\"cover.\(ext)\" media-type=\"\(cover.mime)\" properties=\"cover-image\"/>\n"
             files.append((name: "OEBPS/cover.\(ext)", data: cover.data))
+            // A COVER PAGE, first in the spine. The `cover-image` manifest
+            // property only feeds the shelf thumbnail; opening a normalized
+            // book (mobi, fb2, rtf, docx…) went straight to chapter 1 with no
+            // cover at all ("no coverpage image in mobi books when I open a
+            // book" — the shelf looked right, the reader did not). A
+            // spine entry that is the cover image, marked
+            // `rendition:cover-*`, is what every real EPUB does and what
+            // epub.js renders as a full-page first item.
+            let coverPageID = "coverpage"
+            manifestItems += "<item id=\"\(coverPageID)\" href=\"coverpage.xhtml\" media-type=\"application/xhtml+xml\"/>\n"
+            spineItems += "<itemref idref=\"\(coverPageID)\" linear=\"yes\"/>\n"
+            navItems += "<li><a href=\"coverpage.xhtml\">Cover</a></li>\n"
+            ncxItems += """
+                <navPoint id="np0" playOrder="1">
+                    <navLabel><text>Cover</text></navLabel>
+                    <content src="coverpage.xhtml"/>
+                </navPoint>
+                """
+            coverHREF = "cover.\(ext)"
+            files.append((name: "OEBPS/coverpage.xhtml", data: Data(coverPageXHTML(href: "cover.\(ext)").utf8)))
         }
 
         for (index, chapter) in chapters.enumerated() {
@@ -1484,6 +1505,22 @@ public enum DocumentEpubConverter {
           table.doc-table th { background: rgba(128, 128, 128, 0.15); font-weight: 600; }
         </style>
         """
+
+    /// The book's cover as the first spine item — a full-page image, no
+    /// chrome, so opening a book starts on its cover the way a reader app
+    /// does. The class is what `chapterCSS` sizes to the full content width.
+    private static func coverPageXHTML(href: String) -> String {
+        """
+        <?xml version="1.0" encoding="utf-8"?>
+        <!DOCTYPE html>
+        <html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en">
+          <head><meta charset="utf-8"/>\(chapterCSS)<title>Cover</title></head>
+          <body>
+            <p class="doc-image-wrap"><img class="doc-image" src="\(href)" alt="Cover"/></p>
+          </body>
+        </html>
+        """
+    }
 
     private static func chapterXHTML(_ chapter: DocumentChapter, index: Int, imageHREFs: [String], imageClasses: [String]) -> String {
         var body = ""

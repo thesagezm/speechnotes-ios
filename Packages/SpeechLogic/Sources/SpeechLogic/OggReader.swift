@@ -143,6 +143,98 @@ public enum OggReader {
         }
     }
 
+    /// What an audiobook's manifest needs, read from BOUNDED slices.
+    ///
+    /// The import path cannot read a whole book — a 664 MB Opus encode would
+    /// be the device freeze this codebase keeps fixing — and it does not need
+    /// to: Ogg's last page carries a granule equal to the TOTAL sample
+    /// count, so an 8 MB head (the `OpusHead` header) plus an 8 MB tail (the
+    /// final pages) give an exact duration. The head slice is scanned for the
+    /// last page it fully contains; the tail is scanned for the last valid
+    /// page anywhere in it, which is the stream's end.
+    public struct Summary: Equatable, Sendable {
+        public let sampleRate: Int
+        public let channels: Int
+        public let preSkip: Int
+        public let totalSamples: UInt64
+        public let variant: String
+
+        public var duration: TimeInterval {
+            guard sampleRate > 0 else { return 0 }
+            let samples = max(0, Int64(clamping: totalSamples) - Int64(preSkip))
+            return Double(samples) / Double(sampleRate)
+        }
+    }
+
+    /// Duration and identification from a head and a tail slice of the file.
+    /// Throws when the head carries no readable identification header.
+    public static func summary(head: Data, tail: Data) throws -> Summary {
+        var offset = head.startIndex
+        var info: StreamInfo?
+        var lastGranule: UInt64 = 0
+        var sawPage = false
+        while offset < head.endIndex {
+            guard let page = Page(data: head, at: offset - head.startIndex) else { break }
+            sawPage = true
+            if info == nil {
+                // The identification header is the first packet on the first
+                // page that carries one. Page 0's first segment can be a
+                // partial-packet continuation (segment tables and pages
+                // interleave), so the packet is assembled from the segment
+                // walk exactly as `read` does — not from "page start to the
+                // first short segment", which silently sliced the wrong
+                // bytes and reported 2ch/0 pre-skip for a 6ch book.
+                if let first = firstPacket(of: page, in: head, at: offset) {
+                    info = streamInfo(firstPacket: first)
+                }
+            }
+            if page.granule > 0 { lastGranule = page.granule }
+            offset = page.end
+        }
+        // The tail holds the stream's last page — and its granule, the
+        // authoritative sample count.
+        var tailOffset = 0
+        let tailCount = tail.count
+        while let found = lastPageStart(in: tail, from: tailOffset) {
+            guard let page = Page(data: tail, at: found) else { break }
+            sawPage = true
+            if page.granule > 0 { lastGranule = page.granule }
+            tailOffset = found + 1
+        }
+        guard let info, sawPage else { throw OggError.notOgg }
+        return Summary(
+            sampleRate: info.sampleRate,
+            channels: info.channels,
+            preSkip: info.preSkip,
+            totalSamples: lastGranule,
+            variant: info.codec == .opus ? "opus" : "ogg"
+        )
+    }
+
+    /// The first COMPLETE packet on this page, assembled the way `read`
+    /// assembles packets: segments accumulate until one shorter than 255
+    /// terminates the packet. Returns nil when the page carries no complete
+    /// packet.
+    private static func firstPacket(of page: Page, in data: Data, at offset: Int) -> Data? {
+        var bytes: [UInt8] = []
+        for segment in page.segments {
+            guard segment.upperBound <= data.count else { return nil }
+            bytes.append(contentsOf: data[data.startIndex + segment.lowerBound..<(data.startIndex + segment.upperBound)])
+            if segment.count < 255 { return Data(bytes) }
+            if bytes.count > 64 { return nil }   // no header is this long
+        }
+        return nil
+    }
+
+    /// The last `OggS` capture pattern at or after `from` whose page header
+    /// parses and fits — a random fourCC in the payload fails the fit test.
+    private static func lastPageStart(in data: Data, from: Int) -> Int? {
+        guard let marker = data.range(of: Data([0x4F, 0x67, 0x67, 0x53]), options: [], in: (data.startIndex + from)..<data.endIndex) else {
+            return nil
+        }
+        return marker.lowerBound - data.startIndex
+    }
+
     /// Reads `data` as an Ogg stream. Throws on anything that is not one.
     ///
     /// ## Granule positions

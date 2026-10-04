@@ -54,9 +54,9 @@ final class ImportService {
     /// large, and iCloud downloads can take seconds. Returns nil (with a
     /// logged reason) when nothing useful could be extracted.
     ///
-    /// Async because the PDF branch may run papero's engine, which is a
-    /// webview and cannot be driven synchronously. The security scope taken
-    /// here stays open across that await — the `defer` below runs last.
+    /// Async because the PDF branch reads whole documents. The security
+    /// scope taken here stays open across that await — the `defer` below
+    /// runs last.
     static func importText(from url: URL) async -> (title: String, text: String)? {
         Log.shared.info("ImportService: reading \(url.lastPathComponent)")
         let scoped = url.startAccessingSecurityScopedResource()
@@ -225,18 +225,15 @@ final class ImportService {
     private static let maxPdfTextChars = 1_000_000
 
     private static func pdfText(from url: URL) async -> String? {
-        // Which engine produces this is the user's setting (Settings →
-        // Storage): the built-in PDFKit path, papero's reading-order engine,
-        // or papero with a silent fallback. The caps below are the note
-        // importer's own and apply either way — a note import is not a book
-        // import.
+        // PDFKit, off-main. The caps below are the note importer's own — a
+        // note import is not a book import.
         let result = await PdfTextExtractor.text(
             for: url,
             maxPages: maxPdfPages,
             maxCharacters: maxPdfTextChars
         )
         if let result {
-            Log.shared.info("ImportService: PDF text via \(result.engine.rawValue) (\(result.text.utf16.count) chars)")
+            Log.shared.info("ImportService: PDF text via pdfkit (\(result.text.utf16.count) chars)")
         }
         return result?.text
     }

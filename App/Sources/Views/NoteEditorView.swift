@@ -250,6 +250,11 @@ struct NoteEditorView: View {
                         editorRail
                             .layoutPriority(1)
                     }
+                    // The rail was flush against the screen's trailing edge
+                    // (user: "sometimes the rail is too close to the edge of
+                    // screen") — its panel and buttons need the same breathing
+                    // room the reader's horizontal padding gives the text.
+                    .padding(.trailing, 8)
                     .transition(.opacity.combined(with: .move(edge: .trailing)))
                 } else {
                     VStack(spacing: 0) {

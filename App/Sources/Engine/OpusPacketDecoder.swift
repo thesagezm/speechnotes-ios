@@ -69,7 +69,19 @@ public final class OpusPacketDecoder {
         dropSamples: Int = 0
     ) throws {
         let channels = max(1, stream.channels)
-        guard let format = AVAudioFormat(standardFormatWithSampleRate: Double(stream.sampleRate), channels: UInt32(channels)) else {
+        // `standardFormatWithSampleRate:channels:` only accepts ONE OR TWO
+        // channels — the whole-cast "Opus 5.1ch" encodes the user ships are
+        // 6-channel (OpusHead byte 9 = 6), and that initializer returned nil
+        // for every one of them, so the decoder refused the book outright
+        // ("Opus not playing"). The common-format initializer takes the
+        // real channel count, and the engine's mixer node is what narrows
+        // 5.1 to the device's own layout at output.
+        guard let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: Double(stream.sampleRate),
+            channels: UInt32(channels),
+            interleaved: false
+        ) else {
             throw OpusDecoderError.unavailable
         }
         // The compressed source format, built by hand: `AVAudioFormat(settings:)`
