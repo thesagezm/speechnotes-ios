@@ -165,7 +165,7 @@ struct MarkdownPreviewView: View {
     @ViewBuilder
     private func blockView(_ block: MarkdownText.MarkdownBlock) -> some View {
         switch block {
-        case .heading(let level, _, let text):
+        case .heading(let level, let text, _):
             styledText(text)
                 .font(headingFont(level))
                 .padding(.top, level <= 2 ? ReaderSpacing.headingTopLevel1 * theme.readerBlockSpacing
@@ -837,5 +837,22 @@ private extension String {
             attributes: [.font: UIFont.systemFont(ofSize: fontSize)],
             context: nil
         ).width
+    }
+}
+
+extension Array {
+    /// `count` cells, padded with `filler` — a ragged table row's missing
+    /// cells (every column read has to tolerate a short row either way).
+    func padded(to count: Int, with filler: @autoclosure () -> Element) -> [Element] {
+        guard self.count < count else { return self }
+        return self + Array(repeating: filler(), count: count - self.count)
+    }
+}
+
+extension Text {
+    /// Monospaced digits for a column of figures, so 1,000 and 8 line up on
+    /// the same digit cell instead of jittering. A no-op for prose.
+    func monospacedDigit(_ enabled: Bool) -> Text {
+        enabled ? monospacedDigit() : self
     }
 }
