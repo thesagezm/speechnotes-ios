@@ -150,7 +150,7 @@ struct MarkdownPreviewView: View {
             switch block {
             case .image(_, let url):
                 out.append(url)
-            case .paragraph(_, let text):
+            case .paragraph(let text, _):
                 for run in MarkdownText.inlineRuns(text) {
                     if case .image(_, let url) = run { out.append(url) }
                 }
@@ -171,7 +171,7 @@ struct MarkdownPreviewView: View {
                 .padding(.top, level <= 2 ? ReaderSpacing.headingTopLevel1 * theme.readerBlockSpacing
                                          : ReaderSpacing.headingTopLevel3Plus * theme.readerBlockSpacing)
                 .padding(.bottom, headingBottom)
-        case .paragraph(_, let text):
+        case .paragraph(let text, _):
             runsView(MarkdownText.inlineRuns(text))
                 .lineSpacing(lineSpacing)
                 .padding(.bottom, blockGap)
