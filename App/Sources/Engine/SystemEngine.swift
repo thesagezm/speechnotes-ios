@@ -34,7 +34,11 @@ final class SystemEngine: NSObject, SpeechEngine {
     var onPlayedChars: ((Int) -> Void)?
     var onFinished: (() -> Void)?
 
-    private let synthesizer = AVSpeechSynthesizer()
+    /// A `var`, not a `let`: after a phone call AVSpeechSynthesizer goes
+    /// silent with no error and no further callbacks, and the only recovery
+    /// is to destroy and recreate it (the delegate must be re-installed and
+    /// the queue re-driven — see `rebuildSynthesizer`).
+    private var synthesizer = AVSpeechSynthesizer()
 
     /// Identifier of the `AVSpeechSynthesisVoice` to use (Settings → System
     /// voice). Falls back to the default en-US voice when nil, or when the
@@ -104,11 +108,17 @@ final class SystemEngine: NSObject, SpeechEngine {
 
     private var interruptionObserver: NSObjectProtocol?
 
-    /// Session category is applied on first REAL speech, not at init —
-    /// doing it pre-activate logged OSStatus -50 at every cold start.
+    /// Session category + ACTIVATION are applied on first REAL speech, not at
+    /// init — doing it pre-activate logged OSStatus -50 at every cold start.
+    ///
+    /// The activation half is not optional decoration. A configured-but-
+    /// inactive session gets suspended by iOS seconds after the app
+    /// backgrounds, which is the exact "plays two seconds then dies" the
+    /// audiobook path never had (AVPlayer activates a session internally;
+    /// AVSpeechSynthesizer does not). This single call is the fix.
     private func configureAudioSessionIfNeeded() {
         // Same shared setup as the ONNX engines — see AudioSessionSetup.
-        AudioSessionSetup.configureIfNeeded(prefix: "SystemEngine")
+        AudioSessionSetup.configureAndActivate(source: .tts, prefix: "SystemEngine")
     }
 
     override init() {
@@ -130,10 +140,39 @@ final class SystemEngine: NSObject, SpeechEngine {
                 if self.state == .speaking { self.pause() }
             } else if typeRaw == AVAudioSession.InterruptionType.ended.rawValue,
                       optionsRaw & AVAudioSession.InterruptionOptions.shouldResume.rawValue != 0 {
+                // The session is DEACTIVATED here. Re-activating and starting
+                // the next chunk on the same synthesizer often works and
+                // often does not — after a call the old instance can go
+                // permanently silent with no error and no further delegate
+                // callbacks, which reads to the user as "speech died at the
+                // phone call and never came back". Recreating is cheap
+                // (a few ms) and is the documented recovery.
+                self.rebuildSynthesizer()
                 if self.state == .paused { self.resume() }
             }
         }
         Log.shared.info("SystemEngine ready (chunked)")
+    }
+
+    /// Replace the synthesizer and re-drive the queue on it. The old
+    /// instance is stopped first so it cannot fire a late `didCancel` into
+    /// the new session's state.
+    private func rebuildSynthesizer() {
+        let hadWork = !queue.isEmpty
+        synthesizer.stopSpeaking(at: .immediate)
+        let fresh = AVSpeechSynthesizer()
+        fresh.delegate = self
+        synthesizer = fresh
+        // Configured sessions do not survive a rebuilt synthesizer on some
+        // routes; re-applying is a no-op when the category already matches.
+        AudioSessionSetup.configureAndActivate(source: .tts, prefix: "SystemEngine")
+        if hadWork, state == .paused {
+            // `resume()` sees a synthesizer that is neither speaking nor
+            // paused, so it takes the startNextChunk() branch — the chunk
+            // that was cut off mid-sentence is re-spoken from its start
+            // rather than the queue silently stalling.
+            resume()
+        }
     }
 
     deinit {

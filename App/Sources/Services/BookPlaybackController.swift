@@ -101,6 +101,21 @@ final class BookPlaybackController: ObservableObject {
         await speak(book: book, from: chapterIndex)
     }
 
+    /// Foreground reconcile: the system suspended a backgrounded listening
+    /// session and the player kept the book's bookmark. Resume the book at
+    /// the chapter the bookmark held — the same dressing `togglePlay`
+    /// applies, minus the toggle (nothing is live to toggle).
+    func resumeBook(book: Book, from chapterIndex: Int) async {
+        guard player != nil else { return }
+        NowPlayingCenter.shared.setChapterSkipEnabled(true)
+        player?.nowPlayingPayload = SpeechPlayer.NowPlayingPayload(
+            subtitle: nil, // set per-chapter in publishChapterLabel
+            artworkPath: BooksStore.coverFileURL(book).path
+        )
+        activeBook = book
+        await speak(book: book, from: chapterIndex)
+    }
+
     /// Speaks `from` onward, skipping chapters with no extractable text
     /// (cover-only epub files, image-only PDF pages). Re-arms onNaturalFinish
     /// after every start — explicit stop()s and note takeovers clear it on

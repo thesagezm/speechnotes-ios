@@ -148,6 +148,14 @@ final class StreamingTTSPlaybackCore: NSObject {
     private var stallWatchdog: Timer?
 
     private var interruptionObserver: NSObjectProtocol?
+    /// Engine-configuration and media-services-reset observers. The
+    /// configuration-change one is the hand-wired-AVAudioEngine equivalent of
+    /// what AVPlayer does implicitly: a hardware sample-rate change (a call,
+    /// a Bluetooth headset arriving, AirPods, an alarm) invalidates the
+    /// connection made with the old format, and without a repair the node
+    /// goes silent until the whole engine is rebuilt.
+    private var configChangeObserver: NSObjectProtocol?
+    private var mediaResetObserver: NSObjectProtocol?
 
     // MARK: - Rate-change buffer drain
 
@@ -204,14 +212,20 @@ final class StreamingTTSPlaybackCore: NSObject {
         }
     }
 
-    /// Audio-session category applied lazily on first actual playback —
-    /// configuring it in init landed an OSStatus -50 at every cold start
-    /// (the session isn't attachable before the app is fully active).
+    /// Audio-session category + ACTIVATION applied lazily on first actual
+    /// playback — configuring it in init landed an OSStatus -50 at every cold
+    /// start (the session isn't attachable before the app is fully active).
+    ///
+    /// The activation half is the background-persistence fix: a configured
+    /// but INACTIVE session is suspended by iOS seconds after the app
+    /// backgrounds. `AVAudioEngine.start()` does not activate it (AVPlayer
+    /// does, which is why the audiobook path never had this failure), so
+    /// without this call every ONNX engine spoke two sentences and stopped.
     private func configureAudioSessionIfNeeded() {
         // Shared with the other engines: one category, applied lazily on the
         // first real playback, with a fallback ladder for the routes that
         // reject the preferred option set (the OSStatus -50 in the logs).
-        AudioSessionSetup.configureIfNeeded(prefix: config.logPrefix)
+        AudioSessionSetup.configureAndActivate(source: .tts, prefix: config.logPrefix)
     }
 
     init(config: Config) {
@@ -226,6 +240,20 @@ final class StreamingTTSPlaybackCore: NSObject {
         ) { [weak self] notification in
             self?.handleInterruption(notification)
         }
+        configChangeObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: audioEngine,
+            queue: .main
+        ) { [weak self] _ in
+            self?.handleEngineConfigurationChange()
+        }
+        mediaResetObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.mediaServicesWereResetNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.handleMediaServicesReset()
+        }
         Log.shared.info("\(config.logPrefix) core created")
     }
 
@@ -239,6 +267,12 @@ final class StreamingTTSPlaybackCore: NSObject {
         if let interruptionObserver {
             NotificationCenter.default.removeObserver(interruptionObserver)
         }
+        if let configChangeObserver {
+            NotificationCenter.default.removeObserver(configChangeObserver)
+        }
+        if let mediaResetObserver {
+            NotificationCenter.default.removeObserver(mediaResetObserver)
+        }
     }
 
     private func handleInterruption(_ notification: Notification) {
@@ -248,7 +282,137 @@ final class StreamingTTSPlaybackCore: NSObject {
             if state == .speaking { pause() }
         } else if typeRaw == AVAudioSession.InterruptionType.ended.rawValue,
                   optionsRaw & AVAudioSession.InterruptionOptions.shouldResume.rawValue != 0 {
+            // iOS leaves the session INACTIVE after an interruption. Without
+            // re-activating, `playerNode.play()` succeeds, the node's clock
+            // advances and no sound comes out — and in the background the
+            // process is suspended seconds later. This mirrors
+            // AudioBookPlayer.resumeAfterSessionEvent(), which was the only
+            // place in the app that knew this.
+            AudioSessionSetup.activate(prefix: config.logPrefix)
             if state == .paused { resume() }
+        }
+    }
+
+    /// The hardware's sample rate changed (a call, a Bluetooth headset
+    /// arriving or leaving, AirPods, an alarm). The connection this engine
+    /// made with the old format is no longer valid, so the node goes silent
+    /// until it is re-made. `AVPlayer` rebuilds its own pipeline and never
+    /// sees this; a hand-wired engine has to do it itself.
+    ///
+    /// Buffers already scheduled survive the reconnect — the node's queue is
+    /// untouched by `connect` — but anything not yet scheduled has to be
+    /// pushed through `scheduleReadyChunks` again, because the schedule
+    /// cursor stops advancing once the node stops draining.
+    private func handleEngineConfigurationChange() {
+        let wasRendering = audioEngineRunning
+        let format = connectedFormat
+        Log.shared.info("\(config.logPrefix) engine configuration change (format \(format?.sampleRate ?? -1) Hz) — reconnecting")
+        guard wasRendering else { return }
+
+        audioEngineRunning = false
+        if let format {
+            connectedFormat = nil
+            do {
+                audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: format)
+                connectedFormat = format
+            } catch {
+                Log.shared.error("\(config.logPrefix) reconnect after configuration change failed: \(error)")
+            }
+        }
+        audioEngine.prepare()
+        do {
+            try audioEngine.start()
+            audioEngineRunning = true
+        } catch {
+            Log.shared.error("\(config.logPrefix) restart after configuration change failed: \(error)")
+            state = .idle
+            return
+        }
+        if state == .speaking || state == .paused {
+            if !playerNode.isPlaying { playerNode.play() }
+            // Whatever the node had queued was already scheduled, so the
+            // cursor has not moved; re-drive it in case the node drained
+            // while it was misconfigured.
+            scheduleReadyChunks(generation: playbackGeneration)
+        }
+    }
+
+    /// The media server died: the session category, the audio engine and
+    /// every scheduled buffer are void.
+    ///
+    /// Apple's documentation is explicit that an app "shouldn't restart your
+    /// media playback, recording, or processing until initiated by user
+    /// action", so this does NOT auto-resume — it re-arms the machinery,
+    /// ends the dead session so the UI stops claiming speech that nothing is
+    /// producing, and leaves the bookmark in place for the reader's play
+    /// button. The audiobook path's cold-resume (`AudioBookPlayer.
+    /// handleMediaServicesReset`) predates this and is left alone here; see
+    /// the plan doc.
+    private func handleMediaServicesReset() {
+        Log.shared.error("\(config.logPrefix) media services reset — tearing down the dead session (no auto-resume; Apple requires user action)")
+        AudioSessionSetup.invalidateConfiguration()
+        // Buffers were decoded against the old engine configuration and
+        // cannot be trusted; drop the whole pipeline.
+        playbackGeneration += 1
+        for _ in 0...(config.generationAheadLimit + 1) {
+            pacingGate?.signal()
+        }
+        stopStallWatchdog()
+        // state = .idle fires teardownPlayback(), which ends the metrics
+        // session under its own catch-all — no separate endSession here.
+        state = .idle
+    }
+
+    /// How long the producer waits for the playhead before giving up on a
+    /// chunk. A bounded wait, not `wait()` forever: the gate is signalled
+    /// only from the MAIN queue, so a suspended process (no active session,
+    /// no rendering) parks the producer indefinitely — the exact mechanism
+    /// behind regression R9, where a superseded session's producer blocked
+    /// forever on a semaphore nobody would ever signal. Timing out routes
+    /// the chunk down the existing skip path instead: a soft tone, one
+    /// skipped sentence, and the chain keeps advancing.
+    private static let pacingWaitTimeout: DispatchTimeInterval = .seconds(2)
+
+/// generateQueue. Marks `index` as skipped so the schedule cursor steps
+    /// over it, beeps once, and accounts the chars so the read-along cursor
+    /// keeps moving past text that will not sound. `chunkCount` is passed in
+    /// rather than read from `chunks` — that array is main-thread state.
+    private func reportChunkSkipped(index: Int, chunkCount: Int, chars: Int, generation: Int, message: String) {
+        Log.shared.error("\(config.logPrefix) chunk \(index + 1) of \(chunkCount) skipped (\(message))")
+        // The tone is the ONLY signal the listener gets, so it is posted from
+        // here rather than from the main-queue bookkeeping below: the queue
+        // hop is milliseconds either way, and this keeps the sound tied to
+        // the failure that caused it.
+        BeepPlayer.playSkipTone()
+        DispatchQueue.main.async { [weak self] in
+            guard let self,
+                  self.playbackGeneration == generation,
+                  index < self.bufferSlots.count else { return }
+            self.bufferSlots[index] = Self.slotSkipped
+            self.scheduleReadyChunks(generation: generation)
+            self.metrics.chunkSkipped(index: index, chars: chars)
+        }
+    }
+
+    /// Blocks until the playhead signals a scheduling slot, or the timeout
+    /// expires. Returns false on timeout (caller should skip the chunk) and
+    /// on a superseded generation.
+    private func waitForPacingSlot(generation: Int) -> Bool {
+        if freeChunksRemaining > 0 {
+            freeChunksRemaining -= 1
+            return true
+        }
+        // Looped rather than a single timed wait: a `signal()` can land
+        // between the timeout expiring and the loop re-checking, and a
+        // missed signal must not cost the chunk.
+        while true {
+            let result = pacingGate?.wait(timeout: Self.pacingWaitTimeout)
+            if playbackGeneration != generation { return false }
+            if result == .success { return true }
+            if result == .timedOut {
+                Log.shared.error("\(config.logPrefix) producer timed out waiting for the playhead — skipping one chunk (suspended process, or the node stopped draining)")
+                return false
+            }
         }
     }
 
@@ -331,12 +495,23 @@ final class StreamingTTSPlaybackCore: NSObject {
             }
 
             for (index, chunk) in allChunks.enumerated() {
-                if self.freeChunksRemaining > 0 {
-                    self.freeChunksRemaining -= 1
-                } else {
-                    self.pacingGate?.wait()
+                guard waitForPacingSlot(generation: generation) else {
+                    if playbackGeneration == generation {
+                        // The playhead stopped draining (or we were
+                        // suspended): skip this chunk rather than park. The
+                        // schedule cursor steps over it, the listener hears
+                        // one soft tone, and the chain keeps advancing.
+                        reportChunkSkipped(
+                            index: index,
+                            chunkCount: allChunks.count,
+                            chars: chunk.length,
+                            generation: generation,
+                            message: "pacing gate timed out"
+                        )
+                        continue
+                    }
+                    return
                 }
-                guard self.playbackGeneration == generation else { return }
                 // Rate change: buffers synthesized BEFORE the slider moved
                 // carry the OLD speed. Waiting for all `generationAheadLimit`
                 // of them to play out made 1.0→2.0 take seconds to land —
@@ -398,19 +573,13 @@ final class StreamingTTSPlaybackCore: NSObject {
                         )
                     }
                 } catch {
-                    Log.shared.error("\(self.config.logPrefix) chunk \(index + 1) of \(allChunks.count) skipped (\(error)): «\(chunk.text.prefix(60))»")
-                    // The tone is the ONLY signal the listener gets, so it
-                    // is posted from here rather than from the main-queue
-                    // bookkeeping below: the queue hop is milliseconds either
-                    // way, and this keeps the sound tied to the failure that
-                    // caused it.
-                    BeepPlayer.playSkipTone()
-                    DispatchQueue.main.async {
-                        guard self.playbackGeneration == generation else { return }
-                        self.bufferSlots[index] = Self.slotSkipped
-                        self.scheduleReadyChunks(generation: generation)
-                        self.metrics.chunkSkipped(index: index, chars: chunk.length)
-                    }
+                    reportChunkSkipped(
+                        index: index,
+                        chunkCount: allChunks.count,
+                        chars: chunk.length,
+                        generation: generation,
+                        message: "\(error): «\(chunk.text.prefix(60))»"
+                    )
                 }
             }
         }
@@ -599,6 +768,11 @@ final class StreamingTTSPlaybackCore: NSObject {
                 state = .idle
             }
         }
+        // Re-assert on EVERY schedule, not just the first: an interruption,
+        // a media-services reset or a route change can leave the session
+        // inactive behind our back, and a session that is configured but
+        // not active is suspended by iOS seconds after the app backgrounds.
+        AudioSessionSetup.activate(prefix: config.logPrefix)
     }
 
     private func teardownPlayback() {

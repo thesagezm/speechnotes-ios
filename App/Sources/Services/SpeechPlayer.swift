@@ -403,45 +403,91 @@ final class SpeechPlayer: ObservableObject {
     /// note id back to its current text without importing the store.
     var notesProvider: ((UUID) -> Note?)?
 
+    /// Called when the app returns to the foreground — the reconcile that
+    /// `resumeIfBookmarkPending` grew into. Three jobs, in order:
+    ///
+    /// 1. **Re-assert a live session.** Backgrounding can leave a session
+    ///    configured but inactive (an interruption that fired while the app
+    ///    was away, a route change). Reactivating is free and is what makes
+    ///    the difference between "paused" and "suspended".
+    /// 2. **Repair the wedge.** A state that claims speech with no live
+    ///    engine session behind it is silent dead air the mini-player still
+    ///    advertises — the exact state that gets the process suspended.
+    ///    Unlike `abandonLiveSession`, the bookmark is KEPT: the position
+    ///    is real, only the pipeline is dead.
+    /// 3. **Auto-resume a recent bookmark** — notes and now BOOKS too. A
+    ///    book the system suspended mid-listen used to come back silent
+    ///    with the reader claiming speech; it now picks up where it was.
+    ///    The 30-minute window is deliberate: anything older is stale
+    ///    context the user did not ask to have replayed.
+    ///
+    /// The INITIAL activation at cold launch is skipped: if the previous run
+    /// crashed mid-speech, a fresh bookmark would replay that speech during
+    /// launch and loop the crash.
+    private var skippedInitialActivation = false
+    func reconcileOnForeground() {
+        if !skippedInitialActivation {
+            skippedInitialActivation = true
+            return
+        }
+        if state != .idle {
+            if let engine, engine.hasLiveSession {
+                AudioSessionSetup.activate(prefix: "SpeechPlayer")
+            } else {
+                Log.shared.error("SpeechPlayer: foreground reconcile — state \(state) with no live session; keeping the bookmark, abandoning the pipeline")
+                onNaturalFinish = nil
+                persistPlaybackBookmark()
+                engine?.stop()
+                state = .idle
+                lastRawProgress = 0
+                resumeBaseFraction = 0
+                nowPlayingTitle = nil
+                nowPlayingNoteId = nil
+                nowPlayingBookId = nil
+                finishAuditionIfActive()
+                endReadAlong()
+                NowPlayingCenter.shared.clear()
+            }
+        }
+        guard state == .idle, auditioningVoice == nil else { return }
+        guard let (key, mark) = bookmarkStore.mostRecentBookmark(within: 30 * 60) else { return }
+        if let noteId = mark.noteId, let note = notesProvider?(noteId) {
+            Log.shared.info("SpeechPlayer: resuming bookmarked note after suspension")
+            // Speak the same derived text every other path speaks. The stored
+            // bookmark's textHash is over the speech text, so replaying raw
+            // note.text here could never match it (with rendering on) — the
+            // resume would silently fall through to "from the beginning" and
+            // then prime the slot with the raw-text hash, corrupting the
+            // bookmark for the editor's next tap. Key name shared with
+            // NoteEditorView's @AppStorage("renderMarkdown").
+            let renderMarkdown = UserDefaults.standard.bool(forKey: "renderMarkdown")
+            let speechText = SpeechText.forNote(note, renderMarkdown: renderMarkdown)
+            togglePlay(speechText, note: note)
+        } else if let bookId = mark.bookId, let chapterIndex = mark.chapterIndex {
+            // The handler is wired in SpeechnotesApp's onAppear, where the
+            // BooksStore is in scope to resolve the id back to a Book.
+            Log.shared.info("SpeechPlayer: resuming bookmarked book after suspension (ch\(chapterIndex))")
+            bookResumeHandler?(bookId, chapterIndex)
+        } else {
+            // The note was deleted (or the bookmark predates book keys) —
+            // drop the slot so we stop seeing it.
+            bookmarkStore.remove(key)
+        }
+    }
+
+    /// Set by SpeechnotesApp so a foreground reconcile can hand a book
+    /// bookmark to BookPlaybackController with the BooksStore in scope.
+    var bookResumeHandler: ((String, Int) -> Void)?
+
     /// Called when the app returns to the foreground. If iOS suspended the
     /// process mid-speech (possible even with the `audio` background mode
     /// under memory pressure), restart playback from the saved bookmark so
     /// the user isn't left in silence on return.
     ///
-    /// The INITIAL activation at cold launch is skipped: if the previous run
-    /// crashed mid-speech, a fresh bookmark (< 5 min old) would replay that
-    /// speech during launch and loop the crash. Auto-resume only serves
-    /// returns from the app switcher / lock screen.
-    private var skippedInitialActivation = false
+    /// Kept as a thin shim over `reconcileOnForeground` for callers that
+    /// predate the reconcile; the reconcile is the real path.
     func resumeIfBookmarkPending() {
-        if !skippedInitialActivation {
-            skippedInitialActivation = true
-            return
-        }
-        guard state == .idle, auditioningVoice == nil else { return }
-        // BOOK bookmarks resume from the reader's play button (their 30-day
-        // validity lives in resumeBookPlan) — they are never auto-replayed
-        // here. Among NOTE bookmarks, only one recorded very recently is
-        // intent (a leftover from days ago is stale context); the 30-day cap
-        // in resumePlan() still governs the explicit "Restart from
-        // beginning" affordance in the editor.
-        guard let (key, mark) = bookmarkStore.mostRecentNoteBookmark(within: 5 * 60) else { return }
-        guard let noteId = mark.noteId, let note = notesProvider?(noteId) else {
-            // Note was deleted — drop its slot so we stop seeing it.
-            bookmarkStore.remove(key)
-            return
-        }
-        Log.shared.info("SpeechPlayer: resuming bookmarked note after suspension")
-        // Speak the same derived text every other path speaks. The stored
-        // bookmark's textHash is over the speech text, so replaying raw
-        // note.text here could never match it (with rendering on) — the
-        // resume would silently fall through to "from the beginning" and
-        // then prime the slot with the raw-text hash, corrupting the
-        // bookmark for the editor's next tap. Key name shared with
-        // NoteEditorView's @AppStorage("renderMarkdown").
-        let renderMarkdown = UserDefaults.standard.bool(forKey: "renderMarkdown")
-        let speechText = SpeechText.forNote(note, renderMarkdown: renderMarkdown)
-        togglePlay(speechText, note: note)
+        reconcileOnForeground()
     }
 
     /// Stop + speak the full text from the start, clearing any bookmark.

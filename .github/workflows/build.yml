@@ -449,6 +449,23 @@ jobs:
             exit 1
           }
 
+      - name: Verify background modes
+        run: |
+          # Guard against drift in BOTH directions. `audio` missing means
+          # background playback dies within seconds (the pre-v1.1 bug); any
+          # second mode (fetch, voip, location, processing) is review-bait
+          # App Store apps do not earn — guideline 2.5.4 limits background
+          # services to their intended purposes, and this app's purpose is
+          # audio playback alone.
+          APP_PATH="$(find build -path '*Products/Applications/*.app' -maxdepth 6 | head -n 1)"
+          test -n "$APP_PATH" || { echo "::error::archived .app not found"; exit 1; }
+          MODES=$(/usr/libexec/PlistBuddy -c 'Print :UIBackgroundModes' "$APP_PATH/Info.plist" 2>/dev/null | grep -E '^[[:space:]]+[^[:space:]]' | tr -d ' \t' | tr '\n' ',' | sed 's/,$//')
+          echo "Archived UIBackgroundModes: $MODES"
+          test "$MODES" = "audio" || {
+            echo "::error::UIBackgroundModes must be exactly [audio] (got: $MODES). Additions need a documented App Review rationale; removals reintroduce the background-death bug."
+            exit 1
+          }
+
       - name: Package unsigned IPA
         if: success()
         run: ./Scripts/package-ipa.sh build/SpeechnotesIOS.xcarchive

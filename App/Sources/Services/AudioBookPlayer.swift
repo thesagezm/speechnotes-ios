@@ -219,8 +219,13 @@ final class AudioBookPlayer: ObservableObject {
             // play — an item created while the session is still in its
             // launch default (ambient/silent-switch-able) is silenced by the
             // mute switch and pauses when the app backgrounds, which looks
-            // like "plays two seconds then dies" on device.
-            AudioSessionSetup.configureIfNeeded(prefix: "AudioBookPlayer")
+            // like "plays two seconds then dies" on device. ACTIVATION is
+            // the half the TTS paths were missing: AVPlayer activates a
+            // session internally while building its item pipeline, which is
+            // exactly why audiobooks persisted in the background and speech
+            // did not. Asserting it here costs nothing and covers the
+            // window before AVPlayer gets there.
+            AudioSessionSetup.configureAndActivate(source: .audiobook, prefix: "AudioBookPlayer")
             if loadedURL != url || backend == nil {
                 // A failure must not leave the previous backend's callbacks
                 // attached to the new one.
@@ -745,10 +750,39 @@ final class AudioBookPlayer: ObservableObject {
         }
 
         if chapterIndex < chapters.count - 1, let book = activeBook ?? boundBook {
+            // Between chapters NOTHING is playing, so iOS may suspend the
+            // app despite the audio background mode — the same silent gap
+            // BookPlaybackController bridges for spoken books with its
+            // "BookChapterGap" grace task. Without this, a long listen dies
+            // at the first chapter boundary after the screen locks.
+            beginChapterGapGrace()
             play(book: book, chapterIndex: chapterIndex + 1)
         } else {
             finishBook()
         }
+    }
+
+    // MARK: Chapter-gap background grace
+
+    /// Bridges the silent moment between two chapters of the SAME book —
+    /// the only window where nothing renders and iOS is entitled to suspend
+    /// an audio app. Scoped exactly like BookPlaybackController's: it is
+    /// armed only by the chapter auto-advance and ends the moment the next
+    /// chapter is committed, never as a general keep-alive (App Store
+    /// guideline 2.4.2 — "may not run unrelated background processes").
+    private var chapterGapTask: UIBackgroundTaskIdentifier = .invalid
+
+    private func beginChapterGapGrace() {
+        endChapterGapGrace()
+        chapterGapTask = UIApplication.shared.beginBackgroundTask(withName: "AudioBookChapterGap") { [weak self] in
+            self?.endChapterGapGrace()
+        }
+    }
+
+    private func endChapterGapGrace() {
+        guard chapterGapTask != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(chapterGapTask)
+        chapterGapTask = .invalid
     }
 
     private func finishBook() {
@@ -878,6 +912,17 @@ final class AudioBookPlayer: ObservableObject {
     /// carry a user-facing message; AVPlayer's need the codec sniff.
     private func handleBackendFailure(_ error: Error) {
         guard let url = loadedURL else { return }
+        // The media server died under the engine backend: the session, the
+        // engine and every scheduled buffer are void. Rebuild the SAME
+        // backend at the playhead — the same cold recovery the AVPlayer path
+        // gets from handleMediaServicesReset.
+        if backend is OpusAudioBackend, error is OpusAudioBackend.MediaServicesResetError {
+            Log.shared.error("AudioBookPlayer: media services reset under the Opus backend — rebuilding at the playhead")
+            if let book = activeBook {
+                play(book: book, chapterIndex: chapterIndex, withinChapterFraction: chapterProgress)
+            }
+            return
+        }
         // Second chance, once per book: AVPlayer failed on a file whose
         // codec sniff says Opus — the container-parse-but-cannot-decode
         // case `makeBackend`'s sniff missed (e.g. the sample entry sits

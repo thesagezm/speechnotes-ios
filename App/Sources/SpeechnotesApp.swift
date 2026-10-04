@@ -77,10 +77,24 @@ struct SpeechnotesApp: App {
                 // past the first committed frame.
                 .onAppear {
                     let notes = self.notes
+                    let books = self.books
                     player.notesProvider = { [notes] id in
                         notes.notes.first(where: { $0.id == id })
                     }
                     BookPlaybackController.shared.bind(to: player)
+                    // Foreground reconcile: a book bookmark left behind by a
+                    // suspended background session. The store must be in
+                    // scope here — SpeechPlayer deliberately knows nothing
+                    // about BooksStore.
+                    player.bookResumeHandler = { [weak books] bookId, chapterIndex in
+                        guard let book = books?.books.first(where: { $0.id.uuidString == bookId }) else {
+                            Log.shared.info("SpeechPlayer: book bookmark for a book that is no longer in the library — dropping")
+                            return
+                        }
+                        Task { @MainActor in
+                            await BookPlaybackController.shared.resumeBook(book: book, from: chapterIndex)
+                        }
+                    }
                     // Listening-time recording derives from the players'
                     // published state — zero hooks inside the engines.
                     StatsCenter.shared.attach(player: player, audioBooks: audioBooks)
@@ -207,10 +221,11 @@ struct SpeechnotesApp: App {
                         audioBooks.persistNow()
                     }
                     if phase == .active {
-                        // Returning from the app switcher / lock screen: if
-                        // iOS suspended us mid-speech, restart from the
-                        // bookmark.
-                        player.resumeIfBookmarkPending()
+                        // Returning from the app switcher / lock screen:
+                        // re-assert a live session, repair the "playing
+                        // nothing" wedge, and resume a recent bookmark
+                        // (notes AND books) if the process lost its engines.
+                        player.reconcileOnForeground()
                     }
                 }
                 // Environment injection is attached LAST (outermost) so

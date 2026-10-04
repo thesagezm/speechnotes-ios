@@ -54,12 +54,23 @@ final class OpusAudioBackend: BookAudioBackend {
     private var feedExhausted = false
     /// A decode error (never a clean end) — reported once, on main.
     private var decodeFailure: Error?
+    /// PROBE (main thread): has the first decoded buffer been scheduled this
+    /// rearm? A play tap that logs "playback start" but never this line means
+    /// the DECODER produced nothing; "playback start" + this line + silence
+    /// means the decode works and the failure is downstream (graph/route).
+    private var firstBufferScheduled = false
 
     private var stream: OpusPacketStream?
     /// Exclusively owned by `feedQueue`. Rebuilt by every rearm.
     private var decoder: OpusPacketDecoder?
     /// Content samples at the node clock's zero — the current decode start.
     private var baseSamples: Int64 = 0
+
+    /// Route changes and the media server dying are the two events that tear
+    /// a hand-wired `AVAudioEngine` down behind AVPlayer's back. AVPlayer
+    /// rebuilds its own pipeline and never sees them; this one has to.
+    private var configChangeObserver: NSObjectProtocol?
+    private var mediaResetObserver: NSObjectProtocol?
 
     /// A seek that arrived before the stream finished loading
     /// (`AudioBookPlayer` commits a cold seek immediately; reading a long
@@ -111,6 +122,17 @@ final class OpusAudioBackend: BookAudioBackend {
         let codec: String
         var errorDescription: String? {
             "This Ogg stream holds \(codec), not Opus — the reader cannot decode it."
+        }
+    }
+
+    /// The media server died under us — the engine, session and every
+    /// scheduled buffer are void. Reported so `AudioBookPlayer` can rebuild
+    /// the backend through its own cold path rather than this one guessing
+    /// at what a rebuild needs. Internal so the player can test for it by
+    /// type instead of by message text.
+    struct MediaServicesResetError: LocalizedError {
+        var errorDescription: String? {
+            "The system's audio server restarted — the book's playback was interrupted."
         }
     }
 
@@ -220,6 +242,7 @@ final class OpusAudioBackend: BookAudioBackend {
         scheduledEndSamples = 0
         feedExhausted = false
         decodeFailure = nil
+        firstBufferScheduled = false
         lock.unlock()
     }
 
@@ -257,6 +280,7 @@ final class OpusAudioBackend: BookAudioBackend {
         scheduledEndSamples = 0
         feedExhausted = false
         decodeFailure = nil
+        firstBufferScheduled = false
         lock.unlock()
         _ = nextGeneration()
         pump()
@@ -267,7 +291,25 @@ final class OpusAudioBackend: BookAudioBackend {
     /// Main thread.
     private func startPlayback() {
         guard let decoder else { return }
-        AudioSessionSetup.configureIfNeeded(prefix: "OpusAudioBackend")
+        // PROBE: the device log from an Opus play tap has never gone deeper
+        // than "stream ready" — without this line a silent failure cannot be
+        // placed between "engine never started" and "engine ran, no sound".
+        Log.shared.info(
+            "OpusAudioBackend: playback start — \(Int(decoder.format.sampleRate)) Hz, " +
+            "\(decoder.format.channelCount)ch, rate \(rate)"
+        )
+        AudioSessionSetup.configureAndActivate(source: .audiobook, prefix: "OpusAudioBackend")
+        if configChangeObserver == nil {
+            let center = NotificationCenter.default
+            configChangeObserver = center.addObserver(
+                forName: .AVAudioEngineConfigurationChange,
+                object: engine, queue: .main
+            ) { [weak self] _ in self?.handleEngineConfigurationChange() }
+            mediaResetObserver = center.addObserver(
+                forName: AVAudioSession.mediaServicesWereResetNotification,
+                object: nil, queue: .main
+            ) { [weak self] _ in self?.handleMediaServicesReset() }
+        }
         if !nodesAttached {
             engine.attach(node)
             engine.attach(timePitch)
@@ -287,11 +329,50 @@ final class OpusAudioBackend: BookAudioBackend {
                 return
             }
         }
+        // Re-assert on every start: an interruption or route change can leave
+        // the session inactive behind our back, and a configured-but-inactive
+        // session is suspended seconds after the app backgrounds.
+        AudioSessionSetup.activate(prefix: "OpusAudioBackend")
         timePitch.rate = rate
         if !node.isPlaying {
             node.play()
         }
         pump()
+    }
+
+    /// The hardware sample rate changed under us. Reconnect the graph with
+    /// the format it was built for and restart; the node's queued buffers
+    /// survive the reconnect, so this is non-destructive.
+    private func handleEngineConfigurationChange() {
+        Log.shared.info("OpusAudioBackend: engine configuration change — reconnecting")
+        AudioSessionSetup.activate(prefix: "OpusAudioBackend")
+        guard let decoder else { return }
+        if connectedFormat != decoder.format {
+            engine.connect(node, to: timePitch, format: decoder.format)
+            engine.connect(timePitch, to: engine.mainMixerNode, format: decoder.format)
+            connectedFormat = decoder.format
+        }
+        engine.prepare()
+        if !engine.isRunning {
+            do { try engine.start() } catch {
+                Log.shared.error("OpusAudioBackend: restart after configuration change failed — \(error)")
+                onFailed?(error)
+                return
+            }
+        }
+        if wantsPlayback, !node.isPlaying { node.play() }
+        pump()
+    }
+
+    /// The media server died: the session, the engine and every scheduled
+    /// buffer are void. Re-arm the configuration and report the failure so
+    /// `AudioBookPlayer` can rebuild the backend from its own cold path.
+    private func handleMediaServicesReset() {
+        Log.shared.error("OpusAudioBackend: media services reset — invalidating the session and reporting")
+        AudioSessionSetup.invalidateConfiguration()
+        decodeFailure = nil
+        streamLoaded = false
+        onFailed?(MediaServicesResetError())
     }
 
     /// Refills the schedule-ahead window: captures the current decoder +
@@ -341,6 +422,13 @@ final class OpusAudioBackend: BookAudioBackend {
             }
 
             let frames = Int64(chunk.frameLength)
+            lock.lock()
+            let first = !firstBufferScheduled
+            firstBufferScheduled = true
+            lock.unlock()
+            if first {
+                Log.shared.info("OpusAudioBackend: first buffer scheduled (\(frames) frames) — decode confirmed live")
+            }
             node.scheduleBuffer(chunk) { [weak self] in
                 // A buffer finished: the window has room again.
                 DispatchQueue.main.async { [weak self] in

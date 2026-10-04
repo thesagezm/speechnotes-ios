@@ -314,6 +314,17 @@ final class BooksStore: ObservableObject {
                     Self.renameLegacyAudioFileIfNeeded(book: book, directory: dir)
                     let refreshed = Self.buildAudioManifest(book: book, directory: dir)
                     book = refreshed
+                    // TERMINAL MARKER. A book whose file genuinely carries no
+                    // chapter track gets "single" from the manifest builder —
+                    // which this pass's own pending-filter matches, so the
+                    // same whole-file map + box walk + metadata semaphore
+                    // re-ran at EVERY launch (the device log's "Harry Potter"
+                    // re-import and its 8–35 s main-thread hangs). One
+                    // verified re-read is the contract; stamp the result so
+                    // the filter never matches this book again.
+                    if book.audioChapterSource == "single" {
+                        book.audioChapterSource = "single-verified"
+                    }
                 case .epub:
                     guard let data = try? Data(contentsOf: dir.appendingPathComponent("original.epub"), options: .mappedIfSafe),
                           let info = try? EpubParser.parse(archive: data), !info.spine.isEmpty else { continue }

@@ -55,10 +55,21 @@ final class BookmarkStore {
         remove(Self.noteKey(id))
     }
 
+    /// The most recent bookmark of ANY kind saved within `maxAge` — the
+    /// foreground-reconcile auto-resume candidate. Notes AND books now: a
+    /// suspended background session loses its engines either way, and a
+    /// book left mid-listen deserves the same "pick up where you were" a
+    /// note gets. Returns the key so a stale entry (note deleted, book
+    /// gone) can be dropped by the caller.
+    func mostRecentBookmark(within maxAge: TimeInterval) -> (key: String, mark: SpeechPlayer.PlaybackBookmark)? {
+        guard let key = recency.first(where: { bookmarks[$0] != nil }),
+              let mark = bookmarks[key],
+              mark.savedAt >= Date().addingTimeInterval(-maxAge) else { return nil }
+        return (key, mark)
+    }
+
     /// The most recent note-keyed bookmark if it was saved within `maxAge`
-    /// seconds — the single auto-resume candidate for the app returning to
-    /// the foreground. Book bookmarks are never candidates here (they resume
-    /// from the reader's play button).
+    /// seconds. Kept for callers that must never auto-resume a book.
     func mostRecentNoteBookmark(within maxAge: TimeInterval) -> (key: String, mark: SpeechPlayer.PlaybackBookmark)? {
         guard let key = recency.first(where: { $0.hasPrefix("note:") }),
               let mark = bookmarks[key],
