@@ -139,10 +139,10 @@ public struct RenderAheadBankPolicy: Equatable {
         return min(secondsTarget, bytesTarget)
     }
 
-    /// Whether the producer may synthesize the next chunk. `banked ==
-    /// target` holds: the strict `<` is what keeps a producer parked at
-    /// exactly the full mark from generating on a boundary — the bank must
-    /// DRAIN below target before more work is admitted.
+    /// Whether the producer may synthesize the next chunk. At `banked ==
+    /// target` the producer HOLDS (this returns false): the bank must DRAIN
+    /// below target before more work is admitted, so a producer parked at
+    /// exactly the full mark cannot generate back-to-back.
     public static func allows(bankedSeconds: Double, targetSeconds: Double) -> Bool {
         bankedSeconds < targetSeconds
     }

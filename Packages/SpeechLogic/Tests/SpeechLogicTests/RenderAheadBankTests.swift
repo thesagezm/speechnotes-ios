@@ -99,11 +99,8 @@ final class RenderAheadBankTests: XCTestCase {
         XCTAssertTrue(RenderAheadBankPolicy.allows(bankedSeconds: 29.9, targetSeconds: 30))
     }
 
-    /// `banked == target` holds: the strict `<` is what stops a producer
-    /// parked at exactly the full mark from generating — the bank must
-    /// drain below target before more work is admitted. An equality pass
-    /// would make the oscillation loop generate back-to-back with the bank
-    /// never admitted to be full.
+    /// At exactly the target the check returns false: the producer parks and
+    /// the bank must drain below target before it generates again.
     func testHoldsAtExactlyTarget() {
         XCTAssertFalse(RenderAheadBankPolicy.allows(bankedSeconds: 30, targetSeconds: 30))
     }
