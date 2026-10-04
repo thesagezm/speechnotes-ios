@@ -820,10 +820,9 @@ final class StreamingTTSPlaybackCore: NSObject {
             let thisBufferSeconds = Double(buffer.frameLength) / buffer.format.sampleRate
             let bankedBeforeThis = max(0, bankedSeconds() - thisBufferSeconds)
             if RenderAheadBankPolicy.isExhausted(bankedSeconds: bankedBeforeThis) {
-                metrics.bankExhausted(
-                    thermal: ThermalPressure(
-                        thermalStateRawValue: ProcessInfo.processInfo.thermalState.rawValue),
-                    bankedSeconds: bankedBeforeThis)
+                let thermal = ThermalPressure(
+                    thermalStateRawValue: ProcessInfo.processInfo.thermalState.rawValue)
+                metrics.bankExhausted(thermal: "\(thermal)", bankedSeconds: bankedBeforeThis)
             } else {
                 metrics.nodeRestarted()
             }
