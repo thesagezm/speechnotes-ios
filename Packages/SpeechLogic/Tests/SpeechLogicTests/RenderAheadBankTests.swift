@@ -4,7 +4,7 @@
 //
 //  Tests for the render-ahead bank policy (Batch B of the background-
 //  persistence plan) — thermal sizing, the byte cap, the allow check and
-//  the char→seconds estimator.
+//  the exhaustion classification.
 //
 
 import XCTest
@@ -50,6 +50,7 @@ final class RenderAheadBankTests: XCTestCase {
         XCTAssertEqual(policy.totalStep(for: .fair), 8)
         XCTAssertEqual(policy.totalStep(for: .serious), 4)
         XCTAssertEqual(policy.totalStep(for: .critical), 4)
+        XCTAssertEqual(RenderAheadBankPolicy.fullQualityTotalStep, 8)
     }
 
     // MARK: - Byte cap
@@ -90,35 +91,42 @@ final class RenderAheadBankTests: XCTestCase {
         XCTAssertEqual(policy.effectiveTargetSeconds(thermal: .nominal, sampleRate: -24_000), 30)
     }
 
-    // MARK: - Allow check
+    // MARK: - Allow check (the check the producer actually paces on)
 
-    func testAllowsChunkWithinTarget() {
-        let policy = RenderAheadBankPolicy()
-        // 25 s banked + a 5 s estimate = exactly the 30 s nominal target.
-        XCTAssertTrue(policy.allowsNextChunk(
-            bankedSeconds: 25, nextChunkEstimateSeconds: 5, thermal: .nominal, sampleRate: 24_000))
-        XCTAssertFalse(policy.allowsNextChunk(
-            bankedSeconds: 25.1, nextChunkEstimateSeconds: 5, thermal: .nominal, sampleRate: 24_000))
+    /// Generate while the bank is below target.
+    func testAllowsBelowTarget() {
+        XCTAssertTrue(RenderAheadBankPolicy.allows(bankedSeconds: 0, targetSeconds: 30))
+        XCTAssertTrue(RenderAheadBankPolicy.allows(bankedSeconds: 29.9, targetSeconds: 30))
+    }
+
+    /// `banked == target` holds: the strict `<` is what stops a producer
+    /// parked at exactly the full mark from generating — the bank must
+    /// drain below target before more work is admitted. An equality pass
+    /// would make the oscillation loop generate back-to-back with the bank
+    /// never admitted to be full.
+    func testHoldsAtExactlyTarget() {
+        XCTAssertFalse(RenderAheadBankPolicy.allows(bankedSeconds: 30, targetSeconds: 30))
     }
 
     /// Pressure shrinks the target, so the same banked depth that passes at
     /// nominal must hold at critical.
     func testPressureShrinksAllowance() {
         let policy = RenderAheadBankPolicy()
-        XCTAssertTrue(policy.allowsNextChunk(
-            bankedSeconds: 20, nextChunkEstimateSeconds: 5, thermal: .nominal, sampleRate: 24_000))
-        XCTAssertFalse(policy.allowsNextChunk(
-            bankedSeconds: 20, nextChunkEstimateSeconds: 5, thermal: .critical, sampleRate: 24_000))
+        XCTAssertTrue(policy.allowsNext(
+            bankedSeconds: 20, thermal: .nominal, sampleRate: 24_000))
+        XCTAssertFalse(policy.allowsNext(
+            bankedSeconds: 20, thermal: .critical, sampleRate: 24_000))
     }
 
-    /// A negative estimate (a defensive caller) can only make the bank more
-    /// permissive than reality, never NaN the comparison — clamp it to zero.
-    func testNegativeEstimateIsClamped() {
+    /// The allow check can NEVER deadlock, even when the target is smaller
+    /// than one chunk's audio: an empty bank is always below any positive
+    /// target, so the producer can always resume from a drained bank. This
+    /// is the property the rejected estimate-including check lacked.
+    func testEmptyBankAlwaysRefills() {
         let policy = RenderAheadBankPolicy()
-        XCTAssertTrue(policy.allowsNextChunk(
-            bankedSeconds: 30, nextChunkEstimateSeconds: -5, thermal: .nominal, sampleRate: 24_000))
-        XCTAssertFalse(policy.allowsNextChunk(
-            bankedSeconds: 30.1, nextChunkEstimateSeconds: -5, thermal: .nominal, sampleRate: 24_000))
+        // Critical target 8 s vs a hypothetical 20 s chunk: 0 < 8 passes.
+        XCTAssertTrue(policy.allowsNext(
+            bankedSeconds: 0, thermal: .critical, sampleRate: 24_000))
     }
 
     // MARK: - Exhaustion classification
@@ -129,36 +137,14 @@ final class RenderAheadBankTests: XCTestCase {
         XCTAssertFalse(RenderAheadBankPolicy.isExhausted(bankedSeconds: 0.5))
         XCTAssertFalse(RenderAheadBankPolicy.isExhausted(bankedSeconds: 5))
     }
+}
 
-    // MARK: - CharAudioEstimator
-
-    /// With no measurements the seed rate applies: 0.1 s per UTF-16 char.
-    func testEstimatorSeedRate() {
-        let estimator = CharAudioEstimator()
-        XCTAssertEqual(estimator.estimateSeconds(chars: 200), 20, accuracy: 1e-9)
-        XCTAssertEqual(estimator.estimateSeconds(chars: 60), 6, accuracy: 1e-9)
-        XCTAssertEqual(estimator.estimateSeconds(chars: 0), 0)
-    }
-
-    /// Measurements dilute the seed toward the measured rate: after recording
-    /// 200 chars of real audio at 0.05 s/char, a 200-char estimate lands
-    /// midway (0.075 s/char), and more of the same converges further.
-    func testEstimatorConvergesTowardMeasuredRate() {
-        var estimator = CharAudioEstimator()
-        estimator.record(chars: 200, audioSeconds: 10)
-        XCTAssertEqual(estimator.estimateSeconds(chars: 200), 15, accuracy: 1e-9)
-        estimator.record(chars: 200, audioSeconds: 10)
-        XCTAssertEqual(estimator.estimateSeconds(chars: 200), 40.0 / 3.0, accuracy: 1e-9)
-    }
-
-    /// Chunks that produced no audio are real measurements (they get skipped
-    /// upstream) and may pull the estimate down — but a bogus negative one
-    /// must not.
-    func testEstimatorClampsNegativeSecondsAndIgnoresZeroChars() {
-        var estimator = CharAudioEstimator()
-        estimator.record(chars: 0, audioSeconds: 10)
-        XCTAssertEqual(estimator.estimateSeconds(chars: 200), 20, accuracy: 1e-9)
-        estimator.record(chars: 200, audioSeconds: -5)
-        XCTAssertEqual(estimator.estimateSeconds(chars: 200), 10, accuracy: 1e-9)
+private extension RenderAheadBankPolicy {
+    /// Mirrors the core's call shape: effective target at the current
+    /// thermal state, then the static allow check.
+    func allowsNext(bankedSeconds: Double, thermal: ThermalPressure, sampleRate: Double) -> Bool {
+        Self.allows(
+            bankedSeconds: bankedSeconds,
+            targetSeconds: effectiveTargetSeconds(thermal: thermal, sampleRate: sampleRate))
     }
 }

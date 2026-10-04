@@ -199,9 +199,15 @@ final class SupertonicEngine: NSObject, SpeechEngine {
         // Per-chunk thermal read: the step count tracks the CURRENT state, so
         // a session that heats up mid-chapter sheds model work within one
         // chunk instead of running the RTF climb the Batch A log recorded.
+        // The shed is a real-time lever only — an offline export has no
+        // deadline, so it always renders at full quality regardless of heat
+        // (a long export is itself the heat source; shedding would just
+        // lower the file's quality for nothing).
         let thermal = ThermalPressure(
             thermalStateRawValue: ProcessInfo.processInfo.thermalState.rawValue)
-        let step = bankPolicy.totalStep(for: thermal)
+        let step = core.isExporting
+            ? RenderAheadBankPolicy.fullQualityTotalStep
+            : bankPolicy.totalStep(for: thermal)
         let result = try tts.call(text, lang, style, step, speed: core.speed, silenceDuration: 0.05)
         let predictedLen = Int(Float(tts.sampleRate) * result.duration)
         if predictedLen <= 0 {

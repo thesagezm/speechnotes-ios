@@ -180,7 +180,11 @@ What shipped:
   itself is too slow on that device, not the silicon.
 - **Supertonic step shed**: `generateChunk` reads thermal per chunk and
   passes 8 or 4 steps to Helper's `call`; the per-chunk log now carries
-  `steps N` so a slow chunk's line shows whether the shed was active.
+  `steps N` so a slow chunk's line shows whether the shed was active. The
+  shed is a real-time lever only: a WAV export has no deadline, so the
+  core's generateQueue-confined `isExporting` flag pins exports at the
+  full-quality 8 steps regardless of heat (a long export is itself the
+  heat source — shedding would lower the file's quality for zero benefit).
 
 Deliberately rejected: gating the allow check on a PREDICTED next-chunk
 length (an estimate). A target can drop below one chunk's audio length

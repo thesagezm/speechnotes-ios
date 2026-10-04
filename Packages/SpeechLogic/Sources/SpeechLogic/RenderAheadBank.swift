@@ -62,6 +62,13 @@ public enum ThermalPressure: Equatable, CaseIterable {
 /// background is itself a background-persistence failure, which is why the
 /// cap lives in the same policy as the targets.
 ///
+/// The allow check is deliberately just `banked < target` — NOT
+/// `banked + estimatedNextChunk ≤ target`. A target can drop below one
+/// chunk's audio length (critical's 8 s vs a ~20 s chunk), and an
+/// estimate-including check never passes then: the producer wedges forever
+/// with a starving bank. The shipped check overshoots the target by at most
+/// one chunk — bounded, and unable to deadlock.
+///
 /// Pure arithmetic — no clocks, no I/O, no logging — so the whole policy is
 /// assertable in CI (the app target has no test target; this package is the
 /// only one that does).
@@ -78,6 +85,12 @@ public struct RenderAheadBankPolicy: Equatable {
     /// The default byte cap: 32 MB ≈ 349 s at 24 kHz mono Float32.
     public static let defaultByteCapBytes = 32 * 1024 * 1024
 
+    /// Supertonic's full-quality flow-matching step count — the upstream
+    /// ExampleONNX default. Used verbatim at nominal/fair and on offline
+    /// exports (where RTF > 1 costs nothing, so the pressure shed never
+    /// applies).
+    public static let fullQualityTotalStep = 8
+
     public init(byteCapBytes: Int = RenderAheadBankPolicy.defaultByteCapBytes) {
         self.byteCapBytes = byteCapBytes
     }
@@ -87,7 +100,7 @@ public struct RenderAheadBankPolicy: Equatable {
     /// under 1.0 through fair, and the bank's job there is to ride out the
     /// 8–35 s main-thread stalls. At serious and critical it shrinks toward
     /// the minimum useful buffer — generating further ahead of a machine
-    /// that has already lost real-time burns CPU (heat) for audio that
+    /// that has already lost real time burns CPU (heat) for audio that
     /// cannot cover a drain anyway.
     public func targetSeconds(for thermal: ThermalPressure) -> Double {
         switch thermal {
@@ -98,14 +111,13 @@ public struct RenderAheadBankPolicy: Equatable {
     }
 
     /// Supertonic's flow-matching denoising step count, by thermal state.
-    /// The upstream default is 8; under pressure 4. Audio DURATION is set by
-    /// the duration predictor and does not depend on the step count — only
-    /// synthesis time (and quality margin) does — so halving steps halves
-    /// the model's work per chunk without touching pacing arithmetic.
-    /// Kokoro has no step parameter and ignores this.
+    /// Audio DURATION is set by the duration predictor and does not depend
+    /// on the step count — only synthesis time (and quality margin) does —
+    /// so halving steps halves the model's work per chunk without touching
+    /// pacing arithmetic. Kokoro has no step parameter and ignores this.
     public func totalStep(for thermal: ThermalPressure) -> Int {
         switch thermal {
-        case .nominal, .fair: return 8
+        case .nominal, .fair: return Self.fullQualityTotalStep
         case .serious, .critical: return 4
         }
     }
@@ -116,7 +128,7 @@ public struct RenderAheadBankPolicy: Equatable {
     }
 
     /// The target that actually gates the producer: the thermal seconds
-    /// target, floored by the byte cap expressed in seconds. Non-positive
+    /// target, CAPPED by the byte cap expressed in seconds. Non-positive
     /// sample rates fall back to treating the seconds target as binding
     /// (a zero sample rate cannot be converted to bytes; refusing to
     /// generate at all would be a worse failure than an unguarded bank).
@@ -127,18 +139,12 @@ public struct RenderAheadBankPolicy: Equatable {
         return min(secondsTarget, bytesTarget)
     }
 
-    /// Whether the producer may synthesize the next chunk. The estimate is
-    /// the next chunk's PREDICTED audio length (the real length is unknown
-    /// until synthesis), so the bank can overshoot the target by at most one
-    /// chunk — the estimator's error, not a leak.
-    public func allowsNextChunk(
-        bankedSeconds: Double,
-        nextChunkEstimateSeconds: Double,
-        thermal: ThermalPressure,
-        sampleRate: Double
-    ) -> Bool {
-        let clampedEstimate = max(0, nextChunkEstimateSeconds)
-        return bankedSeconds + clampedEstimate <= effectiveTargetSeconds(thermal: thermal, sampleRate: sampleRate)
+    /// Whether the producer may synthesize the next chunk. `banked ==
+    /// target` holds: the strict `<` is what keeps a producer parked at
+    /// exactly the full mark from generating on a boundary — the bank must
+    /// DRAIN below target before more work is admitted.
+    public static func allows(bankedSeconds: Double, targetSeconds: Double) -> Bool {
+        bankedSeconds < targetSeconds
     }
 
     /// Bank depth below which a node drain counts as `bank exhausted`
@@ -151,52 +157,5 @@ public struct RenderAheadBankPolicy: Equatable {
 
     public static func isExhausted(bankedSeconds: Double) -> Bool {
         bankedSeconds < exhaustionThresholdSeconds
-    }
-}
-
-/// Estimates the audio seconds a chunk of N UTF-16 characters will produce,
-/// from the session's own measurements.
-///
-/// The producer needs the next chunk's length BEFORE synthesizing it, and
-/// the duration predictor's answer only exists after synthesis — so the
-/// bank's allow check runs on an estimate. This one is a smoothed
-/// seconds-per-char: `estimate = chars × (seedSeconds + measuredSeconds) /
-/// (seedChars + measuredChars)`, i.e. the seed behaves like 200 characters
-/// of prior measurement and real chunks dilute it within a chunk or two.
-///
-/// The 0.1 s/char seed is the sanity anchor, not a claim: ~10 chars/s is
-/// ordinary speech at rate 1.0, and the estimator's job is only to be within
-/// a chunk-length of the truth so the bank overshoots by at most one chunk.
-/// The caller normalizes for the speed slider (records divide out the speed
-/// they were measured at; estimates divide by the current speed) because a
-/// 2× rate change moves seconds-per-char 2× while this type should stay a
-/// pure char→seconds map.
-public struct CharAudioEstimator {
-    public static let seedChars: Double = 200
-    public static let seedSecondsPerChar: Double = 0.1
-
-    private var measuredChars: Double = 0
-    private var measuredSeconds: Double = 0
-
-    public init() {}
-
-    /// Records one measured chunk. Non-positive char counts are ignored
-    /// (they cannot move a per-char rate); negative seconds are clamped —
-    /// a zero-length audio return is a real measurement (the chunk will be
-    /// skipped upstream) and is allowed to pull the estimate down.
-    public mutating func record(chars: Int, audioSeconds: Double) {
-        let c = Double(chars)
-        guard c > 0 else { return }
-        measuredChars += c
-        measuredSeconds += max(0, audioSeconds)
-    }
-
-    /// Estimated audio seconds for a chunk of `chars` UTF-16 characters.
-    public func estimateSeconds(chars: Int) -> Double {
-        let c = Double(chars)
-        guard c > 0 else { return 0 }
-        let rate = (Self.seedChars * Self.seedSecondsPerChar + measuredSeconds)
-            / (Self.seedChars + measuredChars)
-        return c * rate
     }
 }

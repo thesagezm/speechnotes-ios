@@ -61,6 +61,15 @@ final class StreamingTTSPlaybackCore: NSObject {
     }
     /// generateQueue-only: cheap availability check before a session starts.
     var isModelReady: () -> Bool = { false }
+    /// generateQueue-confined (written only inside `renderWAV`'s
+    /// generateQueue block, read from `generateChunk` on the same serial
+    /// queue): true while a WAV export loop is running. An export has no
+    /// real-time constraint — RTF > 1 costs nothing offline — so engines use
+    /// this to skip real-time-only degradations: Supertonic renders exports
+    /// at its full-quality step count instead of shedding to 4 under
+    /// thermal pressure (a long export is itself the heat source; shedding
+    /// would only lower the file's quality for zero benefit).
+    var isExporting = false
 
     // Callbacks — main thread.
     var onStateChanged: ((SpeechState) -> Void)?
@@ -143,9 +152,11 @@ final class StreamingTTSPlaybackCore: NSObject {
     // state is main-thread, mirrored to the producer (generateQueue) through
     // `bankLock` as one coherent snapshot pair:
     //   banked = (generatedFrames − playedFrames) / sampleRate
-    // generatedFrames grows when a finished buffer enters `bufferPool` and
-    // shrinks on a rate-change purge; playedFrames follows the playhead via
-    // PlayPositionTracker's onPlayedFrames heartbeat.
+    // generatedFrames grows when a finished buffer enters `bufferPool`;
+    // both counters are zeroed together (with the tracker's coordinate
+    // system) on a new session, a rate-change purge and teardown, so the
+    // pair always shares one coordinate system. playedFrames follows the
+    // playhead via PlayPositionTracker's onPlayedFrames heartbeat.
     private var pacingGate: DispatchSemaphore?
     private let bankPolicy = RenderAheadBankPolicy()
     private var generatedFrames: Int64 = 0
@@ -224,9 +235,12 @@ final class StreamingTTSPlaybackCore: NSObject {
         // bank restarts empty here. (The still-playing old-rate buffer's
         // unplayed remainder is under-counted: it will drain from the bank as
         // if it had never been banked. The bias is toward generating a beat
-        // early, which is the safe direction.) The explicit signal is
-        // promptness: the producer may be parked on the gate with a
-        // full-bank snapshot that this purge just invalidated.
+        // early, which is the safe direction. The read-along cursor has the
+        // mirror-image defect for the same reason — it leads the audio by up
+        // to that one buffer's remainder until the next reset — bounded, and
+        // strictly better than reading the whole running clock as played.)
+        // The explicit signal is promptness: the producer may be parked on
+        // the gate with a full-bank snapshot that this purge just invalidated.
         resetBank()
         pacingGate?.signal()
 
@@ -475,7 +489,14 @@ final class StreamingTTSPlaybackCore: NSObject {
             if result == .success { continue }
             if !loggedExtension {
                 loggedExtension = true
-                Log.shared.info("\(config.logPrefix) bank hold extended — main thread stalled or the process suspended; holding the chunk rather than losing it")
+                if state == .paused {
+                    // A parked-during-pause hold is the steady state of a
+                    // paused session (the bank stays full; the tracker
+                    // reports nothing) — not a stall. Name it as one.
+                    Log.shared.info("\(config.logPrefix) producer holding while paused — the bank is full; nothing to do until playback resumes")
+                } else {
+                    Log.shared.info("\(config.logPrefix) bank hold extended — main thread stalled or the process suspended; holding the chunk rather than losing it")
+                }
             }
         }
     }
@@ -963,6 +984,10 @@ final class StreamingTTSPlaybackCore: NSObject {
                 }
                 return
             }
+            // Export-only state, generateQueue-confined (see the property
+            // doc). Cleared when this block exits, however it exits.
+            self.isExporting = true
+            defer { self.isExporting = false }
 
             let formatter = DateFormatter()
             formatter.dateFormat = "yyyy-MM-dd-HHmmss"
