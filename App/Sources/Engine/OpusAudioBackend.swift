@@ -232,8 +232,8 @@ final class OpusAudioBackend: BookAudioBackend {
         stream = nil
         decoder = nil
         pendingSeekTarget = nil
-        if let configChangeObserver {
-            NotificationCenter.default.removeObserver(configChangeObserver)
+        if let observer = configChangeObserver {
+            NotificationCenter.default.removeObserver(observer)
             configChangeObserver = nil
         }
         lock.lock()

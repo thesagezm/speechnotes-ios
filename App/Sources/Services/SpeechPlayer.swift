@@ -401,7 +401,7 @@ final class SpeechPlayer: ObservableObject {
 
     /// Set by SpeechnotesApp so the player can resolve a saved bookmark's
     /// note id back to its current text without importing the store.
-    var notesProvider: ((UUID) -> Note)?
+    var notesProvider: ((UUID) -> Note?)?
     /// Called when the app returns to the foreground from a REAL backgrounding
     /// (the caller gates on that — see SpeechnotesApp's wasBackgrounded).
     /// Three jobs, in order:
