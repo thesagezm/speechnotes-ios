@@ -85,6 +85,11 @@ final class SystemEngine: NSObject, SpeechEngine {
     /// Pause intent: a pause that lands between chunks must stop the queue,
     /// not just the one utterance in flight.
     private var pauseRequested = false
+    /// True once the in-flight chunk reported `didFinish` — a pause held at
+    /// a chunk BOUNDARY (didFinish fired, startNextChunk withheld). The
+    /// rebuild path uses it to resume with the NEXT chunk instead of
+    /// re-speaking the finished one's tail.
+    private var chunkFinished = false
 
     /// Per-word progress callbacks coalesced to ~3.3 Hz — each one publishes
     /// progress and invalidates observing views; word-rate emissions were
@@ -167,18 +172,32 @@ final class SystemEngine: NSObject, SpeechEngine {
         // routes; re-applying is a no-op when the category already matches.
         AudioSessionSetup.configureAndActivate(source: .tts, prefix: "SystemEngine")
         pauseRequested = false
-        // Re-queue the paused chunk's unsound remainder: startNextChunk()
-        // alone would begin the NEXT chunk, silently dropping the
-        // half-spoken sentence. Same math as the mid-session rate re-queue.
-        if let chunk = current, currentCharsDone > 0, currentCharsDone < chunk.text.utf16.count {
-            let units = Array(chunk.text.utf16)
-            let remainder = String(decoding: units[currentCharsDone...], as: UTF16.self)
-            if !remainder.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                let index = max(0, nextIndex - 1)
-                queue[index] = Queued(offset: chunk.offset + currentCharsDone, text: remainder)
-                nextIndex = index
-                currentCharsDone = 0
+        // Resume with exactly the text that has not sounded yet:
+        //  - pause mid-chunk (willSpeak advanced, didFinish not fired) →
+        //    re-queue the unsound remainder;
+        //  - pause before the first word (no willSpeak yet) → re-speak the
+        //    whole chunk from its start (the critique's P2: this case
+        //    silently dropped up to 320 chars);
+        //  - pause at a chunk BOUNDARY (didFinish fired) → continue with
+        //    the next chunk, not the finished one's tail.
+        // All three collapse to: point nextIndex at the chunk that still
+        // owes sound, then startNextChunk().
+        if let chunk = current, !chunkFinished {
+            let spoken = currentCharsDone
+            if spoken > 0, spoken < chunk.text.utf16.count {
+                let units = Array(chunk.text.utf16)
+                let remainder = String(decoding: units[spoken...], as: UTF16.self)
+                if !remainder.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    let index = max(0, nextIndex - 1)
+                    queue[index] = Queued(offset: chunk.offset + spoken, text: remainder)
+                    nextIndex = index
+                }
+            } else {
+                // Nothing sounded yet (or the odd full-length report) — the
+                // whole chunk is still owed.
+                nextIndex = max(0, nextIndex - 1)
             }
+            currentCharsDone = 0
         }
         // State flips to .speaking via the new instance's didStart.
         startNextChunk()
@@ -238,6 +257,7 @@ final class SystemEngine: NSObject, SpeechEngine {
     /// delegate callbacks hop there, and speak()/pause() are main-actor).
     private func startNextChunk() {
         guard !pauseRequested, nextIndex < queue.count else { return }
+        chunkFinished = false
         let item = queue[nextIndex]
         nextIndex += 1
         current = item
@@ -378,6 +398,7 @@ extension SystemEngine: AVSpeechSynthesizerDelegate {
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
         DispatchQueue.main.async { [weak self] in
             guard let self, self.isCurrentSynthesizer(synthesizer) else { return }
+            self.chunkFinished = true
             // Progress reaches exactly 1.0 on the last chunk before the
             // completion signal fires.
             if self.nextIndex >= self.queue.count {

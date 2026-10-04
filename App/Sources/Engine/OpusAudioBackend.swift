@@ -339,15 +339,16 @@ final class OpusAudioBackend: BookAudioBackend {
         pump()
     }
 
-    /// The hardware sample rate changed under us. Reconnect the graph with
-    /// the format it was built for and restart; the node's queued buffers
-    /// survive the reconnect, so this is non-destructive. A PAUSED backend
-    /// stays paused — a route change must not start a book in the user's
-    /// pocket, and `play()` after a pause is exactly that.
+    /// The hardware sample rate changed under us. Repair the graph REGARDLESS
+    /// of playback state — a resume against a graph invalidated by the route
+    /// change is the silent-node condition (the same commit's own comment in
+    /// StreamingTTSPlaybackCore explains why a format match proves nothing).
+    /// A PAUSED backend stays paused: no session activation (re-activating
+    /// with nothing to resume steals the session from whatever the user
+    /// played during the route change), no node.play, no engine start.
     private func handleEngineConfigurationChange() {
         Log.shared.info("OpusAudioBackend: engine configuration change — reconnecting")
-        guard wantsPlayback, let decoder else { return }
-        AudioSessionSetup.activate(prefix: "OpusAudioBackend")
+        guard let decoder else { return }
         // Force the reconnect: a configuration change can invalidate the
         // graph even when the node→mixer format is unchanged.
         connectedFormat = nil
@@ -355,6 +356,8 @@ final class OpusAudioBackend: BookAudioBackend {
         engine.connect(timePitch, to: engine.mainMixerNode, format: decoder.format)
         connectedFormat = decoder.format
         engine.prepare()
+        guard wantsPlayback else { return }
+        AudioSessionSetup.activate(prefix: "OpusAudioBackend")
         if !engine.isRunning {
             do { try engine.start() } catch {
                 Log.shared.error("OpusAudioBackend: restart after configuration change failed — \(error)")

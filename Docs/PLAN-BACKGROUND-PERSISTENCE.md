@@ -55,14 +55,14 @@ classes differ on precisely this one point.
    silent with no error; recreation is the documented recovery. Delegate
    callbacks are guarded by synthesizer identity so a stale `didCancel`
    cannot drive the new instance.
-6. **Bounded pacing wait** (2 s, looped, generation-checked): the producer
+6. **Bounded pacing wait** (2 s passes, generation-checked): the producer
    can no longer park forever on a semaphore only the main queue signals
-   (the R9 mechanism). A timeout is NOT a skip — the producer only waits
+   (the R9 mechanism). A timeout is NEVER a skip — the producer only waits
    when the main thread has fallen more than `generationAheadLimit` chunks
    behind (a transient stall; the device log shows 8–35 s ones), and
-   skipping then would permanently lose the sentence. The loop re-checks
-   the generation each pass, so a superseded or stopped session always
-   exits; the skip path fires only for a genuinely dead (`.idle`) pipeline.
+   skipping then would permanently lose the sentence. The loop exits only
+   for a superseded generation or a dead (`.idle`) pipeline, and it exits
+   quietly — no skip tone against a pipeline that no longer exists.
 7. **`SpeechPlayer.reconcileOnForeground()`** (called from the scenePhase
    hook): re-assert a live session; repair the "state claims speech, no live
    engine" wedge by keeping the bookmark and abandoning only the pipeline;

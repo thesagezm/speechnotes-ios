@@ -366,14 +366,17 @@ final class StreamingTTSPlaybackCore: NSObject {
         state = .idle
     }
 
-    /// How long the producer waits for the playhead before giving up on a
-    /// chunk. A bounded wait, not `wait()` forever: the gate is signalled
-    /// only from the MAIN queue, so a suspended process (no active session,
-    /// no rendering) parks the producer indefinitely — the exact mechanism
-    /// behind regression R9, where a superseded session's producer blocked
-    /// forever on a semaphore nobody would ever signal. Timing out routes
-    /// the chunk down the existing skip path instead: a soft tone, one
-    /// skipped sentence, and the chain keeps advancing.
+    /// How long the producer waits per pass before re-checking. A bounded
+    /// wait, not `wait()` forever: the gate is signalled only from the MAIN
+    /// queue, so a frozen process parks here indefinitely — the exact
+    /// mechanism behind regression R9, where a superseded session's producer
+    /// blocked forever on a semaphore nobody would ever signal. The loop
+    /// re-checks the generation each pass, so a superseded or stopped
+    /// session always wakes and exits. A LIVE session holds the chunk for as
+    /// long as it takes: timing out is never a reason to lose text (see
+    /// `waitForPacingSlot`'s ledger). A permanently wedged main thread does
+    /// park the producer on this serial queue — acceptable, because a
+    /// permanently wedged main thread has stopped the app anyway.
     private static let pacingWaitTimeout: DispatchTimeInterval = .seconds(2)
 
 /// generateQueue. Marks `index` as skipped so the schedule cursor steps
@@ -398,8 +401,8 @@ final class StreamingTTSPlaybackCore: NSObject {
     }
 
     /// Blocks until the playhead signals a scheduling slot. Returns false only
-    /// when the caller should skip the chunk: a superseded generation, or a
-    /// pipeline that is actually dead (.idle). A TIMEOUT IS NOT A SKIP.
+    /// when the caller should exit the producer: a superseded generation, or
+    /// a pipeline that is actually dead (.idle). A TIMEOUT IS NEVER A SKIP.
     ///
     /// The ledger (verify before changing this): `scheduleReadyChunks`
     /// signals once per schedule-cursor advance, and the cursor chases
@@ -512,20 +515,12 @@ final class StreamingTTSPlaybackCore: NSObject {
 
             for (index, chunk) in allChunks.enumerated() {
                 guard waitForPacingSlot(generation: generation) else {
-                    if playbackGeneration == generation {
-                        // The playhead stopped draining (or we were
-                        // suspended): skip this chunk rather than park. The
-                        // schedule cursor steps over it, the listener hears
-                        // one soft tone, and the chain keeps advancing.
-                        reportChunkSkipped(
-                            index: index,
-                            chunkCount: allChunks.count,
-                            chars: chunk.length,
-                            generation: generation,
-                            message: "pacing gate timed out"
-                        )
-                        continue
-                    }
+                    // Superseded, stopped, or the pipeline went .idle: no
+                    // buffer will ever be scheduled from here, so exit the
+                    // producer QUIETLY — a skip tone and bookkeeping would
+                    // fire against a pipeline that no longer exists (the
+                    // critique's P3: the tone was the only part of the skip
+                    // path that still landed).
                     return
                 }
                 // Rate change: buffers synthesized BEFORE the slider moved

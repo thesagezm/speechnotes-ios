@@ -68,15 +68,6 @@ final class BookmarkStore {
         return (key, mark)
     }
 
-    /// The most recent note-keyed bookmark if it was saved within `maxAge`
-    /// seconds. Kept for callers that must never auto-resume a book.
-    func mostRecentNoteBookmark(within maxAge: TimeInterval) -> (key: String, mark: SpeechPlayer.PlaybackBookmark)? {
-        guard let key = recency.first(where: { $0.hasPrefix("note:") }),
-              let mark = bookmarks[key],
-              mark.savedAt >= Date().addingTimeInterval(-maxAge) else { return nil }
-        return (key, mark)
-    }
-
     // MARK: - Private
 
     private func touch(_ key: String) {

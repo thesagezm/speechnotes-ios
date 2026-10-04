@@ -401,10 +401,10 @@ final class SpeechPlayer: ObservableObject {
 
     /// Set by SpeechnotesApp so the player can resolve a saved bookmark's
     /// note id back to its current text without importing the store.
-    var notesProvider: ((UUID) -> Note?)?
-
-    /// Called when the app returns to the foreground — the reconcile that
-    /// `resumeIfBookmarkPending` grew into. Three jobs, in order:
+    var notesProvider: ((UUID) -> Note)?
+    /// Called when the app returns to the foreground from a REAL backgrounding
+    /// (the caller gates on that — see SpeechnotesApp's wasBackgrounded).
+    /// Three jobs, in order:
     ///
     /// 1. **Re-assert a live session.** Backgrounding can leave a session
     ///    configured but inactive (an interruption that fired while the app
@@ -420,16 +420,7 @@ final class SpeechPlayer: ObservableObject {
     ///    with the reader claiming speech; it now picks up where it was.
     ///    The 30-minute window is deliberate: anything older is stale
     ///    context the user did not ask to have replayed.
-    ///
-    /// The INITIAL activation at cold launch is skipped: if the previous run
-    /// crashed mid-speech, a fresh bookmark would replay that speech during
-    /// launch and loop the crash.
-    private var skippedInitialActivation = false
     func reconcileOnForeground() {
-        if !skippedInitialActivation {
-            skippedInitialActivation = true
-            return
-        }
         if state != .idle {
             if let engine, engine.hasLiveSession {
                 AudioSessionSetup.activate(prefix: "SpeechPlayer")
@@ -485,17 +476,6 @@ final class SpeechPlayer: ObservableObject {
     /// Set by SpeechnotesApp so a foreground reconcile can hand a book
     /// bookmark to BookPlaybackController with the BooksStore in scope.
     var bookResumeHandler: ((String, Int) -> Void)?
-
-    /// Called when the app returns to the foreground. If iOS suspended the
-    /// process mid-speech (possible even with the `audio` background mode
-    /// under memory pressure), restart playback from the saved bookmark so
-    /// the user isn't left in silence on return.
-    ///
-    /// Kept as a thin shim over `reconcileOnForeground` for callers that
-    /// predate the reconcile; the reconcile is the real path.
-    func resumeIfBookmarkPending() {
-        reconcileOnForeground()
-    }
 
     /// Stop + speak the full text from the start, clearing any bookmark.
     func restartFromBeginning(_ text: String, note: Note?) {
