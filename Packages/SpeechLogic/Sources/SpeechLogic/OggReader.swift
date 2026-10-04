@@ -147,6 +147,18 @@ public enum OggReader {
         }
     }
 
+    /// One chapter mark read from the stream's OpusTags comments
+    /// (`CHAPTER001=Title` + `CHAPTER001url=timecode`).
+    public struct OggChapter: Equatable, Sendable {
+        public let title: String
+        public let startSeconds: TimeInterval
+
+        public init(title: String, startSeconds: TimeInterval) {
+            self.title = title
+            self.startSeconds = startSeconds
+        }
+    }
+
     /// What an audiobook's manifest needs, read from BOUNDED slices.
     ///
     /// The import path cannot read a whole book — a 664 MB Opus encode would
@@ -162,6 +174,10 @@ public enum OggReader {
         public let preSkip: Int
         public let totalSamples: UInt64
         public let variant: String
+        /// Chapter marks from the OpusTags comments, when the muxer wrote
+        /// them — empty means the stream has none and the caller falls back
+        /// to uniform division.
+        public let chapters: [OggChapter]
 
         public var duration: TimeInterval {
             guard sampleRate > 0 else { return 0 }
@@ -175,6 +191,7 @@ public enum OggReader {
     public static func summary(head: Data, tail: Data) throws -> Summary {
         var offset = head.startIndex
         var info: StreamInfo?
+        var tagsChapters: [OggChapter] = []
         var lastGranule: UInt64 = 0
         var sawPage = false
         while offset < head.endIndex {
@@ -190,6 +207,15 @@ public enum OggReader {
                 // bytes and reported 2ch/0 pre-skip for a 6ch book.
                 if let first = firstPacket(of: page, in: head, at: offset) {
                     info = streamInfo(firstPacket: first)
+                }
+            }
+            // The chapter table rides in OpusTags, the second header packet —
+            // usually its own page, sometimes the same page as OpusHead.
+            // Both placements are covered by walking every page's completed
+            // packets until the tags turn up.
+            if tagsChapters.isEmpty, let packets = completedPackets(of: page, in: head, at: offset) {
+                for packet in packets where tagsChapters.isEmpty {
+                    tagsChapters = chapters(fromTagsPacket: packet)
                 }
             }
             if page.granule > 0 { lastGranule = page.granule }
@@ -211,8 +237,98 @@ public enum OggReader {
             channels: info.channels,
             preSkip: info.preSkip,
             totalSamples: lastGranule,
-            variant: info.codec == .opus ? "opus" : "ogg"
+            variant: info.codec == .opus ? "opus" : "ogg",
+            chapters: tagsChapters
         )
+    }
+
+    private static let opusTagsMagic: [UInt8] = [0x4F, 0x70, 0x75, 0x73, 0x54, 0x61, 0x67, 0x73]
+
+    /// Every packet that COMPLETES on this page — segments accumulate until
+    /// one shorter than 255 terminates a packet, the same assembly `read`
+    /// does. A packet continuing past this page is dropped (chapter tables
+    /// live in small header packets; a continuation is not worth the
+    /// bookkeeping here). Bounded by the caller's head slice.
+    private static func completedPackets(of page: Page, in data: Data, at offset: Int) -> [Data]? {
+        var packets: [Data] = []
+        var bytes: [UInt8] = []
+        for segment in page.segments {
+            guard segment.upperBound <= data.count else { return packets }
+            bytes.append(contentsOf: data[data.startIndex + segment.lowerBound..<(data.startIndex + segment.upperBound)])
+            // OpusTags comments are never this long; a runaway "packet" is
+            // audio data, not metadata.
+            if bytes.count > 512 * 1024 { return packets }
+            if segment.count < 255 {
+                packets.append(Data(bytes))
+                bytes.removeAll(keepingCapacity: true)
+            }
+        }
+        return packets
+    }
+
+    /// Chapter marks out of an OpusTags packet: magic(8), vendor length (4
+    /// LE) + vendor, comment count (4 LE), then count × (length (4 LE) +
+    /// UTF-8 comment). Comments follow the matroska-era convention —
+    /// `CHAPTER001=Title` names the mark, `CHAPTER001url=…` times it
+    /// ("hh:mm:ss.mmm", "mm:ss.mmm" or plain seconds). Anything else in the
+    /// tag list is ignored; a stream without CHAPTER comments yields [].
+    static func chapters(fromTagsPacket packet: Data) -> [OggChapter] {
+        let bytes = [UInt8](packet)
+        guard bytes.count >= 8, Array(bytes.prefix(8)) == opusTagsMagic else { return [] }
+        func le32(_ index: Int) -> Int {
+            Int(bytes[index]) | (Int(bytes[index + 1]) << 8)
+                | (Int(bytes[index + 2]) << 16) | (Int(bytes[index + 3]) << 24)
+        }
+        var cursor = 8
+        guard cursor + 4 <= bytes.count else { return [] }
+        let vendorLength = le32(cursor)
+        cursor += 4 + vendorLength
+        guard vendorLength >= 0, cursor + 4 <= bytes.count else { return [] }
+        let count = le32(cursor)
+        cursor += 4
+        guard count >= 0, count <= 100_000 else { return [] }
+        var titles: [String: String] = [:]
+        var times: [String: String] = [:]
+        for _ in 0..<count {
+            guard cursor + 4 <= bytes.count else { break }
+            let length = le32(cursor)
+            cursor += 4
+            guard length >= 0, cursor + length <= bytes.count else { break }
+            let line = String(bytes: bytes[cursor..<(cursor + length)], encoding: .utf8) ?? ""
+            cursor += length
+            guard let separator = line.firstIndex(of: "=") else { continue }
+            let key = String(line[..<separator])
+            let value = String(line[line.index(after: separator)...])
+            if key.hasPrefix("CHAPTER") {
+                let suffix = key.dropFirst("CHAPTER".count)
+                if suffix.hasSuffix("url") {
+                    times[String(suffix.dropLast("url".count))] = value
+                } else {
+                    titles[String(suffix)] = value
+                }
+            }
+        }
+        guard !times.isEmpty else { return [] }
+        var out: [OggChapter] = []
+        for (key, raw) in times {
+            guard let seconds = Self.chapterTimecode(raw) else { continue }
+            let title = titles[key] ?? "Chapter \(key)"
+            out.append(OggChapter(title: title, startSeconds: seconds))
+        }
+        return out.sorted { $0.startSeconds < $1.startSeconds }
+    }
+
+    /// "00:12:34.500" | "12:34.5" | "754.5" → seconds. Nil when unparseable.
+    static func chapterTimecode(_ text: String) -> TimeInterval? {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return nil }
+        let parts = trimmed.split(separator: ":")
+        var seconds: Double = 0
+        for part in parts {
+            guard let value = Double(part), value >= 0 else { return nil }
+            seconds = seconds * 60 + value
+        }
+        return seconds
     }
 
     /// The first COMPLETE packet on this page, assembled the way `read`

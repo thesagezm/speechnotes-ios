@@ -82,9 +82,13 @@ final class StreamingTTSPlaybackCore: NSObject {
 
     private let generateQueue = DispatchQueue(label: "com.speechnotes.streaming-core", qos: .userInitiated)
 
-    // Playback state — main thread only.
-    private let audioEngine = AVAudioEngine()
-    private let playerNode = AVAudioPlayerNode()
+    // Playback state — main thread only. The engine/node pair is RECREATED
+    // after a media-services reset (`rebuildAudioGraph`): Apple's guidance is
+    // to discard and recreate AVAudioEngines after that event, and reusing
+    // the old object is the `required condition is false: _engine != nil`
+    // crash on the next play tap.
+    private var audioEngine = AVAudioEngine()
+    private var playerNode = AVAudioPlayerNode()
     private var audioNodesAttached = false
     private var audioEngineRunning = false
     private var connectedFormat: AVAudioFormat?
@@ -281,13 +285,7 @@ final class StreamingTTSPlaybackCore: NSObject {
         self.storedSampleRate = config.sampleRate
         self.metrics = PlaybackMetrics(prefix: config.logPrefix)
         super.init()
-        // The bank drains from the playhead: the tracker's heartbeat (main,
-        // ~3 Hz) reports played samples, which recomputeBank turns into a
-        // banked-seconds figure and, at the target crossing, a producer
-        // wakeup.
-        playTracker.onPlayedFrames = { [weak self] frames in
-            self?.handlePlayedFrames(frames)
-        }
+        wirePlayTracker()
         interruptionObserver = NotificationCenter.default.addObserver(
             forName: AVAudioSession.interruptionNotification,
             object: nil,
@@ -327,6 +325,18 @@ final class StreamingTTSPlaybackCore: NSObject {
         }
         if let mediaResetObserver {
             NotificationCenter.default.removeObserver(mediaResetObserver)
+        }
+        // Backstop for the audio graph: every deliberate path stops it via
+        // teardownPlayback(), but a core dropped by a path that skipped that
+        // (an idler nil, an engine swap racing a session) must not have
+        // AVAudioEngine deallocate with a graph still attached. The hop to
+        // main also moves the engine/node pair's deallocation off whatever
+        // thread ran this deinit.
+        let engine = audioEngine
+        let node = playerNode
+        DispatchQueue.main.async {
+            node.stop()
+            engine.stop()
         }
     }
 
@@ -419,6 +429,51 @@ final class StreamingTTSPlaybackCore: NSObject {
         // state = .idle fires teardownPlayback(), which ends the metrics
         // session under its own catch-all — no separate endSession here.
         state = .idle
+        // A media-services reset invalidates every AVAudioEngine in the
+        // process, and Apple's guidance is to DISCARD and recreate them —
+        // the old object's internals are gone, and the next attach/connect/
+        // start on it is the `required condition is false: _engine != nil`
+        // crash the device reported on every tap after the event. Rebuild
+        // the graph now so the reader's play button works.
+        rebuildAudioGraph()
+    }
+
+    /// Main thread. Wires the tracker callback — the bank drains from the
+    /// playhead: the tracker's heartbeat (~3 Hz) reports played samples,
+    /// which recomputeBank turns into a banked-seconds figure and, at the
+    /// target crossing, a producer wakeup.
+    private func wirePlayTracker() {
+        playTracker.onPlayedFrames = { [weak self] frames in
+            self?.handlePlayedFrames(frames)
+        }
+    }
+
+    /// Main thread. Discards the audio graph and builds a fresh one: new
+    /// engine, new node, new tracker, fresh attach/format state, and the
+    /// configuration-change observer re-registered on the NEW engine.
+    /// Called only from the media-services-reset path, with the pipeline
+    /// already torn down (.idle) and no buffers in flight.
+    private func rebuildAudioGraph() {
+        audioEngine.stop()
+        playerNode.stop()
+        if let configChangeObserver {
+            NotificationCenter.default.removeObserver(configChangeObserver)
+        }
+        audioEngine = AVAudioEngine()
+        playerNode = AVAudioPlayerNode()
+        audioNodesAttached = false
+        audioEngineRunning = false
+        connectedFormat = nil
+        playTracker = PlayPositionTracker(playerNode: playerNode)
+        wirePlayTracker()
+        configChangeObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: audioEngine,
+            queue: .main
+        ) { [weak self] _ in
+            self?.handleEngineConfigurationChange()
+        }
+        Log.shared.info("\(config.logPrefix) audio graph rebuilt after media-services reset")
     }
 
     /// How long the producer waits per pass before re-checking. A bounded

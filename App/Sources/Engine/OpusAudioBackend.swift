@@ -110,7 +110,14 @@ final class OpusAudioBackend: BookAudioBackend {
         // After a paused seek the node clock is zero — the base alone is the
         // honest playhead. Mid-pause (no seek) the clock is frozen where
         // pause() stopped it. Both fall out of the same sum.
-        if let renderTime = node.lastRenderTime,
+        //
+        // The engine guard is load-bearing: `lastRenderTime` THROWS the
+        // `_engine != nil` assertion on a node that was never attached, and
+        // the mini-player/Now Playing poll this property the moment the
+        // stream loads — before the first play() has attached anything. That
+        // was the device crash on every book open whose decode had failed.
+        if node.engine != nil,
+           let renderTime = node.lastRenderTime,
            renderTime.isSampleTimeValid,
            let nodeTime = node.playerTime(forNodeTime: renderTime),
            nodeTime.isSampleTimeValid {
@@ -441,9 +448,13 @@ final class OpusAudioBackend: BookAudioBackend {
 
     /// The node's consumed content samples since the current rearm. Thread-
     /// safe to read; 0 while the node has no clock (stopped, paused before
-    /// first play).
+    /// first play). The engine check keeps the read legal on a node that was
+    /// never attached — `lastRenderTime` asserts `_engine != nil` on one,
+    /// and the feed queue calls this after its first schedule, which can
+    /// land before any play() (a book open without playback).
     private func nodeClockSamples() -> Int64 {
-        guard let renderTime = node.lastRenderTime,
+        guard node.engine != nil,
+              let renderTime = node.lastRenderTime,
               renderTime.isSampleTimeValid,
               let nodeTime = node.playerTime(forNodeTime: renderTime),
               nodeTime.isSampleTimeValid else { return 0 }

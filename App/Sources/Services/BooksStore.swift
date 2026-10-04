@@ -330,6 +330,10 @@ final class BooksStore: ObservableObject {
                     // matches this book again — whatever was missing (a
                     // chapter track, embedded art) is what the file has.
                     book.audioChapterSource = (book.audioChapterSource ?? "single") + "-verified"
+                    // The re-import loop the device logs kept showing can
+                    // only mean this stamp never landed; make the write (or
+                    // its failure) visible in the next device log.
+                    Log.shared.info("BooksStore: backfill stamped «\(book.title)» → \(book.audioChapterSource ?? "?"), \(book.audioChapters?.count ?? 0) chapter(s)")
                 case .epub:
                     guard let data = try? Data(contentsOf: dir.appendingPathComponent("original.epub"), options: .mappedIfSafe),
                           let info = try? EpubParser.parse(archive: data), !info.spine.isEmpty else { continue }
@@ -645,22 +649,38 @@ final class BooksStore: ObservableObject {
             if book.audioDuration == nil, ogg.duration > 0 {
                 book.audioDuration = ogg.duration
             }
-            // No muxer's Opus chapter table reaches us as chapter metadata,
-            // so the reader gets the same uniform hour-per-chapter the
-            // playback backend derives from packet granules — the contents
-            // list is real navigation instead of one unskippable row.
+            // Chapter marks the container itself carries (OpusTags
+            // CHAPTERxxx comments — what m4b-tool and friends write when a
+            // chaptered M4B is re-encoded to Ogg) are the real thing; the
+            // uniform division is the FALLBACK for streams with none.
             if book.audioChapters == nil, ogg.duration > 0 {
-                let boundaries = Self.uniformChapterBoundaries(duration: ogg.duration)
-                if boundaries.count > 1 {
-                    book.audioChapters = boundaries.enumerated().map { index, start in
+                if ogg.chapters.count > 1 {
+                    book.audioChapters = ogg.chapters.enumerated().map { index, chapter in
                         AudioChapter(
-                            title: "Part \(index + 1)",
-                            startSeconds: start,
-                            endSeconds: index + 1 < boundaries.count
-                                ? boundaries[index + 1] : ogg.duration
+                            title: chapter.title,
+                            startSeconds: chapter.startSeconds,
+                            endSeconds: index + 1 < ogg.chapters.count
+                                ? ogg.chapters[index + 1].startSeconds : ogg.duration
                         )
                     }
-                    book.audioChapterSource = "ogg-uniform"
+                    book.audioChapterSource = "ogg-chapters"
+                } else {
+                    // No muxer's chapter table reached us — the reader gets
+                    // the same uniform half-hour navigation it always did,
+                    // and the contents list is still real navigation instead
+                    // of one unskippable row.
+                    let boundaries = Self.uniformChapterBoundaries(duration: ogg.duration)
+                    if boundaries.count > 1 {
+                        book.audioChapters = boundaries.enumerated().map { index, start in
+                            AudioChapter(
+                                title: "Part \(index + 1)",
+                                startSeconds: start,
+                                endSeconds: index + 1 < boundaries.count
+                                    ? boundaries[index + 1] : ogg.duration
+                            )
+                        }
+                        book.audioChapterSource = "ogg-uniform"
+                    }
                 }
             }
         }

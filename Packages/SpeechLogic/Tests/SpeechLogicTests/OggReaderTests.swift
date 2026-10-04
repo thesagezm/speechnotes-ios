@@ -134,4 +134,91 @@ final class OggReaderTests: XCTestCase {
         let data = try load("plain.opus")
         XCTAssertThrowsError(try OggReader.read(data.prefix(data.count / 2)))
     }
+
+    // MARK: - OpusTags chapter marks
+
+    /// Builds one Ogg page by hand. The parser verifies the capture pattern
+    /// and walks the segment table — CRC is not checked (it is not needed
+    /// for structure), which is what makes a synthetic page possible.
+    private func oggPage(segments: [Data], granule: UInt64 = 0, serial: UInt32 = 7, seq: UInt32) -> Data {
+        var header = Data([0x4F, 0x67, 0x67, 0x53])   // "OggS"
+        header.append(0)                              // version
+        header.append(0)                              // header type flags
+        var g = granule.littleEndian
+        withUnsafeBytes(of: &g) { header.append(contentsOf: $0) }
+        var s = serial.littleEndian
+        withUnsafeBytes(of: &s) { header.append(contentsOf: $0) }
+        var q = seq.littleEndian
+        withUnsafeBytes(of: &q) { header.append(contentsOf: $0) }
+        header.append(contentsOf: [0, 0, 0, 0])       // CRC — unchecked here
+        header.append(UInt8(segments.count))
+        for segment in segments { header.append(UInt8(segment.count)) }
+        var page = header
+        for segment in segments { page.append(segment) }
+        return page
+    }
+
+    private func opusTagsPacket(comments: [String]) -> Data {
+        var out = Data("OpusTags".utf8)
+        var vendor = UInt32(0).littleEndian
+        withUnsafeBytes(of: &vendor) { out.append(contentsOf: $0) }
+        var count = UInt32(comments.count).littleEndian
+        withUnsafeBytes(of: &count) { out.append(contentsOf: $0) }
+        for comment in comments {
+            var length = UInt32(comment.utf8.count).littleEndian
+            withUnsafeBytes(of: &length) { out.append(contentsOf: $0) }
+            out.append(contentsOf: comment.utf8)
+        }
+        return out
+    }
+
+    private func opusHeadPacket(channels: UInt8 = 2) -> Data {
+        var head = Data("OpusHead".utf8)
+        head.append(1)          // version
+        head.append(channels)
+        var preSkip = UInt16(312).littleEndian
+        withUnsafeBytes(of: &preSkip) { head.append(contentsOf: $0) }
+        var rate = UInt32(48_000).littleEndian
+        withUnsafeBytes(of: &rate) { head.append(contentsOf: $0) }
+        head.append(contentsOf: [0, 0])   // gain
+        head.append(0)                    // mapping family 0
+        return head
+    }
+
+    /// A head slice carrying OpusHead and OpusTags on two pages, with
+    /// CHAPTER marks, yields them from `summary` in timeline order.
+    func testSummaryReadsChapterMarksFromOpusTags() throws {
+        let head = oggPage(segments: [opusHeadPacket()], seq: 0)
+            + oggPage(segments: [opusTagsPacket(comments: [
+                "CHAPTER002=The Vanishing Glass",
+                "CHAPTER002url=00:29:30.500",
+                "CHAPTER001=The Boy Who Lived",
+                "CHAPTER001url=00:00:00.000",
+                "encoder=Lavf59.27.100",
+            ])], seq: 1)
+        // A one-page tail: the final granule sets the duration (100 s).
+        let tail = oggPage(segments: [Data(repeating: 0xFC, count: 100)], granule: 4_800_000, seq: 2)
+
+        let summary = try OggReader.summary(head: head, tail: tail)
+        XCTAssertEqual(summary.chapters.count, 2)
+        XCTAssertEqual(summary.chapters[0].title, "The Boy Who Lived")
+        XCTAssertEqual(summary.chapters[0].startSeconds, 0, accuracy: 0.001)
+        XCTAssertEqual(summary.chapters[1].title, "The Vanishing Glass")
+        XCTAssertEqual(summary.chapters[1].startSeconds, 29 * 60 + 30.5, accuracy: 0.001)
+    }
+
+    /// A stream without CHAPTER comments reports no chapters — the caller's
+    /// uniform fallback must stay in the picture.
+    func testTagsWithoutChapterCommentsYieldNoChapters() {
+        let tags = opusTagsPacket(comments: ["encoder=Lavf59.27.100", "title=Something"])
+        XCTAssertEqual(OggReader.chapters(fromTagsPacket: tags).count, 0)
+    }
+
+    func testChapterTimecodeForms() {
+        XCTAssertEqual(OggReader.chapterTimecode("01:02:03.500")!, 3723.5, accuracy: 0.001)
+        XCTAssertEqual(OggReader.chapterTimecode("12:34.5")!, 754.5, accuracy: 0.001)
+        XCTAssertEqual(OggReader.chapterTimecode("754.5")!, 754.5, accuracy: 0.001)
+        XCTAssertNil(OggReader.chapterTimecode("not a time"))
+        XCTAssertNil(OggReader.chapterTimecode(""))
+    }
 }

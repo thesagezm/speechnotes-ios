@@ -58,12 +58,19 @@ final class PlayPositionTracker {
     /// With `nodeSampleBase = -currentSample`, the next report is
     /// played-SINCE-reset. If the clock restarts afterwards (stop/play),
     /// the first-report heal in `report()` re-zeros the base exactly.
+    ///
+    /// The clock read is guarded on `engine != nil`: `AVAudioNode.
+    /// lastRenderTime` THROWS the `_engine != nil` assertion when the node
+    /// is not attached to an engine — which is the normal state of a fresh
+    /// `speak()` (this reset runs before the first schedule has ever
+    /// attached the node), and was the device crash on every play tap.
     func reset() {
         timer?.invalidate()
         timer = nil
         markers = []
         scheduledEndSample = 0
-        if let renderTime = playerNode.lastRenderTime,
+        if playerNode.engine != nil,
+           let renderTime = playerNode.lastRenderTime,
            renderTime.isSampleTimeValid,
            let playerTime = playerNode.playerTime(forNodeTime: renderTime),
            playerTime.isSampleTimeValid {
@@ -87,6 +94,11 @@ final class PlayPositionTracker {
 
     private func report() {
         guard playerNode.isPlaying else { return }
+        // The heartbeat cannot fire for a node that was never attached (it
+        // starts at willSchedule), but a rebuild/teardown racing a tick must
+        // not reach the clock — the same `_engine != nil` assertion reset()
+        // guards.
+        guard playerNode.engine != nil else { return }
         guard let renderTime = playerNode.lastRenderTime,
               renderTime.isSampleTimeValid,
               let playerTime = playerNode.playerTime(forNodeTime: renderTime),

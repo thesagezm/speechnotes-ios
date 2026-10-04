@@ -17,6 +17,7 @@ public final class OpusPacketDecoder {
     public enum OpusDecoderError: LocalizedError, Sendable {
         case noHeader
         case noOutput
+        case badFormat(channels: Int)
 
         public var errorDescription: String? {
             switch self {
@@ -24,6 +25,8 @@ public final class OpusPacketDecoder {
                 return "This Opus stream has no readable header."
             case .noOutput:
                 return "The Opus decoder returned no audio."
+            case .badFormat(let channels):
+                return "Cannot build a \(channels)-channel audio format on this device."
             }
         }
     }
@@ -38,7 +41,11 @@ public final class OpusPacketDecoder {
     private var pendingDrop: Int
 
     private let opus: OpusLib
+    /// The STREAM's channel count — what libopus decodes into the scratch.
     private let channels: Int
+    /// The OUTPUT's channel count — min(2, `channels`); see the format note
+    /// in `init`. Multichannel streams are downmixed on the way out.
+    private let outputChannels: Int
     private let packets: [OpusPacketStream.Packet]
     private var index: Int
     private var scratch: [Float]
@@ -57,17 +64,26 @@ public final class OpusPacketDecoder {
     ) throws {
         guard let headerPacket = stream.headerPacket else { throw OpusDecoderError.noHeader }
         let lib = try OpusLib(head: headerPacket)
-        guard let format = AVAudioFormat(
+        // The DECODE runs at the stream's channel count (libopus multistream
+        // writes all of them), but the OUTPUT is downmixed to at most stereo:
+        // the layout-less format initializer returns NIL on iOS for >2
+        // channels, and AVAudioUnitTimePitch — the speed knob — accepts only
+        // mono/stereo. Every 5.1 book used to die at the format build with
+        // the misleading `noOutput` ("the decoder returned no audio" when
+        // nothing had been decoded yet; the device log's instant
+        // `decoder rearm failed — noOutput` right after `stream ready`).
+        channels = lib.channels
+        outputChannels = min(2, channels)
+        guard let built = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
             sampleRate: Double(lib.sampleRate),
-            channels: AVAudioChannelCount(lib.channels),
+            channels: AVAudioChannelCount(outputChannels),
             interleaved: false
         ) else {
-            throw OpusDecoderError.noOutput
+            throw OpusDecoderError.badFormat(channels: outputChannels)
         }
+        format = built
         self.opus = lib
-        self.format = format
-        self.channels = lib.channels
         self.packets = stream.packets
         // Never start on the headers (granule 0, an Ogg-only concept).
         let firstAudio = stream.packets.firstIndex { $0.granule > 0 } ?? stream.packets.count
@@ -128,11 +144,37 @@ public final class OpusPacketDecoder {
         body.withUnsafeBufferPointer { input in
             guard let base = input.baseAddress,
                   let destinations = buffer.floatChannelData else { return }
-            // libopus writes interleaved; the engine wants planar.
-            for channel in 0..<channels {
-                let destination = destinations[channel]
-                for frame in 0..<frames {
-                    destination[frame] = input[frame * channels + channel]
+            // libopus writes interleaved; the engine wants planar. When the
+            // stream is multichannel, Lo/Ro-downmix to stereo on the way:
+            // both centers onto both outputs at -3 dB, the surrounds at
+            // -6 dB on their own side, LFE dropped (it carries only the
+            // rumble a book does not need). Vorbis/Opus channel order is
+            // assumed for the matrix: 6ch = L C R Ls Rs LFE.
+            if outputChannels == channels {
+                for channel in 0..<outputChannels {
+                    let destination = destinations[channel]
+                    for frame in 0..<frames {
+                        destination[frame] = base[frame * channels + channel]
+                    }
+                }
+                return
+            }
+            let lfeIndex = channels >= 6 ? 5 : -1
+            for frame in 0..<frames {
+                let frameBase = frame * channels
+                var left = base[frameBase] + 0.707 * base[frameBase + 1]
+                var right = base[frameBase + 2] + 0.707 * base[frameBase + 1]
+                if channels >= 5 {
+                    left += 0.5 * base[frameBase + 3]
+                    right += 0.5 * base[frameBase + 4]
+                }
+                if lfeIndex >= 0 {
+                    left += 0.25 * base[frameBase + lfeIndex]
+                    right += 0.25 * base[frameBase + lfeIndex]
+                }
+                destinations[0][frame] = max(-1, min(1, left))
+                if outputChannels == 2 {
+                    destinations[1][frame] = max(-1, min(1, right))
                 }
             }
         }
