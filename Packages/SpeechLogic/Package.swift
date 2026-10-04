@@ -69,8 +69,12 @@ let package = Package(
                 .headerSearchPath("silk/float"),
                 // Fixed point is unused by the decoder; the runtime build
                 // libopus uses everywhere (VLC included) is float-only.
-                .define("OPUS_BUILD", to: "0"),
-                .define("FIXED_POINT", to: "0"),
+                // libopus requires OPUS_BUILD (it has no config.h in a
+                // SwiftPM build) and a stack-allocation mode. VAR_ARRAYS is
+                // the mode every non-hardened reference build uses and the
+                // one this target is compiled and tested with.
+                .define("OPUS_BUILD"),
+                .define("VAR_ARRAYS"),
             ]
         ),
         .target(
