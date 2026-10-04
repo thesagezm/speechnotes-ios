@@ -472,6 +472,14 @@ jobs:
         if: success()
         run: ./Scripts/package-ipa.sh build/SpeechnotesIOS.xcarchive
 
+      - name: Upload dSYM artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dSYMs
+          path: build/SpeechnotesIOS.xcarchive/dSYMs
+          if-no-files-found: error
+
       - name: Upload IPA artifact
         if: success()
         uses: actions/upload-artifact@v4
