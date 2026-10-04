@@ -294,7 +294,8 @@ public enum OggReader {
         cursor += 4
         guard count >= 0, count <= 100_000 else { return [] }
         var titles: [String: String] = [:]   // "001" → title
-        var times: [String: String] = [:]    // "001" → timecode
+        var times: [String: String] = [:]    // "001" → bare-key timecode
+        var urlTimes: [String: String] = [:] // "001" → url-field timecode
         for _ in 0..<count {
             guard cursor + 4 <= bytes.count else { break }
             let length = le32(cursor)
@@ -305,34 +306,38 @@ public enum OggReader {
             guard let separator = line.firstIndex(of: "=") else { continue }
             let key = String(line[..<separator])
             let value = String(line[line.index(after: separator)...])
-            guard key.hasPrefix("CHAPTER") else { continue }
+            // Vorbis comment field names are case-insensitive.
+            let upperKey = key.uppercased()
+            guard upperKey.hasPrefix("CHAPTER") else { continue }
             // The key shape is CHAPTER<number>[NAME|URL|TIME]; the digits are
-            // the mark's identity and the role suffix (case-insensitive)
-            // says what the value means.
-            let suffix = key.dropFirst("CHAPTER".count)
+            // the mark's identity and the role suffix says what the value
+            // means.
+            let suffix = upperKey.dropFirst("CHAPTER".count)
             let digits = suffix.prefix(while: \.isNumber)
             guard !digits.isEmpty else { continue }
             let number = String(digits)
-            switch suffix.dropFirst(digits.count).lowercased() {
+            switch suffix.dropFirst(digits.count) {
             case "":
                 times[number] = value          // bare key IS the timecode
-            case "name":
+            case "NAME":
                 titles[number] = value
-            case "url", "time":
+            case "URL", "TIME":
                 // Spec-wise a URL is a link; some writers store the
-                // timecode here — keep it only when it parses as one.
-                if times[number] == nil, Self.chapterTimecode(value) != nil {
-                    times[number] = value
-                }
+                // timecode here — kept only when it parses as one.
+                urlTimes[number] = value
             default:
                 break
             }
         }
-        guard !times.isEmpty else { return [] }
+        guard !times.isEmpty || !urlTimes.isEmpty else { return [] }
         var out: [OggChapter] = []
-        for (key, raw) in times {
-            guard let seconds = Self.chapterTimecode(raw) else { continue }
-            let title = titles[key] ?? "Chapter \(key)"
+        // The bare key wins; the url/time field is the fallback when the
+        // bare value does not parse as a timecode (or is absent).
+        for number in Array(Set(times.keys).union(urlTimes.keys)).sorted() {
+            let candidates = [times[number], urlTimes[number]].compactMap { $0 }
+            guard let raw = candidates.first(where: { Self.chapterTimecode($0) != nil }),
+                  let seconds = Self.chapterTimecode(raw) else { continue }
+            let title = titles[number] ?? "Chapter \(number)"
             out.append(OggChapter(title: title, startSeconds: seconds))
         }
         return out.sorted { $0.startSeconds < $1.startSeconds }

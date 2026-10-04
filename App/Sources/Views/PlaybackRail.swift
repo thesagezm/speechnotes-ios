@@ -151,7 +151,6 @@ struct PlaybackRail: View {
                 .padding(.vertical, 14)
                 .frame(width: Self.idealWidth)
                 .fixedSize(horizontal: false, vertical: true)
-                .frame(minHeight: proxy.size.height)
                 .background(
                     RoundedRectangle(cornerRadius: 26, style: .continuous)
                         .fill(.bar)
@@ -179,6 +178,11 @@ struct PlaybackRail: View {
                     .padding(.trailing, 4)
                     .accessibilityLabel("Minimize playback rail")
                 }
+                // The centering wrapper is OUTERMOST so the card's visuals
+                // hug the natural content: when the card is shorter than the
+                // column the frame centers it at column height; when it is
+                // taller the frame is inert and the overflow scrolls.
+                .frame(minHeight: proxy.size.height)
             }
             .scrollBounceBehavior(.basedOnSize)
         }
