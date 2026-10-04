@@ -459,7 +459,9 @@ jobs:
           # audio playback alone.
           APP_PATH="$(find build -path '*Products/Applications/*.app' -maxdepth 6 | head -n 1)"
           test -n "$APP_PATH" || { echo "::error::archived .app not found"; exit 1; }
-          MODES=$(/usr/libexec/PlistBuddy -c 'Print :UIBackgroundModes' "$APP_PATH/Info.plist" 2>/dev/null | grep -E '^[[:space:]]*[^[:space:]]' | tr -d ' \t' | tr '\n' ',' | sed 's/,$//')
+          # PlistBuddy prints "Array {" / "}" around the elements — drop the
+          # brace lines and keep the indented element tokens.
+          MODES=$(/usr/libexec/PlistBuddy -c 'Print :UIBackgroundModes' "$APP_PATH/Info.plist" 2>/dev/null | grep -vE '[{}]' | grep -E '^[[:space:]]*[^[:space:]]' | tr -d ' \t' | tr '\n' ',' | sed 's/,$//')
           echo "Archived UIBackgroundModes: $MODES"
           test "$MODES" = "audio" || {
             echo "::error::UIBackgroundModes must be exactly [audio] (got: $MODES). Additions need a documented App Review rationale; removals reintroduce the background-death bug."
