@@ -421,7 +421,7 @@ final class StreamingTTSPlaybackCore: NSObject {
         }
         var loggedExtension = false
         while true {
-            let result = pacingGate?.wait(timeout: Self.pacingWaitTimeout)
+            let result = pacingGate?.wait(timeout: .now() + Self.pacingWaitTimeout)
             if playbackGeneration != generation { return false }
             if result == .success { return true }
             if state == .idle { return false }

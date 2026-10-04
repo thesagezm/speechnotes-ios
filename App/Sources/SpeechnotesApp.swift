@@ -107,7 +107,8 @@ struct SpeechnotesApp: App {
                     StatsCenter.shared.attach(player: player, audioBooks: audioBooks)
                     // BookDrop: route landed files into the import
                     // pipelines; start the receiver if the toggle was left on.
-                    let books = self.books
+                    // (`books` was declared beside `notes` above — the
+                    // foreground reconcile's bookResumeHandler shares it.)
                     LocalSendReceiver.shared.router = { @MainActor url in
                         let ext = url.pathExtension.lowercased()
                         if ext == "jex" {
