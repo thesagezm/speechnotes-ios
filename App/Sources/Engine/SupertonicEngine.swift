@@ -1,5 +1,6 @@
 import AVFoundation
 import OnnxRuntimeBindings
+import SpeechLogic
 
 /// Supertonic engine (Supertone supertonic-3): flow-matching TTS over 4 ONNX
 /// sessions, CPU-only, driven entirely by the vendored upstream Helper.swift
@@ -34,11 +35,18 @@ final class SupertonicEngine: NSObject, SpeechEngine {
         set { core.speed = newValue }
     }
 
-    /// Upstream ExampleONNX default — 8 denoising steps.
-    private static let totalStep = 8
     /// Supertonic's own chunker accepts up to 300 chars for non-CJK; our
     /// sentence chunks stay a bit tighter for responsiveness.
     private static let chunkMaxChars = 200
+    /// Thermal-driven render-ahead policy — Batch B. The bank (targets,
+    /// byte cap) lives in the core; the engine reads the same policy for the
+    /// denoising step count: 8 upstream default, 4 under thermal pressure
+    /// (the device log measured RTF 0.48 at nominal but 1.68 at critical —
+    /// past 1.0 the model cannot keep real time, and halving the steps is
+    /// the lever that halves per-chunk work). Duration comes from the
+    /// duration predictor, not the step count, so pacing arithmetic is
+    /// unaffected.
+    private let bankPolicy = RenderAheadBankPolicy()
 
     private let core: StreamingTTSPlaybackCore
 
@@ -72,7 +80,6 @@ final class SupertonicEngine: NSObject, SpeechEngine {
             // (TTFA 15.4 s) while an 11-char opener was 1.7 s. Cap the first
             // chunk so speech starts fast; the rest stay full-size.
             firstMaxChars: 60,
-            generationAheadLimit: 2,
             exportInterChunkSilence: 0.05,
             logPrefix: "SupertonicEngine"
         ))
@@ -189,7 +196,13 @@ final class SupertonicEngine: NSObject, SpeechEngine {
             throw SupertonicEngineError.noVoices
         }
         let started = Date()
-        let result = try tts.call(text, lang, style, Self.totalStep, speed: core.speed, silenceDuration: 0.05)
+        // Per-chunk thermal read: the step count tracks the CURRENT state, so
+        // a session that heats up mid-chapter sheds model work within one
+        // chunk instead of running the RTF climb the Batch A log recorded.
+        let thermal = ThermalPressure(
+            thermalStateRawValue: ProcessInfo.processInfo.thermalState.rawValue)
+        let step = bankPolicy.totalStep(for: thermal)
+        let result = try tts.call(text, lang, style, step, speed: core.speed, silenceDuration: 0.05)
         let predictedLen = Int(Float(tts.sampleRate) * result.duration)
         if predictedLen <= 0 {
             // The duration predictor returned nothing usable — log the text so
@@ -206,11 +219,11 @@ final class SupertonicEngine: NSObject, SpeechEngine {
             throw SupertonicEngineError.noOutput
         }
         let duration = Double(playableLen) / core.sampleRate
-        // The RTF climbed 0.5 → 5.3 WITHIN one session on device and
-        // recovered on the next — thermal throttling is the prime suspect.
-        // Log the state per chunk so the next round's logs decide it.
-        let thermal = ["nominal", "fair", "serious", "critical"][min(3, ProcessInfo.processInfo.thermalState.rawValue)]
-        Log.shared.info("SupertonicEngine: \(String(format: "%.1f", duration))s audio in \(String(format: "%.2f", Date().timeIntervalSince(started)))s (\(voice), \(lang), thermal \(thermal))")
+        // Thermal throttling is the prime suspect whenever the RTF climbs
+        // WITHIN a session (0.5 → 5.3 on device, recovered next chunk); the
+        // step count rides along in the line so a device log shows whether
+        // Batch B's 8→4 shed was active when a slow chunk happened.
+        Log.shared.info("SupertonicEngine: \(String(format: "%.1f", duration))s audio in \(String(format: "%.2f", Date().timeIntervalSince(started)))s (\(voice), \(lang), thermal \(thermal), steps \(step))")
         return Array(result.wav.prefix(playableLen))
     }
 

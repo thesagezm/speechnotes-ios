@@ -136,6 +136,11 @@ final class PlaybackMetrics {
     private var lastBufferEndedAt: ContinuousClock.Instant?
     private var gapCount = 0
     private var worstGapSeconds: Double = 0
+    /// Gaps whose cause the render-ahead bank identified: the bank was
+    /// empty at the drain, i.e. synthesis fell behind the playhead (the
+    /// thermal-pressure signature). The main-thread-stall GAP — banked
+    /// audio sitting unscheduled — is the complement.
+    private var bankExhaustions = 0
 
     private var pausedAt: ContinuousClock.Instant?
     private var pausedSeconds: Double = 0
@@ -166,6 +171,7 @@ final class PlaybackMetrics {
         lastBufferEndedAt = nil
         gapCount = 0
         worstGapSeconds = 0
+        bankExhaustions = 0
         pausedAt = nil
         pausedSeconds = 0
         pauseCount = 0
@@ -219,7 +225,7 @@ final class PlaybackMetrics {
         emit("session \(reason) — \(generatedChunks) chunks (\(skippedChunks) skipped), "
             + "\(twoDP(totalAudioSeconds))s audio, \(twoDP(totalGenerationSeconds))s gen, "
             + "synthesis RTF \(twoDP(synthesisRTF)) [\(rtfRange)]\(drift), "
-            + "TTFA \(ttfaText), T2B \(t2bText), gaps \(gapCount) (worst \(twoDP(worstGapSeconds))s, lower bound), "
+            + "TTFA \(ttfaText), T2B \(t2bText), gaps \(gapCount) (worst \(twoDP(worstGapSeconds))s, lower bound; \(bankExhaustions) bank-exhausted), "
             + "wall \(twoDP(wall))s incl. \(twoDP(pausedSeconds))s paused across \(pauseCount) pause(s), "
             + "rate@start \(twoDP(Double(sessionRate)))")
     }
@@ -356,6 +362,23 @@ final class PlaybackMetrics {
         worstGapSeconds = max(worstGapSeconds, gap)
         lastBufferEndedAt = nil
         emit("GAP \(twoDP(gap))s of silence — node drained after \(scheduledBuffers) buffers, restarted for buffer \(scheduledBuffers + 1)",
+             isError: Self.gapIsError(gap))
+    }
+
+    /// A node drain the render-ahead bank explains: the bank held ~nothing
+    /// when the refilling buffer arrived, so the silence is SYNTHESIS falling
+    /// behind the playhead — the thermal-pressure signature Batch B exists
+    /// for — not the main-thread-stall case where banked audio sat
+    /// unscheduled. Counts in the session's gap figure (it IS audible
+    /// silence) with its own tally beside it in the summary.
+    func bankExhausted(thermal: String, bankedSeconds: Double) {
+        guard sessionActive, let ended = lastBufferEndedAt else { return }
+        let gap = Self.seconds(from: ended, to: ContinuousClock.now)
+        gapCount += 1
+        worstGapSeconds = max(worstGapSeconds, gap)
+        bankExhaustions += 1
+        lastBufferEndedAt = nil
+        emit("bank exhausted — \(twoDP(gap))s of silence, bank held \(twoDP(bankedSeconds))s at the drain, thermal \(thermal) — synthesis fell behind playback",
              isError: Self.gapIsError(gap))
     }
 

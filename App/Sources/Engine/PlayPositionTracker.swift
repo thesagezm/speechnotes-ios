@@ -13,6 +13,11 @@ final class PlayPositionTracker {
     private let playerNode: AVAudioPlayerNode
     /// Fired with the played UTF-16 character count of the spoken string.
     var onPlayedChars: ((Int) -> Void)?
+    /// Fired from the heartbeat with the node's played sample count in the
+    /// tracker's current coordinate system (rebase-aware — see `report()`),
+    /// for callers that think in audio time rather than characters: the
+    /// streaming core's render-ahead bank drains on this.
+    var onPlayedFrames: ((Int64) -> Void)?
 
     private var markers: [(endSample: Int64, endChar: Int)] = []
     private var scheduledEndSample: Int64 = 0
@@ -44,13 +49,29 @@ final class PlayPositionTracker {
     }
 
     /// Clear markers + heartbeat — on idle or a new speak.
+    ///
+    /// The played-sample coordinate system is re-zeroed against the node's
+    /// LIVE clock, not just zeroed: `purgeStaleRateBuffers` resets the
+    /// tracker mid-session while the node keeps playing, so a plain zero
+    /// would make the next report read the whole running clock as played
+    /// (bank accounting would see an empty bank forever and stop pacing).
+    /// With `nodeSampleBase = -currentSample`, the next report is
+    /// played-SINCE-reset. If the clock restarts afterwards (stop/play),
+    /// the first-report heal in `report()` re-zeros the base exactly.
     func reset() {
         timer?.invalidate()
         timer = nil
         markers = []
         scheduledEndSample = 0
+        if let renderTime = playerNode.lastRenderTime,
+           renderTime.isSampleTimeValid,
+           let playerTime = playerNode.playerTime(forNodeTime: renderTime),
+           playerTime.isSampleTimeValid {
+            nodeSampleBase = -playerTime.sampleTime
+        } else {
+            nodeSampleBase = 0
+        }
         lastNodeSample = -1
-        nodeSampleBase = 0
         lastEmittedChar = 0
         scannedMarker = 0
     }
@@ -76,8 +97,17 @@ final class PlayPositionTracker {
         if lastNodeSample >= 0, sample < lastNodeSample {
             nodeSampleBase += lastNodeSample
         }
+        // First report after a reset whose node clock then RESTARTED (the
+        // speak() case: reset read the old session's running clock, then
+        // stop/play zeroed it). The stored base is negative and the fresh
+        // clock starts below it — drop the base so played counts from the
+        // restart instead of staying negative until the clock catches up.
+        if lastNodeSample < 0, nodeSampleBase < 0, sample < -nodeSampleBase {
+            nodeSampleBase = 0
+        }
         lastNodeSample = sample
         let played = nodeSampleBase + sample
+        onPlayedFrames?(played)
 
         var prevSample: Int64 = 0
         var prevChar = 0

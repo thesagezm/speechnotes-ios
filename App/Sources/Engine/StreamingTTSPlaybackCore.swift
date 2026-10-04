@@ -16,11 +16,18 @@ import SpeechLogic
 ///    and `isModelReady` closures are ONLY ever called there, which is what
 ///    makes the engines' model state single-thread-confined.
 ///
-/// Pacing: the producer may hold at most `generationAheadLimit` generated-
-/// but-not-yet-scheduled chunks; instead of polling (the old 50 ms
-/// Thread.sleep spin), it blocks on a semaphore signaled once per scheduled
-/// chunk. Live rate: `speed` is read per chunk on generateQueue, so slider
-/// changes apply from the next sentence without restarting playback.
+/// Pacing (Batch B, the render-ahead bank): the producer may synthesize the
+/// next chunk while the BANK — generated-but-unplayed audio, measured in
+/// SECONDS — is below the target from `RenderAheadBankPolicy`, which sizes
+/// the target from thermal state and caps it in bytes. Chunk count was the
+/// wrong unit: chunk audio length varies ~40×, so "2 chunks ahead" was
+/// anywhere from 2 s to 40 s of protection against the 8–35 s main-thread
+/// stalls the device log records. The bank drains from the playhead
+/// (PlayPositionTracker's heartbeat reports played samples); the semaphore
+/// is only a wakeup token, never credit — every pass re-reads the bank, so
+/// a surplus signal is inert and a missed one costs at most the 2 s
+/// re-check. Live rate: `speed` is read per chunk on generateQueue, so
+/// slider changes apply from the next sentence without restarting playback.
 final class StreamingTTSPlaybackCore: NSObject {
 
     struct Config {
@@ -36,8 +43,6 @@ final class StreamingTTSPlaybackCore: NSObject {
         /// following-sentence wait (restores the v0.4 first/batch asymmetry —
         /// TTS_BASELINE §2). Nil = chunkMaxChars.
         var firstMaxChars: Int? = nil
-        /// How many chunks beyond the playback cursor the producer may run.
-        let generationAheadLimit: Int
         /// Inter-chunk pause baked into WAV exports only (playback itself
         /// schedules back-to-back). Kept small so a skipped chunk reads as a
         /// breath, not dead air.
@@ -96,8 +101,8 @@ final class StreamingTTSPlaybackCore: NSObject {
     private var storedSpeed: Float = 1.0
     /// Playback generation when `storedSpeed` last changed. The producer uses
     /// this to drain stale-rate buffers: buffers scheduled BEFORE a rate
-    /// change carry the old speed, and waiting for all `generationAheadLimit`
-    /// of them to play out made a 1.0→2.0 slider move take seconds of audible
+    /// change carry the old speed, and waiting for every banked old-rate
+    /// buffer to play out made a 1.0→2.0 slider move take seconds of audible
     /// old-rate speech to catch up (rate is baked in at synthesis). Written
     /// under rateLock (main), read under rateLock (generateQueue).
     private var speedChangedGeneration = 0
@@ -133,10 +138,28 @@ final class StreamingTTSPlaybackCore: NSObject {
         rateLock.lock(); storedSampleRate = rate; rateLock.unlock()
     }
 
-    // Pacing — `freeChunksRemaining` is generateQueue-only; the gate is
-    // created per generation and signaled once per scheduled chunk (main).
+    // Pacing — the render-ahead bank. The gate is created per generation
+    // and used ONLY as a wakeup token; the bank is the actual throttle. Bank
+    // state is main-thread, mirrored to the producer (generateQueue) through
+    // `bankLock` as one coherent snapshot pair:
+    //   banked = (generatedFrames − playedFrames) / sampleRate
+    // generatedFrames grows when a finished buffer enters `bufferPool` and
+    // shrinks on a rate-change purge; playedFrames follows the playhead via
+    // PlayPositionTracker's onPlayedFrames heartbeat.
     private var pacingGate: DispatchSemaphore?
-    private var freeChunksRemaining = 0
+    private let bankPolicy = RenderAheadBankPolicy()
+    private var generatedFrames: Int64 = 0
+    private var playedFrames: Int64 = 0
+    private let bankLock = NSLock()
+    private var bankedSecondsSnapshot: Double = 0
+    private var bankTargetSecondsSnapshot: Double = 0
+    /// Last recompute found NO room — the edge that arms the producer's
+    /// wakeup signal for when the bank drains back below target. Main only.
+    private var bankHadNoRoom = false
+    /// Wakeup-token flood size for generation bumps (stop/supersede/reset):
+    /// enough signals to un-park a producer from any wait; the loop
+    /// re-checks, so surplus tokens are inert.
+    private static let gateFloodCount = 8
 
     /// TTFA / T2B / RTF / gap / stall instrumentation. Records and logs only
     /// — it never gates playback, so an instrumented build behaves exactly
@@ -178,13 +201,14 @@ final class StreamingTTSPlaybackCore: NSObject {
         guard firstPurged <= scheduledUpTo else { return }
 
         let purgedCount = scheduledUpTo - firstPurged + 1
-        let purgedAudioSeconds = (firstPurged...scheduledUpTo).reduce(0.0) { total, idx in
+        var purgedFrames: Int64 = 0
+        for idx in firstPurged...scheduledUpTo {
             let slot = bufferSlots[idx]
             if slot >= 0, let buffer = bufferPool[slot] {
-                return total + Double(buffer.frameLength) / buffer.format.sampleRate
+                purgedFrames += Int64(buffer.frameLength)
             }
-            return total
         }
+        let purgedAudioSeconds = Double(purgedFrames) / sampleRate
 
         for idx in firstPurged...scheduledUpTo {
             let slot = bufferSlots[idx]
@@ -195,6 +219,16 @@ final class StreamingTTSPlaybackCore: NSObject {
         }
         scheduledUpTo = firstPurged - 1
         playTracker.reset()
+        // The purged buffers leave the bank, and the tracker reset re-zeroed
+        // the playhead coordinate system against the live node clock — so the
+        // bank restarts empty here. (The still-playing old-rate buffer's
+        // unplayed remainder is under-counted: it will drain from the bank as
+        // if it had never been banked. The bias is toward generating a beat
+        // early, which is the safe direction.) The explicit signal is
+        // promptness: the producer may be parked on the gate with a
+        // full-bank snapshot that this purge just invalidated.
+        resetBank()
+        pacingGate?.signal()
 
         Log.shared.info("\(config.logPrefix) rate change — purged \(purgedCount) stale-rate buffer(s) (\(String(format: "%.1f", purgedAudioSeconds))s of buffered audio), regenerating from chunk \(firstPurged)")
     }
@@ -233,6 +267,13 @@ final class StreamingTTSPlaybackCore: NSObject {
         self.storedSampleRate = config.sampleRate
         self.metrics = PlaybackMetrics(prefix: config.logPrefix)
         super.init()
+        // The bank drains from the playhead: the tracker's heartbeat (main,
+        // ~3 Hz) reports played samples, which recomputeBank turns into a
+        // banked-seconds figure and, at the target crossing, a producer
+        // wakeup.
+        playTracker.onPlayedFrames = { [weak self] frames in
+            self?.handlePlayedFrames(frames)
+        }
         interruptionObserver = NotificationCenter.default.addObserver(
             forName: AVAudioSession.interruptionNotification,
             object: nil,
@@ -357,7 +398,7 @@ final class StreamingTTSPlaybackCore: NSObject {
         // Buffers were decoded against the old engine configuration and
         // cannot be trusted; drop the whole pipeline.
         playbackGeneration += 1
-        for _ in 0...(config.generationAheadLimit + 1) {
+        for _ in 0..<Self.gateFloodCount {
             pacingGate?.signal()
         }
         stopStallWatchdog()
@@ -374,7 +415,7 @@ final class StreamingTTSPlaybackCore: NSObject {
     /// re-checks the generation each pass, so a superseded or stopped
     /// session always wakes and exits. A LIVE session holds the chunk for as
     /// long as it takes: timing out is never a reason to lose text (see
-    /// `waitForPacingSlot`'s ledger). A permanently wedged main thread does
+    /// `waitForBankRoom`'s ledger). A permanently wedged main thread does
     /// park the producer on this serial queue — acceptable, because a
     /// permanently wedged main thread has stopped the app anyway.
     private static let pacingWaitTimeout: DispatchTimeInterval = .seconds(2)
@@ -400,39 +441,90 @@ final class StreamingTTSPlaybackCore: NSObject {
         }
     }
 
-    /// Blocks until the playhead signals a scheduling slot. Returns false only
+    /// Blocks until the bank has room for the next chunk. Returns false only
     /// when the caller should exit the producer: a superseded generation, or
-    /// a pipeline that is actually dead (.idle). A TIMEOUT IS NEVER A SKIP.
+    /// a pipeline that is actually dead (.idle). A TIMEOUT IS NEVER A SKIP —
+    /// the ledger from the chunk-count gate carries over: the bank drains
+    /// only from the playhead, whose reports come through the MAIN queue, so
+    /// while the main thread is stalled (the device log shows 8–35 s ones)
+    /// the snapshot is frozen and the producer parks here. Skipping then
+    /// would permanently lose the sentence; waiting costs nothing the
+    /// listener hears (the node holds the banked audio).
     ///
-    /// The ledger (verify before changing this): `scheduleReadyChunks`
-    /// signals once per schedule-cursor advance, and the cursor chases
-    /// generation one-to-one, so the first `generationAheadLimit` chunks
-    /// consume free lanes whose later signals leave a permanent surplus —
-    /// on a healthy session the producer NEVER blocks here, no matter how
-    /// slow synthesis or the playhead is. It blocks only when the main
-    /// thread has fallen more than `generationAheadLimit` chunks behind,
-    /// i.e. a transient stall — and the device log shows those run 8–35 s.
-    /// Skipping then would permanently lose the sentence; waiting costs
-    /// nothing the listener hears (the node holds ~L chunks of buffered
-    /// audio). The R9 fix this replaces needed a WAKEUP, not a surrender:
-    /// the loop re-checks the generation each pass, so a superseded or
-    /// stopped session always exits.
-    private func waitForPacingSlot(generation: Int) -> Bool {
-        if freeChunksRemaining > 0 {
-            freeChunksRemaining -= 1
-            return playbackGeneration == generation
-        }
+    /// The semaphore is a wakeup token, not credit: every pass re-reads the
+    /// bank snapshot, so a surplus signal is inert and a missed one costs at
+    /// most `pacingWaitTimeout` of latency. On a healthy session the
+    /// recompute edge-signals the moment the bank drains below target, so
+    /// the wait ends in well under a second; a TIMEOUT means the main thread
+    /// is not recompute-ing at all — logged once per hold, it is the same
+    /// information the old `pacing wait extended` line carried.
+    private func waitForBankRoom(generation: Int) -> Bool {
         var loggedExtension = false
         while true {
+            bankLock.lock()
+            let banked = bankedSecondsSnapshot
+            let target = bankTargetSecondsSnapshot
+            bankLock.unlock()
+            if RenderAheadBankPolicy.allows(bankedSeconds: banked, targetSeconds: target) {
+                return playbackGeneration == generation
+            }
+            if playbackGeneration != generation { return false }
+            if state == .idle { return false }
             let result = pacingGate?.wait(timeout: .now() + Self.pacingWaitTimeout)
             if playbackGeneration != generation { return false }
-            if result == .success { return true }
-            if state == .idle { return false }
+            if result == .success { continue }
             if !loggedExtension {
                 loggedExtension = true
-                Log.shared.info("\(config.logPrefix) producer pacing wait extended — main thread stalled or the process suspended; holding the chunk rather than losing it")
+                Log.shared.info("\(config.logPrefix) bank hold extended — main thread stalled or the process suspended; holding the chunk rather than losing it")
             }
         }
+    }
+
+    /// Main thread. Recomputes the bank snapshot the producer paces on:
+    /// banked seconds, the effective target at the CURRENT thermal state,
+    /// and an edge-triggered wakeup when room re-appears. Thermal state is
+    /// read here — per heartbeat (~3 Hz) and per scheduling event — so the
+    /// bank re-sizes within a heartbeat of a thermal transition, which is
+    /// the point of thermal sizing.
+    private func recomputeBank() {
+        let rate = sampleRate
+        let thermal = ThermalPressure(
+            thermalStateRawValue: ProcessInfo.processInfo.thermalState.rawValue)
+        let target = bankPolicy.effectiveTargetSeconds(thermal: thermal, sampleRate: rate)
+        let bankedFrames = max(0, generatedFrames - playedFrames)
+        let banked = Double(bankedFrames) / max(1, rate)
+        bankLock.lock()
+        bankedSecondsSnapshot = banked
+        bankTargetSecondsSnapshot = target
+        bankLock.unlock()
+        let hasRoom = RenderAheadBankPolicy.allows(bankedSeconds: banked, targetSeconds: target)
+        if hasRoom, bankHadNoRoom {
+            pacingGate?.signal()
+        }
+        bankHadNoRoom = !hasRoom
+    }
+
+    /// Locked banked-seconds read for the drain classification in `schedule`.
+    private func bankedSeconds() -> Double {
+        bankLock.lock(); defer { bankLock.unlock() }
+        return bankedSecondsSnapshot
+    }
+
+    /// Playhead advanced (tracker heartbeat, main thread).
+    private func handlePlayedFrames(_ frames: Int64) {
+        playedFrames = max(0, frames)
+        recomputeBank()
+    }
+
+    /// Zero the bank for a fresh coordinate system — a new session or a
+    /// rate-change purge, both of which reset the play tracker. Counters
+    /// start empty and the first post-reset tracker reports continue from
+    /// there. Main thread only.
+    private func resetBank() {
+        generatedFrames = 0
+        playedFrames = 0
+        bankHadNoRoom = false
+        recomputeBank()
     }
 
     // MARK: - SpeechEngine surface
@@ -469,7 +561,7 @@ final class StreamingTTSPlaybackCore: NSObject {
         // Supersede any in-flight producer: signal the gate it may be
         // blocked on BEFORE replacing it, so it wakes, reads the bumped
         // generation, and exits instead of leaking until stop().
-        for _ in 0...(config.generationAheadLimit + 1) {
+        for _ in 0..<Self.gateFloodCount {
             pacingGate?.signal()
         }
 
@@ -487,12 +579,16 @@ final class StreamingTTSPlaybackCore: NSObject {
         rateLock.lock()
         speedChangedGeneration = generation
         rateLock.unlock()
+        // Fresh bank: an empty bank lets the producer start on chunk 0
+        // immediately (TTFA is untouched by the bank) and fills toward the
+        // thermal target from there.
+        resetBank()
 
-        // Fresh gate per generation: the first generationAheadLimit chunks
-        // pass free, every later one waits for a schedule signal. stop()
-        // floods the gate so a blocked producer always wakes and exits.
+        // Fresh gate per generation. The bank is the throttle; the gate is
+        // only the producer's wakeup token (recomputeBank edge-signals it
+        // when the bank drains below target). stop() floods the gate so a
+        // blocked producer always wakes and exits.
         pacingGate = DispatchSemaphore(value: 0)
-        freeChunksRemaining = config.generationAheadLimit
 
         generateQueue.async { [weak self] in
             guard let self, self.playbackGeneration == generation else { return }
@@ -514,7 +610,7 @@ final class StreamingTTSPlaybackCore: NSObject {
             }
 
             for (index, chunk) in allChunks.enumerated() {
-                guard waitForPacingSlot(generation: generation) else {
+                guard self.waitForBankRoom(generation: generation) else {
                     // Superseded, stopped, or the pipeline went .idle: no
                     // buffer will ever be scheduled from here, so exit the
                     // producer QUIETLY — a skip tone and bookkeeping would
@@ -524,8 +620,8 @@ final class StreamingTTSPlaybackCore: NSObject {
                     return
                 }
                 // Rate change: buffers synthesized BEFORE the slider moved
-                // carry the OLD speed. Waiting for all `generationAheadLimit`
-                // of them to play out made 1.0→2.0 take seconds to land —
+                // carry the OLD speed. Waiting for every banked old-rate
+                // buffer to play out made 1.0→2.0 take seconds to land —
                 // audible dead-air transition latency. Instead of waiting we
                 // drop the not-yet-playing ones (the producer regenerates
                 // them at the new rate from the same chunk list), reset the
@@ -567,6 +663,17 @@ final class StreamingTTSPlaybackCore: NSObject {
                         self.nextBufferId += 1
                         self.bufferPool[id] = buffer
                         self.bufferSlots[index] = id
+                        // The chunk's frames enter the bank the moment they
+                        // exist in memory — that is the jetsam-relevant
+                        // instant, and the byte cap is about memory, not
+                        // scheduling. `generatedFrames` is session-cumulative;
+                        // the playhead side drains it. The recompute runs
+                        // BEFORE the schedule below: schedule()'s drain
+                        // classification reads this snapshot and subtracts
+                        // THIS buffer's seconds, which is only coherent if
+                        // the buffer is already in it.
+                        self.generatedFrames += Int64(buffer.frameLength)
+                        self.recomputeBank()
                         // Schedule FIRST. The log call is a DateFormatter, a
                         // UUID, two String(format:) and two GCD dispatches —
                         // tens of microseconds of main-thread work, but it
@@ -616,7 +723,7 @@ final class StreamingTTSPlaybackCore: NSObject {
         playbackGeneration += 1
         // Unblock a producer waiting on the gate; it re-checks the
         // generation and exits. A handful of signals is always enough.
-        for _ in 0...(config.generationAheadLimit + 1) {
+        for _ in 0..<Self.gateFloodCount {
             pacingGate?.signal()
         }
         // Invalidated here, not only via `teardownPlayback()`: speak() starts
@@ -668,8 +775,8 @@ final class StreamingTTSPlaybackCore: NSObject {
         playTracker.onPlayedChars = { [weak self] playedChars in
             guard let self else { return }
             // Play-accurate progress: derived from the position that is
-            // ACTUALLY sounding, not the schedule cursor (which runs up to
-            // generationAheadLimit chunks ahead of the ears).
+            // ACTUALLY sounding, not the schedule cursor (which runs as far
+            // ahead as the render-ahead bank is deep).
             self.onProgress?(min(1.0, Double(playedChars) / Double(self.totalChars)))
             self.onPlayedChars?(playedChars)
         }
@@ -700,9 +807,27 @@ final class StreamingTTSPlaybackCore: NSObject {
         } else if restartedAfterDrain {
             playerNode.play()
         }
-        // Order matters: nodeRestarted labels the gap with the buffer count as
-        // it stood BEFORE this one is added to it.
-        if restartedAfterDrain { metrics.nodeRestarted() }
+        // Order matters: the gap is labeled with the buffer count as it
+        // stood BEFORE this one is added to it, and the bank depth compared
+        // is the snapshot minus THIS buffer — its frames are in the bank
+        // (generated, unplayed) but had not reached the node when the drain
+        // happened. An empty bank at the drain is synthesis-bound silence
+        // (`bank exhausted` — the thermal-pressure signature Batch B exists
+        // for); banked audio that scheduling could not reach is the
+        // main-thread-stall GAP. Both are audible silence and both count in
+        // the session's gap figure; the split names the cause.
+        if restartedAfterDrain {
+            let thisBufferSeconds = Double(buffer.frameLength) / buffer.format.sampleRate
+            let bankedBeforeThis = max(0, bankedSeconds() - thisBufferSeconds)
+            if RenderAheadBankPolicy.isExhausted(bankedSeconds: bankedBeforeThis) {
+                metrics.bankExhausted(
+                    thermal: ThermalPressure(
+                        thermalStateRawValue: ProcessInfo.processInfo.thermalState.rawValue),
+                    bankedSeconds: bankedBeforeThis)
+            } else {
+                metrics.nodeRestarted()
+            }
+        }
         metrics.bufferScheduled(
             chars: chunks[index].length,
             audioSeconds: Double(buffer.frameLength) / buffer.format.sampleRate
@@ -798,6 +923,9 @@ final class StreamingTTSPlaybackCore: NSObject {
         bufferPool = [:]
         bufferSlots = []
         scheduledUpTo = -1
+        // Session dead — zero the bank counters so a stale snapshot can never
+        // pace a session that no longer exists (a new session re-zeros again).
+        resetBank()
         // Catch-all: a natural finish and a user stop both close the session
         // first, so reaching here with one still open means the pipeline was
         // torn down underneath it (model not ready, engine failed to start).

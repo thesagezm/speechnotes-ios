@@ -93,7 +93,6 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
             // exposing it. SentenceChunker keeps the 510-token ceiling via
             // `batchMaxChars`; this only re-opens the v0.4 fast-start.
             firstMaxChars: 100,
-            generationAheadLimit: 3,
             exportInterChunkSilence: 0,
             logPrefix: "OnnxKokoroEngine"
         ))

@@ -122,7 +122,7 @@ classes differ on precisely this one point.
 Per surface — system voice, Kokoro, Supertonic, M4B, one 5.1 EAC3, one Opus:
 
 - Filter the log for `metrics`. Green: `audio` seconds ≈ `wall` seconds,
-  `gaps 0`, no `STALL`, no `session teardown`. A `pacing wait extended`
+  `gaps 0`, no `STALL`, no `session teardown`. A `bank hold extended`
   line is INFORMATION on a healthy session (it means the main thread
   stalled briefly and the chunk was held, not lost); any `skipped` line
   is a real event worth the log.
@@ -134,9 +134,57 @@ Per surface — system voice, Kokoro, Supertonic, M4B, one 5.1 EAC3, one Opus:
 - Supertonic 20+ min for the RTF quartiles; export the log rather than
   screenshotting (500-entry ring, 300-line tail).
 
-## 6. Batch B preview
+## 6. Batch B — the render-ahead bank (shipped 2026-10-04)
 
-Bank arithmetic and policy in `Packages/SpeechLogic` (the only CI-testable
-target — the app has no test target). Producer throttled on banked
-audio-seconds signalled from `PlayPositionTracker`; drain under thermal
-pressure logged as `bank exhausted`, distinct from `nodeRestarted`.
+The producer's throttle moved from CHUNK COUNT to AUDIO SECONDS. The old
+`generationAheadLimit` chunks was the wrong unit: chunk audio length varies
+~40× between a short sentence and a packed 200-char chunk, so "2 chunks
+ahead" was anywhere from 2 s to 40 s of protection against the 8–35 s
+main-thread stalls the device log records. The device log also supplied the
+sizing justification: synthesis RTF measured 0.48 at nominal but 1.68 at
+critical — past 1.0 the model cannot keep real time no matter how far ahead
+it starts.
+
+What shipped:
+
+- **`RenderAheadBankPolicy` in `Packages/SpeechLogic`** (the only
+  CI-testable target): bank targets by thermal state — 30 s nominal/fair,
+  15 s serious, 8 s critical — a hard BYTE cap (32 MB ≈ 349 s at 24 kHz
+  mono Float32; the §4 jetsam guard, binding only if a future retune
+  raises the seconds targets), and Supertonic's denoising step count:
+  8 nominal/fair, 4 serious/critical. Audio duration comes from the
+  duration predictor, not the step count, so the 8→4 shed never disturbs
+  the pacing arithmetic.
+- **Producer pacing** (`StreamingTTSPlaybackCore.waitForBankRoom`):
+  generate while `banked < target`, where banked = generated-but-unplayed
+  PCM frames over the session, written on main (pool inserts + the
+  playhead) and read on generateQueue through one lock as a coherent
+  snapshot pair. The semaphore is now only a WAKEUP token — every pass
+  re-reads the bank — so the old chunk-count ledger's surplus-signal
+  property holds by construction, and the R9 exit conditions (superseded
+  generation, .idle) are unchanged. A TIMEOUT IS NEVER A SKIP.
+- **Bank drains from the playhead**: `PlayPositionTracker` grew an
+  `onPlayedFrames` callback on its existing 0.3 s heartbeat. `reset()`
+  re-zeroes against the node's LIVE clock (`nodeSampleBase = −current`),
+  because the rate-change purge resets the tracker mid-session while the
+  node keeps playing — a plain zero would read the whole running clock as
+  played and the bank would never refill. A first-report heal covers the
+  opposite case (reset read the old clock, then stop/play restarted it).
+- **Drain classification**: a node drain with ~no bank left (<0.5 s, the
+  tracker's heartbeat quantisation) logs `bank exhausted` — synthesis fell
+  behind the playhead, the thermal-pressure signature; a drain with banked
+  audio still unscheduled stays `GAP` — the main-thread-stall case. Both
+  count in the session's gap figure; the summary splits the tally
+  (`N bank-exhausted`), so a device log names the cause of every silent
+  stretch. A `bank exhausted` line with thermal `nominal` means the model
+  itself is too slow on that device, not the silicon.
+- **Supertonic step shed**: `generateChunk` reads thermal per chunk and
+  passes 8 or 4 steps to Helper's `call`; the per-chunk log now carries
+  `steps N` so a slow chunk's line shows whether the shed was active.
+
+Deliberately rejected: gating the allow check on a PREDICTED next-chunk
+length (an estimate). A target can drop below one chunk's audio length
+(critical's 8 s vs a 20 s chunk), and a `banked + estimate ≤ target` check
+never passes then — the producer wedges forever. The shipped check
+(`banked < target`) overshoots the target by at most one chunk — bounded,
+and unable to deadlock.
