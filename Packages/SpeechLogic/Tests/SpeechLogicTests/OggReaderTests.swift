@@ -185,15 +185,17 @@ final class OggReaderTests: XCTestCase {
         return head
     }
 
-    /// A head slice carrying OpusHead and OpusTags on two pages, with
-    /// CHAPTER marks, yields them from `summary` in timeline order.
+    /// A head slice carrying OpusHead and OpusTags on two pages yields the
+    /// chapter marks from `summary`, in timeline order. The comments use the
+    /// convention ffmpeg/m4b-tool actually write: the BARE `CHAPTER001` key
+    /// carries the timecode and `CHAPTER001NAME` the title.
     func testSummaryReadsChapterMarksFromOpusTags() throws {
         let head = oggPage(segments: [opusHeadPacket()], seq: 0)
             + oggPage(segments: [opusTagsPacket(comments: [
-                "CHAPTER002=The Vanishing Glass",
-                "CHAPTER002url=00:29:30.500",
-                "CHAPTER001=The Boy Who Lived",
-                "CHAPTER001url=00:00:00.000",
+                "CHAPTER001=00:00:00.000",
+                "CHAPTER001NAME=The Boy Who Lived",
+                "CHAPTER002=00:29:30.500",
+                "CHAPTER002NAME=The Vanishing Glass",
                 "encoder=Lavf59.27.100",
             ])], seq: 1)
         // A one-page tail: the final granule sets the duration (100 s).
@@ -205,6 +207,20 @@ final class OggReaderTests: XCTestCase {
         XCTAssertEqual(summary.chapters[0].startSeconds, 0, accuracy: 0.001)
         XCTAssertEqual(summary.chapters[1].title, "The Vanishing Glass")
         XCTAssertEqual(summary.chapters[1].startSeconds, 29 * 60 + 30.5, accuracy: 0.001)
+    }
+
+    /// Writers that put the timecode in the URL field instead of the bare
+    /// key still produce marks; a literal non-time URL does not.
+    func testUrlFieldTimecodeCompat() {
+        let tags = opusTagsPacket(comments: [
+            "CHAPTER001NAME=Start",
+            "CHAPTER001url=00:01:30.000",
+            "CHAPTER002NAME=End",
+            "CHAPTER002url=https://example.com/chapter2",
+        ])
+        let chapters = OggReader.chapters(fromTagsPacket: tags)
+        XCTAssertEqual(chapters.count, 1)
+        XCTAssertEqual(chapters[0].startSeconds, 90, accuracy: 0.001)
     }
 
     /// A stream without CHAPTER comments reports no chapters — the caller's

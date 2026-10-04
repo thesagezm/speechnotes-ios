@@ -268,10 +268,16 @@ public enum OggReader {
 
     /// Chapter marks out of an OpusTags packet: magic(8), vendor length (4
     /// LE) + vendor, comment count (4 LE), then count × (length (4 LE) +
-    /// UTF-8 comment). Comments follow the matroska-era convention —
-    /// `CHAPTER001=Title` names the mark, `CHAPTER001url=…` times it
-    /// ("hh:mm:ss.mmm", "mm:ss.mmm" or plain seconds). Anything else in the
-    /// tag list is ignored; a stream without CHAPTER comments yields [].
+    /// UTF-8 comment).
+    ///
+    /// Chapter comments follow the Xiph chapter extension as ffmpeg and
+    /// m4b-tool actually write it: `CHAPTER001=00:00:00.000` (the BARE key
+    /// carries the TIMECODE) and `CHAPTER001NAME=Chapter 1` (the NAME suffix
+    /// carries the title). `CHAPTER001URL=…` is a literal URL in the spec,
+    /// but some writers put a timecode there instead — accepted as a
+    /// fallback when it parses as one. Suffix matching is case-insensitive;
+    /// anything unparseable is skipped, and a stream with no usable marks
+    /// yields [] (the caller's uniform fallback takes over).
     static func chapters(fromTagsPacket packet: Data) -> [OggChapter] {
         let bytes = [UInt8](packet)
         guard bytes.count >= 8, Array(bytes.prefix(8)) == opusTagsMagic else { return [] }
@@ -287,8 +293,8 @@ public enum OggReader {
         let count = le32(cursor)
         cursor += 4
         guard count >= 0, count <= 100_000 else { return [] }
-        var titles: [String: String] = [:]
-        var times: [String: String] = [:]
+        var titles: [String: String] = [:]   // "001" → title
+        var times: [String: String] = [:]    // "001" → timecode
         for _ in 0..<count {
             guard cursor + 4 <= bytes.count else { break }
             let length = le32(cursor)
@@ -299,13 +305,27 @@ public enum OggReader {
             guard let separator = line.firstIndex(of: "=") else { continue }
             let key = String(line[..<separator])
             let value = String(line[line.index(after: separator)...])
-            if key.hasPrefix("CHAPTER") {
-                let suffix = key.dropFirst("CHAPTER".count)
-                if suffix.hasSuffix("url") {
-                    times[String(suffix.dropLast("url".count))] = value
-                } else {
-                    titles[String(suffix)] = value
+            guard key.hasPrefix("CHAPTER") else { continue }
+            // The key shape is CHAPTER<number>[NAME|URL|TIME]; the digits are
+            // the mark's identity and the role suffix (case-insensitive)
+            // says what the value means.
+            let suffix = key.dropFirst("CHAPTER".count)
+            let digits = suffix.prefix(while: \.isNumber)
+            guard !digits.isEmpty else { continue }
+            let number = String(digits)
+            switch suffix.dropFirst(digits.count).lowercased() {
+            case "":
+                times[number] = value          // bare key IS the timecode
+            case "name":
+                titles[number] = value
+            case "url", "time":
+                // Spec-wise a URL is a link; some writers store the
+                // timecode here — keep it only when it parses as one.
+                if times[number] == nil, Self.chapterTimecode(value) != nil {
+                    times[number] = value
                 }
+            default:
+                break
             }
         }
         guard !times.isEmpty else { return [] }

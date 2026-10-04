@@ -650,12 +650,15 @@ final class BooksStore: ObservableObject {
                 book.audioDuration = ogg.duration
             }
             // Chapter marks the container itself carries (OpusTags
-            // CHAPTERxxx comments — what m4b-tool and friends write when a
-            // chaptered M4B is re-encoded to Ogg) are the real thing; the
-            // uniform division is the FALLBACK for streams with none.
+            // CHAPTERxxx comments — what ffmpeg and m4b-tool write when a
+            // chaptered book is re-encoded to Ogg) are the real thing; the
+            // uniform division is the FALLBACK for streams with none. The
+            // marks go through the same normalizer as the AVFoundation path
+            // so duplicates or out-of-range marks cannot produce zero-length
+            // or backwards chapters.
             if book.audioChapters == nil, ogg.duration > 0 {
                 if ogg.chapters.count > 1 {
-                    book.audioChapters = ogg.chapters.enumerated().map { index, chapter in
+                    let raw = ogg.chapters.enumerated().map { index, chapter in
                         AudioChapter(
                             title: chapter.title,
                             startSeconds: chapter.startSeconds,
@@ -663,6 +666,7 @@ final class BooksStore: ObservableObject {
                                 ? ogg.chapters[index + 1].startSeconds : ogg.duration
                         )
                     }
+                    book.audioChapters = AudiobookChapters.normalize(raw, totalSeconds: ogg.duration)
                     book.audioChapterSource = "ogg-chapters"
                 } else {
                     // No muxer's chapter table reached us — the reader gets

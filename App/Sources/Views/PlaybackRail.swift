@@ -131,51 +131,57 @@ struct PlaybackRail: View {
         // stepper + voice chip + play cluster + controls + rate) is taller
         // than a landscape phone's short axis, and the old centered
         // `.frame(maxHeight: .infinity)` CLIPPED BOTH ENDS of the overflow —
-        // taking the minimize chevron (top-trailing) off-screen with it. A
-        // scroll view that starts at the top keeps the whole card reachable;
-        // when the content fits, `.scrollBounceBehavior(.basedOnSize)` makes
-        // it behave exactly like the plain centered layout did.
-        ScrollView(.vertical) {
-            VStack(spacing: 0) {
-                topGroup
-                    .padding(.bottom, 10)
-                middleGroup
-                rateSection
-                    .padding(.top, 10)
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 14)
-            .frame(width: Self.idealWidth)
-            .fixedSize(horizontal: false, vertical: true)
-            .background(
-                RoundedRectangle(cornerRadius: 26, style: .continuous)
-                    .fill(.bar)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 26, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.07))
-            )
-            .shadow(color: .black.opacity(0.12), radius: 14, y: 4)
-            .overlay(alignment: .topTrailing) {
-                // Minimize — the portrait bar's chevron affordance, pointing
-                // off the trailing edge.
-                Button {
-                    Haptics.tap()
-                    minimized = true
-                } label: {
-                    Image(systemName: "chevron.compact.right")
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 28, height: 28)
-                        .contentShape(Rectangle())
+        // taking the minimize chevron (top-trailing) off-screen with it.
+        // Overflow now scrolls from the top, so the chevron is always
+        // reachable. The `minHeight` inside keeps the round-7 design when
+        // the card FITS: a plain ScrollView pins short content to the top
+        // (scroll-view origin semantics), and `minHeight: viewport` re-
+        // centers it in the column; when the card is taller, the frame is
+        // inert and the overflow scrolls.
+        GeometryReader { proxy in
+            ScrollView(.vertical) {
+                VStack(spacing: 0) {
+                    topGroup
+                        .padding(.bottom, 10)
+                    middleGroup
+                    rateSection
+                        .padding(.top, 10)
                 }
-                .buttonStyle(.plain)
-                .padding(.top, 4)
-                .padding(.trailing, 4)
-                .accessibilityLabel("Minimize playback rail")
+                .padding(.horizontal, 12)
+                .padding(.vertical, 14)
+                .frame(width: Self.idealWidth)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(minHeight: proxy.size.height)
+                .background(
+                    RoundedRectangle(cornerRadius: 26, style: .continuous)
+                        .fill(.bar)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 26, style: .continuous)
+                        .strokeBorder(Color.primary.opacity(0.07))
+                )
+                .shadow(color: .black.opacity(0.12), radius: 14, y: 4)
+                .overlay(alignment: .topTrailing) {
+                    // Minimize — the portrait bar's chevron affordance,
+                    // pointing off the trailing edge.
+                    Button {
+                        Haptics.tap()
+                        minimized = true
+                    } label: {
+                        Image(systemName: "chevron.compact.right")
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 28, height: 28)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.top, 4)
+                    .padding(.trailing, 4)
+                    .accessibilityLabel("Minimize playback rail")
+                }
             }
+            .scrollBounceBehavior(.basedOnSize)
         }
-        .scrollBounceBehavior(.basedOnSize)
         .padding(.horizontal, 10)
         .frame(maxHeight: .infinity, alignment: .center)
     }

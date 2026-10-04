@@ -145,11 +145,13 @@ public final class OpusPacketDecoder {
             guard let base = input.baseAddress,
                   let destinations = buffer.floatChannelData else { return }
             // libopus writes interleaved; the engine wants planar. When the
-            // stream is multichannel, Lo/Ro-downmix to stereo on the way:
+            // stream is multichannel, Lo/Ro-downmix to stereo on the way —
             // both centers onto both outputs at -3 dB, the surrounds at
-            // -6 dB on their own side, LFE dropped (it carries only the
-            // rumble a book does not need). Vorbis/Opus channel order is
-            // assumed for the matrix: 6ch = L C R Ls Rs LFE.
+            // -6 dB on their own side, LFE mixed in low (rumble a book does
+            // not need). Channel indexes follow the Vorbis/Opus orders:
+            // 3 = L C R, 5 = L C R Ls Rs, 6 = L C R Ls Rs LFE, 7 = … BC LFE,
+            // 8 = … BL BR LFE — LFE is always LAST from 6 channels up, which
+            // is why the index is derived rather than hard-coded.
             if outputChannels == channels {
                 for channel in 0..<outputChannels {
                     let destination = destinations[channel]
@@ -159,18 +161,26 @@ public final class OpusPacketDecoder {
                 }
                 return
             }
-            let lfeIndex = channels >= 6 ? 5 : -1
             for frame in 0..<frames {
                 let frameBase = frame * channels
-                var left = base[frameBase] + 0.707 * base[frameBase + 1]
-                var right = base[frameBase + 2] + 0.707 * base[frameBase + 1]
-                if channels >= 5 {
-                    left += 0.5 * base[frameBase + 3]
-                    right += 0.5 * base[frameBase + 4]
-                }
-                if lfeIndex >= 0 {
-                    left += 0.25 * base[frameBase + lfeIndex]
-                    right += 0.25 * base[frameBase + lfeIndex]
+                var left: Float
+                var right: Float
+                if channels == 4 {
+                    // Vorbis quad: L R Ls Rs.
+                    left = base[frameBase] + 0.5 * base[frameBase + 2]
+                    right = base[frameBase + 1] + 0.5 * base[frameBase + 3]
+                } else {
+                    left = base[frameBase] + 0.707 * base[frameBase + 1]
+                    right = base[frameBase + 2] + 0.707 * base[frameBase + 1]
+                    if channels >= 5 {
+                        left += 0.5 * base[frameBase + 3]
+                        right += 0.5 * base[frameBase + 4]
+                    }
+                    if channels >= 6 {
+                        let lfe = base[frameBase + channels - 1]
+                        left += 0.25 * lfe
+                        right += 0.25 * lfe
+                    }
                 }
                 destinations[0][frame] = max(-1, min(1, left))
                 if outputChannels == 2 {
