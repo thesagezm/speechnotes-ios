@@ -466,7 +466,13 @@ final class DocumentEpubTests: XCTestCase {
         XCTAssertEqual(try ZipReader.readEntry(info.coverPath!, in: epub), tinyGIF)
         // The image entry is packaged and the chapter references it.
         XCTAssertEqual(try ZipReader.readEntry("OEBPS/images/img1.gif", in: epub), tinyGIF)
-        let chapterXHTML = String(decoding: try ZipReader.readEntry(info.spine[0], in: epub), as: UTF8.self)
+        // A book WITH a cover opens on its cover: the cover page is the
+        // first spine item (the "no coverpage image in mobi books" fix), so
+        // the chapter this test is about is the second one.
+        XCTAssertEqual(info.spine.count, chapters.count + 1)
+        let coverPage = String(decoding: try ZipReader.readEntry(info.spine[0], in: epub), as: UTF8.self)
+        XCTAssertTrue(coverPage.contains("cover.gif"), "the cover page shows no cover")
+        let chapterXHTML = String(decoding: try ZipReader.readEntry(info.spine[1], in: epub), as: UTF8.self)
         // The fixture image is 1x1 — the size sniffer classes it inline
         // (natural size, capped), not full width.
         XCTAssertTrue(chapterXHTML.contains("<img class=\"doc-image-inline\" src=\"images/img1.gif\""))
