@@ -5,11 +5,10 @@ import UIKit
 
 /// Block-rendered markdown reading view.
 ///
-/// Renders `MarkdownText.blocks` output — the GFM (cmark-gfm) AST: headings,
-/// nested lists with task checkboxes, blockquotes, code blocks (with
-/// language label), tables, thematic breaks, and paragraphs composed from
-/// the AST's own styled spans (emphasis, code, links, inline images).
-/// Local `speechnotes://note-image/…` targets
+/// Renders `MarkdownText.blocks` output: headings, nested lists with task
+/// checkboxes, blockquotes, code blocks (with language label), tables,
+/// thematic breaks, and paragraphs split into text / image / link runs via
+/// `MarkdownText.inlineRuns`. Local `speechnotes://note-image/…` targets
 /// resolve through `NoteImageStore` (thumbnails for big images); remote
 /// URLs render via AsyncImage. Links open in an in-app Safari sheet.
 struct MarkdownPreviewView: View {
@@ -63,12 +62,9 @@ struct MarkdownPreviewView: View {
             VStack(alignment: .leading, spacing: 0) {
                 // The table container-width probe. `Color.clear` adopts ANY
                 // proposal, so the width measured here IS the space tables
-                // get. Measuring the table itself instead read back its own
-                // (possibly overflowing) laid-out width and fed the column
-                // math its own overflow — a feedback loop that pinned wide
-                // tables at the full screen width, and in landscape that
-                // pushed the trailing PlaybackRail clean off the screen
-                // (the "rail missing in preview for rich notes" report).
+                // get — where build 421 measured the table itself, read back
+                // its own (possibly overflowing) laid-out width and fed the
+                // column math its own overflow.
                 Color.clear
                     .frame(height: 0)
                     .background(
@@ -154,8 +150,10 @@ struct MarkdownPreviewView: View {
             switch block {
             case .image(_, let url):
                 out.append(url)
-            case .paragraph(_, let spans):
-                out.append(contentsOf: spans.compactMap(\.imageURL))
+            case .paragraph(_, let text):
+                for run in MarkdownText.inlineRuns(text) {
+                    if case .image(_, let url) = run { out.append(url) }
+                }
             default: break
             }
         }
@@ -167,27 +165,27 @@ struct MarkdownPreviewView: View {
     @ViewBuilder
     private func blockView(_ block: MarkdownText.MarkdownBlock) -> some View {
         switch block {
-        case .heading(let level, _, let spans):
-            attributedText(spans)
+        case .heading(let level, _, let text):
+            styledText(text)
                 .font(headingFont(level))
                 .padding(.top, level <= 2 ? ReaderSpacing.headingTopLevel1 * theme.readerBlockSpacing
                                          : ReaderSpacing.headingTopLevel3Plus * theme.readerBlockSpacing)
                 .padding(.bottom, headingBottom)
-        case .paragraph(_, let spans):
-            paragraphView(spans)
+        case .paragraph(_, let text):
+            runsView(MarkdownText.inlineRuns(text))
                 .lineSpacing(lineSpacing)
                 .padding(.bottom, blockGap)
         case .bulletList(let items):
             listRows(items, markerBuilder: { _, _ in "•" })
         case .orderedList(let items):
             listRows(items, markerBuilder: { index, _ in "\(index + 1)." })
-        case .quote(_, let spans):
+        case .quote(let text, _):
             HStack(alignment: .top, spacing: 10) {
                 RoundedRectangle(cornerRadius: 2)
                     .fill(Color.secondary.opacity(0.4))
                     .frame(width: 3)
                     .padding(.top, 2)
-                attributedText(spans)
+                styledText(text)
                     .foregroundStyle(.secondary)
                     .lineSpacing(quoteLineSpacing)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -239,9 +237,7 @@ struct MarkdownPreviewView: View {
                         Text(markerBuilder(index, item))
                             .foregroundStyle(.secondary)
                     }
-                    (item.spans.isEmpty
-                        ? attributedText([.plain(item.text)])
-                        : attributedText(item.spans))
+                    styledText(item.text)
                         .strikethrough(item.isDone)
                         .foregroundStyle(item.isDone ? .secondary : .primary)
                 }
@@ -251,29 +247,13 @@ struct MarkdownPreviewView: View {
         .padding(.bottom, blockGap)
     }
 
-    /// Tables render the way a notes app draws one: a real grid inside the
-    /// available width, not a horizontally-scrolling card.
-    ///
-    /// What that means concretely, and why each part is here:
-    ///   * **Columns share the width.** A column's floor is its longest WORD
-    ///     (a word wraps; it never needs a column of its own), and whatever
-    ///     is left over is split evenly. The old code split the leftover by
-    ///     CONTENT WEIGHT, which gave a sentence column three times the
-    ///     space a one-word column needed and pushed the table wider than
-    ///     the screen.
-    ///   * **A header row that reads as one.** Bold text on a tinted fill,
-    ///     with a rule under it — the visual line that says "this is a
-    ///     header", which bold alone does not do at a glance.
-    ///   * **Hairlines between rows and columns**, plus a very light zebra
-    ///     stripe on alternate rows. That combination is what makes a
-    ///     wrapped multi-line cell readable when your eye has to track back
-    ///     across the row; without it a three-line cell reads as floating
-    ///     text.
-    ///   * **Numeric columns right-align** with monospaced digits, so a
-    ///     column of figures lines up on the decimal instead of jittering.
-    ///   * **Horizontal scrolling only as a last resort** — when the floors
-    ///     alone exceed the width, which is a genuinely wide table, not a
-    ///     long sentence.
+    /// Tables. The old `Grid` gave every column the width of its WIDEST cell,
+    /// so one long sentence stretched the whole table sideways and pushed the
+    /// other columns off screen — and because the grid lived in a horizontal
+    /// ScrollView the reader had to pan to find them. What a reader expects is
+    /// a table that wraps: long cells break across lines, columns share the
+    /// width fairly, and the table only scrolls sideways when even a fair
+    /// share cannot fit (a genuinely wide table, not a long sentence).
     @ViewBuilder
     private func tableView(headers: [[MarkdownText.StyledSpan]], rows: [[[MarkdownText.StyledSpan]]]) -> some View {
         let columnCount = max(headers.count, rows.map(\.count).max() ?? 0)
@@ -434,9 +414,7 @@ struct MarkdownPreviewView: View {
     /// the extra text spilling out of the cell.
     @ViewBuilder
     private func cell(_ spans: [MarkdownText.StyledSpan], width: CGFloat, numeric: Bool, bold: Bool) -> some View {
-        // Traits arrive from the AST (a bold term in a cell stays bold); the
-        // size never changes, so a column of cells reads as one text.
-        var content = attributedText(spans.isEmpty ? [.plain("")] : spans)
+        var content = styledText(cellText(spans))
         if bold {
             content = content.bold()
         }
@@ -623,54 +601,142 @@ struct MarkdownPreviewView: View {
         )
     }
 
-    // MARK: - Spans (one attributed paragraph per block)
+    // MARK: - Inline runs
 
-    /// One block's spans → flowing text + the images lifted out. Traits are
-    /// `inlinePresentationIntent`s, so SwiftUI renders them with the
-    /// ENVIRONMENT font — the reading-size multiplier, the Dynamic Type
-    /// step, the weight all carry through. The old per-span `.font(.system
-    /// (.callout, design: .monospaced))` REPLACED the font wholesale, which
-    /// is why inline code sat at a different size and letter spacing than
-    /// the sentence around it ("font thickness/spacing not uniform").
-    private func attributedText(_ spans: [MarkdownText.StyledSpan]) -> Text {
-        var out = AttributedString()
-        for span in spans where !span.isImage {
-            var piece = AttributedString(span.text)
-            var intent: InlinePresentationIntent = []
-            if span.code { intent.insert(.code) }
-            if span.strike { intent.insert(.strikethrough) }
-            if span.italic { intent.insert(.emphasized) }
-            if span.bold { intent.insert(.stronglyEmphasized) }
-            if !intent.isEmpty { piece.inlinePresentationIntent = intent }
-            if let urlString = span.linkURL, !urlString.isEmpty, let url = URL(string: urlString) {
-                piece.link = url
-                piece.foregroundColor = .accentColor
-                piece.underlineStyle = .single
-            }
-            out += piece
-        }
-        return Text(out)
-    }
-
-    /// A paragraph: its composed text, then any inline images below it.
+    /// Paragraphs render as ONE composed Text so words wrap naturally across
+    /// runs (the old FlowLayout forced run-level wrapping, overflowing to the
+    /// edge). Links become real AttributedString links opened via the
+    /// environment's openURL; inline images stand alone below the paragraph.
     @ViewBuilder
-    private func paragraphView(_ spans: [MarkdownText.StyledSpan]) -> some View {
-        let prose = attributedText(spans)
-        let images = spans.filter(\.isImage)
-        VStack(alignment: .leading, spacing: 8) {
-            if spans.contains(where: { !$0.isImage }) {
-                prose
-            }
-            ForEach(Array(images.enumerated()), id: \.offset) { _, span in
-                if let alt = span.imageAlt, let url = span.imageURL, !url.isEmpty {
-                    imageView(url: url, alt: alt)
-                }
+    private func runsView(_ runs: [MarkdownText.InlineRun]) -> some View {
+        if let composed = composedText(runs) {
+            composed
+        }
+        ForEach(Array(runs.enumerated()), id: \.offset) { _, run in
+            if case .image(let alt, let url) = run {
+                imageView(url: url, alt: alt)
             }
         }
     }
 
-    private func collectImageTargets(from spans: [MarkdownText.StyledSpan]) -> [String] {
-        spans.compactMap { $0.imageURL }.filter { NoteImageStore.parseLocalTarget($0) != nil }
+    private func composedText(_ runs: [MarkdownText.InlineRun]) -> Text? {
+        var composed: Text?
+        for run in runs {
+            let piece: Text
+            switch run {
+            case .text(let s):
+                piece = styledText(s)
+            case .link(let label, let urlString):
+                var attrs = AttributedString(label)
+                attrs.foregroundColor = .accentColor
+                attrs.underlineStyle = .single
+                if let url = URL(string: urlString) { attrs.link = url }
+                piece = Text(attrs)
+            case .image:
+                continue
+            }
+            composed = composed.map { $0 + piece } ?? piece
+        }
+        return composed
+    }
+
+    // MARK: - Emphasis styling
+
+    /// Styles **bold**, *italic*, `code` and ~~strike~~ spans within a text
+    /// run, returning one composed Text. (Links are lifted out earlier as
+    /// separate runs, so no link handling is needed here.)
+    /// One-pass tokenizer over inline markers. Unmatched markers stay
+    /// literal, so stray asterisks in prose survive; underscore rules carry
+    /// word-boundary guards so snake_case identifiers are not styled.
+    private static let emphasisRegex: NSRegularExpression? = {
+        try? NSRegularExpression(
+            pattern: #"`([^`]+)`"#
+                + #"|\*\*\*([^*]+)\*\*\*"#
+                + #"|\*\*([^*]+)\*\*"#
+                + #"|__([^_]+)__"#
+                + #"|~~([^~]+)~~"#
+                + #"|(?<![*\w])\*([^*\s][^*]*)\*(?!\*)"#
+                + #"|(?<![\w_])_([^_\s][^_]*)_(?![\w_])"#
+        )
+    }()
+
+    private enum SpanStyle { case plain, bold, italic, boldItalic, code, strike }
+    private struct Span { let text: String; let style: SpanStyle }
+
+    /// Per-source-string span cache. The emphasis regex used to run once per
+    /// run per body evaluation, and body evaluations fire on every playback
+    /// progress tick (the player is a root environment object) — a table- or
+    /// paragraph-heavy note re-ran a full regex pass over its visible text
+    /// several times a second for output that never changed. Bounded to the
+    /// most recent 512 distinct strings so a long scroll can't grow it
+    /// without limit.
+    private static var spanCache: [String: [Span]] = [:]
+    private static let spanCacheLimit = 512
+
+    private static func cachedSpans(in string: String) -> [Span] {
+        if let hit = spanCache[string] { return hit }
+        let spans = emphasisSpans(in: string)
+        if spanCache.count >= spanCacheLimit {
+            // Cheap eviction — drop the whole map rather than track LRU
+            // order; rebuilding 512 short strings is microseconds.
+            spanCache.removeAll()
+        }
+        spanCache[string] = spans
+        return spans
+    }
+
+    private func styledText(_ string: String) -> Text {
+        let spans = Self.cachedSpans(in: string)
+        guard !spans.isEmpty else { return Text(string) }
+        var composed = Text("")
+        for span in spans {
+            let piece = Text(span.text)
+            switch span.style {
+            case .plain: composed = composed + piece
+            case .bold: composed = composed + piece.bold()
+            case .italic: composed = composed + piece.italic()
+            case .boldItalic: composed = composed + piece.bold().italic()
+            case .code: composed = composed + piece.font(.system(.callout, design: .monospaced))
+            case .strike: composed = composed + piece.strikethrough()
+            }
+        }
+        return composed
+    }
+
+    private static func emphasisSpans(in string: String) -> [Span] {
+        guard let regex = Self.emphasisRegex else { return [] }
+        let ns = string as NSString
+        var spans: [Span] = []
+        var cursor = 0
+        for match in regex.matches(in: string, range: NSRange(location: 0, length: ns.length)) {
+            if match.range.location > cursor {
+                spans.append(Span(text: ns.substring(with: NSRange(location: cursor, length: match.range.location - cursor)), style: .plain))
+            }
+            let content: (String, SpanStyle)
+            if match.range(at: 1).location != NSNotFound {
+                content = (ns.substring(with: match.range(at: 1)), .code)
+            } else if match.range(at: 2).location != NSNotFound {
+                content = (ns.substring(with: match.range(at: 2)), .boldItalic)
+            } else if match.range(at: 3).location != NSNotFound {
+                content = (ns.substring(with: match.range(at: 3)), .bold)
+            } else if match.range(at: 4).location != NSNotFound {
+                content = (ns.substring(with: match.range(at: 4)), .bold)
+            } else if match.range(at: 5).location != NSNotFound {
+                content = (ns.substring(with: match.range(at: 5)), .strike)
+            } else if match.range(at: 6).location != NSNotFound {
+                content = (ns.substring(with: match.range(at: 6)), .italic)
+            } else if match.range(at: 7).location != NSNotFound {
+                content = (ns.substring(with: match.range(at: 7)), .italic)
+            } else {
+                content = (ns.substring(with: match.range), .plain)
+            }
+            spans.append(Span(text: content.0, style: content.1))
+            cursor = match.range.location + match.range.length
+        }
+        if cursor < ns.length {
+            spans.append(Span(text: ns.substring(from: cursor), style: .plain))
+        }
+        return spans
     }
 
     // MARK: - Images
@@ -753,47 +819,23 @@ extension EnvironmentValues {
     }
 }
 
-/// The empty cells a ragged table produces, and the single-owner problem
-/// that comes with them.
-///
-/// The table body pads every row to the column count in one place, so a row
-/// that legitimately has fewer cells than the header (normal for anything
-/// imported from a PDF or a spreadsheet with an optional last column) cannot
-/// be miscounted at a call site.
-extension Array {
-    /// `count` cells, padded with `filler` — a ragged table row's missing
-    /// cells (every column read has to tolerate a short row either way).
-    func padded(to count: Int, with filler: @autoclosure () -> Element) -> [Element] {
-        guard self.count < count else { return self }
-        return self + Array(repeating: filler(), count: count - self.count)
-    }
-}
-
-/// Element at `index`, or nil — the table rows are ragged by nature (a row
-/// may have fewer cells than the header), so every column read has to
-/// tolerate a short row.
 private extension Array {
+    /// Element at `index`, or nil — used for ragged table rows, where a row
+    /// may legitimately have fewer cells than the header.
     subscript(safe index: Int) -> Element? {
         indices.contains(index) ? self[index] : nil
     }
 }
 
-/// Monospaced digits for a column of figures, so 1,000 and 8 line up on
-/// the same digit cell instead of jittering. A no-op for prose.
-private extension Text {
-    func monospacedDigit(_ enabled: Bool) -> Text {
-        enabled ? monospacedDigit() : self
-    }
-}
-
 private extension String {
-    /// Rendered width of the string at a font size, measured on ONE line so a
-    /// cell that will wrap never inflates a column's floor. Used by the table
-    /// layout to find the narrowest width a column can take without clipping
-    /// a word.
+    /// Rendered width of the string at a font size. Used by the table layout
+    /// to find the narrowest width a column can take without clipping a word.
     func boundingWidth(at fontSize: CGFloat) -> CGFloat {
-        (self as NSString).size(
-            withAttributes: [.font: UIFont.systemFont(ofSize: fontSize)]
+        (self as NSString).boundingRect(
+            with: CGSize(width: .greatestFiniteMagnitude, height: fontSize * 2),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: [.font: UIFont.systemFont(ofSize: fontSize)],
+            context: nil
         ).width
     }
 }
