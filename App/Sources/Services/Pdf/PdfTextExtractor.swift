@@ -5,58 +5,45 @@ import SpeechLogic
 /// One place where "which extractor" is decided, so the notes importer and
 /// the book reader can never drift apart.
 ///
-/// The policy, in full:
+/// The policy is PDFKit, and only PDFKit. Papero used to sit in front of it
+/// here — a webview running a vendored 1.5 MB layout engine — and it is gone
+/// (purged 2026-10-03): on device it either failed outright or returned page
+/// counts the document did not have ("page 9 does not exist, the document
+/// has 5"), which put a working extractor out of reach. The per-page path
+/// below keeps what papero never had: per-page offsets for the reader's
+/// auto-scroll, and OCR for pages with no text layer.
 ///
-///   * `.builtin` — PDFKit, exactly as before this existed. Still the only
-///     path that OCRs a scanned page, so it stays a first-class choice.
-///   * `.papero` — papero, and a failure is a failure. Nothing silently
-///     substitutes a different engine behind the user's back.
-///   * `.automatic` — papero unless it cannot serve the document, in which
-///     case PDFKit. "Cannot serve" is mostly papero's own verdict: a scanned
-///     page set has no text layer to reconstruct, and an error — encrypted,
-///     malformed, webview refused — falls back too.
-///
-/// Only PDFs go through here. The office formats reach the Books tab through
-/// DocumentBook's EPUB conversion, which has no papero equivalent on the
-/// device: papero's office support comes from Tika, which lives on papero's
-/// server, not in its browser engine. That is a real limit of the
-/// on-device route, not an oversight — the alternative is sending documents
-/// to a server, which is a different product decision.
+/// Only PDFs go through here. The office formats reach the Books tab
+/// through DocumentBook's EPUB conversion.
 enum PdfTextExtractor {
 
     /// What an extraction produced.
     struct Extraction {
         /// The text to speak, in reading order.
         let text: String
-        /// Which engine produced it — logged, so a report about a
-        /// mis-extracted PDF can be answered without asking.
-        let engine: PdfExtractionMode
         /// The document is a scan with no usable text layer.
         let isScanned: Bool
         /// UTF-16 offset into `text` where each page begins, for the reader's
-        /// auto-scroll. Empty when the engine cannot supply it.
+        /// auto-scroll. Empty when the caller does not need them.
         let pageOffsets: [PdfPageOffset]
     }
 
     // MARK: - Notes import (whole document, capped)
 
     /// Extracts a document for a note import, honouring the importer's caps.
-    /// Returns nil when neither engine produced text.
+    /// Returns nil when the document yielded no text.
     static func text(
         for url: URL,
         maxPages: Int,
         maxCharacters: Int
     ) async -> Extraction? {
-        let mode = PdfExtractionMode.current
-        if mode.prefersPapero {
-            if let result = await papero(url: url, pageRange: 1...maxPages, maxCharacters: maxCharacters) {
-                return result
-            }
-            if mode == .papero { return nil }
-            Log.shared.info("PdfTextExtractor: papero could not serve the document — using the built-in extractor")
-        }
-        guard let text = builtin(url: url, maxPages: maxPages, maxCharacters: maxCharacters) else { return nil }
-        return Extraction(text: text, engine: .builtin, isScanned: false, pageOffsets: [])
+        // PDFKit is synchronous and can walk a long document; the note
+        // importer is already async, so the walk goes off the main actor.
+        let result = await Task.detached(priority: .userInitiated) {
+            builtin(url: url, maxPages: maxPages, maxCharacters: maxCharacters)
+        }.value
+        guard let result else { return nil }
+        return Extraction(text: result, isScanned: false, pageOffsets: [])
     }
 
     // MARK: - Book chapter (page range, cached)
@@ -68,21 +55,11 @@ enum PdfTextExtractor {
         firstPage: Int,
         lastPage: Int
     ) async -> Extraction? {
-        let mode = PdfExtractionMode.current
-        let key = "\(url.lastPathComponent)|\(mode.rawValue)|\(firstPage)-\(lastPage)" as NSString
+        let key = "\(url.lastPathComponent)|builtin|\(firstPage)-\(lastPage)" as NSString
         if let cached = cache.object(forKey: key) { return cached.value }
-
-        var result: Extraction?
-        if mode.prefersPapero {
-            result = await papero(url: url, pageRange: firstPage...lastPage, maxCharacters: .max)
-            if result == nil {
-                if mode == .papero { return nil }
-                Log.shared.info("PdfTextExtractor: papero could not serve pages \(firstPage)-\(lastPage) — using the built-in extractor")
-            }
-        }
-        if result == nil {
-            result = builtinChapter(url: url, firstPage: firstPage, lastPage: lastPage)
-        }
+        let result = await Task.detached(priority: .userInitiated) {
+            builtinChapter(url: url, firstPage: firstPage, lastPage: lastPage)
+        }.value
         if let result {
             cache.setObject(Box(result), forKey: key)
         }
@@ -95,41 +72,7 @@ enum PdfTextExtractor {
         cache.removeAllObjects()
     }
 
-    // MARK: - papero
-
-    private static let extractor = PaperoExtractor()
-
-    private static func papero(
-        url: URL,
-        pageRange: ClosedRange<Int>,
-        maxCharacters: Int
-    ) async -> Extraction? {
-        do {
-            let result = try await extractor.extract(pdf: url, pageRange: pageRange) { done, total in
-                Log.shared.info("PdfTextExtractor: papero \(done)/\(total) pages")
-            }
-            // A scanned document has nothing for papero to reconstruct — no
-            // text layer. Say so instead of handing back an empty string the
-            // caller has to interpret; the built-in path OCRs it.
-            if result.likelyScanned {
-                Log.shared.info("PdfTextExtractor: papero reports a scanned document")
-                return nil
-            }
-            let text = truncate(result.markdown, to: maxCharacters)
-            guard !text.isEmpty else { return nil }
-            return Extraction(
-                text: text,
-                engine: .papero,
-                isScanned: false,
-                pageOffsets: result.pageOffsets
-            )
-        } catch {
-            Log.shared.info("PdfTextExtractor: papero failed — \(error.localizedDescription)")
-            return nil
-        }
-    }
-
-    // MARK: - Built-in (the pre-existing PDFKit path, unchanged)
+    // MARK: - PDFKit
 
     private static func builtin(url: URL, maxPages: Int, maxCharacters: Int) -> String? {
         guard let document = PDFDocument(url: url), document.pageCount > 0 else { return nil }
@@ -172,14 +115,7 @@ enum PdfTextExtractor {
             text += pageString
         }
         guard !text.isEmpty else { return nil }
-        return Extraction(text: text, engine: .builtin, isScanned: false, pageOffsets: offsets)
-    }
-
-    private static func truncate(_ text: String, to limit: Int) -> String {
-        guard limit != .max, text.utf16.count > limit else { return text }
-        let index = text.index(text.startIndex, offsetBy: limit, limitedBy: text.endIndex) ?? text.endIndex
-        return String(text[..<index])
-            + "\n\n[Text truncated at \(limit / 1000)k characters — import large PDFs on the Books tab instead.]"
+        return Extraction(text: text, isScanned: false, pageOffsets: offsets)
     }
 
     /// One chapter's worth of extractions, keyed by document and page range.
