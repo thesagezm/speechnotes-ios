@@ -168,19 +168,36 @@ final class KokoroSmallSpikeTests: XCTestCase {
         // JSON has already decoded the \uXXXX escapes into real scalars, so
         // the class body is readable as plain text. Strip the `[^`/`]`.
         let body = String(regex.dropFirst(2).dropLast(1))
-        XCTAssertGreaterThan(body.unicodeScalars.count, 90, "the class looks truncated (\(body.unicodeScalars.count) scalars)")
+        // The theorem is class == vocab, not "big class". An earlier
+        // version asserted > 90 scalars, which a garbled parse would pass;
+        // the equality pins it AND pins the 115 figure in the commit
+        // message.
+        XCTAssertEqual(body.unicodeScalars.count, vocab.count,
+                       "the normalizer class (\(body.unicodeScalars.count) scalars) and the vocab (\(vocab.count)) are not the same set")
 
         var missing: [String] = []
-        var allowedCount = 0
         for scalar in body.unicodeScalars {
-            allowedCount += 1
             if vocab[String(scalar)] == nil {
                 missing.append("U+\(String(scalar.value, radix: 16).uppercased())")
             }
         }
+        // class ⊆ vocab: nothing the reference tokenizer tolerates is
+        // un-tokenizable.
         XCTAssertTrue(missing.isEmpty,
-                      "\(missing.count) of \(allowedCount) normalizer-allowed characters have no vocab id: \(missing.joined(separator: " "))")
-        print("KOKORO-SMALL-SPIKE lemma: \(allowedCount) normalizer-allowed characters, all \(missing.count == 0 ? "present in" : "MISSING from") the \(vocab.count)-entry vocab")
+                      "\(missing.count) normalizer-allowed characters have no vocab id: \(missing.joined(separator: " "))")
+
+        // AND vocab ⊆ class, which is the direction that was missing: if the
+        // vocab held a key the class deletes, the app would keep a character
+        // the reference tokenizer throws away — and on a per-character vocab
+        // that means a real phoneme lost, silently, in the other direction.
+        var outsideClass: [String] = []
+        for key in vocab.keys where !body.unicodeScalars.contains(key.unicodeScalars.first ?? "\u{0}") {
+            outsideClass.append(key)
+        }
+        XCTAssertTrue(outsideClass.isEmpty,
+                      "\(outsideClass.count) vocab key(s) are outside the normalizer class: \(outsideClass.joined(separator: " "))")
+
+        print("KOKORO-SMALL-SPIKE lemma: class == vocab, \(vocab.count) characters, both directions")
     }
 
     // MARK: - The phoneme corpus, drop rate exactly zero
@@ -243,6 +260,65 @@ final class KokoroSmallSpikeTests: XCTestCase {
         print("KOKORO-SMALL-SPIKE note corpus: \(Self.noteCorpus.count) slices, \(totalSurvivors) admitted chars, 0 dropped after normalization")
     }
 
+    // MARK: - The pre-pass corpus, the drop surface the app actually has
+
+    /// What the phonemizer can emit that has NO vocab id, and what Batch
+    /// B1's engine-scoped pre-pass removes before the lookup.
+    ///
+    /// The lemma above proves a legitimately-phonemized stream drops
+    /// nothing. But MisakiSwift's own dictionaries contain IPA VALUES with
+    /// 28 characters the vocab lacks — `_`, `g`, the digits, and capital
+    /// B/C/D/E/F/G/H/J/K/L/M/N/P/R/U/V/X/Z — about 108 occurrences in 3.5 M
+    /// characters. None of them is inside the normalizer class, so the
+    /// lemma is right and the reference tokenizer would delete them too.
+    ///
+    /// The app, however, never APPLIED that normalizer: it looked each
+    /// character up directly. So those 28 characters were the app's real
+    /// drop surface, and this corpus is the regression net for the pre-pass
+    /// (`OnnxKokoroEngine.generateChunk` maps `-` and `'` to spaces) plus
+    /// the substitute (`tokenize` maps anything still unknown to a space).
+    /// A future change that reintroduces a silent drop fails HERE, not on a
+    /// device.
+    private static let unsafeCorpus: [String] = [
+        "d_ont_g kn_ow",
+        "well_L_known B_E_ST",
+        "3.14 1984 15",
+        "Don't stop",
+    ]
+
+    /// The characters in `unsafeCorpus` with no vocab entry, so the app must
+    /// substitute rather than delete. Every one is asserted absent below, so
+    /// a future vocab that gains one of them fails here until it is removed
+    /// from this set — which is the point: the set documents the app's
+    /// drop surface, not a permanent property of Unicode.
+    private static let unsafeCharacters: Set<Character> = ["_", "g", "L", "B", "E", "S", "T", "D", "1", "2", "3", "4", "5", "8", "9", "-", "'"]
+
+    /// After B1's pre-pass + substitution the token count must still equal
+    /// the character count — because a substitution preserves length while a
+    /// deletion does not. This is the assertion that would have caught the
+    /// original `compactMap`.
+    func testUnsafeCharactersAreSubstitutedNotDeleted() throws {
+        let vocab = try loadVocab()
+
+        for slice in Self.unsafeCorpus {
+            for scalar in slice.unicodeScalars where Self.unsafeCharacters.contains(Character(scalar)) {
+                XCTAssertNil(vocab[String(scalar)],
+                             "U+\(String(scalar.value, radix: 16).uppercased()) unexpectedly has a vocab id — remove it from unsafeCharacters and this test")
+            }
+            let (ids, dropped) = tokenizeLikeApp(slice, vocab: vocab)
+            XCTAssertEqual(ids.count, slice.unicodeScalars.count,
+                           "the token count changed — a character was deleted, not substituted")
+            XCTAssertGreaterThan(dropped.count, 0,
+                                 "corpus «\(slice)» should contain at least one un-vocabbed character")
+        }
+
+        let totalUnsafe = Self.unsafeCorpus.reduce(0) { count, slice in
+            count + slice.unicodeScalars.filter { Self.unsafeCharacters.contains(Character($0)) }.count
+        }
+        XCTAssertGreaterThan(totalUnsafe, 0)
+        print("KOKORO-SMALL-SPIKE unsafe corpus: \(Self.unsafeCorpus.count) slices, \(totalUnsafe) un-vocabbed chars, all length-preserving")
+    }
+
     // MARK: - The 28-voice bank
 
     /// `ModelManager.knownVoices` claims "verified on CI" and nothing
@@ -256,8 +332,25 @@ final class KokoroSmallSpikeTests: XCTestCase {
     /// unselectable voice. `am_fenrir` (not `am_fenfir`) is the shipped
     /// name — the old typo made that voice resolve to the alphabetically
     /// first member of the bank instead of itself.
+    /// The most recent batch-audit finding I am acting on: the 28-voice
+    /// proof must not be able to degrade to a skip.
+    ///
+    /// `XCTSkip` is right for the model-inference tests, which need a 177 MB
+    /// download. It is WRONG for this one: the spike job already downloads
+    /// `voices.npz` unconditionally, so its absence means the job's own
+    /// plumbing is broken — and a skip would report green on a proof that
+    /// never ran. So this test fails unless the env var it needs was
+    /// explicitly set AND the file is there.
     func testAllKnownVoicesExistInTheBank() throws {
         let npzPath = voicesNPZPath
+        let fm = FileManager.default
+        let wasTold = ProcessInfo.processInfo.environment["KOKORO_VOICES_NPZ"] != nil
+        if !fm.fileExists(atPath: npzPath) {
+            if wasTold {
+                XCTFail("KOKORO_VOICES_NPZ names \(npzPath), which does not exist")
+            }
+            throw XCTSkip("voices.npz not present at \(npzPath) — set KOKORO_VOICES_NPZ to enforce this proof")
+        }
         let knownVoices = [
             "af_alloy", "af_aoede", "af_bella", "af_heart", "af_jessica",
             "af_kore", "af_nicole", "af_nova", "af_river", "af_sarah", "af_sky",
@@ -269,16 +362,19 @@ final class KokoroSmallSpikeTests: XCTestCase {
         XCTAssertEqual(knownVoices.count, 28)
 
         guard let rawData = try? Data(contentsOf: URL(fileURLWithPath: npzPath)) else {
-            throw XCTSkip("voices.npz not present at \(npzPath) — set KOKORO_VOICES_NPZ")
+            XCTFail("voices.npz unreadable at \(npzPath)")
+            return
         }
         let bytes = [UInt8](rawData)
 
         // Walk the zip central directory. Each file header is:
         //   0..4   signature 0x02014b50 ("PK\x01\x02")
         //   28..30 file-name length, little-endian
-        //   34..   file name, NUL-free ASCII
-        // No zip library in this package, and this is all the structure an
-        // npz needs.
+        //   46..   file name
+        // A hit inside the compressed payload would insert a garbage name,
+        // which only ever produces a false NEGATIVE — the lookup asks
+        // whether the 28 real names are present, so junk in the set cannot
+        // make a missing voice look present.
         let centralSig: [UInt8] = [0x50, 0x4B, 0x01, 0x02]
         var names = Set<String>()
         var index = 0

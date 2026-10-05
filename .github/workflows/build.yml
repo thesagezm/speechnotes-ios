@@ -103,7 +103,12 @@ jobs:
       - name: Run Kokoro small spike test
         id: test
         env:
-          KOKORO_VOICES_NPZ: $HOME/kokoro-small-spike/voices.npz
+          # $HOME is NOT expanded in a step's `env:` — the runner writes the
+          # token verbatim. The test's own default path is the same file
+          # (NSHomeDirectory() == the runner's home here), so the proof was
+          # running on the default rather than on this variable. Set it from
+          # an expression, which IS expanded.
+          KOKORO_VOICES_NPZ: ${{ github.workspace }}/../kokoro-small-spike/voices.npz
         run: |
           set -o pipefail
           cd Tests/KokoroSmallSpike
