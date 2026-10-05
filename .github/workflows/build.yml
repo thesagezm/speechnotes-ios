@@ -106,7 +106,7 @@ jobs:
           set -o pipefail
           # The variable is exported in the shell on purpose. In a step's
           # `env:`, `$HOME` is written verbatim (no expansion), and there is
-          # no `runner.home` context property — the ${{ }} expression
+          # no runner.home context property — an expression referencing it
           # evaluated to the EMPTY string, so the proof failed with a path
           # of "/kokoro-small-spike/voices.npz" (CI 37355222138). The shell
           # below is the only place $HOME actually resolves.
