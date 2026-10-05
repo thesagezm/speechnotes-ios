@@ -119,21 +119,28 @@ final class KokoroSmallSpikeTests: XCTestCase {
 
     // MARK: - The tokenizer, verbatim
 
-    /// The app's tokenizer (`OnnxKokoroEngine.swift:234-236`), expressed as
-    /// a test helper so a drop is OBSERVABLE rather than silent:
-    ///
-    /// ```swift
-    /// phonemes.map { vocab[String($0)] }.compactMap { $0 }
-    /// ```
+    /// The app's tokenizer (`OnnxKokoroEngine.tokenize`, Batch B1) as a
+    /// test helper: the engine pre-pass maps `-` and `'` to spaces, then
+    /// every character the vocab lacks is SUBSTITUTED with a space (id 16)
+    /// rather than deleted. Mirroring it here is what makes a regression
+    /// observable — the original body was
+    /// `map { vocab[$0] }.compactMap { $0 }`, which shrank the token count
+    /// with no error and no log. (The first draft of this helper mirrored
+    /// the OLD compactMap while the unsafe-corpus test asserted the NEW
+    /// substitution — the two could never both pass, and the compile break
+    /// on the spike job hid that until CI run 37355222138 ran it.)
     private func tokenizeLikeApp(_ text: String, vocab: [String: Int]) -> (ids: [Int], dropped: [String]) {
+        let spaceID = vocab[" "] ?? 16
+        let prePass = String(text.map { ($0 == "-" || $0 == "'") ? " " : $0 })
         var ids: [Int] = []
         var dropped: [String] = []
-        ids.reserveCapacity(text.unicodeScalars.count)
-        for scalar in text.unicodeScalars {
+        ids.reserveCapacity(prePass.unicodeScalars.count)
+        for scalar in prePass.unicodeScalars {
             if let id = vocab[String(scalar)] {
                 ids.append(id)
             } else {
                 dropped.append(String(scalar))
+                ids.append(spaceID)
             }
         }
         return (ids, dropped)
@@ -215,8 +222,9 @@ final class KokoroSmallSpikeTests: XCTestCase {
                            "phoneme slice «\(slice.prefix(48))» dropped \(dropped.count) char(s): \(dropped.joined(separator: " "))")
             XCTAssertGreaterThan(ids.count, 0)
             XCTAssertLessThanOrEqual(ids.count, 510, "exceeds the model's max token window")
-            // The vocab is per-character, so a drop shows directly as a
-            // count gap: ids == characters holds only if nothing was lost.
+            // The vocab is per-character and B1 substitutes rather than
+            // deletes, so the drop detector is `dropped` above; the count
+            // assertion pins that the substitution path preserves length.
             XCTAssertEqual(ids.count, slice.unicodeScalars.count,
                            "token count \(ids.count) != scalar count \(slice.unicodeScalars.count)")
         }

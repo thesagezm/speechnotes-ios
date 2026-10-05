@@ -190,7 +190,7 @@ final class ChunkFileQueue: NSObject {
             try writer.close()
         } catch {
             Log.shared.error("ChunkFileQueue: chunk \(index) write failed: \(error)")
-            return
+            return false
         }
 
         liveIndexes.append(index)

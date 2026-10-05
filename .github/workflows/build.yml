@@ -102,15 +102,15 @@ jobs:
 
       - name: Run Kokoro small spike test
         id: test
-        env:
-          # $HOME is NOT expanded in a step's `env:` — the runner writes the
-          # token verbatim. The ${{ }} expression IS expanded, but it has to
-          # resolve to the real download directory. `github.workspace` is the
-          # repo checkout, whose parent (`_work`) is where the runner puts
-          # everything — the download step's `~` also lands there.
-          KOKORO_VOICES_NPZ: ${{ runner.home }}/kokoro-small-spike/voices.npz
         run: |
           set -o pipefail
+          # The variable is exported in the shell on purpose. In a step's
+          # `env:`, `$HOME` is written verbatim (no expansion), and there is
+          # no `runner.home` context property — the ${{ }} expression
+          # evaluated to the EMPTY string, so the proof failed with a path
+          # of "/kokoro-small-spike/voices.npz" (CI 37355222138). The shell
+          # below is the only place $HOME actually resolves.
+          export KOKORO_VOICES_NPZ="$HOME/kokoro-small-spike/voices.npz"
           cd Tests/KokoroSmallSpike
           swift test 2>&1 | tee ../../kokoro-small-spike.log
 
