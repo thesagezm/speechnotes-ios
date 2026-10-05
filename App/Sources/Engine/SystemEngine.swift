@@ -105,7 +105,13 @@ final class SystemEngine: NSObject, SpeechEngine {
     /// Chunks handed to `synthesizer.speak(_:)` this session. The lookahead
     /// gate is `nextIndex - startedCount < lookahead`, so this is the count
     /// of utterances Apple has been given but the finish callback has not
-    /// yet come back for.
+    /// yet come back for — the queue depth, from this side.
+    ///
+    /// It advances in `startNextChunk` (a chunk was handed over) and in
+    /// `didFinish` (one of them is done). Advancing on hand-over rather than
+    /// on `didStart` matters: the gate has to hold even before Apple
+    /// acknowledges the utterance, or a burst of `didStart` callbacks could
+    /// refill the queue.
     private var startedCount = 0
     /// The chunk currently in flight, and how many characters of it have
     /// sounded (`willSpeakRangeOfSpeechString` gives the latter).
@@ -338,6 +344,12 @@ final class SystemEngine: NSObject, SpeechEngine {
     /// waiting for `didFinish` and only then handing Apple the next string.
     /// Now `startNextChunk` is called from BOTH the finish path and the
     /// utterance-start path, and it stops once the lookahead is full.
+    ///
+    /// The lookahead count is `nextIndex - startedCount`, which counts what
+    /// has been HANDED OVER minus what has finished — exactly Apple's queue
+    /// depth from this side. `startedCount` advances in `didFinish`, and a
+    /// chunk is handed over at most once because `nextIndex` only ever
+    /// moves forward and the gate is monotone.
     private static let lookahead = 4
 
     private func startNextChunk() {
@@ -348,6 +360,7 @@ final class SystemEngine: NSObject, SpeechEngine {
         chunkFinished = false
         let item = queue[nextIndex]
         nextIndex += 1
+        startedCount += 1
         current = item
         currentCharsDone = 0
 
@@ -356,7 +369,6 @@ final class SystemEngine: NSObject, SpeechEngine {
         utterance.voice = resolvedVoice()
         epochByUtterance[ObjectIdentifier(utterance)] = epoch
         synthesizer.speak(utterance)
-        startedCount += 1
     }
 
     /// Our 0.5…2.0 multiplier mapped onto Apple's 0…1 utterance scale.
@@ -465,6 +477,11 @@ final class SystemEngine: NSObject, SpeechEngine {
         current = queue[index]
         currentCharsDone = 0
         lastEffectiveRate = Double(speed)
+        // Batch F1: the utterance in flight is cancelled and re-spoken
+        // rather than replacing itself in the queue, so the lookahead depth
+        // has to shrink by one — otherwise every rate change slowly widens
+        // Apple's queue.
+        startedCount = max(0, startedCount - 1)
         synthesizer.stopSpeaking(at: .immediate)
         speakQueued(index: index)
     }
@@ -476,6 +493,13 @@ final class SystemEngine: NSObject, SpeechEngine {
     /// `startNextChunk`, and the debounce means a slider drag — which emits
     /// at 0.05 steps — produces one re-queue instead of a dozen mid-word
     /// chops.
+    ///
+    /// This is the ONE path that replaces an utterance already in Apple's
+    /// queue, so the accounting differs from `startNextChunk`: the caller has
+    /// already rewound `nextIndex` to the chunk being re-spoken, and the
+    /// utterance it replaces never `didFinish`es. So `startedCount` is
+    /// adjusted by the difference: hand-over adds one, the utterance that
+    /// will never finish claims one back.
     private func speakQueued(index: Int) {
         let item = queue[index]
         current = item
@@ -485,7 +509,6 @@ final class SystemEngine: NSObject, SpeechEngine {
         utterance.voice = resolvedVoice()
         epochByUtterance[ObjectIdentifier(utterance)] = epoch
         synthesizer.speak(utterance)
-        startedCount += 1
     }
 
     /// The word position inside the current chunk, for a re-queue.
@@ -548,6 +571,11 @@ extension SystemEngine: AVSpeechSynthesizerDelegate {
                   self.isCurrentSynthesizer(synthesizer),
                   self.epochByUtterance[ObjectIdentifier(utterance)] == self.epoch else { return }
             self.chunkFinished = true
+            // Batch F1: one fewer utterance sitting in Apple's queue. This is
+            // the other half of the lookahead arithmetic — the depth is
+            // handed-over minus finished, so finishing is what lets the next
+            // chunk in.
+            self.startedCount = max(0, self.startedCount - 1)
             // Batch A2: one stamp, one comparison. No scheduling changes here.
             self.chunkFinishStamp = ContinuousClock.now
             // Progress reaches exactly 1.0 on the last chunk before the
