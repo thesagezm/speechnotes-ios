@@ -27,7 +27,7 @@ enum VoiceCatalog {
 
     /// Codenames whose spoken name isn't just a capitalized suffix.
     private static let irregularNames = [
-        "am_fenfir": "Fenrir",
+        "am_fenrir": "Fenrir",
         "bf_lily": "Lily",
         "bm_fable": "Fable",
     ]

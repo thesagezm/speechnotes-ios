@@ -80,25 +80,30 @@ jobs:
             -o ~/kokoro-small-spike/tokenizer.json \
             "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/tokenizer.json"
           curl -L --retry 3 --progress-bar \
-            -o /tmp/kokoro-voices.npz \
+            -o ~/kokoro-small-spike/voices.npz \
             "https://raw.githubusercontent.com/mlalma/KokoroTestApp/main/Resources/voices.npz"
           # voices.npz carries one [rows, 256] float32 style matrix per
-          # voice — extract the full af_heart matrix; the engine slices
-          # row clamp(N-2, 0, rows-1) exactly like OnnxKokoroEngine.
+          # voice. The full archive is kept whole so the 28-voice test can
+          # enumerate its members; af_heart is also extracted as the flat
+          # matrix the inference test runs through.
           python3 -c "
           import zipfile, os
-          z = zipfile.ZipFile('/tmp/kokoro-voices.npz')
+          os.makedirs(os.path.expanduser('~/kokoro-small-spike'), exist_ok=True)
+          z = zipfile.ZipFile(os.path.expanduser('~/kokoro-small-spike/voices.npz'))
           data = z.read('af_heart.npy')
           hlen = int.from_bytes(data[8:10], 'little')
           body = data[10 + hlen:]
           assert len(body) % (256 * 4) == 0, len(body)
           print('CI voice matrix:', len(body) // (256 * 4), 'rows')
+          print('CI voice members:', len(z.namelist()))
           open(os.path.expanduser('~/kokoro-small-spike/voice.f32'), 'wb').write(body)
           "
           ls -lh ~/kokoro-small-spike
 
       - name: Run Kokoro small spike test
         id: test
+        env:
+          KOKORO_VOICES_NPZ: $HOME/kokoro-small-spike/voices.npz
         run: |
           set -o pipefail
           cd Tests/KokoroSmallSpike
@@ -128,6 +133,14 @@ jobs:
           name: kokoro-small-sample
           path: ~/kokoro-small-spike/sample.wav
           if-no-files-found: error
+
+      - name: Upload corpus artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kokoro-small-corpus
+          path: ~/kokoro-small-spike/corpus-*.wav
+          if-no-files-found: warn
 
       - name: Upload spike log
         if: always()
