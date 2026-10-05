@@ -264,15 +264,16 @@ final class OggReaderTests: XCTestCase {
     /// corrupt "packet" is discarded mid-stream, and the walk still reports
     /// duration from the tail.
     func testRunawayPacketIsDiscardedWithoutKillingTheSummary() throws {
-        // One 255-byte segment per page, forever: a lying segment table
-        // whose "packet" never terminates. Pending crosses the 4 MB cap —
-        // 16 384 continuation pages — and the assembler drops it instead of
-        // buffering the whole head.
+        // One 255-segment page after another, every segment a lacing value of
+        // 255: a lying segment table whose "packet" never terminates. Each page
+        // carries 65 KB, so ~390 pages cross the 24 MB cap and the assembler
+        // drops the packet instead of buffering the whole head.
+        let pageOfContinuations = Array(repeating: Data(repeating: 0xAA, count: 255), count: 255)
         var head = oggPage(segments: [opusHeadPacket()], seq: 0)
-        for seq in UInt32(1)...16_600 {
-            head += oggPage(segments: [Data(repeating: 0xAA, count: 255)], seq: seq)
+        for seq in UInt32(1)...400 {
+            head += oggPage(segments: pageOfContinuations, seq: seq)
         }
-        let tail = oggPage(segments: [Data(repeating: 0xFC, count: 100)], granule: 4_800_000, seq: 16_601)
+        let tail = oggPage(segments: [Data(repeating: 0xFC, count: 100)], granule: 4_800_000, seq: 401)
         let summary = try OggReader.summary(head: head, tail: tail)
         XCTAssertEqual(summary.variant, "opus")
         XCTAssertEqual(summary.chapters.count, 0)

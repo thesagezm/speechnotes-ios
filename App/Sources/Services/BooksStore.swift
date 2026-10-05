@@ -220,22 +220,26 @@ final class BooksStore: ObservableObject {
         }
         books = allBooks.filter { !$0.isDeleted }
         pruneExpiredBooks()
-        backfillMissingBooks(maxAudioBooks: 3)
+        backfillMissingBooks(maxAudioBooks: 2)
     }
 
     /// One backfill pass per launch: PDFs/EPUBs imported before covers,
     /// spine lists or nested TOCs existed get them filled in, and
-    /// `maxAudioBooks` (default 1) audio books get their manifest re-read
+    /// `maxAudioBooks` (default 2) audio books get their manifest re-read
     /// from the file. One detached pass, then the shelf refreshes.
     ///
-    /// The audio book re-read is EXPENSIVE by nature — it maps the whole
-    /// m4b and walks its box tree — so it is capped (oldest book first) and
-    /// deferred behind everything else. With N pending audio books the
-    /// shelf repaired one per launch rather than seconds of I/O on every
-    /// launch.
+    /// The audio re-read is the expensive one — 8 MB of head plus 8 MB of
+    /// tail per book, an AVFoundation metadata probe, and two metadata waits
+    /// that can block for seconds each — so it is capped and deferred behind
+    /// everything else. The cap is deliberately small: this pass is not on a
+    /// critical path, it runs detached, and a shelf with N broken audio books
+    /// repairs one or two per launch rather than seconds of I/O every launch.
+    /// Books carrying a synthesized `ogg-uniform` chapter table sort first, so
+    /// a repair the user can SEE is never starved by a legacy book that only
+    /// misses cover art.
     private var didBackfillLegacyBooks = false
 
-    private func backfillMissingBooks(maxAudioBooks: Int = 1) {
+    private func backfillMissingBooks(maxAudioBooks: Int = 2) {
         guard !didBackfillLegacyBooks else { return }
         let pending = books.filter { book in
             (book.format == .pdf && (!book.hasCover || book.pdfChapters == nil))
@@ -289,7 +293,16 @@ final class BooksStore: ObservableObject {
         let capped: [Book] = {
             let others = orderedPending.filter { $0.format != .audio }
             let audio = orderedPending.filter { $0.format == .audio }
-                .sorted { $0.addedAt < $1.addedAt }
+                // A book with a synthesized uniform table has chapters the
+                // user can SEE are wrong, so it outranks the older books the
+                // cap would otherwise pick first — otherwise a shelf full of
+                // legacy books starves the repair for launch after launch.
+                .sorted { lhs, rhs in
+                    let lhsUniform = lhs.audioChapterSource == "ogg-uniform"
+                    let rhsUniform = rhs.audioChapterSource == "ogg-uniform"
+                    if lhsUniform != rhsUniform { return lhsUniform }
+                    return lhs.addedAt < rhs.addedAt
+                }
                 .prefix(maxAudioBooks)
             return others + audio
         }()
@@ -330,6 +343,18 @@ final class BooksStore: ObservableObject {
                     // kept working. Give the file its true extension, then
                     // re-read the manifest from it.
                     Self.renameLegacyAudioFileIfNeeded(book: book, directory: dir)
+                    // A synthesized uniform table must be DROPPED before the
+                    // re-read: buildAudioManifest only fills chapters when
+                    // `audioChapters == nil`, so re-reading a book that still
+                    // carries its half-hour table skipped the whole Ogg block
+                    // and stamped the book `ogg-uniform-verified` — terminal,
+                    // never retried, the real marks never applied. This is the
+                    // one case where the stored chapters are known-wrong
+                    // rather than known-best.
+                    if book.audioChapterSource == "ogg-uniform" {
+                        book.audioChapters = nil
+                        book.audioChapterSource = nil
+                    }
                     let refreshed = Self.buildAudioManifest(book: book, directory: dir)
                     book = refreshed
                     // TERMINAL STAMP. One verified re-read is the contract:

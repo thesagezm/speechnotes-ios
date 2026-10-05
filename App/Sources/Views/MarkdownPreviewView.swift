@@ -7,10 +7,11 @@ import UIKit
 ///
 /// Renders `MarkdownText.blocks` output: headings, nested lists with task
 /// checkboxes, blockquotes, code blocks (with language label), tables,
-/// thematic breaks, and paragraphs split into text / image / link runs via
-/// `MarkdownText.inlineRuns`. Local `speechnotes://note-image/…` targets
-/// resolve through `NoteImageStore` (thumbnails for big images); remote
-/// URLs render via AsyncImage. Links open in an in-app Safari sheet.
+/// thematic breaks, and paragraphs split into text / image / link runs from
+/// the paragraph's own AST spans (`MarkdownText.runs(from:)`). Local
+/// `speechnotes://note-image/…` targets resolve through `NoteImageStore`
+/// (thumbnails for big images); remote URLs render via `CachedImage`'s
+/// read-through cache. Links open in an in-app Safari sheet.
 struct MarkdownPreviewView: View {
     let markdown: String
 
@@ -134,11 +135,11 @@ struct MarkdownPreviewView: View {
             // for a real note identity (the preview's fallback UUID must not
             // litter the index).
             if let realId = realNoteId {
+                // The same filter the fetcher applies (https only), so the
+                // index holds exactly what `remoteImageURLs(in:)` enumerates
+                // and what `removeImages(for:)` can later delete.
                 let urls = remoteTargets.compactMap(RemoteImageStore.flexibleURL)
-                    .filter { url in
-                        guard let scheme = url.scheme?.lowercased() else { return false }
-                        return scheme == "http" || scheme == "https"
-                    }
+                    .filter { $0.scheme?.lowercased() == "https" }
                 RemoteImageStore.record(urls: urls, noteId: realId)
             }
         }

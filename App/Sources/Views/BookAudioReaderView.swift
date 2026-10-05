@@ -491,7 +491,13 @@ struct BookAudioReaderView: View {
             RoundedRectangle(cornerRadius: 26, style: .continuous)
                 .strokeBorder(Color.primary.opacity(0.07))
         )
-        .padding(.horizontal, 10)
+        .padding(.horizontal, PlaybackRail.horizontalPadding)
+        // Same footprint as `fullAudioRail` below (which pins
+        // idealWidth + 2 × horizontalPadding). Without it the capsule's own
+        // ~66 pt width replaces the panel's column and the trailing column
+        // re-flows the screen on every toggle — the audiobook twin of the
+        // rail jump PlaybackRail.swift has the same guard for.
+        .frame(width: PlaybackRail.idealWidth + 2 * PlaybackRail.horizontalPadding)
         .frame(maxHeight: .infinity, alignment: .center)
     }
 

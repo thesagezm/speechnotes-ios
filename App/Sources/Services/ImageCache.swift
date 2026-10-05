@@ -48,6 +48,13 @@ final class ImageCache {
             // into a fetch by the preview's read-through cache. Plain http
             // is excluded too — ATS blocks it, so accepting the scheme only
             // produced silent failures.
+            //
+            // The scheme is checked here AND inside fetchCapped, so a
+            // rejected URL logs twice; the copy above is the security guard
+            // (it is the one that stops a non-https fetch from being
+            // attempted at all) and the one below is the fetch layer's
+            // diagnostic. Not deduped: losing either loses a different
+            // guarantee.
             guard let scheme = url.scheme?.lowercased(), scheme == "https" else {
                 Log.shared.error("Web image skipped (not https): \(url.absoluteString.prefix(120))")
                 return nil

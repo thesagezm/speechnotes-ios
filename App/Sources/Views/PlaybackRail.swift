@@ -262,6 +262,13 @@ struct PlaybackRail: View {
                 .strokeBorder(Color.primary.opacity(0.07))
         )
         .padding(.horizontal, Self.horizontalPadding)
+        // The SAME column footprint as the expanded panel. Without this the
+        // capsule's natural width (a 46 pt circle plus its own padding, ~66)
+        // replaces the panel's pinned 170, so the host HStack re-flows the
+        // whole screen on every minimize and every re-expand — which is what
+        // the user saw as the rail jumping to the middle on open and hanging
+        // off the edge (minimize button unreachable) after the round trip.
+        .frame(width: Self.idealWidth + 2 * Self.horizontalPadding)
         .frame(maxHeight: .infinity, alignment: .center)
     }
 

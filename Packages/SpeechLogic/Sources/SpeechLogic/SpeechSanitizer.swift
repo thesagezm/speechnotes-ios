@@ -55,6 +55,32 @@ public enum SpeechSanitizer {
     private static let variationSelectors: ClosedRange<Unicode.Scalar> = "\u{FE00}"..."\u{FE0F}"
     private static let variationSelectorsSupplement: ClosedRange<Unicode.Scalar> = "\u{E0100}"..."\u{E01EF}"
 
+    /// Emoji: no pronunciation exists, and a phonemizer handed one emits
+    /// noise or reads the character's name ("party popper") at the reader.
+    ///
+    /// Block ranges would be both too wide and too narrow at once. Too wide:
+    /// U+2600–U+26FF is mostly music notation, card suits and genetics (♀ ♂ ♯
+    /// ♠ ♪), which are ordinary note content and must survive — a block there
+    /// deleted real characters from imported notes at ImportService.swift:91,
+    /// whose output IS the stored note body. Too narrow: ✅ U+2705, ❌ U+274C,
+    /// ❗ U+2757 and ⭐ U+2B50 render as emoji yet sit outside the emoji planes.
+    ///
+    /// So the question is "would a user see a PICTURE by default", asked of
+    /// the scalar's `isEmojiPresentation` property: 🎉 ✅ ❌ ⚡ ❗ ⭐ are
+    /// pictures, ♀ ♂ ♯ ♠ ♪ ♥ ✔ ✖ ✂ are not. The wider `isEmoji` property is
+    /// deliberately NOT used as well — nearly all of U+2600–U+27BF carries
+    /// Emoji=Yes while rendering as text by default (that is exactly the
+    /// data-loss case above), and an emoji-presentation codepoint in this set
+    /// is precisely the one that renders as a picture.
+    ///
+    /// U+2764 ❤ is the one deliberate edge: it carries both properties but
+    /// its default presentation is text, and an existing test pins
+    /// clean("Hello ❤ world") unchanged, so it stays.
+    private static func isEmojiSymbol(_ scalar: Unicode.Scalar) -> Bool {
+        if scalar.value == 0x2764 { return false }   // pinned text-default
+        return scalar.properties.isEmojiPresentation
+    }
+
     /// Private Use Area — glyphs from an embedded font with no agreed
     /// pronunciation anywhere (the "tofu box" of TTS).
     private static let privateUse: [ClosedRange<Unicode.Scalar>] = [
@@ -95,7 +121,7 @@ public enum SpeechSanitizer {
 
     /// True when the scalar has no business reaching a speech engine:
     /// C0/C1 controls except tab and newline, zero-width and bidi controls,
-    /// variation selectors, private-use glyphs. Cells of the Basic
+    /// variation selectors, emoji, private-use glyphs. Cells of the Basic
     /// Multilingual Plane that are unassigned are *kept* — Unicode's own
     /// convention (U+FFFD) is a better signal than a guess here.
     public static func isUnspeakable(_ scalar: Unicode.Scalar) -> Bool {
@@ -113,6 +139,7 @@ public enum SpeechSanitizer {
         if bidiControls.contains(scalar) { return true }
         if variationSelectors.contains(scalar) { return true }
         if variationSelectorsSupplement.contains(scalar) { return true }
+        if isEmojiSymbol(scalar) { return true }
         for range in privateUse where range.contains(scalar) { return true }
         return false
     }
@@ -128,9 +155,13 @@ public enum SpeechSanitizer {
     /// it is invisible to the reader, so a page full of soft hyphens and
     /// joiners stops breaking synthesis without moving a single later offset.
     ///
-    /// Length is preserved exactly: `result.utf16.count == text.utf16.count`.
-    /// Control characters that a reader would treat as a line break (CR, and
-    /// the Unicode line/paragraph separators) become `\n`; every other
+    /// Length is preserved per SCALAR, not per UTF-16 unit — the substitution is
+    /// one scalar for one scalar, and an astral scalar (an emoji, 2 UTF-16
+    /// units) becoming a space therefore shortens the result by one unit. The
+    /// callers of this shape index by SCALAR offset; a path that needs UTF-16
+    /// stability must not run unspeakable ASTRAL scalars through here. Control
+    /// characters that a reader would treat as a line break (CR, and the
+    /// Unicode line/paragraph separators) become `\n`; every other
     /// unspeakable scalar becomes a space.
     public static func cleanedPreservingOffsets(_ text: String) -> String {
         guard !text.isEmpty else { return text }

@@ -123,4 +123,58 @@ final class SpeechSanitizerTests: XCTestCase {
         XCTAssertEqual(span.endOffset, 6)
         XCTAssertEqual(span.text, "def")
     }
+
+    /// Emoji reach the phonemizer (it has no pronunciation for a pictograph
+    /// and reads the character's name instead), so `clean` removes them.
+    func testCleanDropsEmoji() {
+        let raw = "Party \u{1F389} tonight \u{26A1} \u{2705} \u{274C} \u{2757} \u{2B50}"
+        let cleaned = SpeechSanitizer.clean(raw)
+        for symbol in ["\u{1F389}", "\u{26A1}", "\u{2705}", "\u{274C}", "\u{2757}", "\u{2B50}"] {
+            XCTAssertFalse(cleaned.contains(symbol), "\(symbol) survived into speech text")
+        }
+        XCTAssertFalse(cleaned.contains("\u{FE0F}"), "variation selector survived")
+    }
+
+    /// The other half of the rule — a block-range implementation that strips
+    /// "emoji" by codepoint range deletes content users type on purpose.
+    /// Music notation, card suits, genetics and the dingbats-as-punctuation
+    /// set are all ordinary note text.
+    func testCleanKeepsProseSymbols() {
+        let raw = "gen\n♀ ♂ ♯ ♭ ♪ ♫ ♠ ♥ ♦ ♣ ⚖ ⚗ ☎ ⚕ and ✓ ✗ ✔ ✖ ✂ \u{2764}"
+        XCTAssertEqual(SpeechSanitizer.clean(raw), raw)
+    }
+
+    /// The astral-plane split the block-range version got wrong in both
+    /// directions: pictures outside the astral emoji planes are dropped, prose
+    /// symbols inside them are kept. 🎉 is U+1F389 and ⭐ is U+2B50 — both
+    /// pictures; ♪ is U+266A and ✓ is U+2713 — neither is.
+    func testEmojiIsAPropertyNotABlock() {
+        XCTAssertTrue(SpeechSanitizer.isUnspeakable("\u{1F389}" as Unicode.Scalar))
+        XCTAssertTrue(SpeechSanitizer.isUnspeakable("\u{2B50}" as Unicode.Scalar))
+        XCTAssertFalse(SpeechSanitizer.isUnspeakable("\u{266A}" as Unicode.Scalar))
+        XCTAssertFalse(SpeechSanitizer.isUnspeakable("\u{2713}" as Unicode.Scalar))
+    }
+
+    /// The import path stores the sanitizer's output as the note body, so an
+    /// over-wide classification is DATA LOSS, not a speech quirk — this pins
+    /// the exact case where a "strip the emoji blocks" implementation would
+    /// have deleted the user's characters.
+    func testCleanPreservesSymbolsForStorage() {
+        let raw = "B major: \u{266F} then \u{2642}\u{2640} pair, \u{2660} suit"
+        XCTAssertEqual(SpeechSanitizer.clean(raw), raw)
+    }
+
+    /// `cleanedPreservingOffsets` substitutes one scalar for one scalar, so
+    /// the guarantee is per-scalar. An astral emoji is two UTF-16 units and
+    /// becomes a one-unit space: the guarantee that holds is
+    /// `unicodeScalars.count`, and a reader that indexes by UTF-16 must know
+    /// that.
+    func testPreservingOffsetsPreservesScalarCount() {
+        let raw = "a\u{1F389}b\u{00AD}c"
+        let cleaned = SpeechSanitizer.cleanedPreservingOffsets(raw)
+        XCTAssertEqual(cleaned.unicodeScalars.count, raw.unicodeScalars.count)
+        XCTAssertFalse(cleaned.contains("\u{1F389}"))
+        XCTAssertEqual(cleaned.utf16.count, raw.utf16.count - 1,
+                       "an astral scalar is 2 UTF-16 units and one scalar replaces it")
+    }
 }

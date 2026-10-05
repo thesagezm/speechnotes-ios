@@ -227,10 +227,14 @@ public enum OggReader {
                 }
                 let packet = Data(pending)
                 pending.removeAll(keepingCapacity: true)
-                if info == nil {
+                // Latch on a packet that actually IS OpusHead, not merely on
+                // the first completed one: on a multiplexed stream the second
+                // logical stream's OpusHead is not packet 0, and latching
+                // `info` on that one returned `.other` with no retry.
+                if info == nil, packet.starts(with: Data(Self.opusHeadMagic)) {
                     info = streamInfo(firstPacket: packet)
                 }
-                if tagsChapters.isEmpty, packet.starts(with: Data(opusTagsMagic)) {
+                if tagsChapters.isEmpty, packet.starts(with: tagsMagic) {
                     tagsChapters = chapters(fromTagsPacket: packet)
                 }
             }
@@ -257,13 +261,20 @@ public enum OggReader {
         )
     }
 
-    /// Ceiling on one assembled packet during the bounded summary scan —
-    /// a comment packet with embedded art and lyrics is routinely about a
-    /// megabyte; beyond 4 MB the bytes are audio from a lying segment table,
-    /// not metadata.
-    private static let maxMetadataPacketBytes = 4 * 1024 * 1024
+/// Ceiling on one assembled packet during the bounded summary scan. A
+    /// comment packet with embedded art is routinely megabytes — a
+    /// METADATA_BLOCK_PICTURE is base64, so a 3 MB cover alone is ~4 MB of
+    /// comment — plus lyrics and the chapter table, so this has to clear a
+    /// large embedded cover with room to spare or the chapter comments go
+    /// with it. Still a cap: past it the segment table is describing audio
+    /// from a corrupt file, not metadata.
+    private static let maxMetadataPacketBytes = 24 * 1024 * 1024
 
+    /// Hoisted out of the walk: an 8 MB head holds tens of thousands of packets,
+    /// and building this `Data` per packet was an allocation per packet.
     private static let opusTagsMagic: [UInt8] = [0x4F, 0x70, 0x75, 0x73, 0x54, 0x61, 0x67, 0x73]
+    private static let tagsMagic = Data(opusTagsMagic)
+    private static let opusHeadMagic: [UInt8] = [0x4F, 0x70, 0x75, 0x73, 0x48, 0x65, 0x61, 0x64]
 
     /// Chapter marks out of an OpusTags packet: magic(8), vendor length (4
     /// LE) + vendor, comment count (4 LE), then count × (length (4 LE) +

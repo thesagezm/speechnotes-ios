@@ -167,7 +167,11 @@ enum RemoteImageStore {
         for (_, urls) in index { referencedElsewhere.formUnion(urls) }
         var freed: Int64 = 0
         for string in strings where !referencedElsewhere.contains(string) {
-            guard let url = URL(string: string) else { continue }
+            // flexibleURL, not URL(string:): the index holds whatever the
+            // PREVIEW parsed, and a target that only parsed after
+            // percent-encoding has to decode back through the same path or
+            // the hash misses and the bytes are never freed.
+            guard let url = flexibleURL(string) else { continue }
             let file = fileURL(for: url)
             let bytes = Int64((try? file.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
             freed += bytes
@@ -209,14 +213,24 @@ enum RemoteImageStore {
 
     /// URL construction tolerant of what users actually paste. `URL(string:)`
     /// is strict — one raw space or an unencoded non-ASCII path character
-    /// makes it nil, and the image silently degraded to a photo glyph. A
-    /// well-formed string is returned untouched (the fallback only runs when
-    /// the strict parse failed); the percent-encoding pass fixes exactly the
-    /// characters a paste left raw.
+    /// makes it nil, and the image silently degraded to a photo glyph.
+    ///
+    /// The fallback encodes ONLY the characters a paste can leave raw, using
+    /// a set that does NOT include the URL's structural delimiters. Encoding
+    /// with `.urlQueryAllowed` (the obvious choice) leaves `? & + ; = : @ $`
+    /// unescaped, which is what makes it wrong here: in `https://x/a b&c.jpg`
+    /// the space gets encoded but the raw `&` still parses as a query
+    /// separator, so the server sees `b` as a parameter and 404s. Encoding
+    /// them instead means the whole `a/b?c` string hydrates as a path and the
+    /// query round-trips intact.
+    ///
+    /// A well-formed string is returned untouched (the fallback only runs
+    /// when the strict parse failed).
     static func flexibleURL(_ string: String) -> URL? {
         if let url = URL(string: string) { return url }
-        guard let encoded = string.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else { return nil }
-        return URL(string: encoded)
+        guard let encoded = string.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) else { return nil }
+        guard let url = URL(string: encoded), url.scheme?.lowercased() == "https" else { return nil }
+        return url
     }
 
     /// Hard cap on one remote image download. A note can name any URL —
