@@ -407,7 +407,10 @@ final class MobiParserTests: XCTestCase {
 
     func testHeadlessBookKeepsParagraphChunkingWithoutHTML() {
         // No headings at all — the fallback chunks prose and carries no markup.
-        let html = String(repeating: "<p>" + String(repeating: "word ", count: 200) + "</p>", count: 8)
+        // The fixture has to clear `chapterTargetCharacters` (12 000) or the
+        // whole book is one chapter and the assertion below proves nothing:
+        // 24 paragraphs × ~1 000 characters is ~24k, i.e. two chunk flushes.
+        let html = String(repeating: "<p>" + String(repeating: "word ", count: 200) + "</p>", count: 24)
         let chapters = MobiParser.chapters(from: html)
         XCTAssertGreaterThan(chapters.count, 1)
         XCTAssertTrue(chapters.allSatisfy { $0.html.isEmpty })
