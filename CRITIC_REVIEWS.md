@@ -631,3 +631,90 @@ logic-tests and all four spikes) on `e04fd0e`.
 decodes ALAC and FLAC-in-MP4, and a raw `.flac` file is not a book
 container (the importer takes m4b/m4a/mp4/mp3 by design). Nothing about
 this path re-encodes; it hands the file to the decoder Apple ships.
+
+## TTS Engines — Batch A1 — Round 1 (diff `0bea095`, independent pass)
+
+**Score: 6.5/10.** The pass made one structural point that landed: the
+headline claim "made provable" rested on a job whose two new proofs could
+both degrade to a silent skip, and whose delivery mechanism was broken — a
+proof that can no-op without failing is a comment, not a test. All fixes in
+`e3c2851`.
+
+1. **P1 (fixed) the delivery mechanism was broken.** `KOKORO_VOICES_NPZ:
+   $HOME/...` in a step's `env:` is written verbatim by the runner — there
+   is no shell expansion on that path. The variable was the literal string,
+   and the proof only worked because the test's own default happened to name
+   the same file. Now set from `${{ github.workspace }}`, which IS expanded.
+2. **P1 (fixed) the 28-voice proof could fake itself.** It skipped when the
+   env var named a missing file; now it FAILS on a named-but-absent file and
+   skips only when it was never told where to look. The spike job downloads
+   voices.npz unconditionally, so "absent" means the job's own plumbing
+   broke — exactly the failure the skip was hiding. (Model-inference tests
+   keep XCTSkip: a 177 MB download is a legitimate reason not to run.)
+3. **P2 (fixed) the normalizer lemma asserted `> 90 scalars`**, which a
+   garbled parse would pass. Now asserts class == vocab — the actual
+   theorem, pinning the 115 figure — in BOTH directions: vocab ⊆ class was
+   missing, and without it the lemma proved only that the app never drops
+   more than the reference, not that it never drops LESS. On a
+   per-character vocab, dropping less means keeping a character the model
+   was never trained on.
+4. **P2 (fixed) no regression net for B1's drop surface.** New unsafe
+   corpus: MisakiSwift's own dictionaries contain 28 characters with no
+   vocab id (`_`, `g`, the digits, capitals B/C/D/E/L/…) — about 108 in
+   3.5 M characters. The app never applied the normalizer that deletes
+   them, so those 28 were its real drop surface, and the phoneme corpus —
+   which contains none of them — could not see a regression there. The new
+   test pins the drop set and asserts the substitution is
+   length-preserving: the one assertion that catches the original
+   `compactMap`, because a deletion changes the count and a substitution
+   does not.
+
+Not acted on, recorded: the note-corpus test is near-vacuous as a drop
+detector (class == vocab makes the two filters identical); its value is the
+boundary claim, and its doc comment says so now. The npz walk's O(n) byte
+scan (0.011 s for 14 MB, reviewer-measured) and its false-positive window
+are accepted — a junk name can only cause a false negative.
+
+**Build gate: `37345434653` — the session's first green run** (all prior
+runs red on compile errors in never-compiled code or wrong test expected
+values), on `d5471fb`, which postdates both critique rounds.
+
+## TTS Engines — Batch A2/A3 — Round 1 (diffs `112d7ad`, `29c70f9`, independent pass)
+
+**Score: 7/10.** Two P1s: the field the batch exists to use was written and
+never read, and the accounting section the batch adds work to was not
+updated. Both label/contract defects rather than behaviour defects — but
+the whole point of the tier tag is that the RTF figure is readable, and the
+line that prints the RTF was the one line without it. Fixes in `dbfe16e`;
+the numbered items below are the findings that round landed.
+
+1. **P1 (fixed) `sessionTier` was set in `beginSession` and read nowhere.**
+   It now rides the session summary; `modelReady` also reads the session's
+   own tag as its default, so the two sources for one value collapse to one.
+2. **P1 (fixed) TTS_BASELINE.md §6, the accounting section A2 adds work to,
+   was not updated** — now extended with A2's three sites.
+3. **P2 (fixed) `tierName(for:)` reported `kokoro-fp32` for anything not
+   literally `model_uint8.onnx`.** An unrecognised file now says
+   `kokoro-unknown`, which fails loudly instead of silently — the fp16
+   variant already shipped once and produced NaN on ORT CPU
+   (CI 34008548349), so a third tier is a live possibility, not a
+   hypothetical.
+4. **P2 (fixed) `emit` accepted `isError` and dropped it** — the threshold
+   it gates on paid for a decision that was then thrown away. A boundary
+   over half a second is a real event the listener heard; it goes to the
+   error channel, matching PlaybackMetrics' GAP escalation.
+5. **P2 (fixed) the `didFinish → didStart` endpoint was mislabelled** in the
+   class doc and TTS_BASELINE.md §4; both now say what it is, with the same
+   lower-bound caveat `gaps` carries. The `boundaries 50/41` doc example is
+   recomputed (N chunks → N−1 boundaries).
+
+Still open: `SystemSpeechMetrics` has no injectable sink, so its arithmetic
+cannot be asserted in CI — the same parity gap PlaybackMetrics already
+solved, and there is no test harness for App/Sources at all; noted for
+Batch F, which rebuilds the class. GAP escalation is unbounded (~638 lines
+worst case for a 200k-char chapter), recorded in TTS_BASELINE.md §6 as the
+known worst case, not capped. Out-of-scope observation carried forward:
+`didCancel` was the only delegate callback with no epoch guard — fixed in
+F1 (`26af724`).
+
+**Build gate: `37345434653`** on `d5471fb` (see the A1 entry).
