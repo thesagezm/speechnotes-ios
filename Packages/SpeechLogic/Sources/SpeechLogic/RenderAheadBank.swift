@@ -122,6 +122,32 @@ public struct RenderAheadBankPolicy: Equatable {
         }
     }
 
+    /// How far the producer may pre-render under thermal pressure, as a
+    /// multiplier on the state's seconds target (Batch C2).
+    ///
+    /// Kokoro has no compute dial — no step parameter, and shrinking chunks
+    /// does not lower a transformer's RTF, which is roughly constant in
+    /// chunk size. What smaller banks DO buy is GRANULARITY: at a 15 s bank
+    /// a thermal transition costs at most 15 s of margin swing instead of
+    /// 30 s, so the drain that follows recovers in smaller steps. That is a
+    /// real property, and it is not throughput.
+    ///
+    /// The values are multipliers so the byte-cap and seconds-target
+    /// arithmetic in `effectiveTargetSeconds` keeps working unchanged.
+    public func pressureFactor(for thermal: ThermalPressure) -> Double {
+        switch thermal {
+        case .nominal, .fair: return 1.0
+        case .serious: return 0.5
+        case .critical: return 0.25
+        }
+    }
+
+    /// The seconds target under thermal pressure, after the byte cap.
+    /// `effectiveTargetSeconds` plus the pressure factor, in one call.
+    public func pressuredTargetSeconds(thermal: ThermalPressure, sampleRate: Double) -> Double {
+        effectiveTargetSeconds(thermal: thermal, sampleRate: sampleRate) * pressureFactor(for: thermal)
+    }
+
     /// Bytes of mono Float32 PCM per second of audio at `sampleRate`.
     public static func bytesPerSecond(sampleRate: Double) -> Double {
         sampleRate * 4

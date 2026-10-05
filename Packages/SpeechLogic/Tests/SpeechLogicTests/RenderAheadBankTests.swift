@@ -60,6 +60,53 @@ final class RenderAheadBankTests: XCTestCase {
         XCTAssertEqual(RenderAheadBankPolicy.bytesPerSecond(sampleRate: 44_100), 176_400)
     }
 
+    // MARK: - Thermal pressure factor (Batch C2)
+
+    /// Pressure shrinks the bank in HALVING steps. Kokoro has no compute
+    /// dial, so the value this buys is granularity — smaller margin swings
+    /// per thermal transition — not throughput. The test pins the arithmetic
+    /// so the honest claim stays honest.
+    func testPressureFactorByThermal() {
+        let policy = RenderAheadBankPolicy()
+        XCTAssertEqual(policy.pressureFactor(for: .nominal), 1.0)
+        XCTAssertEqual(policy.pressureFactor(for: .fair), 1.0)
+        XCTAssertEqual(policy.pressureFactor(for: .serious), 0.5)
+        XCTAssertEqual(policy.pressureFactor(for: .critical), 0.25)
+    }
+
+    /// The pressured target composes the byte cap with the factor: the cap
+    /// still has the last word, and the factor scales what survives it.
+    func testPressuredTargetComposesCapAndFactor() {
+        let policy = RenderAheadBankPolicy()
+        XCTAssertEqual(
+            policy.pressuredTargetSeconds(thermal: .nominal, sampleRate: 24_000),
+            30, accuracy: 1e-9)
+        XCTAssertEqual(
+            policy.pressuredTargetSeconds(thermal: .critical, sampleRate: 24_000),
+            2, accuracy: 1e-9)
+
+        let capped = RenderAheadBankPolicy(byteCapBytes: 1_048_576)
+        let bytesTarget = 1_048_576.0 / 96_000.0
+        XCTAssertEqual(
+            capped.pressuredTargetSeconds(thermal: .critical, sampleRate: 24_000),
+            bytesTarget * 0.25, accuracy: 1e-9)
+        XCTAssertEqual(
+            capped.pressuredTargetSeconds(thermal: .nominal, sampleRate: 0),
+            30, accuracy: 1e-9)
+    }
+
+    /// The pressured target never EXCEEDS the plain one, at any state — a
+    /// pressure multiplier above 1 would mean pressure makes the bank grow.
+    func testPressureNeverGrowsTheTarget() {
+        let policy = RenderAheadBankPolicy(byteCapBytes: 1)
+        for raw in 0...3 {
+            let thermal = ThermalPressure(thermalStateRawValue: raw)
+            let plain = policy.effectiveTargetSeconds(thermal: thermal, sampleRate: 24_000)
+            let pressured = policy.pressuredTargetSeconds(thermal: thermal, sampleRate: 24_000)
+            XCTAssertLessThanOrEqual(pressured, plain)
+        }
+    }
+
     /// At the engines' 24 kHz the seconds target binds and the default byte
     /// cap never does (32 MB ≈ 349 s ≫ 30 s) — the cap is the jetsam guard,
     /// not the everyday limiter.
