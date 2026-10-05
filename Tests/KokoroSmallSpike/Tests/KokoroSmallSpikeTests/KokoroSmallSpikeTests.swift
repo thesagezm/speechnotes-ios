@@ -651,6 +651,28 @@ final class KokoroSmallSpikeTests: XCTestCase {
             }
         }
         print("KOKORO-SMALL-SPIKE quantization gate: best lag \(bestLag) samples, correlation at best lag \(String(format: "%.4f", bestLagCorrelation))")
+        // Aligned metrics at the best lag: the assertions must judge the
+        // renders at their BEST alignment, or an honest re-quantization
+        // whose render is merely shifted would fail a zero-lag gate the
+        // search was built to rule shifts out of (round-4 critique, P3).
+        var alignedRelativeRMS = relativeRMS
+        let alignedLo = max(0, bestLag)
+        let alignedHi = n + min(0, bestLag)
+        var alignedDiffEnergy = 0.0
+        var alignedFPEnergy = 0.0
+        if alignedHi > alignedLo {
+            let alignedCount = alignedHi - alignedLo
+            for i in alignedLo..<alignedHi {
+                let du = Double(u[i])
+                let df = Double(f[i - bestLag])
+                alignedDiffEnergy += (du - df) * (du - df)
+                alignedFPEnergy += df * df
+            }
+            let alignedDiffRMS = sqrt(alignedDiffEnergy / Double(alignedCount))
+            let alignedFPRMS = sqrt(alignedFPEnergy / Double(alignedCount))
+            alignedRelativeRMS = alignedDiffRMS / max(alignedFPRMS, 1e-9)
+        }
+        print("KOKORO-SMALL-SPIKE quantization gate: aligned rel-RMS \(String(format: "%.4f", alignedRelativeRMS))")
         // Both renders saved for the ear: correlation numbers indict, but a
         // human listening to the pair convicts. `corpus-*` rides the
         // existing artifact upload.
@@ -658,11 +680,11 @@ final class KokoroSmallSpikeTests: XCTestCase {
         try? WAVWriter.write(samples: uint8Samples, sampleRate: 24_000, to: URL(fileURLWithPath: "\(outDir)/corpus-quantgate-uint8.wav"))
         try? WAVWriter.write(samples: fp32Samples, sampleRate: 24_000, to: URL(fileURLWithPath: "\(outDir)/corpus-quantgate-fp32.wav"))
         // First real run calibrates these: the printed values above are the
-        // data. A correlation near zero IS the gibberish signature.
-        XCTAssertLessThan(relativeRMS, 0.25,
-                          "quantized render diverges from fp32 (rel-RMS \(relativeRMS)) — uint8 is corrupting speech")
-        XCTAssertGreaterThan(correlation, 0.9,
-                             "quantized render does not correlate with fp32 (\(correlation)) — uint8 is corrupting speech")
+        // data. A best-lag correlation near zero IS the gibberish signature.
+        XCTAssertLessThan(alignedRelativeRMS, 0.25,
+                          "quantized render diverges from fp32 at best alignment (rel-RMS \(alignedRelativeRMS)) — uint8 is corrupting speech")
+        XCTAssertGreaterThan(bestLagCorrelation, 0.9,
+                             "quantized render does not correlate with fp32 at any lag within ±0.5 s (best \(bestLagCorrelation) at lag \(bestLag)) — uint8 is corrupting speech")
     }
 
     /// One artifact per corpus slice, as the spike always did.

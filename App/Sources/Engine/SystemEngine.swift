@@ -58,6 +58,11 @@ final class SystemEngine: NSObject, SpeechEngine {
         didSet {
             guard speed != oldValue else { return }
             debouncedRateRequeue?.cancel()
+            // The tick belongs to the session that is live NOW. A speak()
+            // (or stop()) within the debounce window supersedes it: the hop
+            // must not fire into the new session and stomp the rate speak()
+            // chose (round-4 critique, P3).
+            let epochAtChange = epoch
             debouncedRateRequeue = Task { [weak self] in
                 try? await Task.sleep(nanoseconds: 250_000_000)
                 guard !Task.isCancelled else { return }
@@ -67,7 +72,8 @@ final class SystemEngine: NSObject, SpeechEngine {
                 // actor and would run all of it on the global executor,
                 // racing the delegate callbacks. Round-3 critique, P1.
                 DispatchQueue.main.async { [weak self] in
-                    self?.requeueCurrentChunkAtNewRate()
+                    guard let self, self.epoch == epochAtChange else { return }
+                    self.requeueCurrentChunkAtNewRate()
                 }
             }
         }
@@ -459,7 +465,12 @@ final class SystemEngine: NSObject, SpeechEngine {
     }
 
     func pause() {
-        guard synthesizer.isSpeaking || !queue.isEmpty else { return }
+        // An idle session has nothing to pause — and the queue array is NOT
+        // cleared by a natural finish, so the emptiness check alone would
+        // let a pause tap racing the final didFinish flip a FINISHED session
+        // to .paused (and a later resume to .speaking over dead air).
+        guard state != .idle, synthesizer.isSpeaking || !queue.isEmpty else { return }
+        let epochAtPause = epoch
         pauseRequested = true
         synthesizer.pauseSpeaking(at: .word)
         // A pause is not a boundary: the boundary stamp is dropped so the
@@ -468,7 +479,12 @@ final class SystemEngine: NSObject, SpeechEngine {
         // intent, not a fault, and the session summary's wall clock says
         // everything about it.
         chunkFinishStamp = nil
-        DispatchQueue.main.async { self.state = .paused }
+        DispatchQueue.main.async { [weak self] in
+            // A stop() that ran between here and the hop supersedes this
+            // pause — the surface must not claim .paused over a dead session.
+            guard let self, self.epoch == epochAtPause else { return }
+            self.state = .paused
+        }
     }
 
     func resume() {
@@ -510,9 +526,15 @@ final class SystemEngine: NSObject, SpeechEngine {
     }
 
     /// Re-queues the SOUNDING chunk's unsound remainder at the new rate.
-    /// Only runs while a chunk is actually sounding; a pause/idle session
-    /// picks the rate up on its next utterance.
+    ///
+    /// The rate itself applies FIRST, unconditionally: a change taken while
+    /// paused, in a between-chunks gap, or against a chunk with nothing left
+    /// to re-queue used to be silently dropped for the REST of the session —
+    /// every later utterance is built from `lastEffectiveRate`, so the
+    /// resumed playback continued at the old rate (round-4 critique, P2).
+    /// Only the remainder re-queue is conditional on something sounding.
     private func requeueCurrentChunkAtNewRate() {
+        lastEffectiveRate = Double(speed)
         guard state == .speaking,
               let slot = currentSlot,
               queue.indices.contains(slot),
@@ -526,7 +548,6 @@ final class SystemEngine: NSObject, SpeechEngine {
         // chunk's base offset is unchanged and the read-along cursor cannot
         // rewind.
         queue[slot] = Queued(offset: chunk.offset + currentCharsDone, text: remainder)
-        lastEffectiveRate = Double(speed)
         // `stopSpeaking(at: .immediate)` below empties Apple's queue — the
         // sounding utterance AND every handed-but-not-started one die with
         // it — so everything from the sounding slot onward is re-owed, and

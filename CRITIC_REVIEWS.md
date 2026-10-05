@@ -884,3 +884,41 @@ the uint8 tier is the gibberish root cause and Batch E's Kokoro wiring
 must not ship on it.
 
 **Build gate: run on this fix round — see the entry above.**
+
+## TTS Engines — Round 4, fix verification (diff `4e03548`, independent pass)
+
+**Score: 7/10. Faster than baseline: YES** — the primed-lookahead pipeline
+is untouched by the findings; chapters stream with only inter-chunk gaps.
+**No P1 findings**, and all six round-3 fixes held (the nextIndex
+bookkeeping, main-hop debounce, drained-held finish, ChunkFileQueue
+completion contract, sample-rate log and trim doc all simulate clean,
+including the refused-last-chunk and exactly-once cases). Four findings,
+all fixed in the round that records this entry:
+
+1. **[P2, fixed] A rate change made while paused was silently dropped for
+   the REST of the session.** The re-queue's `state == .speaking` guard
+   no-oped while paused and `lastEffectiveRate` — the value every later
+   utterance is built from — was never updated on the no-op, so
+   pause → drag slider → resume played every following chunk at the old
+   rate. The same silent drop applied in the didFinish→didStart gap and
+   on a whitespace-only remainder. Fix: the rate applies FIRST,
+   unconditionally; only the remainder re-queue stays conditional.
+2. **[P2, fixed] The mirror ordering of the pause-vs-finish fix still
+   resurrected dead-air `.speaking`.** A `pause()` tap racing the final
+   `didFinish` passed its guard (the queue array survives a natural
+   finish) and flipped a FINISHED session to `.paused`; a later resume
+   claimed `.speaking` with no audio. Fix: `pause()` refuses on
+   `.idle`, and its async state write now carries the epoch guard so a
+   stop() between the call and the hop cannot be overwritten either.
+3. **[P3, fixed] The debounced re-queue had no session guard** — a tick
+   ≤250 ms before a new `speak()` fired its hop into the NEW session and
+   stomped the rate speak() chose. The debounce now captures the epoch at
+   the tick and drops the hop on mismatch.
+4. **[P3, fixed] The B4 gate asserted zero-lag correlation only**, so an
+   honest re-quantization whose render is merely shifted would fail the
+   very gate the lag search was built to rule shifts out of. The
+   assertions now judge the ALIGNED metrics (best-lag correlation,
+   rel-RMS at the best lag), and TTS_BASELINE's "fails CI" wording was
+   corrected to name the spike job, not the run headline.
+
+**Build gate: run on this fix round — see the entry above.**
