@@ -95,6 +95,18 @@ correlation against its own fp32 render. The gate lives in the spike job
 (`testQuantizedRenderMatchesFP32`), so a quantization regression fails CI
 before any device build.
 
+**Verdict (first run, CI `37382312043`/`37383887457`): the uint8 tier IS
+corrupt.** Identical length (92 400 samples — the duration predictor agrees
+exactly, so the text path is shared and sane), but rel-RMS 1.37 and
+correlation 0.057 at zero lag; the ±0.5 s lag search (10 ms steps) tops out
+at 0.082 (lag 480) — the renders are different utterances, not shifted
+copies. That is the device gibberish reports' mechanism, reproduced in CI.
+The listenable pair is in the spike job's `corpus-quantgate-*.wav` artifacts.
+The spike job is therefore failing BY DESIGN (masked green by its
+`continue-on-error`) until the tier changes: ship fp32, re-quantize with a
+calibration set, or drop the tier — a decision that belongs to the release
+plan, not this doc. The other six spike proofs keep passing.
+
 ### What that means per engine
 
 Kokoro, `c1 ≈ 160`:
