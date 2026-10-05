@@ -75,22 +75,26 @@ final class SystemEngine: NSObject, SpeechEngine {
     /// clobber the newer state (M15). Bumped on each speak() and stop().
     ///
     /// Batch F1: the epoch is now compared, not just carried. Every
-    /// utterance is tagged with the epoch it was built under, and all three
-    /// delegate callbacks check the tag — so a `didCancel` from a
+    /// utterance is tagged with the epoch it was built under, and every
+    /// delegate callback checks the tag — so a `didCancel` from a
     /// superseded session cannot drive the current queue, whichever
-    /// synthesizer instance delivers it. The tag is kept out of
-    /// `userInfo`-style side storage: `AVSpeechUtterance` has no payload
-    /// slot of its own, so it rides a private associated-object key.
+    /// synthesizer instance delivers it. `AVSpeechUtterance` has no payload
+    /// slot of its own and Apple's callbacks deliver the utterance, so the
+    /// object identity is the only key that survives BOTH a session
+    /// supersede and a synthesizer rebuild.
     private var epoch = 0
 
-    /// The epoch each live utterance was built under, keyed on the utterance
-    /// object. `AVSpeechUtterance` has no payload slot of its own, and
-    /// Apple's callbacks deliver the utterance — so it is the only identity
-    /// that survives BOTH a session supersede and a synthesizer rebuild.
-    /// Main-thread only, like every other state in this class; entries are
-    /// removed when a callback consumes them, so the table holds at most the
-    /// lookahead.
-    private var epochByUtterance: [ObjectIdentifier: Int] = [:]
+    /// Where each live utterance sits in `queue`, and the epoch it was
+    /// built under, keyed on the utterance object. Main-thread only, like
+    /// every other state in this class; entries are removed by the
+    /// `didFinish`/`didCancel` that retire the utterance, so the table
+    /// holds at most the lookahead.
+    private struct UtteranceTag {
+        let epoch: Int
+        let slot: Int
+    }
+
+    private var tagByUtterance: [ObjectIdentifier: UtteranceTag] = [:]
 
     // MARK: - The chunk queue
 
@@ -102,20 +106,27 @@ final class SystemEngine: NSObject, SpeechEngine {
 
     private var queue: [Queued] = []
     private var nextIndex = 0
-    /// Chunks handed to `synthesizer.speak(_:)` this session. The lookahead
-    /// gate is `nextIndex - startedCount < lookahead`, so this is the count
-    /// of utterances Apple has been given but the finish callback has not
-    /// yet come back for — the queue depth, from this side.
+    /// Utterances Apple is currently holding — handed to
+    /// `synthesizer.speak(_:)` but not yet finished OR cancelled. This IS
+    /// the queue depth, and the lookahead gate is `startedCount < lookahead`.
     ///
-    /// It advances in `startNextChunk` (a chunk was handed over) and in
-    /// `didFinish` (one of them is done). Advancing on hand-over rather than
-    /// on `didStart` matters: the gate has to hold even before Apple
+    /// It advances in `startNextChunk`/`speakQueued` (a chunk was handed
+    /// over) and decrements in `didFinish` and `didCancel` (the utterance
+    /// left Apple's queue either way — a cancel that never decremented
+    /// would close the gate permanently and strand the session in
+    /// mid-chapter silence). Advancing on hand-over rather than on
+    /// `didStart` matters: the gate has to hold even before Apple
     /// acknowledges the utterance, or a burst of `didStart` callbacks could
     /// refill the queue.
     private var startedCount = 0
-    /// The chunk currently in flight, and how many characters of it have
-    /// sounded (`willSpeakRangeOfSpeechString` gives the latter).
+    /// The chunk currently SOUNDING, and how many characters of it have
+    /// sounded. Set from `didStart`/`willSpeakRangeOfSpeechString` via the
+    /// utterance's slot tag — NOT at hand-over: with the lookahead filled,
+    /// several handed chunks sit in Apple's queue ahead of the sounding
+    /// one, and progress/re-queue that keyed on the last-handed chunk would
+    /// pair the sounding utterance's word range with the wrong text.
     private var current: Queued?
+    private var currentSlot: Int?
     private var currentCharsDone = 0
     /// Total UTF-16 length of the whole spoken string — the denominator for
     /// progress.
@@ -131,6 +142,11 @@ final class SystemEngine: NSObject, SpeechEngine {
     /// rebuild path uses it to resume with the NEXT chunk instead of
     /// re-speaking the finished one's tail.
     private var chunkFinished = false
+    /// The slot of the last chunk that reported `didFinish` (utterances
+    /// finish in order). With `chunkFinished` it is the rebuild path's
+    /// resume point: every slot after it was handed ahead but never sounded,
+    /// and the rebuild's `stopSpeaking` destroyed those copies.
+    private var lastFinishedSlot: Int?
 
     /// Per-word progress callbacks coalesced to ~3.3 Hz — each one publishes
     /// progress and invalidates observing views; word-rate emissions were
@@ -234,33 +250,47 @@ final class SystemEngine: NSObject, SpeechEngine {
         // The rebuild is preceded by an interruption, not by a chunk
         // boundary: drop the stamp so the resume is not logged as a gap.
         chunkFinishStamp = nil
-        // Resume with exactly the text that has not sounded yet:
+        // Resume with exactly the text that has not sounded yet. The
+        // `stopSpeaking(.immediate)` above emptied Apple's queue — the
+        // sounding utterance AND every handed-but-not-started one died with
+        // it — so the depth restarts from zero and the rewind must re-owe
+        // everything from the sounding chunk onward, not just rewind one
+        // slot:
         //  - pause mid-chunk (willSpeak advanced, didFinish not fired) →
-        //    re-queue the unsound remainder;
-        //  - pause before the first word (no willSpeak yet) → re-speak the
-        //    whole chunk from its start (the critique's P2: this case
-        //    silently dropped up to 320 chars);
-        //  - pause at a chunk BOUNDARY (didFinish fired) → continue with
-        //    the next chunk, not the finished one's tail.
-        // All three collapse to: point nextIndex at the chunk that still
-        // owes sound, then startNextChunk().
-        if let chunk = current, !chunkFinished {
+        //    replace the sounding chunk with its unsound remainder, re-owe
+        //    from its slot;
+        //  - pause before the first word of a chunk (no willSpeak yet) →
+        //    re-speak that chunk whole (the critique's P2: this case used
+        //    to silently drop up to 320 chars);
+        //  - pause at a chunk BOUNDARY (didFinish fired, next chunk held) →
+        //    continue at the slot after the finished one.
+        startedCount = 0
+        tagByUtterance.removeAll()
+        if chunkFinished, let finishedSlot = lastFinishedSlot {
+            nextIndex = finishedSlot + 1
+        } else if let slot = currentSlot, queue.indices.contains(slot) {
+            let chunk = queue[slot]
             let spoken = currentCharsDone
+            var rewindTo = slot
             if spoken > 0, spoken < chunk.text.utf16.count {
                 let units = Array(chunk.text.utf16)
                 let remainder = String(decoding: units[spoken...], as: UTF16.self)
-                if !remainder.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    let index = max(0, nextIndex - 1)
-                    queue[index] = Queued(offset: chunk.offset + spoken, text: remainder)
-                    nextIndex = index
+                if remainder.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    // The unsound tail is nothing: the chunk is done.
+                    rewindTo = slot + 1
+                } else {
+                    queue[slot] = Queued(offset: chunk.offset + spoken, text: remainder)
                 }
-            } else {
-                // Nothing sounded yet (or the odd full-length report) — the
-                // whole chunk is still owed.
-                nextIndex = max(0, nextIndex - 1)
             }
-            currentCharsDone = 0
+            // Whole chunk (nothing sounded), its remainder, or the slot
+            // after a chunk whose tail was whitespace only.
+            nextIndex = rewindTo
         }
+        // Nothing ever sounded (paused between hand-over and the first
+        // didStart): nextIndex is untouched — every handed utterance is
+        // still owed and still sits in `queue`.
+        currentSlot = nil
+        currentCharsDone = 0
         // State flips to .speaking via the new instance's didStart.
         startNextChunk()
     }
@@ -279,12 +309,12 @@ final class SystemEngine: NSObject, SpeechEngine {
         synthesizer.stopSpeaking(at: .immediate)
         configureAudioSessionIfNeeded()
         epoch += 1
-        // The bump above orphans every entry in `epochByUtterance` — which
+        // The bump above orphans every entry in `tagByUtterance` — which
         // is the point. A stale `didFinish`/`didCancel` for an utterance
         // from before this speak() now finds a mismatched tag and is
         // dropped, so a superseded session cannot drive this queue's
         // `nextIndex`.
-        epochByUtterance.removeAll()
+        tagByUtterance.removeAll()
 
         activeUtteranceText = clean
         totalChars = max(1, clean.utf16.count)
@@ -307,7 +337,10 @@ final class SystemEngine: NSObject, SpeechEngine {
         nextIndex = 0
         startedCount = 0
         current = nil
+        currentSlot = nil
         currentCharsDone = 0
+        chunkFinished = false
+        lastFinishedSlot = nil
         // A new session invalidates the cached voice: the settings UI may
         // have written a different identifier between plays.
         cachedVoice = nil
@@ -316,10 +349,9 @@ final class SystemEngine: NSObject, SpeechEngine {
         // a device log can be filtered on one string for every engine.
         metrics.beginSession(chunkCount: queue.count, rate: lastEffectiveRate)
         chunkFinishStamp = nil
-        // Fills the lookahead before returning: `startNextChunk` is gated on
-        // `nextIndex - startedCount < lookahead`, so this one call hands
-        // Apple the first `lookahead` utterances and no more. Its queue is
-        // primed while utterance 0 is still rendering.
+        // Hands the first utterance; each `didStart` hands one more until
+        // the gate holds, so Apple's queue is primed to the lookahead while
+        // utterance 0 is still rendering.
         startNextChunk()
         // State flips to .speaking via the didStart delegate callback.
     }
@@ -345,29 +377,32 @@ final class SystemEngine: NSObject, SpeechEngine {
     /// Now `startNextChunk` is called from BOTH the finish path and the
     /// utterance-start path, and it stops once the lookahead is full.
     ///
-    /// The lookahead count is `nextIndex - startedCount`, which counts what
-    /// has been HANDED OVER minus what has finished — exactly Apple's queue
-    /// depth from this side. `startedCount` advances in `didFinish`, and a
-    /// chunk is handed over at most once because `nextIndex` only ever
-    /// moves forward and the gate is monotone.
+    /// The lookahead depth. `startedCount` — handed to Apple, not yet
+    /// finished or cancelled — IS Apple's queue depth from this side, and
+    /// the gate holds once it reaches this. The depth is what primed
+    /// queues do for the gap: `startNextChunk` is called from BOTH the
+    /// finish path and the utterance-start path, and it stops once the
+    /// lookahead is full.
+    ///
+    /// (The first F1 draft gated on `nextIndex - startedCount`, but
+    /// hand-over advances BOTH counters, so that difference only grew in
+    /// `didFinish` — it counted finished utterances, and the gate closed
+    /// permanently a few chunks into every chapter. Round-2 critique, P1.)
     private static let lookahead = 4
 
     private func startNextChunk() {
         guard !pauseRequested, nextIndex < queue.count else { return }
         // Already `lookahead` utterances deep in Apple's queue: it will call
         // back as each one finishes, and that is the trigger for the next.
-        guard nextIndex - startedCount < Self.lookahead else { return }
-        chunkFinished = false
+        guard startedCount < Self.lookahead else { return }
         let item = queue[nextIndex]
+        let slot = nextIndex
         nextIndex += 1
         startedCount += 1
-        current = item
-        currentCharsDone = 0
-
         let utterance = AVSpeechUtterance(string: item.text)
         utterance.rate = Float(utteranceRate())
         utterance.voice = resolvedVoice()
-        epochByUtterance[ObjectIdentifier(utterance)] = epoch
+        tagByUtterance[ObjectIdentifier(utterance)] = UtteranceTag(epoch: epoch, slot: slot)
         synthesizer.speak(utterance)
     }
 
@@ -446,15 +481,18 @@ final class SystemEngine: NSObject, SpeechEngine {
     func stop() {
         epoch += 1
         let epochAtStop = epoch
-        epochByUtterance.removeAll()
+        tagByUtterance.removeAll()
         synthesizer.stopSpeaking(at: .immediate)
         activeUtteranceText = nil
         queue = []
         nextIndex = 0
         startedCount = 0
         current = nil
+        currentSlot = nil
         currentCharsDone = 0
         lastRangeOffset = 0
+        chunkFinished = false
+        lastFinishedSlot = nil
         pauseRequested = false
         chunkFinishStamp = nil
         metrics.endSession(reason: "stopped")
@@ -464,33 +502,36 @@ final class SystemEngine: NSObject, SpeechEngine {
         }
     }
 
-    /// Re-queues the CURRENT chunk's unsounded remainder at the new rate.
-    /// Only runs while a chunk is actually in flight; a pause/idle session
-    /// picks the rate up on its next utterance, and the remaining queue is
-    /// unaffected (each chunk is built when it starts).
+    /// Re-queues the SOUNDING chunk's unsound remainder at the new rate.
+    /// Only runs while a chunk is actually sounding; a pause/idle session
+    /// picks the rate up on its next utterance.
     private func requeueCurrentChunkAtNewRate() {
         guard state == .speaking,
-              let chunk = current,
+              let slot = currentSlot,
+              queue.indices.contains(slot),
               currentCharsDone > 0,
-              currentCharsDone < chunk.text.utf16.count else { return }
+              currentCharsDone < queue[slot].text.utf16.count else { return }
+        let chunk = queue[slot]
         let units = Array(chunk.text.utf16)
         let remainder = String(decoding: units[currentCharsDone...], as: UTF16.self)
         guard !remainder.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        // Same text, new rate: replace the current chunk in place so the
+        // Same text, new rate: replace the sounding chunk in place so the
         // chunk's base offset is unchanged and the read-along cursor cannot
         // rewind.
-        let index = max(0, nextIndex - 1)
-        queue[index] = Queued(offset: chunk.offset + currentCharsDone, text: remainder)
-        current = queue[index]
-        currentCharsDone = 0
+        queue[slot] = Queued(offset: chunk.offset + currentCharsDone, text: remainder)
         lastEffectiveRate = Double(speed)
-        // Batch F1: the utterance in flight is cancelled and re-spoken
-        // rather than replacing itself in the queue, so the lookahead depth
-        // has to shrink by one — otherwise every rate change slowly widens
-        // Apple's queue.
-        startedCount = max(0, startedCount - 1)
+        // `stopSpeaking(at: .immediate)` below empties Apple's queue — the
+        // sounding utterance AND every handed-but-not-started one die with
+        // it — so everything from the sounding slot onward is re-owed, and
+        // the depth restarts from zero. The tag map goes with it: the
+        // cancelled utterances must not drive the refill (their slots are
+        // re-handed from the rewound `nextIndex`), and the remainder's own
+        // `didStart` fills the lookahead back up.
+        nextIndex = slot
+        startedCount = 0
+        tagByUtterance.removeAll()
         synthesizer.stopSpeaking(at: .immediate)
-        speakQueued(index: index)
+        speakQueued(index: slot)
     }
 
     /// Re-speaks one queued chunk immediately (used by the rate re-queue).
@@ -500,21 +541,16 @@ final class SystemEngine: NSObject, SpeechEngine {
     /// `startNextChunk`, and the debounce means a slider drag — which emits
     /// at 0.05 steps — produces one re-queue instead of a dozen mid-word
     /// chops.
-    ///
-    /// This is the ONE path that replaces an utterance already in Apple's
-    /// queue, so the accounting differs from `startNextChunk`: the caller has
-    /// already rewound `nextIndex` to the chunk being re-spoken, and the
-    /// utterance it replaces never `didFinish`es. So `startedCount` is
-    /// adjusted by the difference: hand-over adds one, the utterance that
-    /// will never finish claims one back.
     private func speakQueued(index: Int) {
         let item = queue[index]
         current = item
+        currentSlot = index
         currentCharsDone = 0
+        startedCount += 1
         let utterance = AVSpeechUtterance(string: item.text)
         utterance.rate = Float(utteranceRate())
         utterance.voice = resolvedVoice()
-        epochByUtterance[ObjectIdentifier(utterance)] = epoch
+        tagByUtterance[ObjectIdentifier(utterance)] = UtteranceTag(epoch: epoch, slot: index)
         synthesizer.speak(utterance)
     }
 
@@ -555,8 +591,18 @@ extension SystemEngine: AVSpeechSynthesizerDelegate {
         DispatchQueue.main.async { [weak self] in
             guard let self,
                   self.isCurrentSynthesizer(synthesizer),
-                  self.epochByUtterance[ObjectIdentifier(utterance)] == self.epoch else { return }
+                  let tag = self.tagByUtterance[ObjectIdentifier(utterance)],
+                  tag.epoch == self.epoch else { return }
             self.state = .speaking
+            // This utterance is the one sounding now — not the last-handed
+            // one: with the lookahead filled, several chunks sit ahead of
+            // it in Apple's queue.
+            self.chunkFinished = false
+            if self.queue.indices.contains(tag.slot) {
+                self.current = self.queue[tag.slot]
+                self.currentSlot = tag.slot
+                self.currentCharsDone = 0
+            }
             // Batch F1: fill the lookahead from the START path too, not only
             // the finish path. This is the actual gap fix — the utterance has
             // begun sounding and the queue is still a chunk short, so the
@@ -576,18 +622,27 @@ extension SystemEngine: AVSpeechSynthesizerDelegate {
         DispatchQueue.main.async { [weak self] in
             guard let self,
                   self.isCurrentSynthesizer(synthesizer),
-                  self.epochByUtterance[ObjectIdentifier(utterance)] == self.epoch else { return }
+                  let tag = self.tagByUtterance[ObjectIdentifier(utterance)],
+                  tag.epoch == self.epoch else { return }
+            self.tagByUtterance.removeValue(forKey: ObjectIdentifier(utterance))
             self.chunkFinished = true
-            // Batch F1: one fewer utterance sitting in Apple's queue. This is
-            // the other half of the lookahead arithmetic — the depth is
-            // handed-over minus finished, so finishing is what lets the next
-            // chunk in.
+            self.lastFinishedSlot = tag.slot
+            // Batch F1: one fewer utterance sitting in Apple's queue — the
+            // other half of the depth accounting the gate paces on.
             self.startedCount = max(0, self.startedCount - 1)
+            // Nothing is sounding in the gap between this callback and the
+            // next chunk's `didStart` (which fills current again). Clearing
+            // it here keeps a mid-gap rate re-queue a no-op instead of
+            // re-speaking this chunk's tail.
+            self.current = nil
+            self.currentSlot = nil
+            self.currentCharsDone = 0
             // Batch A2: one stamp, one comparison. No scheduling changes here.
             self.chunkFinishStamp = ContinuousClock.now
-            // Progress reaches exactly 1.0 on the last chunk before the
-            // completion signal fires.
-            if self.nextIndex >= self.queue.count {
+            // Progress reaches exactly 1.0 when the LAST chunk finishes —
+            // keyed on the finishing slot, not on `nextIndex >= count`,
+            // which the lookahead satisfies four chunks early.
+            if tag.slot == self.queue.count - 1 {
                 self.onProgress?(1.0)
                 self.onPlayedChars?(self.totalChars)
             }
@@ -611,7 +666,13 @@ extension SystemEngine: AVSpeechSynthesizerDelegate {
         DispatchQueue.main.async { [weak self] in
             guard let self,
                   self.isCurrentSynthesizer(synthesizer),
-                  self.epochByUtterance[ObjectIdentifier(utterance)] == self.epoch else { return }
+                  let tag = self.tagByUtterance[ObjectIdentifier(utterance)],
+                  tag.epoch == self.epoch else { return }
+            self.tagByUtterance.removeValue(forKey: ObjectIdentifier(utterance))
+            // A cancelled utterance left Apple's queue without finishing —
+            // it must release its depth slot all the same, or the gate
+            // ratchets shut one notch per cancel and strands the session.
+            self.startedCount = max(0, self.startedCount - 1)
             // A cancel from stop() is not a completion. A cancel with the queue
             // still holding work means an interruption killed the utterance —
             // run the rest rather than leaving the UI claiming speech.
@@ -624,29 +685,39 @@ extension SystemEngine: AVSpeechSynthesizerDelegate {
     }
 
     /// Fires before each spoken word-range; location+length ≈ chars spoken
-    /// so far. Offset by the current chunk's base so the value addresses the
-    /// WHOLE text (and so the bookmark / read-along / progress stay in one
-    /// coordinate space across chunk boundaries).
+    /// so far. Offset by the SOUNDING chunk's base so the value addresses
+    /// the WHOLE text (and so the bookmark / read-along / progress stay in
+    /// one coordinate space across chunk boundaries).
     func speechSynthesizer(
         _ synthesizer: AVSpeechSynthesizer,
         willSpeakRangeOfSpeechString characterRange: NSRange,
         utterance: AVSpeechUtterance
     ) {
-        guard let chunk = current, isCurrentSynthesizer(synthesizer) else { return }
-        let total = (utterance.speechString as NSString).length
-        guard total > 0, characterRange.location + characterRange.length > 0 else { return }
-        currentCharsDone = characterRange.location
-        lastRangeOffset = characterRange.location
-        let charsDone = chunk.offset + characterRange.location + characterRange.length
-        let now = Date()
-        // Coalesced to ~3.3 Hz AND monotonic, so the cursor never rewinds and
-        // the views are not invalidated at word rate.
-        guard charsDone >= self.totalChars
-            || (now.timeIntervalSince(lastSignalAt) >= 0.3 && charsDone > lastEmittedChars) else { return }
-        lastSignalAt = now
-        lastEmittedChars = charsDone
-        let fraction = Double(charsDone) / Double(totalChars)
-        DispatchQueue.main.async {
+        // Same main hop as the other three callbacks: the state this mutates
+        // (currentSlot, currentCharsDone) is read on the main thread by the
+        // rate re-queue and the rebuild path.
+        DispatchQueue.main.async { [weak self] in
+            guard let self,
+                  self.isCurrentSynthesizer(synthesizer),
+                  let tag = self.tagByUtterance[ObjectIdentifier(utterance)],
+                  tag.epoch == self.epoch,
+                  self.queue.indices.contains(tag.slot) else { return }
+            let chunk = self.queue[tag.slot]
+            let total = (utterance.speechString as NSString).length
+            guard total > 0, characterRange.location + characterRange.length > 0 else { return }
+            self.current = chunk
+            self.currentSlot = tag.slot
+            self.currentCharsDone = characterRange.location
+            self.lastRangeOffset = characterRange.location
+            let charsDone = chunk.offset + characterRange.location + characterRange.length
+            let now = Date()
+            // Coalesced to ~3.3 Hz AND monotonic, so the cursor never rewinds and
+            // the views are not invalidated at word rate.
+            guard charsDone >= self.totalChars
+                || (now.timeIntervalSince(self.lastSignalAt) >= 0.3 && charsDone > self.lastEmittedChars) else { return }
+            self.lastSignalAt = now
+            self.lastEmittedChars = charsDone
+            let fraction = Double(charsDone) / Double(self.totalChars)
             self.onProgress?(min(1.0, fraction))
             self.onPlayedChars?(charsDone)
         }

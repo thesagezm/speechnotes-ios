@@ -38,10 +38,11 @@ final class ChunkCachePolicyTests: XCTestCase {
 
     // MARK: - Eviction order
 
-    /// Oldest finished first, and only down to the count cap. Index 5 is
-    /// unfinished (the player is on it) and index 6 is a live lookahead; the
-    /// count cap of 4 is satisfied after evicting 1 and 2, so the walk stops
-    /// there rather than reaching the unfinished one.
+    /// Oldest finished first, and only down to the count cap — which counts
+    /// the INCOMING write, so 6 live + 1 incoming under a cap of 4 needs
+    /// THREE evictions. Index 3 is unfinished (the player is on it) and is
+    /// skipped; index 4 is finished and goes; then usedCount 3 < 4 stops the
+    /// walk. Post-write the cache holds exactly 4.
     func testEvictsOldestFinishedFirst() {
         let policy = ChunkCachePolicy(maxItems: 4, maxBytes: 10_000, floorItems: 1)
         let live = [1, 2, 3, 4, 5, 6]
@@ -49,7 +50,7 @@ final class ChunkCachePolicyTests: XCTestCase {
         let finished: Set<Int> = [1, 2, 4]
         let evict = policy.indexesToEvict(
             live: live, bytes: bytes, finished: finished, incomingBytes: 100)
-        XCTAssertEqual(evict, [1, 2])
+        XCTAssertEqual(evict, [1, 2, 4])
     }
 
     /// The floor protects the player's lookahead. Everything is finished,

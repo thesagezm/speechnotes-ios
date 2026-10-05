@@ -123,7 +123,13 @@ public struct ChunkCachePolicy: Equatable {
             evict.append(index)
             usedCount -= 1
             usedBytes -= bytes[position]
-            if usedCount <= maxItems, usedBytes + incomingBytes <= maxBytes {
+            // The count clause leaves room for the INCOMING write: the cap
+            // is on the cache as the caller will hold it after the append,
+            // so the walk stops with usedCount one short of maxItems.
+            // (`<=` here made the steady-state cache maxItems + 1 items —
+            // the round-2 critique's off-by-one, pinned by a test that
+            // asserted the wrong count with it.)
+            if usedCount < maxItems, usedBytes + incomingBytes <= maxBytes {
                 break
             }
         }

@@ -45,7 +45,13 @@ final class ChunkFileQueue: NSObject {
     /// change is heard immediately, with `.spectral` pitch correction, and
     /// does not require re-rendering the audio that is already banked.
     var rate: Float = 1.0 {
-        didSet { queuePlayer.rate = rate }
+        didSet {
+            // A rate change must not START a paused player: assigning a
+            // nonzero rate to a paused AVQueuePlayer is how it un-pauses.
+            // While paused the new rate is picked up by the next play().
+            guard queuePlayer.rate != 0 else { return }
+            queuePlayer.rate = rate
+        }
     }
 
     /// Called with the played UTF-16 character count, from the periodic
@@ -77,6 +83,8 @@ final class ChunkFileQueue: NSObject {
     private var scheduledSamples: Double = 0
     private var totalChars = 1
     private var scannedMarker = 0
+    /// The sample rate the markers are counted in — the first append's.
+    private var markerSampleRate: Double = 0
 
     private var timeObserver: Any?
     private var endObserver: NSObjectProtocol?
@@ -117,6 +125,7 @@ final class ChunkFileQueue: NSObject {
         markers = []
         scheduledSamples = 0
         scannedMarker = 0
+        markerSampleRate = 0
         guard !sessionID.isEmpty else { return }
         do {
             try FileManager.default.removeItem(at: sessionDir)
@@ -130,14 +139,23 @@ final class ChunkFileQueue: NSObject {
 
     /// Writes one chunk and enqueues it. Main actor only: it mutates the
     /// queue player's item list, which is not thread-safe.
+    ///
+    /// Returns false when the write was REFUSED — the cache is over its
+    /// caps and the policy found nothing evictable, which per its contract
+    /// means the caller holds the producer (a stall, not silent growth).
+    @discardableResult
     func append(
         index: Int,
         samples: [Float],
         endChar: Int,
         totalChars: Int,
         sampleRate: Double
-    ) {
+    ) -> Bool {
         self.totalChars = max(1, totalChars)
+        // Markers are counted in the rendered files' own sample rate; the
+        // read-along converts CMTime seconds with the same rate. Engines
+        // render one rate per session, so the first append's rate governs.
+        if markerSampleRate == 0 { markerSampleRate = sampleRate }
 
         // The trim. `peak` reads out of the samples array rather than a copy,
         // so the scan is one pass and allocates nothing.
@@ -156,6 +174,10 @@ final class ChunkFileQueue: NSObject {
             let doomed = policy.indexesToEvict(
                 live: liveIndexes, bytes: liveBytes, finished: finished,
                 incomingBytes: incoming)
+            guard !doomed.isEmpty else {
+                Log.shared.error("ChunkFileQueue: cache over cap with nothing evictable — holding chunk \(index)")
+                return false
+            }
             for doomedIndex in doomed {
                 removeItem(index: doomedIndex)
             }
@@ -184,6 +206,7 @@ final class ChunkFileQueue: NSObject {
         queuePlayer.insert(item, after: nil)
 
         startObservingIfNeeded()
+        return true
     }
 
     private func removeItem(index: Int) {
@@ -207,17 +230,17 @@ final class ChunkFileQueue: NSObject {
 
     // MARK: - The 4-item lookahead
 
-    /// Items the player has finished with, counted from its
-    /// `AVPlayerItemDidPlayToEndTime` notifications. The difference between
-    /// this and `liveIndexes.count` is what is written-but-unplayed, which
-    /// is the number Batch E's producer paces on: keep it at or above 4 and
-    /// the listener never hears a boundary.
-    private var playedItems = 0
-
-    /// The number of items written but not yet played. Below 4, the producer
-    /// is behind and the engine should keep synthesizing.
+    /// The number of items written but not yet played — what Batch E's
+    /// producer paces on: keep it at or above 4 and the listener never
+    /// hears a boundary.
+    ///
+    /// Counted as the live items minus the live-and-finished ones, NOT
+    /// against a cumulative played counter: eviction removes finished items
+    /// from `liveIndexes`, so a cumulative counter would deflate the
+    /// lookahead by one per eviction and the producer would render audio
+    /// nobody accounts for.
     var lookahead: Int {
-        max(0, liveIndexes.count - playedItems)
+        max(0, liveIndexes.count - liveIndexes.filter { finished.contains($0) }.count)
     }
 
     // MARK: - Read-along
@@ -248,7 +271,11 @@ final class ChunkFileQueue: NSObject {
     /// is where the playhead comes from — CMTime instead of the node's
     /// sample clock.
     private func reportPosition() {
-        let played = queuePlayer.currentTime().seconds * 24_000
+        // `CMTime.seconds` is NaN before the player has a valid clock — an
+        // unguarded `Int(frac * …)` downstream would trap on it.
+        let seconds = queuePlayer.currentTime().seconds
+        guard seconds.isFinite, markerSampleRate > 0 else { return }
+        let played = seconds * markerSampleRate
         var prevSample = 0.0
         var prevChar = 0
         var chars: Int?
@@ -300,7 +327,6 @@ final class ChunkFileQueue: NSObject {
             for (position, index) in self.liveIndexes.enumerated()
             where self.itemURL(for: index) == playedURL {
                 self.finished.insert(index)
-                self.playedItems += 1
                 // The marker walk has already consumed everything up to
                 // here; nothing else to advance.
                 break

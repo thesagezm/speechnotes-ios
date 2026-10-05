@@ -124,11 +124,13 @@ enum AudioSessionSetup {
             configuredBy = source
             return true
         }
-        // Some routes reject A2DP outright. For an audiobook that meant
-        // dropping to HFP before it would play; for TTS rung 1 is already
-        // HFP, so this rung is only reachable if the .spokenAudio mode itself
-        // is what the route objects to.
-        if apply(.playback, mode: .spokenAudio, options: [.allowBluetooth], prefix: prefix) {
+        // Rung 2 drops the MODE but keeps the Bluetooth route. For an
+        // audiobook that is the documented A2DP-rejected descent to HFP;
+        // for TTS (whose rung 1 already carries HFP) it is the rung that
+        // catches a route objecting to `.spokenAudio` itself — the previous
+        // rung 2 repeated rung 1's call verbatim, so a mode objection fell
+        // straight through to losing Bluetooth entirely.
+        if apply(.playback, mode: .default, options: [.allowBluetooth], prefix: prefix) {
             configured = true
             configuredBy = source
             return true

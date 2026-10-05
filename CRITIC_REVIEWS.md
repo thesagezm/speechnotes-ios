@@ -718,3 +718,95 @@ known worst case, not capped. Out-of-scope observation carried forward:
 F1 (`26af724`).
 
 **Build gate: `37345434653`** on `d5471fb` (see the A1 entry).
+
+## TTS Engines — Round 2, whole range (diffs `5d60552`..`d5471fb`, independent pass)
+
+**Score: 5/10. Faster than baseline: NO** — the neural paths keep pace
+(C1's `min(cores, 6)` is the only throughput lever and it is safe), but the
+Apple path regressed from "completes the chapter with small gaps" to
+"plays ~8–12 chunks then goes permanently silent" (finding 1), which is
+strictly slower than any baseline. Both P1s are F1 wiring defects; every
+finding below is fixed in the same commit round that records this entry
+(`a77acd6`+).
+
+1. **[P1, fixed] SystemEngine's lookahead gate was arithmetically inverted
+   and permanently closed mid-session, stranding the chapter.** The gate
+   was `nextIndex - startedCount < lookahead`, but hand-over incremented
+   BOTH counters while `didFinish` decremented `startedCount` — so the
+   gate metric equalled the number of FINISHED utterances, monotone
+   within a session. The gate closed permanently at the 4th `didFinish`;
+   a 600-chunk chapter handed 8 chunks, drained Apple's queue, then sat
+   in `.speaking` with no `onFinished` and `hasLiveSession == true`.
+   Short notes (≤ ~12 chunks) masked it because everything was handed
+   before closure. Fix: the invariant the comments already stated —
+   `startedCount` IS the queue depth, so the gate is
+   `startedCount < lookahead`.
+2. **[P1, fixed] `current` was the last-HANDED chunk, not the sounding
+   one** — a pre-F1 invariant that the lookahead broke. Consequences,
+   all traced: `willSpeakRangeOfSpeechString` paired the sounding
+   utterance's word range with a later chunk's offset (progress jumped
+   forward ~120–320 chars per chunk); `requeueCurrentChunkAtNewRate`
+   computed its slot as `nextIndex - 1` — the last-handed, never-started
+   chunk — overwrote it with a slice mixing the sounding chunk's
+   `currentCharsDone` into different text, and orphaned the sounding
+   chunk's remainder on every debounced slider move; `rebuildSynthesizer`'s
+   rewind made the same assumption after a phone call. Fix: utterances
+   are tagged with their queue SLOT (the tag map also replaces
+   `epochByUtterance`); `didStart`/`willSpeak` set `current`/
+   `currentSlot`/`currentCharsDone` from the sounding utterance's tag;
+   the re-queue and the rebuild rewrite the SOUNDING slot, re-owe
+   everything from it onward (the `.immediate` stop also destroyed the
+   handed-but-not-started copies — a second text-loss path the pass
+   implied), and reset the depth to zero.
+3. **[P2, fixed] `willSpeakRangeOfSpeechString` mutated engine state
+   without the main hop its three siblings use** — racing the main-thread
+   readers (re-queue, rebuild). The whole callback now hops to main, the
+   same as `didStart`/`didFinish`/`didCancel`.
+4. **[P2, fixed] ChunkCachePolicy's count-cap eviction stopped one item
+   short, and the CI test pinned the wrong answer.** The break was
+   `usedCount <= maxItems` with the incoming write not yet counted, so
+   the steady-state cache held maxItems + 1 items forever. The walk now
+   stops at `usedCount < maxItems` (leaving room for the incoming), and
+   `testEvictsOldestFinishedFirst` was re-simulated: 6 live + 1 incoming
+   under a cap of 4 evicts `[1, 2, 4]` (3 is unfinished and skipped), not
+   the `[1, 2]` the old test asserted with the bug.
+5. **[P2, fixed] ChunkFileQueue (Batch E's substrate) carried landmines
+   Batch E would have inherited.** `reportPosition` hardcoded `* 24_000`
+   while `append` accepts a sample rate (markers are now converted at the
+   session's rate, recorded from the first append); the
+   `Int(frac * …)` conversion trapped on a NaN `CMTime.seconds`, which
+   `currentTime()` returns before the first item is ready (now guarded
+   with `isFinite`); `lookahead` was `liveIndexes.count - playedItems`
+   with `playedItems` cumulative while eviction removed those same items
+   from `liveIndexes` — every eviction deflated the number the producer
+   paces on (now counted as live minus live-and-finished);
+   `rate`'s didSet assigned the player rate unconditionally, which
+   UN-PAUSES a paused AVQueuePlayer (now guarded); and `append` wrote
+   even when the policy returned nothing evictable, silently violating
+   the policy's documented hold contract (now refused, returning false —
+   the unbounded-growth failure the policy exists to prevent).
+6. **[P3, fixed] `epochByUtterance` was never pruned per-entry** — the
+   comment claimed callbacks consumed entries; none did, so a chapter
+   accumulated ~600 stale ones. The slot map removes entries in
+   `didFinish`/`didCancel`, making the stated contract true.
+7. **[P3, fixed] AudioSessionSetup's TTS fallback rung 2 was a dead rung**
+   — for `.tts`, rungs 1 and 2 were the identical call, so the comment's
+   "catches a mode objection" was false. Rung 2 now drops the MODE and
+   keeps the Bluetooth route, which is also the documented A2DP-rejected
+   descent for audiobooks.
+8. **[P3, fixed] RenderAheadBankTests' `allowsNext` helper no longer
+   mirrored the core** — it composed `effectiveTargetSeconds` while
+   `recomputeBank` has used `pressuredTargetSeconds` since C2. Conclusions
+   at the tested values were unchanged (nominal factor is 1.0); the helper
+   now calls the same function the producer paces on.
+
+Also found by reading the per-job conclusions of run `37345434653` (the
+run the session first called green) rather than the run's own status: the
+Kokoro spike job had been failing to COMPILE since `d5471fb` joined two
+lines in the 28-voice test — invisible because the job is
+`continue-on-error: true`. No Kokoro proof had run on CI since. Fixed in
+`a77acd6`; lesson recorded: read the job table, not the headline, on any
+workflow that ships `continue-on-error`.
+
+**Build gate: run on `a77acd6`+ (this fix round) — see the entry above
+for the first-green-run caveat.**

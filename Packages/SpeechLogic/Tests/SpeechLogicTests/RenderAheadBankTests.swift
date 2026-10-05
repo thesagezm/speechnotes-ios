@@ -199,11 +199,13 @@ final class RenderAheadBankTests: XCTestCase {
 }
 
 private extension RenderAheadBankPolicy {
-    /// Mirrors the core's call shape: effective target at the current
-    /// thermal state, then the static allow check.
+    /// Mirrors the core's call shape: `recomputeBank` gates the producer on
+    /// `pressuredTargetSeconds` (the effective target WITH the pressure
+    /// factor applied) — the helper used to compose the effective target
+    /// alone, testing a target the producer never paces on.
     func allowsNext(bankedSeconds: Double, thermal: ThermalPressure, sampleRate: Double) -> Bool {
         Self.allows(
             bankedSeconds: bankedSeconds,
-            targetSeconds: effectiveTargetSeconds(thermal: thermal, sampleRate: sampleRate))
+            targetSeconds: pressuredTargetSeconds(thermal: thermal, sampleRate: sampleRate))
     }
 }
