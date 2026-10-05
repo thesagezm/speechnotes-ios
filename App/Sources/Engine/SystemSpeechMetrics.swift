@@ -10,10 +10,16 @@ import Foundation
 ///
 /// So this measures the one thing the Apple path makes hard to see and the
 /// other engines report for free: **the silence between `didFinish` on one
-/// chunk and the first audio of the next.** That is the number Batch F's
+/// chunk and the `didStart` of the next.** That is the number Batch F's
 /// decision rests on. Everything else here is that figure's context — a
 /// boundary count and a session summary in the same log shape as the neural
 /// engines', so one `metrics` filter covers every engine in a device log.
+///
+/// The endpoint is `didStart`, not a rendered sample: Apple dispatches
+/// `didStart` when an utterance BEGINS, which is before its first audio
+/// reaches the speaker. The figure is therefore a LOWER bound on the silence
+/// the listener hears, carrying that extra start latency on top of the
+/// dispatch cost — the same caveat `PlaybackMetrics` documents for GAP.
 ///
 /// The instrumentation is deliberately three `ContinuousClock` stamps and a
 /// dispatch hop the delegate callbacks were already making. It records; it
@@ -113,13 +119,17 @@ final class SystemSpeechMetrics {
     /// and the prefix the neural engines' lines carry — so a log grepped for
     /// one string covers all engines.
     ///
-    /// `isError` is currently unused and that is a decision, not an
-    /// oversight: Batch A2 measures and records. Whether a wide boundary
-    /// should be an ERROR line is a question for Batch F, which is the batch
-    /// that fixes it — an error line written before there is a fix is a log
-    /// that cries wolf. The parameter is kept so the escalation is one call
-    /// away when it is earned.
+    /// `isError` is honoured, matching `PlaybackMetrics`: a boundary over the
+    /// notice threshold is a real event the listener heard, and it goes to
+    /// the error channel where a log filter can find it. Everything else is
+    /// informational, because a healthy session's boundaries are ~30 ms and
+    /// calling them faults would drain the level of meaning.
     private func emit(_ message: String, isError: Bool = false) {
-        Log.shared.info("SystemEngine metrics \(message)")
+        let line = "SystemEngine metrics \(message)"
+        if isError {
+            Log.shared.error(line)
+        } else {
+            Log.shared.info(line)
+        }
     }
 }

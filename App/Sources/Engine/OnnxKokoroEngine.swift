@@ -69,8 +69,18 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
     /// Tier name for the log line (Batch A3). Matched on the FILE, not on a
     /// flag the caller set, so a mistagged tier would have to be a
     /// consistently wrong filename.
+    ///
+    /// An unrecognised name reports `kokoro-unknown` rather than defaulting
+    /// to fp32. The fp16 variant already shipped once and produced NaN on
+    /// ORT CPU (CI 34008548349), so a future third tier is a real
+    /// possibility — and a silently-mislabelled tier would defeat the whole
+    /// point of tagging it.
     static func tierName(for url: URL) -> String {
-        url.lastPathComponent == "model_uint8.onnx" ? "kokoro-small-uint8" : "kokoro-fp32"
+        switch url.lastPathComponent {
+        case "model_uint8.onnx": return "kokoro-small-uint8"
+        case "model.onnx": return "kokoro-fp32"
+        default: return "kokoro-unknown"
+        }
     }
 
     // Model state — the core's generateQueue only.

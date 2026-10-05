@@ -231,9 +231,14 @@ final class PlaybackMetrics {
         // printed beside the overall one so a device log can be read at a
         // glance instead of comparing four quartile lines by hand.
         let drift = Self.driftLabel(firstQuartileMean: firstQuartileMeanRTF, overallMean: synthesisRTF)
+        // Batch A3: the tier rides the summary, because the summary is the
+        // only line that prints RTF. The two Kokoro tiers produce materially
+        // different figures (fp32 and uint8 are the same graph at different
+        // precision), and an untagged RTF cannot be read twice.
+        let tierTag = sessionTier.map { " [\($0)]" } ?? ""
         emit("session \(reason) — \(generatedChunks) chunks (\(skippedChunks) skipped), "
             + "\(twoDP(totalAudioSeconds))s audio, \(twoDP(totalGenerationSeconds))s gen, "
-            + "synthesis RTF \(twoDP(synthesisRTF)) [\(rtfRange)]\(drift), "
+            + "synthesis RTF \(twoDP(synthesisRTF)) [\(rtfRange)]\(drift)\(tierTag), "
             + "TTFA \(ttfaText), T2B \(t2bText), gaps \(gapCount) (worst \(twoDP(worstGapSeconds))s, lower bound; \(bankExhaustions) bank-exhausted), "
             + "wall \(twoDP(wall))s incl. \(twoDP(pausedSeconds))s paused across \(pauseCount) pause(s), "
             + "rate@start \(twoDP(Double(sessionRate)))")
@@ -244,10 +249,8 @@ final class PlaybackMetrics {
     /// one — otherwise a 25 s cold TTFA and a 1.2 s warm TTFA land in the same
     /// field with the same label and nothing explains the difference.
     ///
-    /// Batch A3 adds the tier tag: the two Kokoro tiers (fp32, uint8) produce
-    /// different RTFs and different memory pressure, and a log that does not
-    /// say which one ran cannot be read twice. The session-start line carries
-    /// the same tag so a single line identifies the whole session.
+    /// `tier` defaults to the session's own tag rather than to nil, so the
+    /// parameter can never print something the session did not record.
     func modelReady(seconds: Double, tier: String? = nil) {
         guard sessionActive else { return }
         let cold = seconds >= 1.0
@@ -255,7 +258,7 @@ final class PlaybackMetrics {
         // pays the model load, so routing it to the error channel would
         // make every normal cold start look like a fault. The label carries
         // the distinction.
-        let tierTag = tier.map { " [\($0)]" } ?? ""
+        let tierTag = (tier ?? sessionTier).map { " [\($0)]" } ?? ""
         emit("model-ready \(twoDP(seconds))s (\(cold ? "COLD — includes the model load, inside TTFA" : "warm"))\(tierTag)")
     }
 

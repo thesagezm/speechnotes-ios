@@ -70,17 +70,17 @@ RTF on one build and a 0.9 on the next is only comparable if both lines say
 which file ran.
 
 Batch A3 closes that: `PlaybackMetrics` carries the tier through the session,
-so every session now prints it on the `session start` and `model-ready` lines
-(`OnnxKokoroEngine metrics session start — … rate@start 1.00 [kokoro-fp32]`).
+so every ONNX-engine session prints it on the `session start`,
+`model-ready` and — the line that matters most, because it is the only one
+that carries the RTF — the `session finished` summary
+(`… synthesis RTF 0.50 [chunk RTF 0.48–0.53] [kokoro-fp32], TTFA 840ms …`).
 The tag is derived from the model FILE, not from a flag the caller passed, so
 the two construction sites in `SpeechPlayer.rebuildOnnxEngine` cannot disagree
-with the tier they built.
+with the tier they built. Apple system speech has one tier and prints none.
 
-The session-summary line already prints `synthesis RTF` for the whole session
-plus per-chunk RTF range; nothing new is added there. A device session now
-produces the number this table's constants were guessed from, per tier, warm
-(second play after launch) and cold — which is what Batch B3 sizes
-`firstMaxChars` from instead of the 0.53 assumption below.
+A device session now produces the number this table's constants were guessed
+from, per tier, warm (second play after launch) and cold — which is what Batch
+B3 sizes `firstMaxChars` from instead of the 0.53 assumption below.
 
 ### What that means per engine
 
@@ -163,7 +163,7 @@ OnnxKokoroEngine metrics TTFA 840ms — first buffer scheduled (12 chars → 0.8
 OnnxKokoroEngine metrics T2B 6100ms — second buffer 5260ms after the first; the first was 12 chars / 0.80s of audio → margin -4460ms (SHORT — audible silence)
 OnnxKokoroEngine metrics chunk 1/4 — 12 chars → 0.80s audio in 0.41s (RTF 0.51)
 OnnxKokoroEngine metrics chunk 2/4 — 158 chars → 10.53s audio in 5.26s (RTF 0.50)
-OnnxKokoroEngine metrics session finished — 4 chunks (0 skipped), 32.10s audio, 16.02s gen, synthesis RTF 0.50 [chunk RTF 0.48–0.53], TTFA 840ms, T2B 6100ms, gaps 1 (worst 0.31s, lower bound), wall 33.04s incl. 0.00s paused across 0 pause(s), rate@start 1.00
+OnnxKokoroEngine metrics session finished — 4 chunks (0 skipped), 32.10s audio, 16.02s gen, synthesis RTF 0.50 [chunk RTF 0.48–0.53] [kokoro-fp32], TTFA 840ms, T2B 6100ms, gaps 1 (worst 0.31s, lower bound), wall 33.04s incl. 0.00s paused across 0 pause(s), rate@start 1.00
 ```
 
 That `margin -4460ms` line is the first-sentence stall, measured, with its cause
@@ -175,15 +175,18 @@ prefixed `SystemEngine metrics` and carry the boundary figure instead of the
 ONNX figures — there is no producer loop, bank or player node to time:
 
 ```
-SystemEngine metrics session start — 41 chunks, rate@start 1.00
+SystemEngine metrics session start — 52 chunks, rate@start 1.00
 SystemEngine metrics GAP 0.812s of silence — between chunk 3 and 4
-SystemEngine metrics boundaries 50/41 — mean 0.031s, worst 0.812s
-SystemEngine metrics session finished — 41 chunks, boundaries 40 (mean 0.031s, worst 0.812s), wall 214.60s
+SystemEngine metrics boundaries 50/52 — mean 0.031s, worst 0.812s
+SystemEngine metrics session finished — 52 chunks, boundaries 51 (mean 0.031s, worst 0.812s), wall 271.40s
 ```
 
 The `boundaries N` count is the chunk boundaries this session crossed, and
-`mean`/`worst` are the inter-chunk silences between them. Those numbers are
-what Batch F's decision rests on.
+`mean`/`worst` are the inter-chunk silences between them. N chunks produce
+exactly N−1 boundaries — the first chunk has nothing before it to measure
+against, and the last `didFinish` has no following `didStart` to measure to —
+so `boundaries 51` for 52 chunks. Those numbers are what Batch F's decision
+rests on.
 
 Reading rules:
 
@@ -197,6 +200,14 @@ Reading rules:
 - **`gaps N (worst X, lower bound)`** — a lower bound twice over: both stamps are
   main-queue events, not render-callback events, so each carries dispatch
   latency; and a drain across a pause/resume is dropped.
+- **`boundaries N` and `GAP Xs` (Apple system speech)** — the same caveat, one
+  step worse. The figure is `didFinish` → next `didStart`: Apple dispatches
+  `didStart` when an utterance BEGINS, which is before its first rendered
+  sample, so the measurement carries that extra start latency on top of the
+  dispatch cost. It is a lower bound on the silence the listener hears, in
+  the same sense `gaps` is — treat a `GAP 0.8s` as "at least 0.8 s", and
+  read the `worst` figure with the same margin. A pause, a rebuild and a
+  stop are all excluded by construction, so none of them can inflate it.
 - **`wall` includes every pause** and counts through device sleep. Do **not**
   divide it by the `audio` figure beside it. Use `synthesis RTF`.
 - **`RTF at 25%/50%/75%`** lines appear only for sessions of ≥16 chunks.
@@ -274,6 +285,9 @@ is the whole of it, per event, so the exception is bounded rather than asserted:
 | `bufferScheduled` | 1 per buffer | 1 divide (`frameLength / format.sampleRate`) + comparisons; log line only for buffers 1 and 2 |
 | `bufferEnded` | 1 per buffer | 1 clock read + 1 assignment |
 | Stall watchdog | 1 Hz while a session is live | ~4 field reads + comparisons; **no log line in the steady state** |
+| `SystemSpeechMetrics.beginSession` | 1 per session (Apple system speech) | 1 formatted log line, inside TTFA |
+| `SystemSpeechMetrics.recordBoundary` | 1 per chunk boundary (Apple system speech) | 2 `ContinuousClock` reads + 1 accumulate + 2 comparisons |
+| `SystemSpeechMetrics.endSession` | 1 per session (Apple system speech) | 1 formatted log line |
 
 Against a pipeline where one chunk takes 0.4–6 s to generate, the per-chunk
 addition is on the order of 10⁻⁵ of the work it measures. The 1 Hz timer sits
@@ -284,6 +298,17 @@ The per-chunk log thinning is not cosmetic. Unthinned, a 200k-char chapter is
 ~1300 chunks → ~2600 log lines, which evicts TTFA from the 500-entry ring before
 the chapter ends and takes the RTF series for the first ~80 % of the session with
 it. Thinned, the same chapter emits ~64 lines.
+
+Apple system speech's boundary thinning is the same argument at its own scale.
+A 200k-char chapter at `batchMaxChars: 320` is ~625 chunks → ~624 boundaries,
+which emit **12 thin lines** at the 50-boundary interval — plus one line per
+boundary over the 0.5 s notice threshold. That escalation is deliberately not
+capped, matching the neural engines' GAP escalation (`PlaybackMetrics`), and
+it is bounded by session pathology rather than by volume: in the normal case
+it fires ~0 times, and a session where every boundary exceeds half a second is
+a session with a far bigger problem than its log line count. The pathological
+case — ~638 lines — is recorded here as the known worst case rather than
+discovered in a device log.
 
 **Nothing in this instrumentation gates, delays, reorders or alters playback.**
 It records and logs. The one structural change to the audio path is that

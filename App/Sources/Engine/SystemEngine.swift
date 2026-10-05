@@ -50,12 +50,25 @@ final class SystemEngine: NSObject, SpeechEngine {
     /// chunk is re-queued at the new rate from the current word — the user
     /// hears the rest of the sentence change speed, not the whole chapter
     /// restart.
+    ///
+    /// Batch F1: debounced. The slider emits at 0.05 steps, and an
+    /// un-debounced re-queue calls `stopSpeaking(at: .immediate)` per tick —
+    /// so a drag chopped the sentence at every step instead of once.
     var speed: Float = 1.0 {
         didSet {
             guard speed != oldValue else { return }
-            requeueCurrentChunkAtNewRate()
+            debouncedRateRequeue?.cancel()
+            debouncedRateRequeue = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                guard !Task.isCancelled, let self else { return }
+                self.requeueCurrentChunkAtNewRate()
+            }
         }
     }
+
+    /// Batch F1: the coalescing task for a rate change. nil in the steady
+    /// state, so a non-playing or paused session pays nothing.
+    private var debouncedRateRequeue: Task<Void, Never>?
 
     /// Every async state jump carries the utterance epoch it belongs to — a
     /// `speak`/`stop` interleave used to let a stale queued `idle`/`speaking`
@@ -72,6 +85,11 @@ final class SystemEngine: NSObject, SpeechEngine {
 
     private var queue: [Queued] = []
     private var nextIndex = 0
+    /// Chunks handed to `synthesizer.speak(_:)` this session. The lookahead
+    /// gate is `nextIndex - startedCount < lookahead`, so this is the count
+    /// of utterances Apple has been given but the finish callback has not
+    /// yet come back for.
+    private var startedCount = 0
     /// The chunk currently in flight, and how many characters of it have
     /// sounded (`willSpeakRangeOfSpeechString` gives the latter).
     private var current: Queued?
@@ -258,12 +276,21 @@ final class SystemEngine: NSObject, SpeechEngine {
 
         queue = Self.expanded(chunks)
         nextIndex = 0
+        startedCount = 0
         current = nil
         currentCharsDone = 0
+        // A new session invalidates the cached voice: the settings UI may
+        // have written a different identifier between plays.
+        cachedVoice = nil
+        cachedVoiceIdentifier = nil
         // Batch A2: one line per session, same shape as the ONNX engines' so
         // a device log can be filtered on one string for every engine.
         metrics.beginSession(chunkCount: queue.count, rate: lastEffectiveRate)
         chunkFinishStamp = nil
+        // Fills the lookahead before returning: `startNextChunk` is gated on
+        // `nextIndex - startedCount < lookahead`, so this one call hands
+        // Apple the first `lookahead` utterances and no more. Its queue is
+        // primed while utterance 0 is still rendering.
         startNextChunk()
         // State flips to .speaking via the didStart delegate callback.
     }
@@ -280,8 +307,21 @@ final class SystemEngine: NSObject, SpeechEngine {
 
     /// Starts the next queued chunk. Called on the main actor only (the
     /// delegate callbacks hop there, and speak()/pause() are main-actor).
+    ///
+    /// Batch F1: the one-in-flight rule this used to enforce is what caused
+    /// the audible inter-sentence gap. Apple's own queue holds several
+    /// utterances, and filling it is how the synthesizer is primed for the
+    /// next chunk before the current one ends — the gap was this engine
+    /// waiting for `didFinish` and only then handing Apple the next string.
+    /// Now `startNextChunk` is called from BOTH the finish path and the
+    /// utterance-start path, and it stops once the lookahead is full.
+    private static let lookahead = 4
+
     private func startNextChunk() {
         guard !pauseRequested, nextIndex < queue.count else { return }
+        // Already `lookahead` utterances deep in Apple's queue: it will call
+        // back as each one finishes, and that is the trigger for the next.
+        guard nextIndex - startedCount < Self.lookahead else { return }
         chunkFinished = false
         let item = queue[nextIndex]
         nextIndex += 1
@@ -289,25 +329,48 @@ final class SystemEngine: NSObject, SpeechEngine {
         currentCharsDone = 0
 
         let utterance = AVSpeechUtterance(string: item.text)
-        // Apple's rate scale: 0.5 is "average human" — the pace a voice is
-        // designed for. Map so our 1.0 → 0.5 and our 2.0 → 1.0. (The old
-        // mapping was `0.5 × multiplier`, so the DEFAULT spoke at half pace
-        // and 2× could only ever reach normal.)
-        let rate = min(
+        utterance.rate = Float(utteranceRate())
+        utterance.voice = resolvedVoice()
+        synthesizer.speak(utterance)
+        startedCount += 1
+    }
+
+    /// Our 0.5…2.0 multiplier mapped onto Apple's 0…1 utterance scale.
+    /// 1.0 → `AVSpeechUtteranceDefaultSpeechRate` (0.5), 2.0 → Maximum.
+    private func utteranceRate() -> Double {
+        min(
             Double(AVSpeechUtteranceMaximumSpeechRate),
             max(Double(AVSpeechUtteranceMinimumSpeechRate),
                 Double(AVSpeechUtteranceDefaultSpeechRate)
                     + (lastEffectiveRate - 1.0)
                     * (Double(AVSpeechUtteranceMaximumSpeechRate) - Double(AVSpeechUtteranceDefaultSpeechRate)))
         )
-        utterance.rate = Float(rate)
-        if let identifier = voiceIdentifier,
-           let voice = AVSpeechSynthesisVoice(identifier: identifier) {
-            utterance.voice = voice
-        } else {
-            utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
+    }
+
+    /// The `AVSpeechSynthesisVoice` for this session, built once and reused.
+    ///
+    /// It used to be constructed on every chunk, at two duplicated sites
+    /// (`startNextChunk` and `speakQueued`), each paying the
+    /// `AVSpeechSynthesisVoice(identifier:)` lookup per utterance. Cached
+    /// per session keyed on `voiceIdentifier`: the settings UI writes a new
+    /// identifier, which invalidates the cache on the next `speak()`.
+    private var cachedVoice: AVSpeechSynthesisVoice?
+    private var cachedVoiceIdentifier: String?
+
+    private func resolvedVoice() -> AVSpeechSynthesisVoice {
+        if let identifier = voiceIdentifier {
+            if let cached = cachedVoice, cachedVoiceIdentifier == identifier {
+                return cached
+            }
+            if let voice = AVSpeechSynthesisVoice(identifier: identifier) {
+                cachedVoice = voice
+                cachedVoiceIdentifier = identifier
+                return voice
+            }
         }
-        synthesizer.speak(utterance)
+        cachedVoice = nil
+        cachedVoiceIdentifier = nil
+        return AVSpeechSynthesisVoice(language: "en-US")
     }
 
     func pause() {
@@ -344,6 +407,7 @@ final class SystemEngine: NSObject, SpeechEngine {
         activeUtteranceText = nil
         queue = []
         nextIndex = 0
+        startedCount = 0
         current = nil
         currentCharsDone = 0
         lastRangeOffset = 0
@@ -381,26 +445,21 @@ final class SystemEngine: NSObject, SpeechEngine {
     }
 
     /// Re-speaks one queued chunk immediately (used by the rate re-queue).
+    ///
+    /// Batch F1: the cached voice replaces the fresh-per-utterance lookup
+    /// that used to be duplicated verbatim in here and in
+    /// `startNextChunk`, and the debounce means a slider drag — which emits
+    /// at 0.05 steps — produces one re-queue instead of a dozen mid-word
+    /// chops.
     private func speakQueued(index: Int) {
         let item = queue[index]
         current = item
         currentCharsDone = 0
         let utterance = AVSpeechUtterance(string: item.text)
-        let rate = min(
-            Double(AVSpeechUtteranceMaximumSpeechRate),
-            max(Double(AVSpeechUtteranceMinimumSpeechRate),
-                Double(AVSpeechUtteranceDefaultSpeechRate)
-                    + (lastEffectiveRate - 1.0)
-                    * (Double(AVSpeechUtteranceMaximumSpeechRate) - Double(AVSpeechUtteranceDefaultSpeechRate)))
-        )
-        utterance.rate = Float(rate)
-        if let identifier = voiceIdentifier,
-           let voice = AVSpeechSynthesisVoice(identifier: identifier) {
-            utterance.voice = voice
-        } else {
-            utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
-        }
+        utterance.rate = Float(utteranceRate())
+        utterance.voice = resolvedVoice()
         synthesizer.speak(utterance)
+        startedCount += 1
     }
 
     /// The word position inside the current chunk, for a re-queue.
@@ -426,6 +485,11 @@ extension SystemEngine: AVSpeechSynthesizerDelegate {
         DispatchQueue.main.async { [weak self] in
             guard let self, self.isCurrentSynthesizer(synthesizer), self.epoch > 0 else { return }
             self.state = .speaking
+            // Batch F1: fill the lookahead from the START path too, not only
+            // the finish path. This is the actual gap fix — the utterance has
+            // begun sounding and the queue is still a chunk short, so the
+            // next one is handed to Apple now rather than seconds later.
+            self.startNextChunk()
             // Batch A2: the missing half of the boundary pair. `didFinish`
             // above stamps the end of this boundary, so the two together give
             // the inter-chunk gap for the only engine with no instrumentation.
