@@ -291,7 +291,12 @@ final class KokoroSmallSpikeTests: XCTestCase {
     /// a future vocab that gains one of them fails here until it is removed
     /// from this set — which is the point: the set documents the app's
     /// drop surface, not a permanent property of Unicode.
-    private static let unsafeCharacters: Set<Character> = ["_", "g", "L", "B", "E", "S", "T", "D", "1", "2", "3", "4", "5", "8", "9", "-", "'"]
+    ///
+    /// `S` and `T` are NOT in this set on purpose: they are espeak's capital
+    /// letters for sh/affricate sounds and they DO have ids (35, 36) — which
+    /// is exactly the kind of detail this test exists to catch, since the
+    /// first version of it wrongly assumed every capital was unsafe.
+    private static let unsafeCharacters: Set<Character> = ["_", "g", "L", "B", "E", "D", "1", "2", "3", "4", "5", "8", "9", "-", "'"]
 
     /// After B1's pre-pass + substitution the token count must still equal
     /// the character count — because a substitution preserves length while a
@@ -350,8 +355,7 @@ final class KokoroSmallSpikeTests: XCTestCase {
                 XCTFail("KOKORO_VOICES_NPZ names \(npzPath), which does not exist")
             }
             throw XCTSkip("voices.npz not present at \(npzPath) — set KOKORO_VOICES_NPZ to enforce this proof")
-        }
-        let knownVoices = [
+        }        let knownVoices = [
             "af_alloy", "af_aoede", "af_bella", "af_heart", "af_jessica",
             "af_kore", "af_nicole", "af_nova", "af_river", "af_sarah", "af_sky",
             "am_adam", "am_echo", "am_eric", "am_fenrir", "am_liam",

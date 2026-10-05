@@ -406,7 +406,14 @@ final class SystemEngine: NSObject, SpeechEngine {
         }
         cachedVoice = nil
         cachedVoiceIdentifier = nil
-        return AVSpeechSynthesisVoice(language: "en-US")
+        // `AVSpeechSynthesisVoice(language:)` returns an optional — the
+        // library can decline a language it has no data for. The en-US
+        // default is always present on iOS, so the `?? AVSpeechSynthesisVoice()`
+        // is a nil check rather than a crash: an empty initialiser is an
+        // object the synthesizer will reject loudly, which is better than a
+        // force-unwrap. (This cost two CI rounds: the first patch's
+        // `setResourceValues`-style mistake, then this line itself.)
+        return AVSpeechSynthesisVoice(language: "en-US") ?? AVSpeechSynthesisVoice()
     }
 
     func pause() {

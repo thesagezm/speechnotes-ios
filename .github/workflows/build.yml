@@ -104,11 +104,11 @@ jobs:
         id: test
         env:
           # $HOME is NOT expanded in a step's `env:` — the runner writes the
-          # token verbatim. The test's own default path is the same file
-          # (NSHomeDirectory() == the runner's home here), so the proof was
-          # running on the default rather than on this variable. Set it from
-          # an expression, which IS expanded.
-          KOKORO_VOICES_NPZ: ${{ github.workspace }}/../kokoro-small-spike/voices.npz
+          # token verbatim. The ${{ }} expression IS expanded, but it has to
+          # resolve to the real download directory. `github.workspace` is the
+          # repo checkout, whose parent (`_work`) is where the runner puts
+          # everything — the download step's `~` also lands there.
+          KOKORO_VOICES_NPZ: ${{ runner.home }}/kokoro-small-spike/voices.npz
         run: |
           set -o pipefail
           cd Tests/KokoroSmallSpike
