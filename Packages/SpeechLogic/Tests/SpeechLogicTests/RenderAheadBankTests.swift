@@ -85,11 +85,26 @@ final class RenderAheadBankTests: XCTestCase {
             policy.pressuredTargetSeconds(thermal: .critical, sampleRate: 24_000),
             2, accuracy: 1e-9)
 
+        // At critical the byte cap is NOT binding (1 MB ≈ 10.9 s > the 8 s
+        // seconds target), so the composition is min(8, 10.9) × 0.25 = 2.0.
+        // A cap that small only binds at nominal, which the last assertion in
+        // this test covers via the small-cap case below.
         let capped = RenderAheadBankPolicy(byteCapBytes: 1_048_576)
         let bytesTarget = 1_048_576.0 / 96_000.0
         XCTAssertEqual(
             capped.pressuredTargetSeconds(thermal: .critical, sampleRate: 24_000),
-            bytesTarget * 0.25, accuracy: 1e-9)
+            min(8, bytesTarget) * 0.25, accuracy: 1e-9)
+
+        // A cap small enough to bind: 1 MB at 24 kHz ≈ 10.9 s, so at
+        // NOMINAL it is the cap that gates — and the factor still applies
+        // underneath it.
+        XCTAssertEqual(
+            capped.pressuredTargetSeconds(thermal: .nominal, sampleRate: 24_000),
+            bytesTarget, accuracy: 1e-9)
+        XCTAssertLessThan(
+            capped.pressuredTargetSeconds(thermal: .nominal, sampleRate: 24_000),
+            capped.targetSeconds(for: .nominal))
+
         XCTAssertEqual(
             capped.pressuredTargetSeconds(thermal: .nominal, sampleRate: 0),
             30, accuracy: 1e-9)
