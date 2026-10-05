@@ -126,6 +126,24 @@ final class SystemEngine: NSObject, SpeechEngine {
         AudioSessionSetup.configureAndActivate(source: .tts, prefix: "SystemEngine")
     }
 
+    // MARK: - Batch A2 instrumentation
+
+    /// Apple's chunk-boundary measurement, kept local on purpose.
+    ///
+    /// `PlaybackMetrics` is built around a producer loop this engine does
+    /// not have (per-chunk generation stamps, a bank, a node), so borrowing
+    /// it would mean pretending. This measures the one thing Apple's
+    /// machine makes hard to see — the silence between `didFinish` on one
+    /// utterance and the first audio of the next — and nothing else.
+    ///
+    /// Nothing here gates, reorders or delays playback. The stamps are
+    /// ContinuousClock reads already paid for by the dispatch hop.
+    private let metrics = SystemSpeechMetrics()
+
+    /// Set on `didFinish`, consumed on the next `didStart`. Nil the rest of
+    /// the time, so a rebuild, a stop or a pause simply records nothing.
+    private var chunkFinishStamp: ContinuousClock.Instant?
+
     override init() {
         super.init()
         synthesizer.delegate = self
@@ -172,6 +190,9 @@ final class SystemEngine: NSObject, SpeechEngine {
         // routes; re-applying is a no-op when the category already matches.
         AudioSessionSetup.configureAndActivate(source: .tts, prefix: "SystemEngine")
         pauseRequested = false
+        // The rebuild is preceded by an interruption, not by a chunk
+        // boundary: drop the stamp so the resume is not logged as a gap.
+        chunkFinishStamp = nil
         // Resume with exactly the text that has not sounded yet:
         //  - pause mid-chunk (willSpeak advanced, didFinish not fired) →
         //    re-queue the unsound remainder;
@@ -239,6 +260,10 @@ final class SystemEngine: NSObject, SpeechEngine {
         nextIndex = 0
         current = nil
         currentCharsDone = 0
+        // Batch A2: one line per session, same shape as the ONNX engines' so
+        // a device log can be filtered on one string for every engine.
+        metrics.beginSession(chunkCount: queue.count, rate: lastEffectiveRate)
+        chunkFinishStamp = nil
         startNextChunk()
         // State flips to .speaking via the didStart delegate callback.
     }
@@ -289,6 +314,12 @@ final class SystemEngine: NSObject, SpeechEngine {
         guard synthesizer.isSpeaking || !queue.isEmpty else { return }
         pauseRequested = true
         synthesizer.pauseSpeaking(at: .word)
+        // A pause is not a boundary: the boundary stamp is dropped so the
+        // resume does not report the whole pause as inter-chunk silence.
+        // The pause's own duration is not measured anywhere — it is user
+        // intent, not a fault, and the session summary's wall clock says
+        // everything about it.
+        chunkFinishStamp = nil
         DispatchQueue.main.async { self.state = .paused }
     }
 
@@ -300,6 +331,7 @@ final class SystemEngine: NSObject, SpeechEngine {
             synthesizer.continueSpeaking()
         } else {
             pauseRequested = false
+            chunkFinishStamp = nil
             startNextChunk()
         }
         DispatchQueue.main.async { self.state = .speaking }
@@ -316,6 +348,8 @@ final class SystemEngine: NSObject, SpeechEngine {
         currentCharsDone = 0
         lastRangeOffset = 0
         pauseRequested = false
+        chunkFinishStamp = nil
+        metrics.endSession(reason: "stopped")
         DispatchQueue.main.async { [weak self] in
             guard let self, self.epoch == epochAtStop else { return }
             self.state = .idle
@@ -392,6 +426,13 @@ extension SystemEngine: AVSpeechSynthesizerDelegate {
         DispatchQueue.main.async { [weak self] in
             guard let self, self.isCurrentSynthesizer(synthesizer), self.epoch > 0 else { return }
             self.state = .speaking
+            // Batch A2: the missing half of the boundary pair. `didFinish`
+            // above stamps the end of this boundary, so the two together give
+            // the inter-chunk gap for the only engine with no instrumentation.
+            if let started = self.chunkFinishStamp {
+                self.metrics.recordBoundary(startedAt: started)
+            }
+            self.chunkFinishStamp = nil
         }
     }
 
@@ -399,6 +440,8 @@ extension SystemEngine: AVSpeechSynthesizerDelegate {
         DispatchQueue.main.async { [weak self] in
             guard let self, self.isCurrentSynthesizer(synthesizer) else { return }
             self.chunkFinished = true
+            // Batch A2: one stamp, one comparison. No scheduling changes here.
+            self.chunkFinishStamp = ContinuousClock.now
             // Progress reaches exactly 1.0 on the last chunk before the
             // completion signal fires.
             if self.nextIndex >= self.queue.count {
@@ -414,6 +457,9 @@ extension SystemEngine: AVSpeechSynthesizerDelegate {
             } else {
                 self.onFinished?()
                 self.state = .idle
+                // Batch A2: the session's summary line. `didFinish` is Apple's
+                // only natural-end signal, so this is where it belongs.
+                self.metrics.endSession(reason: "finished")
             }
         }
     }
