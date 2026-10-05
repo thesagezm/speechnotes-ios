@@ -1,4 +1,5 @@
 import AVFoundation
+import SpeechLogic
 
 /// Batch D's file-queue substrate: rendered chunks written to disk and
 /// played by an `AVQueuePlayer`, so TTS output is treated exactly like the
@@ -187,7 +188,7 @@ final class ChunkFileQueue: NSObject {
         guard let position = liveIndexes.firstIndex(of: index) else { return }
         liveIndexes.remove(at: position)
         liveBytes.remove(at: position)
-        let url = sessionDir.appendingPathComponent(ChunkCachePolicy.chunkFileName(index: index))
+        let url = sessionDir.appendingPathComponent(ChunkCacheLayout.chunkFileName(index: index))
         try? FileManager.default.removeItem(at: url)
     }
 
@@ -306,6 +307,6 @@ final class ChunkFileQueue: NSObject {
     }
 
     private func itemURL(for index: Int) -> URL {
-        sessionDir.appendingPathComponent(ChunkCachePolicy.chunkFileName(index: index))
+        sessionDir.appendingPathComponent(ChunkCacheLayout.chunkFileName(index: index))
     }
 }

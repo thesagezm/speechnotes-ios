@@ -142,7 +142,11 @@ final class ChunkCachePolicyTests: XCTestCase {
         let trim = policy.trimmedRange(sampleCount: sampleCount, peak: peak, padding: 480)
         XCTAssertEqual(trim.start, 24_000 - 480)
         XCTAssertEqual(trim.end, 48_000 + 480)
-        XCTAssertEqual(policy.trimmedSampleCount(sampleCount: sampleCount, trim: trim), 48_000 + 960)
+        // Kept = end - start = the 24 000 samples of tone plus 480 of
+        // padding on each side.
+        XCTAssertEqual(
+            policy.trimmedSampleCount(sampleCount: sampleCount, trim: trim),
+            48_000 - 24_000 + 960)
     }
 
     /// Padding is clamped to the buffer, so a chunk that is ALL tone keeps

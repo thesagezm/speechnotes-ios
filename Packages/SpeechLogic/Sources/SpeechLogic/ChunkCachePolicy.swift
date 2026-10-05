@@ -213,9 +213,21 @@ public enum ChunkCacheLayout {
     }
 
     /// A new session id. Milliseconds since epoch: time-ordered, so the
-    /// oldest session is the first to be reclaimed, and unique per process
-    /// without a counter.
+    /// oldest session is the first a purge would reclaim, and unique per
+    /// process without a counter.
     public static func newSessionID(now: Date = Date()) -> String {
         "s\(Int(now.timeIntervalSince1970 * 1000))"
+    }
+
+    /// `<index>.wav` inside the session directory, zero-padded to six digits
+    /// so a directory listing sorts the same way the player orders its queue
+    /// — `000002.wav` does not sort before `000010.wav`.
+    ///
+    /// WAV, not CAF: `WAVWriter.StreamingWriter` already writes canonical
+    /// 16-bit mono WAV and is CI-tested against the one-shot path, and
+    /// `AVPlayer` plays it. A CAF variant is a two-line change to the writer
+    /// if a device session shows a decode-latency difference.
+    public static func chunkFileName(index: Int) -> String {
+        String(format: "%06d.wav", index)
     }
 }
