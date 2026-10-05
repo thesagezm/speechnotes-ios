@@ -47,9 +47,13 @@ classes differ on precisely this one point.
    it is what dies first on a Bluetooth connect, AirPods, an alarm, a call.
 4. **`mediaServicesWereReset` on the TTS path** — re-arm, tear the dead
    pipeline down, KEEP the bookmark, no auto-resume (Apple: *"shouldn't
-   restart your media playback … until initiated by user action"*). The
-   audiobook's auto-resume predates this and is left alone; the Opus backend
-   reports the reset by type and `AudioBookPlayer` cold-rebuilds it.
+   restart your media playback … until initiated by user action"*). Batch G
+   (2026-10-05) brought the audiobook to the same rule:
+   `AudioBookPlayer.handleMediaServicesReset` now pauses at the persisted
+   playhead and tears the dead pipeline down; the auto-resume it shipped
+   with is gone — the lock-screen/in-app play button is the resume path.
+   The Opus backend reports the reset by type and `AudioBookPlayer`
+   cold-rebuilds it.
 5. **`SystemEngine.synthesizer` is a `var`** with `rebuildSynthesizer()` on
    interruption-`.ended`: after a call the old instance can go permanently
    silent with no error; recreation is the documented recovery. Delegate

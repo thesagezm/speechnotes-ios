@@ -1049,18 +1049,18 @@ final class AudioBookPlayer: ObservableObject {
 
     private func handleMediaServicesReset() {
         // The media server died: session configuration and the loaded item
-        // are both void. Re-arm the setup and cold-resume where the user
-        // was — a stuck "playing" surface with a dead pipeline is exactly
-        // the state that gets the app suspended.
-        Log.shared.error("AudioBookPlayer: media services reset — rebuilding the session and resuming")
+        // are both void. Reflect a paused surface at the persisted playhead
+        // and tear the dead pipeline down — but do NOT auto-resume. Apple's
+        // guidance for this reset is that playback restarts only on user
+        // action (the rule the TTS path already follows): resuming here
+        // would fight whatever grabbed media services. The lock-screen or
+        // in-app play button resumes from the persisted fraction.
+        Log.shared.error("AudioBookPlayer: media services reset — pipeline is dead, pausing at the persisted playhead")
         AudioSessionSetup.invalidateConfiguration()
-        guard let book = activeBook else { return }
-        let fraction = chapterProgress
-        let wasPlaying = isPlaying
+        isPlaying = false
+        persistPosition(force: true)
+        publishNowPlaying(force: true)
         teardownAudio()
-        if wasPlaying {
-            play(book: book, chapterIndex: chapterIndex, withinChapterFraction: fraction)
-        }
     }
 
     /// Interruption ended with shouldResume: re-activate the session and

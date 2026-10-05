@@ -81,6 +81,9 @@ final class BookmarkStore {
 
     private var persistTask: Task<Void, Never>?
     private var lastPersist = Date.distantPast
+    /// Serial: writes land in call order, so the last snapshot taken is the
+    /// file's final state even when writes overlap.
+    private let persistQueue = DispatchQueue(label: "BookmarkStore.persist")
 
     /// Throttle with a GUARANTEED trailing write (min interval 1 s). The old
     /// code was a re-arming 500 ms debounce: playback ticks fire every 0.3 s
@@ -105,15 +108,35 @@ final class BookmarkStore {
         }
     }
 
-    /// Synchronous write — also the scenePhase path via persistNow().
+    /// Snapshot synchronously, write off-main. The encode captures the state
+    /// AT THE CALL — that is the guarantee the scenePhase path relies on —
+    /// and the file I/O runs on the serial persist queue. A few-KB write
+    /// finishes inside the backgrounding grace window, and immediately while
+    /// audio keeps the process alive. `lastPersist` is stamped before the
+    /// write: a failing write must not turn the throttle into a hot loop.
     func persistNow() {
         persistTask?.cancel()
         persistTask = nil
+        lastPersist = Date()
+        let snapshot: Data
         do {
-            let data = try JSONEncoder().encode(bookmarks)
-            try data.write(to: fileURL, options: .atomic)
+            snapshot = try JSONEncoder().encode(bookmarks)
         } catch {
-            Log.shared.error("BookmarkStore: persist failed: \(error)")
+            Log.shared.error("BookmarkStore: encode failed: \(error)")
+            return
+        }
+        let url = fileURL
+        persistQueue.async {
+            do {
+                try snapshot.write(to: url, options: .atomic)
+            } catch {
+                // The queue closure must not capture the non-Sendable
+                // LogStore — stringify here, log on the main actor.
+                let message = "\(error)"
+                Task { @MainActor in
+                    Log.shared.error("BookmarkStore: persist failed: \(message)")
+                }
+            }
         }
     }
 
