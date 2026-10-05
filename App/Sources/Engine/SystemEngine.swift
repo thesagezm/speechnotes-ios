@@ -482,7 +482,12 @@ final class SystemEngine: NSObject, SpeechEngine {
         DispatchQueue.main.async { [weak self] in
             // A stop() that ran between here and the hop supersedes this
             // pause — the surface must not claim .paused over a dead session.
-            guard let self, self.epoch == epochAtPause else { return }
+            // A FINISHED session can also land in this window with the epoch
+            // unchanged (the final chunk's didFinish hop interleaving between
+            // pause()'s entry and this block): the drained branch ends the
+            // session, so a surface flip to .paused here would resurrect it
+            // as a zombie for the next resume (round-5 critique, P3).
+            guard let self, self.epoch == epochAtPause, self.state != .idle else { return }
             self.state = .paused
         }
     }
@@ -690,6 +695,7 @@ extension SystemEngine: AVSpeechSynthesizerDelegate {
                 // Without this, onFinished never fires (the finish branch is
                 // below) and resume() would claim .speaking over dead air.
                 if self.nextIndex >= self.queue.count {
+                    self.pauseRequested = false
                     self.onFinished?()
                     self.state = .idle
                     self.metrics.endSession(reason: "finished")

@@ -922,3 +922,27 @@ all fixed in the round that records this entry:
    corrected to name the spike job, not the run headline.
 
 **Build gate: run on this fix round — see the entry above.**
+
+## TTS Engines — Round 5, closing verification (diff `085870a`, independent pass)
+
+**Score: 9/10. Faster than baseline: YES. No findings at severity P1 or
+P2** — the ship bar is met. All four round-4 fixes verified: the
+unconditional `lastEffectiveRate` update is correct in every reachable
+path (the `speed`/`rateMultiplier` divergence is unreachable — the slider
+writer keeps both synced), the epoch capture drops only what it should,
+and the B4 gate's aligned-metric arithmetic was replicated in a numeric
+harness (shifted synthetic waves align at corr ≈ 1.0; gibberish stays at
+0.15; the degenerate-overlap default is unreachable). The docs match the
+code line for line.
+
+1. **[P3, fixed in this round] A residual pause-vs-final-didFinish race
+   survived the epoch guard.** The final chunk's finish hop could
+   interleave INSIDE `pause()`'s synchronous body — before the `.paused`
+   hop was enqueued — and end the session with the epoch unchanged; the
+   pause hop then flipped the finished session to `.paused`, and a
+   resume would claim `.speaking` over dead air. The hop now also
+   refuses when `state == .idle`, and the drained-finish branch clears
+   the stale `pauseRequested`. Instruction-window narrow, but it is the
+   same bug class the round-4 fix closed, one gate short of closed.
+
+**Build gate: run on the P3 fix — the loop closes at 9/10 ≥ 8.**
