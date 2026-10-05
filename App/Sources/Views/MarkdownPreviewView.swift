@@ -122,7 +122,7 @@ struct MarkdownPreviewView: View {
         let remoteTargets = targets.filter { NoteImageStore.parseLocalTarget($0) == nil }
         Task.detached(priority: .userInitiated) {
             var map: [String: URL] = [:]
-            for target in targets {
+            for target in targets where NoteImageStore.parseLocalTarget(target) != nil {
                 if let url = NoteImageStore.thumbnailURL(for: target, noteId: noteId)
                     ?? NoteImageStore.resolveLocalURL(target, noteId: noteId) {
                     map[target] = url
@@ -144,6 +144,14 @@ struct MarkdownPreviewView: View {
         }
     }
 
+    /// Every image target in the note, local AND web.
+    ///
+    /// It used to filter to local targets here, which made
+    /// `remoteTargets` (the web-image index Storage's per-note deletion and
+    /// the recycle bin's purge key off) permanently EMPTY — a web image was
+    /// never registered against its note, so deleting that note left its
+    /// bytes in the gallery. The local resolution loop below filters for
+    /// itself now.
     private func collectImageTargets(from blocks: [MarkdownText.MarkdownBlock]) -> [String] {
         var out: [String] = []
         for block in blocks {
@@ -157,7 +165,7 @@ struct MarkdownPreviewView: View {
             default: break
             }
         }
-        return out.filter { NoteImageStore.parseLocalTarget($0) != nil }
+        return out
     }
 
     // MARK: - Blocks

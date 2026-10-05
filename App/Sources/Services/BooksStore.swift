@@ -672,7 +672,10 @@ final class BooksStore: ObservableObject {
                     // No muxer's chapter table reached us — the reader gets
                     // the same uniform half-hour navigation it always did,
                     // and the contents list is still real navigation instead
-                    // of one unskippable row.
+                    // of one unskippable row. The count is logged because
+                    // "chapters are still 30 minutes" is otherwise
+                    // indistinguishable from "the file has no marks at all"
+                    // and from "the parser missed them".
                     let boundaries = Self.uniformChapterBoundaries(duration: ogg.duration)
                     if boundaries.count > 1 {
                         book.audioChapters = boundaries.enumerated().map { index, start in
@@ -685,6 +688,7 @@ final class BooksStore: ObservableObject {
                         }
                         book.audioChapterSource = "ogg-uniform"
                     }
+                    Log.shared.info("AudioBook chapters: no OpusTags CHAPTER marks found in «\(book.title)» (\(ogg.chapters.count) parsed) — falling back to uniform half-hour division")
                 }
             }
         }

@@ -219,9 +219,25 @@ enum RemoteImageStore {
     /// only produced silent failures. A truncated or errored stream
     /// returns nil — never a partial image worth storing.
     static func fetchCapped(_ url: URL, maxBytes: Int = maxImageBytes) async -> Data? {
-        guard let scheme = url.scheme?.lowercased(), scheme == "https" else { return nil }
-        guard let (stream, response) = try? await URLSession.shared.bytes(from: url) else { return nil }
+        // Diagnostics first: "web images don't render" was reported with no
+        // way to tell an http-only link from a dead host from a decode
+        // failure, and every one of those looks identical in the UI (a photo
+        // glyph). Each rejection below says which it was — filter the log
+        // for `web image` to see the reason for a given URL.
+        guard let scheme = url.scheme?.lowercased(), scheme == "https" else {
+            Log.shared.error("Web image skipped (not https): \(url.absoluteString.prefix(120))")
+            return nil
+        }
+        guard let (stream, response) = try? await URLSession.shared.bytes(from: url) else {
+            Log.shared.error("Web image fetch failed (transport): \(url.absoluteString.prefix(120))")
+            return nil
+        }
+        if let status = (response as? HTTPURLResponse)?.statusCode, !(200...299).contains(status) {
+            Log.shared.error("Web image fetch returned HTTP \(status): \(url.absoluteString.prefix(120))")
+            return nil
+        }
         if response.expectedContentLength > 0, response.expectedContentLength > Int64(maxBytes) {
+            Log.shared.error("Web image too large (\(response.expectedContentLength) bytes, cap \(maxBytes)): \(url.absoluteString.prefix(120))")
             return nil
         }
         var data = Data()
@@ -230,13 +246,19 @@ enum RemoteImageStore {
             for try await byte in stream {
                 data.append(byte)
                 if data.count > maxBytes {
+                    Log.shared.error("Web image exceeded the \(maxBytes)-byte cap mid-stream: \(url.absoluteString.prefix(120))")
                     return nil
                 }
             }
         } catch {
+            Log.shared.error("Web image stream failed after \(data.count) bytes (\(error.localizedDescription)): \(url.absoluteString.prefix(120))")
             return nil
         }
-        return data.isEmpty ? nil : data
+        guard !data.isEmpty else {
+            Log.shared.error("Web image returned zero bytes: \(url.absoluteString.prefix(120))")
+            return nil
+        }
+        return data
     }
 
     /// Downloads and stores `urls` without decoding (the Automatic caching

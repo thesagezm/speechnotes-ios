@@ -30,6 +30,13 @@ struct PlaybackRail: View {
     /// Round 6: 150 (user liked the panel, asked for it slightly smaller).
     static let idealWidth: CGFloat = 150
 
+    /// Air between the card and the screen edge, on both sides. The
+    /// expanded panel needs it to not touch the bezel; the minimized
+    /// capsule keeps the same footprint so the host column does not resize
+    /// when the user collapses/expands (a width jump there is what made the
+    /// rail look like it "moved" after a minimize/maximize round trip).
+    static let horizontalPadding: CGFloat = 10
+
     /// What the rail's buttons do. Every surface fills this in with its own
     /// calls — the rail itself holds no playback knowledge.
     struct Action {
@@ -126,18 +133,23 @@ struct PlaybackRail: View {
     /// is pixel-identical whether the chrome is visible or not, and reads as
     /// a deliberate landscape player instead of a strip of UI.
     private var fullPanel: some View {
-        // The scroll wrapper is the fix for the "expanded rail ran off the
-        // top of the screen" report: a session-active panel (progress +
-        // stepper + voice chip + play cluster + controls + rate) is taller
-        // than a landscape phone's short axis, and the old centered
-        // `.frame(maxHeight: .infinity)` CLIPPED BOTH ENDS of the overflow —
-        // taking the minimize chevron (top-trailing) off-screen with it.
-        // Overflow now scrolls from the top, so the chevron is always
-        // reachable. The `minHeight` inside keeps the round-7 design when
-        // the card FITS: a plain ScrollView pins short content to the top
-        // (scroll-view origin semantics), and `minHeight: viewport` re-
-        // centers it in the column; when the card is taller, the frame is
-        // inert and the overflow scrolls.
+        // Two fixes live here, both from the device:
+        //
+        // 1. SCROLL: a session-active panel (progress + stepper + voice chip
+        //    + play cluster + controls + rate) is taller than a landscape
+        //    phone's short axis, and the old centered `.frame(maxHeight:
+        //    .infinity)` CLIPPED BOTH ENDS of the overflow — taking the
+        //    minimize chevron (top-trailing) off-screen. Overflow now scrolls
+        //    from the top, and the `minHeight` inside keeps the round-7
+        //    centered float when the card FITS (a plain ScrollView pins short
+        //    content to its top, so the frame re-centers it; when the card is
+        //    taller, the frame is inert).
+        // 2. WIDTH: GeometryReader is greedy in BOTH axes, so letting it size
+        //    itself let it swallow the trailing column in the host HStack —
+        //    the card then floated in the middle of the screen instead of
+        //    hugging the lateral edge (the device report). The column is
+        //    therefore pinned to the card width plus its side padding, the
+        //    same footprint the pre-scroll layout reserved.
         GeometryReader { proxy in
             ScrollView(.vertical) {
                 VStack(spacing: 0) {
@@ -178,15 +190,16 @@ struct PlaybackRail: View {
                     .padding(.trailing, 4)
                     .accessibilityLabel("Minimize playback rail")
                 }
-                // The centering wrapper is OUTERMOST so the card's visuals
-                // hug the natural content: when the card is shorter than the
-                // column the frame centers it at column height; when it is
-                // taller the frame is inert and the overflow scrolls.
+                // Outermost so the card's visuals hug the natural content:
+                // centered when it fits, inert when it overflows.
                 .frame(minHeight: proxy.size.height)
             }
             .scrollBounceBehavior(.basedOnSize)
+            // Re-expanding must land at the top, or the chevron (which lives
+            // at the card's top) is scrolled out of sight again.
+            .scrollPosition(initialAnchor: .top)
         }
-        .padding(.horizontal, 10)
+        .frame(width: Self.idealWidth + 2 * Self.horizontalPadding)
         .frame(maxHeight: .infinity, alignment: .center)
     }
 
@@ -244,7 +257,7 @@ struct PlaybackRail: View {
             RoundedRectangle(cornerRadius: 26, style: .continuous)
                 .strokeBorder(Color.primary.opacity(0.07))
         )
-        .padding(.horizontal, 10)
+        .padding(.horizontal, Self.horizontalPadding)
         .frame(maxHeight: .infinity, alignment: .center)
     }
 

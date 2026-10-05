@@ -49,6 +49,7 @@ final class ImageCache {
             // is excluded too — ATS blocks it, so accepting the scheme only
             // produced silent failures.
             guard let scheme = url.scheme?.lowercased(), scheme == "https" else {
+                Log.shared.error("Web image skipped (not https): \(url.absoluteString.prefix(120))")
                 return nil
             }
             // Remote: disk-backed store first (persists across launches —
@@ -64,7 +65,13 @@ final class ImageCache {
                 data = fetched
             }
         }
-        guard let data, let decoded = Self.downsampledImage(data) else { return nil }
+        guard let data, let decoded = Self.downsampledImage(data) else {
+            // Bytes arrived but nothing decoded — a webp/avif the ImageIO
+            // decoder here cannot read, or an HTML error page served with a
+            // 200. The reason is invisible otherwise.
+            Log.shared.error("Web image decode failed (\(data.count) bytes, not an image the decoder reads): \(url.absoluteString.prefix(120))")
+            return nil
+        }
         lock.lock()
         defer { lock.unlock() }
         // Cost in DECODED bytes (compressed bytes * 4–30× undercount and
