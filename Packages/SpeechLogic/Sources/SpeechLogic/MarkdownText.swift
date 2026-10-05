@@ -650,7 +650,16 @@ public enum MarkdownText {
     public static func inlineRuns(_ line: String, references: [String: LinkReference] = [:]) -> [InlineRun] {
         guard !line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
         let spans = spans(of: Array(Document(parsing: line).children))
-        guard !spans.isEmpty else { return [.text(line)] }
+        let runs = runs(from: spans)
+        return runs.isEmpty ? [.text(line)] : runs
+    }
+
+    /// Runs straight from spans the caller already holds — paragraph blocks
+    /// carry theirs from the document parse. Re-parsing the paragraph's PLAIN
+    /// text (the old preview path) cannot recover images: flattening replaced
+    /// the `![…](…)` marker with the alt text, so an inline image vanished
+    /// from every paragraph that was not exactly one image.
+    public static func runs(from spans: [StyledSpan]) -> [InlineRun] {
         var runs: [InlineRun] = []
         for span in spans {
             if let alt = span.imageAlt, let url = span.imageURL {
@@ -662,7 +671,7 @@ public enum MarkdownText {
                 runs.append(.text(span.text))
             }
         }
-        return runs.isEmpty ? [.text(line)] : runs
+        return runs
     }
 
     // MARK: - Reference definitions

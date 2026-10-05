@@ -354,7 +354,6 @@ final class MarkdownTextTests: XCTestCase {
         XCTAssertTrue(MarkdownSlashMenu.filter(prefix: "tbl").contains { $0.id == "table" })
         XCTAssertTrue(MarkdownSlashMenu.filter(prefix: "task").contains { $0.id == "todo" })
     }
-}
 
     // MARK: - Emoji survival (device report: "notes cannot render emojis")
 
@@ -408,3 +407,44 @@ final class MarkdownTextTests: XCTestCase {
         let plain = MarkdownText.plainText("Party 🎉 tonight")
         XCTAssertFalse(plain.contains("🎉"), "sanitizer should strip emoji from SPEECH text")
     }
+
+    /// An image inside a mixed paragraph must survive into the preview runs.
+    /// The paragraph's spans come from the document parse; rebuilding runs
+    /// from the paragraph's PLAIN text cannot recover the image (the alt
+    /// text replaced the `![…](…)` marker), which is how web images vanished
+    /// from every paragraph that was not exactly one image.
+    func testRunsFromParagraphSpansKeepInlineImages() {
+        let markdown = "Before text ![cover](https://example.com/pic.jpg) after text"
+        guard case .paragraph(_, let spans)? = MarkdownText.blocks(markdown).first else {
+            return XCTFail("expected one paragraph block, got \(MarkdownText.blocks(markdown))")
+        }
+        let runs = MarkdownText.runs(from: spans)
+        var sawImage = false
+        for run in runs {
+            if case .image(let alt, let url) = run {
+                sawImage = true
+                XCTAssertEqual(alt, "cover")
+                XCTAssertEqual(url, "https://example.com/pic.jpg")
+            }
+        }
+        XCTAssertTrue(sawImage, "inline image lost from paragraph runs: \(runs)")
+        // The old path fed the FLATTENED text back through the parser — the
+        // marker is gone there, which is exactly the failure this guards.
+        let flattened = spans.map(\.text).joined()
+        XCTAssertFalse(flattened.contains("!["), "test premise: span text carries no markers")
+        XCTAssertFalse(MarkdownText.inlineRuns(flattened).contains { run in
+            if case .image = run { return true }
+            return false
+        }, "premise check: a re-parse of the flattened text yields no image runs")
+    }
+
+    /// A one-image paragraph is lifted to an `.image` block; a mixed
+    /// paragraph must stay a paragraph (the image renders inline via its
+    /// spans).
+    func testMixedImageParagraphStaysParagraph() {
+        let blocks = MarkdownText.blocks("Look: ![x](https://example.com/a.png)")
+        guard case .paragraph = blocks.first else {
+            return XCTFail("mixed paragraph must not be lifted to an image block")
+        }
+    }
+}

@@ -189,32 +189,48 @@ public enum OggReader {
     /// Duration and identification from a head and a tail slice of the file.
     /// Throws when the head carries no readable identification header.
     public static func summary(head: Data, tail: Data) throws -> Summary {
-        var offset = head.startIndex
         var info: StreamInfo?
         var tagsChapters: [OggChapter] = []
         var lastGranule: UInt64 = 0
         var sawPage = false
+        // Packets assemble ACROSS pages, exactly as `read` assembles them.
+        // A book's OpusTags packet carries the muxer's whole comment block —
+        // embedded art, lyrics, the chapter table — and regularly spans
+        // dozens of pages (933 KB on a real Harry Potter 5.1ch encode). The
+        // old per-page assembly dropped every packet that did not COMPLETE
+        // on one page, so that file's chapters were silently lost to the
+        // uniform-division fallback.
+        var pending: [UInt8] = []
+        /// A runaway "packet" (a corrupt segment table) is being discarded;
+        /// keep discarding until a short segment ends it.
+        var dropping = false
+        var offset = head.startIndex
         while offset < head.endIndex {
             guard let page = Page(data: head, at: offset - head.startIndex) else { break }
             sawPage = true
-            if info == nil {
-                // The identification header is the first packet on the first
-                // page that carries one. Page 0's first segment can be a
-                // partial-packet continuation (segment tables and pages
-                // interleave), so the packet is assembled from the segment
-                // walk exactly as `read` does — not from "page start to the
-                // first short segment", which silently sliced the wrong
-                // bytes and reported 2ch/0 pre-skip for a 6ch book.
-                if let first = firstPacket(of: page, in: head, at: offset) {
-                    info = streamInfo(firstPacket: first)
+            for segment in page.segments {
+                guard segment.upperBound <= head.count else { break }
+                if dropping {
+                    if segment.count < 255 { dropping = false }
+                    continue
                 }
-            }
-            // The chapter table rides in OpusTags, the second header packet —
-            // usually its own page, sometimes the same page as OpusHead.
-            // Both placements are covered by walking every page's completed
-            // packets until the tags turn up.
-            if tagsChapters.isEmpty, let packets = completedPackets(of: page, in: head, at: offset) {
-                for packet in packets where tagsChapters.isEmpty {
+                pending.append(contentsOf: head[head.startIndex + segment.lowerBound..<(head.startIndex + segment.upperBound)])
+                guard segment.count < 255 else {
+                    if pending.count > Self.maxMetadataPacketBytes {
+                        // Comment packets with art run to megabytes; audio
+                        // packets never approach this. Past the cap the
+                        // segment table is lying, not describing metadata.
+                        pending.removeAll(keepingCapacity: true)
+                        dropping = true
+                    }
+                    continue   // 255: the packet continues on this page or the next
+                }
+                let packet = Data(pending)
+                pending.removeAll(keepingCapacity: true)
+                if info == nil {
+                    info = streamInfo(firstPacket: packet)
+                }
+                if tagsChapters.isEmpty, packet.starts(with: Data(opusTagsMagic)) {
                     tagsChapters = chapters(fromTagsPacket: packet)
                 }
             }
@@ -224,7 +240,6 @@ public enum OggReader {
         // The tail holds the stream's last page — and its granule, the
         // authoritative sample count.
         var tailOffset = 0
-        let tailCount = tail.count
         while let found = lastPageStart(in: tail, from: tailOffset) {
             guard let page = Page(data: tail, at: found) else { break }
             sawPage = true
@@ -242,29 +257,13 @@ public enum OggReader {
         )
     }
 
-    private static let opusTagsMagic: [UInt8] = [0x4F, 0x70, 0x75, 0x73, 0x54, 0x61, 0x67, 0x73]
+    /// Ceiling on one assembled packet during the bounded summary scan —
+    /// a comment packet with embedded art and lyrics is routinely about a
+    /// megabyte; beyond 4 MB the bytes are audio from a lying segment table,
+    /// not metadata.
+    private static let maxMetadataPacketBytes = 4 * 1024 * 1024
 
-    /// Every packet that COMPLETES on this page — segments accumulate until
-    /// one shorter than 255 terminates a packet, the same assembly `read`
-    /// does. A packet continuing past this page is dropped (chapter tables
-    /// live in small header packets; a continuation is not worth the
-    /// bookkeeping here). Bounded by the caller's head slice.
-    private static func completedPackets(of page: Page, in data: Data, at offset: Int) -> [Data]? {
-        var packets: [Data] = []
-        var bytes: [UInt8] = []
-        for segment in page.segments {
-            guard segment.upperBound <= data.count else { return packets }
-            bytes.append(contentsOf: data[data.startIndex + segment.lowerBound..<(data.startIndex + segment.upperBound)])
-            // OpusTags comments are never this long; a runaway "packet" is
-            // audio data, not metadata.
-            if bytes.count > 512 * 1024 { return packets }
-            if segment.count < 255 {
-                packets.append(Data(bytes))
-                bytes.removeAll(keepingCapacity: true)
-            }
-        }
-        return packets
-    }
+    private static let opusTagsMagic: [UInt8] = [0x4F, 0x70, 0x75, 0x73, 0x54, 0x61, 0x67, 0x73]
 
     /// Chapter marks out of an OpusTags packet: magic(8), vendor length (4
     /// LE) + vendor, comment count (4 LE), then count × (length (4 LE) +
@@ -354,21 +353,6 @@ public enum OggReader {
             seconds = seconds * 60 + value
         }
         return seconds
-    }
-
-    /// The first COMPLETE packet on this page, assembled the way `read`
-    /// assembles packets: segments accumulate until one shorter than 255
-    /// terminates the packet. Returns nil when the page carries no complete
-    /// packet.
-    private static func firstPacket(of page: Page, in data: Data, at offset: Int) -> Data? {
-        var bytes: [UInt8] = []
-        for segment in page.segments {
-            guard segment.upperBound <= data.count else { return nil }
-            bytes.append(contentsOf: data[data.startIndex + segment.lowerBound..<(data.startIndex + segment.upperBound)])
-            if segment.count < 255 { return Data(bytes) }
-            if bytes.count > 64 { return nil }   // no header is this long
-        }
-        return nil
     }
 
     /// The last `OggS` capture pattern at or after `from` whose page header

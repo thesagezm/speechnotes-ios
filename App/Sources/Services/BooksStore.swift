@@ -220,7 +220,7 @@ final class BooksStore: ObservableObject {
         }
         books = allBooks.filter { !$0.isDeleted }
         pruneExpiredBooks()
-        backfillMissingBooks(maxAudioBooks: 1)
+        backfillMissingBooks(maxAudioBooks: 3)
     }
 
     /// One backfill pass per launch: PDFs/EPUBs imported before covers,
@@ -272,7 +272,14 @@ final class BooksStore: ObservableObject {
                         || book.audioChapterSource == "single"
                         || book.audioChapterSource == "chpl"
                         || book.audioChapterSource == "mp4"
-                        || book.audioChapterSource == "id3"))
+                        || book.audioChapterSource == "id3"
+                        // Books whose Ogg read ran before the summary
+                        // scanner could assemble a multi-page OpusTags
+                        // packet: their chapters were synthesized uniform
+                        // even when the file carried real marks. One
+                        // bounded re-read either upgrades them to the real
+                        // table or re-stamps them verified.
+                        || book.audioChapterSource == "ogg-uniform"))
         }
         guard !pending.isEmpty else { return }
         didBackfillLegacyBooks = true

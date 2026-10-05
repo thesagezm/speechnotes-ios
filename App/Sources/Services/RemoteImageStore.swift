@@ -186,7 +186,7 @@ enum RemoteImageStore {
         var out: [URL] = []
         func collect(_ target: String) {
             guard NoteImageStore.parseLocalTarget(target) == nil,
-                  let url = URL(string: target),
+                  let url = flexibleURL(target),
                   let scheme = url.scheme?.lowercased(),
                   scheme == "https" else { return }
             out.append(url)
@@ -206,6 +206,18 @@ enum RemoteImageStore {
     }
 
     // MARK: - Fetching
+
+    /// URL construction tolerant of what users actually paste. `URL(string:)`
+    /// is strict — one raw space or an unencoded non-ASCII path character
+    /// makes it nil, and the image silently degraded to a photo glyph. A
+    /// well-formed string is returned untouched (the fallback only runs when
+    /// the strict parse failed); the percent-encoding pass fixes exactly the
+    /// characters a paste left raw.
+    static func flexibleURL(_ string: String) -> URL? {
+        if let url = URL(string: string) { return url }
+        guard let encoded = string.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else { return nil }
+        return URL(string: encoded)
+    }
 
     /// Hard cap on one remote image download. A note can name any URL —
     /// without a cap, `URLSession` buffers the whole response in RAM and a

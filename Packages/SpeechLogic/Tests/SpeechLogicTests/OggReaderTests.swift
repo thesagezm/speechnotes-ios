@@ -209,6 +209,76 @@ final class OggReaderTests: XCTestCase {
         XCTAssertEqual(summary.chapters[1].startSeconds, 29 * 60 + 30.5, accuracy: 0.001)
     }
 
+    /// A comment packet that spans DOZENS of pages. A real book's OpusTags
+    /// carries the muxer's art and lyrics inline (933 KB on a Harry Potter
+    /// 5.1ch encode), so the packet is a chain of 255-byte segments across
+    /// many pages and completes nowhere until its last page. The old
+    /// per-page assembly dropped it, and with it every chapter — the file
+    /// navigated as uniform 30-minute divisions.
+    func testSummaryAssemblesOpusTagsPacketSpanningPages() throws {
+        let tags = opusTagsPacket(comments: [
+            "ENCODER=Lavf62.12.101",
+            "ARTIST=J.K. Rowling",
+            "LYRICS=" + String(repeating: "x", count: 100_000),
+            "CHAPTER000=00:00:00.000",
+            "CHAPTER000NAME=Opening Credits",
+            "CHAPTER001=00:01:04.208",
+            "CHAPTER001NAME=Chapter One: Owl Post",
+            "CHAPTER002=00:25:33.771",
+            "CHAPTER002NAME=Chapter Two: Aunt Marge's Big Mistake",
+        ])
+        // Slice the packet into 255-byte segments, 16 to a page — the exact
+        // page shape the real file shows for the ~229 pages the packet spans.
+        let bytes = [UInt8](tags)
+        var segments: [Data] = []
+        var cursor = 0
+        while cursor + 255 < bytes.count {
+            segments.append(Data(bytes[cursor..<(cursor + 255)]))
+            cursor += 255
+        }
+        segments.append(Data(bytes[cursor...]))
+
+        var head = oggPage(segments: [opusHeadPacket(channels: 6)], seq: 0)
+        var seq = 1
+        while !segments.isEmpty {
+            let group = Array(segments.prefix(16))
+            segments.removeFirst(group.count)
+            head += oggPage(segments: group, seq: seq)
+            seq += 1
+        }
+        let tail = oggPage(segments: [Data(repeating: 0xFC, count: 100)], granule: 4_800_000, seq: seq)
+
+        let summary = try OggReader.summary(head: head, tail: tail)
+        XCTAssertEqual(summary.chapters.count, 3)
+        XCTAssertEqual(summary.chapters[0].title, "Opening Credits")
+        XCTAssertEqual(summary.chapters[1].title, "Chapter One: Owl Post")
+        XCTAssertEqual(summary.chapters[1].startSeconds, 64.208, accuracy: 0.001)
+        XCTAssertEqual(summary.chapters[2].title, "Chapter Two: Aunt Marge's Big Mistake")
+        // The identification header still reads from the packet BEFORE the
+        // tags (5.1ch books were once mis-read as stereo here).
+        XCTAssertEqual(summary.channels, 6)
+        XCTAssertEqual(summary.variant, "opus")
+    }
+
+    /// A comment packet past the runaway cap must not wedge the scan: the
+    /// corrupt "packet" is discarded mid-stream, and the walk still reports
+    /// duration from the tail.
+    func testRunawayPacketIsDiscardedWithoutKillingTheSummary() throws {
+        // One 255-byte segment per page, forever: a lying segment table
+        // whose "packet" never terminates. Pending crosses the 4 MB cap —
+        // 16 384 continuation pages — and the assembler drops it instead of
+        // buffering the whole head.
+        var head = oggPage(segments: [opusHeadPacket()], seq: 0)
+        for seq in 1...16_600 {
+            head += oggPage(segments: [Data(repeating: 0xAA, count: 255)], seq: seq)
+        }
+        let tail = oggPage(segments: [Data(repeating: 0xFC, count: 100)], granule: 4_800_000, seq: 16_601)
+        let summary = try OggReader.summary(head: head, tail: tail)
+        XCTAssertEqual(summary.variant, "opus")
+        XCTAssertEqual(summary.chapters.count, 0)
+        XCTAssertGreaterThan(summary.duration, 90)
+    }
+
     /// Writers that put the timecode in the URL field instead of the bare
     /// key still produce marks; a literal non-time URL does not.
     func testUrlFieldTimecodeCompat() {

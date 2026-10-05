@@ -197,7 +197,11 @@ struct PlaybackRail: View {
             .scrollBounceBehavior(.basedOnSize)
             // Re-expanding must land at the top, or the chevron (which lives
             // at the card's top) is scrolled out of sight again.
-            .scrollPosition(initialAnchor: .top)
+            // `scrollPosition(initialAnchor:)` was removed in the iOS 26 SDK
+            // (consolidated into `scrollPosition(_:anchor:)`); the anchor
+            // variant of `defaultScrollAnchor` sets the same initial
+            // position and survives it.
+            .defaultScrollAnchor(.top)
         }
         .frame(width: Self.idealWidth + 2 * Self.horizontalPadding)
         .frame(maxHeight: .infinity, alignment: .center)

@@ -65,7 +65,8 @@ final class ImageCache {
                 data = fetched
             }
         }
-        guard let data, let decoded = Self.downsampledImage(data) else {
+        guard let data else { return nil }
+        guard let decoded = Self.downsampledImage(data) else {
             // Bytes arrived but nothing decoded — a webp/avif the ImageIO
             // decoder here cannot read, or an HTML error page served with a
             // 200. The reason is invisible otherwise.

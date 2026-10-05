@@ -134,7 +134,7 @@ struct MarkdownPreviewView: View {
             // for a real note identity (the preview's fallback UUID must not
             // litter the index).
             if let realId = realNoteId {
-                let urls = remoteTargets.compactMap(URL.init(string:))
+                let urls = remoteTargets.compactMap(RemoteImageStore.flexibleURL)
                     .filter { url in
                         guard let scheme = url.scheme?.lowercased() else { return false }
                         return scheme == "http" || scheme == "https"
@@ -158,8 +158,10 @@ struct MarkdownPreviewView: View {
             switch block {
             case .image(_, let url):
                 out.append(url)
-            case .paragraph(let text, _):
-                for run in MarkdownText.inlineRuns(text) {
+            case .paragraph(_, let spans):
+                // The block's spans, not a re-parse of the plain text — same
+                // reason the paragraph renderer uses them.
+                for run in MarkdownText.runs(from: spans) {
                     if case .image(_, let url) = run { out.append(url) }
                 }
             default: break
@@ -179,8 +181,12 @@ struct MarkdownPreviewView: View {
                 .padding(.top, level <= 2 ? ReaderSpacing.headingTopLevel1 * theme.readerBlockSpacing
                                          : ReaderSpacing.headingTopLevel3Plus * theme.readerBlockSpacing)
                 .padding(.bottom, headingBottom)
-        case .paragraph(let text, _):
-            runsView(MarkdownText.inlineRuns(text))
+        case .paragraph(_, let spans):
+            // Runs come from the block's OWN spans. The old path re-parsed
+            // the paragraph's plain text, where the image marker is already
+            // gone (the alt text took its place) — an inline image rendered
+            // only when the paragraph was exactly one image.
+            runsView(MarkdownText.runs(from: spans))
                 .lineSpacing(lineSpacing)
                 .padding(.bottom, blockGap)
         case .bulletList(let items):
@@ -764,7 +770,7 @@ struct MarkdownPreviewView: View {
             }
             .frame(maxWidth: .infinity)
             .padding(.bottom, 14)
-        } else if let remote = URL(string: url) {
+        } else if let remote = RemoteImageStore.flexibleURL(url) {
             CachedImage(url: remote, alt: alt, zoomable: true) {
                 zoomedImage = (url: remote, alt: alt)
             }
