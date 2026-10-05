@@ -66,6 +66,25 @@ enum AudioSessionSetup {
         case audiobook
 
         var label: String { rawValue }
+
+        /// Batch F1: the Bluetooth profile this source should prefer.
+        ///
+        /// Speech and music want different transports. HFP (`.allowBluetooth`)
+        /// is the speech profile — low latency, caller-side processing, the
+        /// route a phone call itself uses. A2DP (`.allowBluetoothA2DP`) is the
+        /// high-quality music profile with constant latency, which for speech
+        /// means a fixed delay on the way to the speaker and a fixed delay on
+        /// the way back.
+        ///
+        /// Both sources used to take A2DP, so TTS paid the music profile's
+        /// latency for no benefit. The audiobook path keeps it — it is playing
+        /// music files, and there the quality is worth the latency.
+        var bluetoothOptions: AVAudioSession.CategoryOptions {
+            switch self {
+            case .tts: return [.allowBluetooth]
+            case .audiobook: return [.allowBluetooth, .allowBluetoothA2DP]
+            }
+        }
     }
 
     private static var configured = false
@@ -96,12 +115,19 @@ enum AudioSessionSetup {
         // the ladder instead of trusting a category that was never applied
         // and staying on the launch default (mute-switch-silenced,
         // background-suspended).
-        if apply(.playback, mode: .spokenAudio, options: [.allowBluetooth, .allowBluetoothA2DP], prefix: prefix) {
+        // Rung 1 carries each source's own Bluetooth profile (Batch F1): HFP
+        // for speech, A2DP for audiobooks. `.allowBluetooth` alone is NOT a
+        // weaker version of the pair — it is the speech route, and it is what
+        // the phone-call path uses.
+        if apply(.playback, mode: .spokenAudio, options: source.bluetoothOptions, prefix: prefix) {
             configured = true
             configuredBy = source
             return true
         }
-        // Some routes reject the A2DP option outright.
+        // Some routes reject A2DP outright. For an audiobook that meant
+        // dropping to HFP before it would play; for TTS rung 1 is already
+        // HFP, so this rung is only reachable if the .spokenAudio mode itself
+        // is what the route objects to.
         if apply(.playback, mode: .spokenAudio, options: [.allowBluetooth], prefix: prefix) {
             configured = true
             configuredBy = source

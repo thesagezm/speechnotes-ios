@@ -73,7 +73,24 @@ final class SystemEngine: NSObject, SpeechEngine {
     /// Every async state jump carries the utterance epoch it belongs to — a
     /// `speak`/`stop` interleave used to let a stale queued `idle`/`speaking`
     /// clobber the newer state (M15). Bumped on each speak() and stop().
+    ///
+    /// Batch F1: the epoch is now compared, not just carried. Every
+    /// utterance is tagged with the epoch it was built under, and all three
+    /// delegate callbacks check the tag — so a `didCancel` from a
+    /// superseded session cannot drive the current queue, whichever
+    /// synthesizer instance delivers it. The tag is kept out of
+    /// `userInfo`-style side storage: `AVSpeechUtterance` has no payload
+    /// slot of its own, so it rides a private associated-object key.
     private var epoch = 0
+
+    /// The epoch each live utterance was built under, keyed on the utterance
+    /// object. `AVSpeechUtterance` has no payload slot of its own, and
+    /// Apple's callbacks deliver the utterance — so it is the only identity
+    /// that survives BOTH a session supersede and a synthesizer rebuild.
+    /// Main-thread only, like every other state in this class; entries are
+    /// removed when a callback consumes them, so the table holds at most the
+    /// lookahead.
+    private var epochByUtterance: [ObjectIdentifier: Int] = [:]
 
     // MARK: - The chunk queue
 
@@ -256,6 +273,12 @@ final class SystemEngine: NSObject, SpeechEngine {
         synthesizer.stopSpeaking(at: .immediate)
         configureAudioSessionIfNeeded()
         epoch += 1
+        // The bump above orphans every entry in `epochByUtterance` — which
+        // is the point. A stale `didFinish`/`didCancel` for an utterance
+        // from before this speak() now finds a mismatched tag and is
+        // dropped, so a superseded session cannot drive this queue's
+        // `nextIndex`.
+        epochByUtterance.removeAll()
 
         activeUtteranceText = clean
         totalChars = max(1, clean.utf16.count)
@@ -331,6 +354,7 @@ final class SystemEngine: NSObject, SpeechEngine {
         let utterance = AVSpeechUtterance(string: item.text)
         utterance.rate = Float(utteranceRate())
         utterance.voice = resolvedVoice()
+        epochByUtterance[ObjectIdentifier(utterance)] = epoch
         synthesizer.speak(utterance)
         startedCount += 1
     }
@@ -403,6 +427,7 @@ final class SystemEngine: NSObject, SpeechEngine {
     func stop() {
         epoch += 1
         let epochAtStop = epoch
+        epochByUtterance.removeAll()
         synthesizer.stopSpeaking(at: .immediate)
         activeUtteranceText = nil
         queue = []
@@ -458,6 +483,7 @@ final class SystemEngine: NSObject, SpeechEngine {
         let utterance = AVSpeechUtterance(string: item.text)
         utterance.rate = Float(utteranceRate())
         utterance.voice = resolvedVoice()
+        epochByUtterance[ObjectIdentifier(utterance)] = epoch
         synthesizer.speak(utterance)
         startedCount += 1
     }
@@ -481,9 +507,25 @@ extension SystemEngine: AVSpeechSynthesizerDelegate {
         synthesizer === self.synthesizer
     }
 
+    /// Fires when the utterance was cancelled. Batch F1: the epoch guard.
+    ///
+    /// `startNextChunk` increments `nextIndex`, and a stale cancel —
+    /// `stopSpeaking(at:)` in `speak()` enqueues one, and the identity guard
+    /// below only rejects cancels from an instance this engine no longer
+    /// owns — can drive the NEW queue, skipping or double-starting a chunk
+    /// and skewing progress for the rest of the chapter.
+    ///
+    /// All three callbacks check `utterance.epoch == self.epoch`, so a
+    /// callback from before the current `speak()` is dropped regardless of
+    /// which synthesizer instance delivered it. `didStart` used to check
+    /// `epoch > 0`, which cannot reject a stale epoch — only a
+    /// pre-first-speak callback.
+
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didStart utterance: AVSpeechUtterance) {
         DispatchQueue.main.async { [weak self] in
-            guard let self, self.isCurrentSynthesizer(synthesizer), self.epoch > 0 else { return }
+            guard let self,
+                  self.isCurrentSynthesizer(synthesizer),
+                  self.epochByUtterance[ObjectIdentifier(utterance)] == self.epoch else { return }
             self.state = .speaking
             // Batch F1: fill the lookahead from the START path too, not only
             // the finish path. This is the actual gap fix — the utterance has
@@ -502,7 +544,9 @@ extension SystemEngine: AVSpeechSynthesizerDelegate {
 
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
         DispatchQueue.main.async { [weak self] in
-            guard let self, self.isCurrentSynthesizer(synthesizer) else { return }
+            guard let self,
+                  self.isCurrentSynthesizer(synthesizer),
+                  self.epochByUtterance[ObjectIdentifier(utterance)] == self.epoch else { return }
             self.chunkFinished = true
             // Batch A2: one stamp, one comparison. No scheduling changes here.
             self.chunkFinishStamp = ContinuousClock.now
@@ -530,7 +574,9 @@ extension SystemEngine: AVSpeechSynthesizerDelegate {
 
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
         DispatchQueue.main.async { [weak self] in
-            guard let self, self.isCurrentSynthesizer(synthesizer) else { return }
+            guard let self,
+                  self.isCurrentSynthesizer(synthesizer),
+                  self.epochByUtterance[ObjectIdentifier(utterance)] == self.epoch else { return }
             // A cancel from stop() is not a completion. A cancel with the queue
             // still holding work means an interruption killed the utterance —
             // run the rest rather than leaving the UI claiming speech.
