@@ -567,11 +567,17 @@ final class StreamingTTSPlaybackCore: NSObject {
     /// read here — per heartbeat (~3 Hz) and per scheduling event — so the
     /// bank re-sizes within a heartbeat of a thermal transition, which is
     /// the point of thermal sizing.
+    ///
+    /// Batch C2 substituted `pressuredTargetSeconds` for
+    /// `effectiveTargetSeconds`: same byte cap underneath, halved at serious
+    /// and quartered at critical. That buys granularity — smaller margin
+    /// swings — not throughput, which is why the doc comment on
+    /// `pressureFactor` says what the lever is and is not.
     private func recomputeBank() {
         let rate = sampleRate
         let thermal = ThermalPressure(
             thermalStateRawValue: ProcessInfo.processInfo.thermalState.rawValue)
-        let target = bankPolicy.effectiveTargetSeconds(thermal: thermal, sampleRate: rate)
+        let target = bankPolicy.pressuredTargetSeconds(thermal: thermal, sampleRate: rate)
         let bankedFrames = max(0, generatedFrames - playedFrames)
         let banked = Double(bankedFrames) / max(1, rate)
         bankLock.lock()
