@@ -183,8 +183,12 @@ public struct ChunkCachePolicy: Equatable {
         return (keepStart, keepEnd)
     }
 
-    /// Samples the trim above removes from a chunk, so a caller can decide
-    /// (via `trimIsWorthwhile`) whether the seam is worth the silence.
+    /// Samples the trim above KEEPS (`end - start`) — the caller feeds it
+    /// to `trimIsWorthwhile` as `keptCount`. (`sampleCount` is not used in
+    /// the arithmetic; it stays in the signature so a call site states the
+    /// chunk it is trimming, and so a future floor on the kept fraction has
+    /// the input at hand. The doc used to claim the REMOVED count —
+    /// inverted — while every call site and test treated it as kept.)
     public func trimmedSampleCount(sampleCount: Int, trim: (start: Int, end: Int)) -> Int {
         max(0, trim.end - trim.start)
     }

@@ -810,3 +810,77 @@ workflow that ships `continue-on-error`.
 
 **Build gate: run on `a77acd6`+ (this fix round) — see the entry above
 for the first-green-run caveat.**
+
+## TTS Engines — Round 3, fix verification (diffs `8dad0a0`..`5c6d406`, independent pass)
+
+**Score: 6/10. Faster than baseline: YES** — the primed-lookahead pipeline
+streams a full chapter with only inter-chunk gaps (vs the one-utterance
+baseline's minute-long silent stalls), and the round-2 fixes held: the gate
+inversion, sounding-slot tracking, main hop, cap off-by-one and dead rung
+are genuinely fixed, and the chapter-stranding is gone. But the fix round
+was incomplete: the rate re-queue introduced a new deterministic
+double-speak, and two P2s remained. All findings below are fixed in the
+same round that records this entry.
+
+1. **[P1, fixed] Mid-chunk rate change spoke the remainder TWICE; at the
+   last chunk `onFinished` fired twice.** The re-queue set `nextIndex =
+   slot` and handed the remainder via `speakQueued` — which does no
+   hand-over bookkeeping — so the remainder's `didStart` cascade read
+   `queue[nextIndex] == queue[slot]` and handed the SAME remainder again.
+   Worse at the final chunk: the first copy's `didFinish` ended the
+   session while the second was still queued, then resurrected
+   `.speaking` and finished twice. Fix: `nextIndex = slot + 1` — the
+   re-queue re-owes everything FROM the slot onward, and the remainder
+   itself is handed exactly once by `speakQueued`; the caller-owns-
+   `nextIndex` contract is now stated on `speakQueued`.
+2. **[P1, fixed] The debounced rate Task ran off the main thread and raced
+   the engine's main-only state.** `speed.didSet` spawned a bare `Task` on
+   a nonisolated class — no inherited actor, so the re-queue mutated the
+   tag map (dictionary), `queue`, `startedCount` and the sounding slot on
+   the global executor while the delegate callbacks mutate the same state
+   through explicit main hops. The re-queue now hops with
+   `DispatchQueue.main.async` after the debounce sleep, which also makes
+   `willSpeak`'s "read on the main thread by the rate re-queue" comment
+   true instead of aspirational.
+3. **[P2, fixed] Pausing as the LAST chunk finished permanently lost
+   `onFinished`.** The `pauseRequested` early-return in `didFinish` is
+   correct for a held boundary but skipped the finish branch forever when
+   the queue was drained; `resume()` would then claim `.speaking` over
+   dead air. The held branch now fires the completion (finish, `.idle`,
+   `endSession`) when `nextIndex >= queue.count` — a pause that lands
+   after the final chunk's finish is a session end, not a boundary.
+4. **[P2, fixed] `ChunkFileQueue.onFinished` was declared, documented —
+   and never fired.** Round 2 claimed this file's landmines fixed; this
+   one survived. The substrate cannot observe "no more audio is coming"
+   (that is producer knowledge), so completion is now an honest contract:
+   `markStreamingComplete()` from the producer, appended/finished
+   counters, `checkFinished()` from the player's end-of-item
+   notifications, fired once.
+5. **[P3, fixed] `markerSampleRate` latched the first append's rate with
+   no guard** while each file is written at its own per-append rate — a
+   differing rate now logs loudly instead of silently descaling the
+   read-along.
+6. **[P3, fixed] `trimmedSampleCount`'s doc was inverted** ("samples the
+   trim REMOVES" for a function that returns the KEPT count); the doc now
+   matches every call site, and the unused `sampleCount` parameter is
+   accounted for.
+
+Verified clean this round: the eviction walk re-simulated exactly
+(`[1, 2, 4]` with 6 live + 1 incoming under cap 4), the session ladder's
+three rungs distinct and ordered, the `tokenizeLikeApp` mirror
+line-faithful to the app's tokenize with all three call sites coherent,
+and the depth/epoch/tag accounting correct on the normal path including
+the exactly-once finish.
+
+**Also found by the batch-B4 gate, not the critic:** CI run `37382312043`
+rendered the same corpus slice through `model_uint8.onnx` and the fp32
+`model.onnx` — identical length (92 400 samples both), **rel-RMS 1.37,
+correlation 0.057**. The two renders are essentially uncorrelated: the
+gibberish signature, against the suspect A1's lemma left standing. The
+gate now searches ±0.5 s for a best-aligning lag (to rule out a shift
+artifact framing quantization) and writes both renders as `corpus-
+quantgate-*.wav` artifacts for the ear. If the lag search confirms it,
+the uint8 tier is the gibberish root cause and Batch E's Kokoro wiring
+must not ship on it.
+
+**Build gate: run on this fix round — see the entry above.**

@@ -60,8 +60,15 @@ final class SystemEngine: NSObject, SpeechEngine {
             debouncedRateRequeue?.cancel()
             debouncedRateRequeue = Task { [weak self] in
                 try? await Task.sleep(nanoseconds: 250_000_000)
-                guard !Task.isCancelled, let self else { return }
-                self.requeueCurrentChunkAtNewRate()
+                guard !Task.isCancelled else { return }
+                // The re-queue mutates main-only state (the tag map, the
+                // queue, the sounding slot) and calls into the synthesizer —
+                // an unstructured Task on a nonisolated class inherits NO
+                // actor and would run all of it on the global executor,
+                // racing the delegate callbacks. Round-3 critique, P1.
+                DispatchQueue.main.async { [weak self] in
+                    self?.requeueCurrentChunkAtNewRate()
+                }
             }
         }
     }
@@ -526,8 +533,12 @@ final class SystemEngine: NSObject, SpeechEngine {
         // the depth restarts from zero. The tag map goes with it: the
         // cancelled utterances must not drive the refill (their slots are
         // re-handed from the rewound `nextIndex`), and the remainder's own
-        // `didStart` fills the lookahead back up.
-        nextIndex = slot
+        // `didStart` fills the lookahead back up. `nextIndex` points PAST
+        // the remainder — `speakQueued` hands it directly and does no
+        // hand-over bookkeeping, so leaving `nextIndex` at the slot would
+        // make the didStart cascade hand the SAME remainder again
+        // (round-3 critique's double-speak).
+        nextIndex = slot + 1
         startedCount = 0
         tagByUtterance.removeAll()
         synthesizer.stopSpeaking(at: .immediate)
@@ -541,6 +552,11 @@ final class SystemEngine: NSObject, SpeechEngine {
     /// `startNextChunk`, and the debounce means a slider drag — which emits
     /// at 0.05 steps — produces one re-queue instead of a dozen mid-word
     /// chops.
+    ///
+    /// This is NOT a hand-over: `nextIndex` is untouched and the CALLER has
+    /// already accounted for the slot it points at (the re-queue sets it
+    /// past the re-spoken slot). Only the depth counter advances here,
+    /// because the utterance does go into Apple's queue.
     private func speakQueued(index: Int) {
         let item = queue[index]
         current = item
@@ -648,6 +664,15 @@ extension SystemEngine: AVSpeechSynthesizerDelegate {
             }
             if self.pauseRequested {
                 // Held between chunks: publish the boundary, start nothing.
+                // UNLESS the queue is drained — a pause that lands after the
+                // final chunk's finish is a session end, not a held boundary.
+                // Without this, onFinished never fires (the finish branch is
+                // below) and resume() would claim .speaking over dead air.
+                if self.nextIndex >= self.queue.count {
+                    self.onFinished?()
+                    self.state = .idle
+                    self.metrics.endSession(reason: "finished")
+                }
                 return
             }
             if self.nextIndex < self.queue.count {

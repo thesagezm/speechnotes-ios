@@ -58,7 +58,12 @@ final class ChunkFileQueue: NSObject {
     /// time observer. The marker model is `PlayPositionTracker`'s, unchanged.
     var onPlayedChars: ((Int) -> Void)?
 
-    /// Fired when the queue drains — the natural end of the chapter.
+    /// Fired ONCE when the producer has marked the stream complete and the
+    /// player has played every appended item — the natural end of the
+    /// chapter. "No more audio is coming" is producer knowledge (the
+    /// substrate cannot distinguish a pause in rendering from the end), so
+    /// the producer calls `markStreamingComplete()` after its final append;
+    /// the player's own end-of-item notifications do the rest.
     var onFinished: (() -> Void)?
 
     // MARK: - State
@@ -88,6 +93,35 @@ final class ChunkFileQueue: NSObject {
 
     private var timeObserver: Any?
     private var endObserver: NSObjectProtocol?
+
+    // MARK: - Completion
+
+    /// Set by the producer when the last chunk has been appended; the finish
+    /// check needs it because "no more audio is coming" is not observable
+    /// from the player alone. (Round-3 critique: `onFinished` was declared,
+    /// documented, and never fired — Batch E's chapters would never end.)
+    private var streamingComplete = false
+    private var appendedCount = 0
+    /// Items the player has played to end. Evicted items were already
+    /// finished when the policy allowed their eviction, so eviction never
+    /// decrements this.
+    private var finishedCount = 0
+
+    /// Called by the producer after its final `append`.
+    func markStreamingComplete() {
+        streamingComplete = true
+        checkFinished()
+    }
+
+    private func checkFinished() {
+        guard streamingComplete, appendedCount > 0, finishedCount >= appendedCount else { return }
+        // Fire once — a repeated finish would double-advance the caller's
+        // chapter state.
+        let handler = onFinished
+        onFinished = nil
+        streamingComplete = false
+        handler?()
+    }
 
     // MARK: - Lifecycle
 
@@ -126,6 +160,9 @@ final class ChunkFileQueue: NSObject {
         scheduledSamples = 0
         scannedMarker = 0
         markerSampleRate = 0
+        streamingComplete = false
+        appendedCount = 0
+        finishedCount = 0
         guard !sessionID.isEmpty else { return }
         do {
             try FileManager.default.removeItem(at: sessionDir)
@@ -154,8 +191,14 @@ final class ChunkFileQueue: NSObject {
         self.totalChars = max(1, totalChars)
         // Markers are counted in the rendered files' own sample rate; the
         // read-along converts CMTime seconds with the same rate. Engines
-        // render one rate per session, so the first append's rate governs.
-        if markerSampleRate == 0 { markerSampleRate = sampleRate }
+        // render one rate per session, so the first append's rate governs —
+        // a differing rate is a producer bug and is logged loudly, because
+        // the markers would silently mix sample domains (round-3 critique).
+        if markerSampleRate == 0 {
+            markerSampleRate = sampleRate
+        } else if sampleRate != markerSampleRate {
+            Log.shared.error("ChunkFileQueue: chunk \(index) arrived at \(Int(sampleRate)) Hz but markers are latched to \(Int(markerSampleRate)) Hz — the read-along will drift")
+        }
 
         // The trim. `peak` reads out of the samples array rather than a copy,
         // so the scan is one pass and allocates nothing.
@@ -203,6 +246,7 @@ final class ChunkFileQueue: NSObject {
         item.audioTimePitchAlgorithm = .spectral
         markers.append((endSample: scheduledSamples + writtenSamples, endChar: endChar))
         scheduledSamples += writtenSamples
+        appendedCount += 1
         queuePlayer.insert(item, after: nil)
 
         startObservingIfNeeded()
@@ -327,6 +371,8 @@ final class ChunkFileQueue: NSObject {
             for (position, index) in self.liveIndexes.enumerated()
             where self.itemURL(for: index) == playedURL {
                 self.finished.insert(index)
+                self.finishedCount += 1
+                self.checkFinished()
                 // The marker walk has already consumed everything up to
                 // here; nothing else to advance.
                 break

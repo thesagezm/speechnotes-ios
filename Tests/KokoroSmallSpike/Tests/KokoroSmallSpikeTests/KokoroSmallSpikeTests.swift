@@ -622,6 +622,41 @@ final class KokoroSmallSpikeTests: XCTestCase {
         }
         let correlation = covariance / max(sqrt(uVariance * fVariance), 1e-9)
         print("KOKORO-SMALL-SPIKE quantization gate: rel-RMS \(String(format: "%.4f", relativeRMS)), correlation \(String(format: "%.4f", correlation))")
+        // Zero-lag correlation of identical audio that is merely SHIFTED is
+        // ~0 — a shift would frame quantization for a crime it did not
+        // commit. Search ±0.5 s in 10 ms steps for the best-aligning lag;
+        // positive means the uint8 render leads the fp32 one by that many
+        // samples.
+        var bestLag = 0
+        var bestLagCorrelation = correlation
+        let maxLag = min(12_000, n / 4)
+        if uVariance > 0, fVariance > 0 {
+            for lag in stride(from: -maxLag, through: maxLag, by: 240) {
+                let lo = max(0, lag)
+                let hi = n + min(0, lag)
+                guard hi - lo > n / 2 else { continue }
+                var lagCovariance = 0.0, lagUVariance = 0.0, lagFVariance = 0.0
+                for i in lo..<hi {
+                    let du = Double(u[i]) - uMean
+                    let df = Double(f[i - lag]) - fMean
+                    lagCovariance += du * df
+                    lagUVariance += du * du
+                    lagFVariance += df * df
+                }
+                let lagCorrelation = lagCovariance / max(sqrt(lagUVariance * lagFVariance), 1e-9)
+                if lagCorrelation > bestLagCorrelation {
+                    bestLagCorrelation = lagCorrelation
+                    bestLag = lag
+                }
+            }
+        }
+        print("KOKORO-SMALL-SPIKE quantization gate: best lag \(bestLag) samples, correlation at best lag \(String(format: "%.4f", bestLagCorrelation))")
+        // Both renders saved for the ear: correlation numbers indict, but a
+        // human listening to the pair convicts. `corpus-*` rides the
+        // existing artifact upload.
+        let outDir = ProcessInfo.processInfo.environment["KOKORO_ARTIFACT_DIR"] ?? fixtureDir
+        try? WAVWriter.write(samples: uint8Samples, sampleRate: 24_000, to: URL(fileURLWithPath: "\(outDir)/corpus-quantgate-uint8.wav"))
+        try? WAVWriter.write(samples: fp32Samples, sampleRate: 24_000, to: URL(fileURLWithPath: "\(outDir)/corpus-quantgate-fp32.wav"))
         // First real run calibrates these: the printed values above are the
         // data. A correlation near zero IS the gibberish signature.
         XCTAssertLessThan(relativeRMS, 0.25,
