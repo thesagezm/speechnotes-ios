@@ -202,8 +202,33 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
         do {
             let started = Date()
             let env = try ORTEnv(loggingLevel: .warning)
+            // Batch C1. The only option set used to be
+            // `setIntraOpNumThreads(4)` — a fixed number, regardless of the
+            // device, and nothing else.
+            //
+            // The thread count is now `min(activeProcessorCount, 6)`:
+            // on the A-series this lands at 4–6 rather than 4, and it stops
+            // pinning a 6-core Pro at half its width while leaving a 2-core
+            // SE oversubscribed. Six is the ceiling because the render
+            // thread needs headroom for the main thread's scheduling, and
+            // Kokoro's graph is intra-op-shaped enough that more than six
+            // buys nothing.
+            //
+            // Two options from the brief are NOT set, because the pinned
+            // binding does not expose them. onnxruntime-swift-package-manager
+            // 1.24.2's `ORTSessionOptions` declares exactly:
+            // setIntraOpNumThreads, setGraphOptimizationLevel,
+            // setOptimizedModelFilePath, setLogID, setLogSeverityLevel,
+            // addConfigEntry, registerCustomOpsUsingFunction,
+            // enableOrtExtensionsCustomOps. There is no
+            // setInterOpNumThreads and no setIntraOpAllowSpinning, so
+            // spinning cannot be switched off and the thermal-headroom
+            // argument for it is recorded as an open item, not a change.
+            // Inter-op is already 1 by ORT's default, which is what the brief
+            // asked for anyway.
             let options = try ORTSessionOptions()
-            try options.setIntraOpNumThreads(4)
+            let cores = ProcessInfo.processInfo.activeProcessorCount
+            try options.setIntraOpNumThreads(Int32(min(cores, 6)))
             let session = try ORTSession(env: env, modelPath: modelPath.path, sessionOptions: options)
             ortEnv = env
             ortSession = session
@@ -211,7 +236,7 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
             if let first = outputNames.first {
                 outputName = outputNames.contains("waveform") ? "waveform" : first
             }
-            Log.shared.info("OnnxKokoroEngine: session loaded in \(Date().timeIntervalSince(started))s (output: \(outputName))")
+            Log.shared.info("OnnxKokoroEngine: session loaded in \(Date().timeIntervalSince(started))s (output: \(outputName), \(min(cores, 6)) of \(cores) cores)")
 
             let tokenizerData = try Data(contentsOf: tokenizerPath)
             let tokenizerJSON = try JSONSerialization.jsonObject(with: tokenizerData) as? [String: Any]

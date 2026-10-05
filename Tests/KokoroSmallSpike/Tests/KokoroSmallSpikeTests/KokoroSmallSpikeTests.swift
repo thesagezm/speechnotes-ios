@@ -335,6 +335,10 @@ final class KokoroSmallSpikeTests: XCTestCase {
 
         let ortEnv = try ORTEnv(loggingLevel: .warning)
         let options = try ORTSessionOptions()
+        // Batch C1: the app sizes this to min(activeProcessorCount, 6). The
+        // spike keeps 4 because it runs fixed threads only so the RTF it
+        // prints stays comparable across runs — the thread count is a variable
+        // of the throughput test, not of the correctness test.
         try options.setIntraOpNumThreads(4)
         let session = try ORTSession(env: ortEnv, modelPath: modelPath, sessionOptions: options)
 
@@ -422,6 +426,10 @@ final class KokoroSmallSpikeTests: XCTestCase {
 
         let ortEnv = try ORTEnv(loggingLevel: .warning)
         let options = try ORTSessionOptions()
+        // Batch C1: the app sizes this to min(activeProcessorCount, 6). The
+        // spike keeps 4 because it runs fixed threads only so the RTF it
+        // prints stays comparable across runs — the thread count is a variable
+        // of the throughput test, not of the correctness test.
         try options.setIntraOpNumThreads(4)
         let session = try ORTSession(env: ortEnv, modelPath: modelPath, sessionOptions: options)
         let outputNames = (try? session.outputNames()) ?? []
