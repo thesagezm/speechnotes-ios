@@ -239,7 +239,7 @@ final class OggReaderTests: XCTestCase {
         segments.append(Data(bytes[cursor...]))
 
         var head = oggPage(segments: [opusHeadPacket(channels: 6)], seq: 0)
-        var seq = 1
+        var seq: UInt32 = 1
         while !segments.isEmpty {
             let group = Array(segments.prefix(16))
             segments.removeFirst(group.count)
@@ -269,7 +269,7 @@ final class OggReaderTests: XCTestCase {
         // 16 384 continuation pages — and the assembler drops it instead of
         // buffering the whole head.
         var head = oggPage(segments: [opusHeadPacket()], seq: 0)
-        for seq in 1...16_600 {
+        for seq in UInt32(1)...16_600 {
             head += oggPage(segments: [Data(repeating: 0xAA, count: 255)], seq: seq)
         }
         let tail = oggPage(segments: [Data(repeating: 0xFC, count: 100)], granule: 4_800_000, seq: 16_601)
