@@ -94,9 +94,11 @@ final class ChunkFileQueue: NSObject {
         let dir = ChunkCacheLayout.sessionDirectory(base: caches, sessionID: id)
         do {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            // `setResourceValues` is mutating, so the URL has to be a var.
+            var mutableDir = dir
             var resourceValues = URLResourceValues()
             resourceValues.isExcludedFromBackup = true
-            try dir.setResourceValues(resourceValues)
+            try mutableDir.setResourceValues(resourceValues)
             sessionDir = dir
         } catch {
             Log.shared.error("ChunkFileQueue: could not create \(dir.path): \(error)")
