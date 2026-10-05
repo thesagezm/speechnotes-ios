@@ -82,6 +82,11 @@ jobs:
           curl -L --retry 3 --progress-bar \
             -o ~/kokoro-small-spike/voices.npz \
             "https://raw.githubusercontent.com/mlalma/KokoroTestApp/main/Resources/voices.npz"
+          # Batch B4: the fp32 original, for the quantization gate — the
+          # uint8 render is only "acceptable" relative to something.
+          curl -L --retry 3 --progress-bar \
+            -o ~/kokoro-small-spike/model.onnx \
+            "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/onnx/model.onnx"
           # voices.npz carries one [rows, 256] float32 style matrix per
           # voice. The full archive is kept whole so the 28-voice test can
           # enumerate its members; af_heart is also extracted as the flat

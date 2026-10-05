@@ -513,6 +513,123 @@ final class KokoroSmallSpikeTests: XCTestCase {
         try WAVWriter.write(samples: samples, sampleRate: 24_000, to: URL(fileURLWithPath: outPath))
     }
 
+    // MARK: - The quantization gate (Batch B4)
+
+    /// One render through a named model: same tokenization, same style-row
+    /// arithmetic (B2's `len(ps) - 1`), same speed, four threads. Shared by
+    /// the quantization gate; `testGenerateSpeech` keeps its own inline path
+    /// because it also times the run.
+    private func renderSamples(modelPath: String, phonemes: String, voiceFlat: [Float], vocab: [String: Int]) throws -> [Float] {
+        let rows = voiceFlat.count / 256
+        let ortEnv = try ORTEnv(loggingLevel: .warning)
+        let options = try ORTSessionOptions()
+        try options.setIntraOpNumThreads(4)
+        let session = try ORTSession(env: ortEnv, modelPath: modelPath, sessionOptions: options)
+
+        let tokens = phonemes.map { vocab[String($0)] }.compactMap { $0 }
+        XCTAssertGreaterThan(tokens.count, 0, "vocab rejected every phoneme char")
+        let adjusted = min(max(phonemes.unicodeScalars.count - 1, 0), rows - 1)
+        let style = Array(voiceFlat[(adjusted * 256)..<((adjusted + 1) * 256)])
+
+        let tokens64 = tokens.map(Int64.init)
+        let tokensTensor = try ORTValue(
+            tensorData: NSMutableData(bytes: tokens64, length: tokens64.count * MemoryLayout<Int64>.size),
+            elementType: .int64,
+            shape: [1, NSNumber(value: tokens.count)]
+        )
+        let styleTensor = try ORTValue(
+            tensorData: NSMutableData(bytes: style, length: style.count * MemoryLayout<Float>.size),
+            elementType: .float,
+            shape: [1, NSNumber(value: 256)]
+        )
+        var speedValue: Float = 1.0
+        let speedTensor = try ORTValue(
+            tensorData: NSMutableData(bytes: &speedValue, length: MemoryLayout<Float>.size),
+            elementType: .float,
+            shape: [1]
+        )
+        let outputNames = (try? session.outputNames()) ?? []
+        let outputName = outputNames.contains("waveform") ? "waveform" : (outputNames.first ?? "waveform")
+        let outputs = try session.run(
+            withInputs: [
+                "input_ids": tokensTensor,
+                "style": styleTensor,
+                "speed": speedTensor,
+            ],
+            outputNames: [outputName],
+            runOptions: nil
+        )
+        let raw = try outputs[outputName]!.tensorData()
+        return (raw as Data).withUnsafeBytes { raw in
+            Array(raw.bindMemory(to: Float.self))
+        }
+    }
+
+    /// Batch B4: the quantization gate. A1's lemma exonerated the tokenizer,
+    /// which left the uint8 model itself as the prime suspect for the
+    /// gibberish reports. This renders the SAME corpus slice through the
+    /// quantized and the fp32 graph and compares the two waveforms: quant-
+    /// ization damage is sample-wise divergence between identical inputs —
+    /// measurable here, invisible on a device without both tiers to A/B.
+    ///
+    /// Skips when the fp32 fixture is absent: a ~310 MB download that CI
+    /// performs unconditionally and a local checkout usually does not.
+    func testQuantizedRenderMatchesFP32() throws {
+        let fm = FileManager.default
+        let fp32Path = "\(fixtureDir)/model.onnx"
+        guard fm.fileExists(atPath: modelPath), fm.fileExists(atPath: fp32Path),
+              fm.fileExists(atPath: voicePath) else {
+            throw XCTSkip("quantization gate needs model_uint8.onnx AND model.onnx AND voice.f32 in \(fixtureDir)")
+        }
+        let vocab = try loadVocab()
+        let voiceFlat = try Data(contentsOf: URL(fileURLWithPath: voicePath)).withUnsafeBytes {
+            Array($0.bindMemory(to: Float.self))
+        }
+        let phonemes = Self.phonemeCorpus[0]
+
+        let uint8Samples = try renderSamples(modelPath: modelPath, phonemes: phonemes, voiceFlat: voiceFlat, vocab: vocab)
+        let fp32Samples = try renderSamples(modelPath: fp32Path, phonemes: phonemes, voiceFlat: voiceFlat, vocab: vocab)
+        XCTAssertGreaterThan(fp32Samples.count, 1_000, "fp32 render too short to compare")
+        XCTAssertGreaterThan(uint8Samples.count, 1_000, "uint8 render too short to compare")
+
+        // Length first: the duration predictor is part of the graph, so
+        // gross corruption moves it. A boundary phoneme rounding differently
+        // across precisions shifts one phoneme's duration — allow 0.1 s or
+        // 2%, whichever is larger.
+        let lengthDelta = abs(uint8Samples.count - fp32Samples.count)
+        let lengthAllowance = max(2_400, fp32Samples.count / 50)
+        print("KOKORO-SMALL-SPIKE quantization gate: uint8 \(uint8Samples.count) samples vs fp32 \(fp32Samples.count) (delta \(lengthDelta), allowance \(lengthAllowance))")
+        XCTAssertLessThanOrEqual(lengthDelta, lengthAllowance,
+                                 "render length diverged — quantization moved the duration predictor")
+
+        let n = min(uint8Samples.count, fp32Samples.count)
+        let u = Array(uint8Samples[0..<n])
+        let f = Array(fp32Samples[0..<n])
+        let fp32RMS = sqrt(f.reduce(0.0) { $0 + Double($1) * Double($1) } / Double(n))
+        let diffRMS = sqrt(zip(u, f).reduce(0.0) { $0 + Double($1.0 - $1.1) * Double($1.0 - $1.1) } / Double(n))
+        let relativeRMS = diffRMS / max(fp32RMS, 1e-9)
+        // Pearson correlation over the overlap: gibberish is a DIFFERENT
+        // utterance, so the two waveforms stop correlating entirely.
+        let uMean = u.reduce(0.0) { $0 + Double($1) } / Double(n)
+        let fMean = f.reduce(0.0) { $0 + Double($1) } / Double(n)
+        var covariance = 0.0, uVariance = 0.0, fVariance = 0.0
+        for i in 0..<n {
+            let du = Double(u[i]) - uMean
+            let df = Double(f[i]) - fMean
+            covariance += du * df
+            uVariance += du * du
+            fVariance += df * df
+        }
+        let correlation = covariance / max(sqrt(uVariance * fVariance), 1e-9)
+        print("KOKORO-SMALL-SPIKE quantization gate: rel-RMS \(String(format: "%.4f", relativeRMS)), correlation \(String(format: "%.4f", correlation))")
+        // First real run calibrates these: the printed values above are the
+        // data. A correlation near zero IS the gibberish signature.
+        XCTAssertLessThan(relativeRMS, 0.25,
+                          "quantized render diverges from fp32 (rel-RMS \(relativeRMS)) — uint8 is corrupting speech")
+        XCTAssertGreaterThan(correlation, 0.9,
+                             "quantized render does not correlate with fp32 (\(correlation)) — uint8 is corrupting speech")
+    }
+
     /// One artifact per corpus slice, as the spike always did.
     ///
     /// The model run is guarded so this test still delivers its artifacts

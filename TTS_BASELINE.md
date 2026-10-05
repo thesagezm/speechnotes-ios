@@ -82,6 +82,19 @@ A device session now produces the number this table's constants were guessed
 from, per tier, warm (second play after launch) and cold — which is what Batch
 B3 sizes `firstMaxChars` from instead of the 0.53 assumption below.
 
+### The quantization gate — Batch B4 (2026-10-05)
+
+The gibberish investigation had two suspects: the tokenizer (exonerated by
+A1's lemma — the reference normalizer's class and the vocab are the same set)
+and the uint8 quantization itself. B4 closes the second: CI renders the SAME
+corpus slice through `model_uint8.onnx` and the fp32 `model.onnx` and compares
+the waveforms sample-wise (length delta ≤ 0.1 s or 2%, relative RMS < 0.25,
+Pearson correlation > 0.9 — first real run calibrates the thresholds from the
+printed values). Gibberish is a different utterance: it cannot pass a 0.9
+correlation against its own fp32 render. The gate lives in the spike job
+(`testQuantizedRenderMatchesFP32`), so a quantization regression fails CI
+before any device build.
+
 ### What that means per engine
 
 Kokoro, `c1 ≈ 160`:
