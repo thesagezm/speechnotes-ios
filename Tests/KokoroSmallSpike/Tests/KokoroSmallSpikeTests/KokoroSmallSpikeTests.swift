@@ -346,7 +346,12 @@ final class KokoroSmallSpikeTests: XCTestCase {
         XCTAssertTrue(inputNames.contains("speed"), "expected speed, got \(inputNames)")
         let outputName = outputNames.contains("waveform") ? "waveform" : (outputNames.first ?? "waveform")
 
-        let adjusted = min(max(tokens.count - 2, 0), rows - 1)
+        // Batch B2: the style row is indexed by the PHONEME-STRING length,
+        // not the token count, and the index is `len(ps) - 1` — upstream's
+        // `model(ps, pack[len(ps)-1], speed)`. The `-2` this used to carry
+        // was kokoro.js's compensation for a [0,*ids,0] wrap this package
+        // never adds.
+        let adjusted = min(max(phonemes.unicodeScalars.count - 1, 0), rows - 1)
         let style = Array(voiceFlat[(adjusted * 256)..<((adjusted + 1) * 256)])
 
         let tokens64 = tokens.map(Int64.init)
@@ -425,7 +430,7 @@ final class KokoroSmallSpikeTests: XCTestCase {
         for (index, slice) in Self.phonemeCorpus.enumerated() {
             let tokens = slice.map { vocab[String($0)] }.compactMap { $0 }
             XCTAssertFalse(tokens.isEmpty, "slice \(index) tokenized to nothing")
-            let adjusted = min(max(tokens.count - 2, 0), rows - 1)
+            let adjusted = min(max(slice.unicodeScalars.count - 1, 0), rows - 1)
             let style = Array(voiceFlat[(adjusted * 256)..<((adjusted + 1) * 256)])
             let tokens64 = tokens.map(Int64.init)
             let tokensTensor = try ORTValue(
