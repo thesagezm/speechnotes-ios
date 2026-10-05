@@ -48,6 +48,11 @@ final class StreamingTTSPlaybackCore: NSObject {
         /// breath, not dead air.
         let exportInterChunkSilence: Float
         let logPrefix: String
+        /// Which model file this session renders with (Batch A3). Kokoro has
+        /// two tiers sharing one engine class — fp32 and uint8 — and a device
+        /// log that does not say which one ran cannot size `firstMaxChars`
+        /// from the RTF it printed.
+        var tier: String? = nil
     }
 
     let config: Config
@@ -626,7 +631,8 @@ final class StreamingTTSPlaybackCore: NSObject {
         metrics.beginSession(
             chunkCount: allChunks.count,
             firstChunkChars: allChunks[0].length,
-            rate: speed
+            rate: speed,
+            tier: config.tier
         )
         startStallWatchdog()
 
@@ -675,7 +681,7 @@ final class StreamingTTSPlaybackCore: NSObject {
             let readySeconds = PlaybackMetrics.seconds(since: readyStart)
             DispatchQueue.main.async {
                 guard self.playbackGeneration == generation else { return }
-                self.metrics.modelReady(seconds: readySeconds)
+                self.metrics.modelReady(seconds: readySeconds, tier: self.config.tier)
             }
             guard modelReady else {
                 Log.shared.error("\(self.config.logPrefix) asked to speak but the model isn't ready")

@@ -111,6 +111,9 @@ final class PlaybackMetrics {
     private var sessionStart: ContinuousClock.Instant?
     private var chunkCount = 0
     private var sessionRate: Float = 1.0
+    /// Which model file ran this session (Batch A3). Nil for engines that
+    /// have one file and one tier.
+    private var sessionTier: String?
 
     /// Facts about the buffer that ACTUALLY sounded first — not chunk index 0,
     /// which can be skipped, in which case its char count would be printed
@@ -184,15 +187,21 @@ final class PlaybackMetrics {
 
     /// Called from `speak(_:)`. Closes any session left open — a second play
     /// tap supersedes the first without going through `stop()` — then stamps t0.
-    func beginSession(chunkCount: Int, firstChunkChars: Int, rate: Float) {
+    ///
+    /// `tier` (Batch A3) names the model file in play for this session, so a
+    /// log read a week later can tell fp32 from uint8 without matching
+    /// timestamps to a build.
+    func beginSession(chunkCount: Int, firstChunkChars: Int, rate: Float, tier: String? = nil) {
         if sessionActive { endSession(reason: "superseded") }
 
         sessionActive = true
         self.chunkCount = chunkCount
         self.sessionRate = rate
+        self.sessionTier = tier
         reset()
 
-        emit("session start — \(chunkCount) chunks, chunk 0 is \(firstChunkChars) chars, rate@start \(twoDP(Double(rate)))")
+        let tierTag = tier.map { " [\($0)]" } ?? ""
+        emit("session start — \(chunkCount) chunks, chunk 0 is \(firstChunkChars) chars, rate@start \(twoDP(Double(rate)))\(tierTag)")
     }
 
     /// One summary line, then the session goes quiet. `reason` separates a
@@ -234,14 +243,20 @@ final class PlaybackMetrics {
     /// (Kokoro: a 326 MB ONNX session load plus a tokenizer parse) from a warm
     /// one — otherwise a 25 s cold TTFA and a 1.2 s warm TTFA land in the same
     /// field with the same label and nothing explains the difference.
-    func modelReady(seconds: Double) {
+    ///
+    /// Batch A3 adds the tier tag: the two Kokoro tiers (fp32, uint8) produce
+    /// different RTFs and different memory pressure, and a log that does not
+    /// say which one ran cannot be read twice. The session-start line carries
+    /// the same tag so a single line identifies the whole session.
+    func modelReady(seconds: Double, tier: String? = nil) {
         guard sessionActive else { return }
         let cold = seconds >= 1.0
         // Not an error even when cold: the first play after launch always
         // pays the model load, so routing it to the error channel would
         // make every normal cold start look like a fault. The label carries
         // the distinction.
-        emit("model-ready \(twoDP(seconds))s (\(cold ? "COLD — includes the model load, inside TTFA" : "warm"))")
+        let tierTag = tier.map { " [\($0)]" } ?? ""
+        emit("model-ready \(twoDP(seconds))s (\(cold ? "COLD — includes the model load, inside TTFA" : "warm"))\(tierTag)")
     }
 
     private var ttfaText: String {

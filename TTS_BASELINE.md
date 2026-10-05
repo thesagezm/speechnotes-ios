@@ -41,7 +41,7 @@ Three parameters:
 | Symbol | Meaning | Value |
 | --- | --- | --- |
 | `cps` | chars of text per second of generated audio (speech rate) | ~15 for English narration at speed 1.0 (150 wpm × ~6 chars/word). Range 12–18. **Unmeasured.** |
-| `RTF` | generation seconds ÷ audio seconds | **Unmeasured.** The instrumentation reports it as `synthesis RTF`. |
+| `RTF` | generation seconds ÷ audio seconds | **Unmeasured.** The instrumentation reports it as `synthesis RTF`, per tier since Batch A3. |
 | `c0`, `c1` | UTF-16 length of chunk 0 and chunk 1 | `c0` = one sentence (4…limit). `c1` ≈ limit (160 Kokoro, 200 Supertonic). |
 
 Derived:
@@ -60,6 +60,27 @@ dead air = max(0, T2B − TTFA − audio(c0))
 **Break-even: `c0 ≥ RTF · c1`.** Below it, the listener hears silence for
 `(RTF·c1 − c0)/cps` seconds between the first sentence ending and the second
 starting.
+
+### Where the RTF numbers come from — Batch A3 (2026-10-05)
+
+Every figure in this table is assumed, not measured. `ModelManager` ships two
+Kokoro tiers that share one engine class (`OnnxKokoroEngine`, fp32 vs uint8),
+and a device log that does not name the tier cannot be read twice — a 0.5
+RTF on one build and a 0.9 on the next is only comparable if both lines say
+which file ran.
+
+Batch A3 closes that: `PlaybackMetrics` carries the tier through the session,
+so every session now prints it on the `session start` and `model-ready` lines
+(`OnnxKokoroEngine metrics session start — … rate@start 1.00 [kokoro-fp32]`).
+The tag is derived from the model FILE, not from a flag the caller passed, so
+the two construction sites in `SpeechPlayer.rebuildOnnxEngine` cannot disagree
+with the tier they built.
+
+The session-summary line already prints `synthesis RTF` for the whole session
+plus per-chunk RTF range; nothing new is added there. A device session now
+produces the number this table's constants were guessed from, per tier, warm
+(second play after launch) and cold — which is what Batch B3 sizes
+`firstMaxChars` from instead of the 0.53 assumption below.
 
 ### What that means per engine
 
@@ -136,8 +157,8 @@ session on a short note looks like:
 
 ```
 OnnxKokoroEngine metrics play-path file validation 1ms → valid
-OnnxKokoroEngine metrics session start — 4 chunks, chunk 0 is 12 chars, rate@start 1.00
-OnnxKokoroEngine metrics model-ready 0.00s (warm)
+OnnxKokoroEngine metrics session start — 4 chunks, chunk 0 is 12 chars, rate@start 1.00 [kokoro-fp32]
+OnnxKokoroEngine metrics model-ready 0.00s (warm) [kokoro-fp32]
 OnnxKokoroEngine metrics TTFA 840ms — first buffer scheduled (12 chars → 0.80s audio)
 OnnxKokoroEngine metrics T2B 6100ms — second buffer 5260ms after the first; the first was 12 chars / 0.80s of audio → margin -4460ms (SHORT — audible silence)
 OnnxKokoroEngine metrics chunk 1/4 — 12 chars → 0.80s audio in 0.41s (RTF 0.51)
@@ -148,6 +169,21 @@ OnnxKokoroEngine metrics session finished — 4 chunks (0 skipped), 32.10s audio
 That `margin -4460ms` line is the first-sentence stall, measured, with its cause
 visible on the same line: 12 chars of first chunk against 5.26 s to build the
 second.
+
+**Apple system speech speaks the same dialect** (Batch A2). Its lines are
+prefixed `SystemEngine metrics` and carry the boundary figure instead of the
+ONNX figures — there is no producer loop, bank or player node to time:
+
+```
+SystemEngine metrics session start — 41 chunks, rate@start 1.00
+SystemEngine metrics GAP 0.812s of silence — between chunk 3 and 4
+SystemEngine metrics boundaries 50/41 — mean 0.031s, worst 0.812s
+SystemEngine metrics session finished — 41 chunks, boundaries 40 (mean 0.031s, worst 0.812s), wall 214.60s
+```
+
+The `boundaries N` count is the chunk boundaries this session crossed, and
+`mean`/`worst` are the inter-chunk silences between them. Those numbers are
+what Batch F's decision rests on.
 
 Reading rules:
 

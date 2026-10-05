@@ -66,6 +66,13 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
     private static let maxTokens = 510
     private static let chunkMaxChars = 160
 
+    /// Tier name for the log line (Batch A3). Matched on the FILE, not on a
+    /// flag the caller set, so a mistagged tier would have to be a
+    /// consistently wrong filename.
+    static func tierName(for url: URL) -> String {
+        url.lastPathComponent == "model_uint8.onnx" ? "kokoro-small-uint8" : "kokoro-fp32"
+    }
+
     // Model state — the core's generateQueue only.
     private var ortEnv: ORTEnv?
     private var ortSession: ORTSession?
@@ -80,7 +87,11 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
 
     init(
         modelFileURL: URL = ModelManager.onnxModelFileURL,
-        modelFilesValid: @escaping () -> Bool = { ModelManager.onnxFilesAreValid() }
+        modelFilesValid: @escaping () -> Bool = { ModelManager.onnxFilesAreValid() },
+        /// Which tier this instance serves — printed on every session line
+        /// (Batch A3). Derived from the file so the two instances cannot
+        /// disagree with the file they were built for.
+        tier: String? = nil
     ) {
         self.modelFileURL = modelFileURL
         self.modelFilesValid = modelFilesValid
@@ -94,7 +105,8 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
             // `batchMaxChars`; this only re-opens the v0.4 fast-start.
             firstMaxChars: 100,
             exportInterChunkSilence: 0,
-            logPrefix: "OnnxKokoroEngine"
+            logPrefix: "OnnxKokoroEngine",
+            tier: tier ?? Self.tierName(for: modelFileURL)
         ))
         super.init()
 

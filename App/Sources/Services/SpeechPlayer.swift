@@ -773,6 +773,9 @@ final class SpeechPlayer: ObservableObject {
 
     private func rebuildOnnxEngine(big: Bool) {
         if onnxEngine == nil || onnxEngineFileIsBig != big {
+            // The tier tag is derived from the file INSIDE the engine (Batch
+            // A3) and is deliberately not passed here, so the two call sites
+            // cannot disagree about what they built.
             let onnx = big
                 ? OnnxKokoroEngine(
                     modelFileURL: ModelManager.onnxModelFileURL,

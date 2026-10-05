@@ -81,7 +81,8 @@ final class SupertonicEngine: NSObject, SpeechEngine {
             // chunk so speech starts fast; the rest stay full-size.
             firstMaxChars: 60,
             exportInterChunkSilence: 0.05,
-            logPrefix: "SupertonicEngine"
+            logPrefix: "SupertonicEngine",
+            tier: "supertonic"
         ))
         super.init()
 
