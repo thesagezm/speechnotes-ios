@@ -6,6 +6,10 @@ struct SpeechSettingsView: View {
     @ObservedObject private var models = ModelManager.shared
     @State private var systemVoices: [AVSpeechSynthesisVoice] = []
     @State private var showingVoicePicker = false
+    /// Supertonic's quality-vs-speed dial — read per chunk by the engine
+    /// (`SupertonicEngine.RenderQuality`), so a change applies from the
+    /// next chunk with no restart.
+    @AppStorage("supertonicRenderQuality") private var supertonicRenderQuality = "high"
 
     private var neuralEngineIsActive: Bool {
         (player.engineKind == .kokoroOnnx || player.engineKind == .kokoroSmall
@@ -155,6 +159,21 @@ struct SpeechSettingsView: View {
                 }
             } header: { Text("Supertonic model") } footer: {
                 Text("Supertone supertonic-3 — flow-matching TTS with 31 languages and 10 voice styles. Large (~399 MB) and CPU-based; keep it as the optional multilingual engine alongside Kokoro.")
+            }
+
+            if player.engineKind == .supertonic {
+                Section {
+                    Picker("Render quality", selection: $supertonicRenderQuality) {
+                        Text("High — always full").tag("high")
+                        Text("Automatic — sheds when very hot").tag("automatic")
+                        Text("Fast — lowest quality").tag("fast")
+                    }
+                    .pickerStyle(.inline)
+                } header: {
+                    Text("Supertonic quality")
+                } footer: {
+                    Text("High renders every chunk with the full 8 denoising steps — the best sound, roughly twice the generation work (still faster than playback). Automatic drops to 4 steps only when the phone runs critically hot. Fast always uses 4 steps: quickest, with audible artifacts. Applies from the next chunk — no restart needed.")
+                }
             }
 
 

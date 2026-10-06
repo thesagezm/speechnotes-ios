@@ -39,14 +39,39 @@ final class SupertonicEngine: NSObject, SpeechEngine {
     /// sentence chunks stay a bit tighter for responsiveness.
     private static let chunkMaxChars = 200
     /// Thermal-driven render-ahead policy — Batch B. The bank (targets,
-    /// byte cap) lives in the core; the engine reads the same policy for the
-    /// denoising step count. The 2026-10-06 device verdict: shedding at
-    /// `serious` (where real sessions sit ~always) rendered whole books at
-    /// 4 steps — artifacts and pitch drift; the policy now sheds ONLY at
-    /// critical, where the Batch A log measured RTF 1.68 at 8 steps.
-    /// Duration comes from the duration predictor, not the step count, so
-    /// pacing arithmetic is unaffected.
+    /// byte cap) lives in the core. The step count no longer sheds at
+    /// `serious` (the 2026-10-06 device verdict: whole books at 4 steps);
+    /// the dial the user asked for lives in `userStep(for:)`.
     private let bankPolicy = RenderAheadBankPolicy()
+
+    // MARK: - The quality dial (2026-10-06 user ask)
+
+    /// How the user trades render quality against speed. Stored under
+    /// `supertonicRenderQuality`; the default is HIGH — the user's stated
+    /// preference ("likely to only ever use the high quality one").
+    enum RenderQuality: String {
+        case high        // 8 steps, always — the best sound
+        case automatic   // the policy's thermal gear (8; 4 at critical only)
+        case fast        // 4 steps, always — fastest, audible artifacts
+
+        static var current: RenderQuality {
+            RenderQuality(rawValue: UserDefaults.standard.string(forKey: "supertonicRenderQuality") ?? "") ?? .high
+        }
+    }
+
+    /// The step count one chunk renders with, under the user's dial.
+    /// Exports bypass this (`core.isExporting` above): an offline render has
+    /// no deadline, so it is always full quality.
+    static func userStep(for thermal: ThermalPressure) -> Int {
+        switch RenderQuality.current {
+        case .high:
+            return RenderAheadBankPolicy.fullQualityTotalStep
+        case .automatic:
+            return RenderAheadBankPolicy().totalStep(for: thermal)
+        case .fast:
+            return 4
+        }
+    }
 
     private let core: StreamingTTSPlaybackCore
 
@@ -208,7 +233,7 @@ final class SupertonicEngine: NSObject, SpeechEngine {
             thermalStateRawValue: ProcessInfo.processInfo.thermalState.rawValue)
         let step = core.isExporting
             ? RenderAheadBankPolicy.fullQualityTotalStep
-            : bankPolicy.totalStep(for: thermal)
+            : Self.userStep(for: thermal)
         let result = try tts.call(text, lang, style, step, speed: core.speed, silenceDuration: 0.05)
         let predictedLen = Int(Float(tts.sampleRate) * result.duration)
         if predictedLen <= 0 {

@@ -403,6 +403,37 @@ final class SystemEngine: NSObject, SpeechEngine {
     /// permanently a few chunks into every chapter. Round-2 critique, P1.)
     private static let lookahead = 4
 
+    /// What Apple speaks for a chunk, and the pause after it.
+    ///
+    /// The chunker's contract is that chunk texts concatenate to the exact
+    /// original — so every chunk carries its trailing newlines, and a
+    /// paragraph-ending chunk hands Apple a trailing blank line, which the
+    /// synthesizer answers with its own unbounded paragraph pause. Those
+    /// were the "long breaks between paragraphs and text fields" (2026-10-06
+    /// device report; the engine-level boundary metric measured 0.005 s
+    /// because the pause lives INSIDE the utterance, before `didFinish`).
+    /// The spoken string trims the trailing whitespace and the pause becomes
+    /// a deliberate, bounded `postUtteranceDelay`: ~0.45 s for a paragraph
+    /// break (two or more newlines), ~0.2 s for a single line break, none
+    /// for a plain sentence (Apple's own punctuation pause applies).
+    ///
+    /// Read-along offsets are unaffected: `chunk.offset` addresses the
+    /// chunk's START, and only trailing characters are dropped.
+    static func spokenTextAndPause(for text: String) -> (text: String, pause: TimeInterval) {
+        var newlineCount = 0
+        var index = text.endIndex
+        while index > text.startIndex {
+            let previous = text.index(before: index)
+            guard text[previous] == "\n" || text[previous] == "\r" else { break }
+            newlineCount += 1
+            index = previous
+        }
+        let trimmed = String(text[..<index])
+        let spoken = trimmed.isEmpty ? text : trimmed
+        let pause: TimeInterval = newlineCount >= 2 ? 0.45 : (newlineCount == 1 ? 0.2 : 0)
+        return (spoken, pause)
+    }
+
     private func startNextChunk() {
         guard !pauseRequested, nextIndex < queue.count else { return }
         // Already `lookahead` utterances deep in Apple's queue: it will call
@@ -412,7 +443,9 @@ final class SystemEngine: NSObject, SpeechEngine {
         let slot = nextIndex
         nextIndex += 1
         startedCount += 1
-        let utterance = AVSpeechUtterance(string: item.text)
+        let spoken = Self.spokenTextAndPause(for: item.text)
+        let utterance = AVSpeechUtterance(string: spoken.text)
+        utterance.postUtteranceDelay = spoken.pause
         utterance.rate = Float(utteranceRate())
         utterance.voice = resolvedVoice()
         tagByUtterance[ObjectIdentifier(utterance)] = UtteranceTag(epoch: epoch, slot: slot)
@@ -589,7 +622,9 @@ final class SystemEngine: NSObject, SpeechEngine {
         currentSlot = index
         currentCharsDone = 0
         startedCount += 1
-        let utterance = AVSpeechUtterance(string: item.text)
+        let spoken = Self.spokenTextAndPause(for: item.text)
+        let utterance = AVSpeechUtterance(string: spoken.text)
+        utterance.postUtteranceDelay = spoken.pause
         utterance.rate = Float(utteranceRate())
         utterance.voice = resolvedVoice()
         tagByUtterance[ObjectIdentifier(utterance)] = UtteranceTag(epoch: epoch, slot: index)
