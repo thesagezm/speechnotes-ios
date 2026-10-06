@@ -113,12 +113,22 @@ public struct RenderAheadBankPolicy: Equatable {
     /// Supertonic's flow-matching denoising step count, by thermal state.
     /// Audio DURATION is set by the duration predictor and does not depend
     /// on the step count — only synthesis time (and quality margin) does —
-    /// so halving steps halves the model's work per chunk without touching
-    /// pacing arithmetic. Kokoro has no step parameter and ignores this.
+    /// so fewer steps means faster chunks and NOTHING else in the pacing
+    /// arithmetic. Kokoro has no step parameter and ignores this.
+    ///
+    /// **The 2026-10-06 device verdict: shedding at `serious` overshot.**
+    /// Continuous generation heats the phone, so real sessions sit at
+    /// `serious` for their whole length — the 8/8/4/4 ladder rendered ~90%
+    /// of a 17-minute book at 4 steps: audible artifacts, pitch drifting
+    /// between chunks, unnatural breaks (the user's quality report, which
+    /// outranks speed). The same device ran 8-step chunks at RTF 0.42–0.49 —
+    /// full quality keeps ahead of playback ~2:1. The shed is now an
+    /// EMERGENCY gear only: 4 steps at critical thermal, where the Batch A
+    /// log measured RTF 1.68 at 8 steps and speech would stall outright.
     public func totalStep(for thermal: ThermalPressure) -> Int {
         switch thermal {
-        case .nominal, .fair: return Self.fullQualityTotalStep
-        case .serious, .critical: return 4
+        case .nominal, .fair, .serious: return Self.fullQualityTotalStep
+        case .critical: return 4
         }
     }
 

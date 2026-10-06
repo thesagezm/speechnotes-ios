@@ -51,6 +51,10 @@ struct ReadAlongView: View {
     /// and reading it locally keeps the inset correct on rotation's first
     /// frame instead of one frame behind the environment value.
     @State private var proxyWidth: CGFloat = 0
+    /// Mirrors PlaybackRail's own storage: when the rail is minimized its
+    /// trailing column shrinks, and the text inset follows it so the
+    /// read-along gains the display room too.
+    @AppStorage("landscapeRailMinimized") private var railMinimized = false
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -79,12 +83,13 @@ struct ReadAlongView: View {
                 }
                 .padding(.leading, 16)
                 // In landscape the trailing playback panel owns its documented
-                // width (PlaybackRail.idealWidth) plus breathing room; the
-                // text column must not run under it. Read from the scroll
-                // view's own geometry so the inset is right on the very first
-                // frame of the new orientation (an environment value can
-                // arrive a frame late — the tab-rail bug).
-                .padding(.trailing, proxyWidth > 500 ? PlaybackRail.idealWidth + 24 : 16)
+                // width (PlaybackRail.hostColumnWidth, which shrinks when the
+                // rail is minimized) plus breathing room; the text column must
+                // not run under it. Read from the scroll view's own geometry
+                // so the inset is right on the very first frame of the new
+                // orientation (an environment value can arrive a frame late —
+                // the tab-rail bug).
+                .padding(.trailing, proxyWidth > 500 ? PlaybackRail.hostColumnWidth(minimized: railMinimized) + 24 : 16)
             }
             .onChange(of: activeRange?.lowerBound) { start in
                 guard let start else { return }

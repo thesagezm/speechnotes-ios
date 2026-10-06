@@ -43,12 +43,16 @@ final class RenderAheadBankTests: XCTestCase {
         XCTAssertEqual(policy.targetSeconds(for: .critical), 8)
     }
 
-    /// Supertonic's denoising steps drop 8→4 only under real pressure.
+    /// Supertonic's denoising steps drop 8→4 ONLY at critical thermal. The
+    /// 2026-10-06 device verdict: real sessions sit at `serious` for their
+    /// whole length, so shedding there rendered ~90% of a book at 4 steps —
+    /// the artifacts/pitch-drift quality regression. 8-step RTF measured
+    /// 0.42–0.49 at fair; the shed is an emergency gear now.
     func testTotalStepByThermal() {
         let policy = RenderAheadBankPolicy()
         XCTAssertEqual(policy.totalStep(for: .nominal), 8)
         XCTAssertEqual(policy.totalStep(for: .fair), 8)
-        XCTAssertEqual(policy.totalStep(for: .serious), 4)
+        XCTAssertEqual(policy.totalStep(for: .serious), 8)
         XCTAssertEqual(policy.totalStep(for: .critical), 4)
         XCTAssertEqual(RenderAheadBankPolicy.fullQualityTotalStep, 8)
     }

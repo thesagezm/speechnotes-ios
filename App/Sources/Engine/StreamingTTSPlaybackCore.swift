@@ -1,5 +1,6 @@
 import AVFoundation
 import SpeechLogic
+import UIKit
 
 /// Shared streaming-playback machinery for the ONNX engines
 /// (OnnxKokoroEngine, SupertonicEngine — the two engines that synthesize
@@ -200,6 +201,36 @@ final class StreamingTTSPlaybackCore: NSObject {
     private var configChangeObserver: NSObjectProtocol?
     private var mediaResetObserver: NSObjectProtocol?
 
+    // MARK: - Background transitions
+
+    /// Main-thread only. While set, the bank target is overridden up to
+    /// `backgroundBankTargetSeconds` — the boost that keeps enough audio
+    /// scheduled ahead for a backgrounded main-thread stall to ride out.
+    private var isBackgrounded = false
+    private var backgroundObserver: NSObjectProtocol?
+    private var foregroundObserver: NSObjectProtocol?
+    /// Deeper than the nominal 30 s target: the byte cap (≈175–350 s of
+    /// audio) never binds at 45 s, and the boost lasts only while
+    /// backgrounded.
+    private static let backgroundBankTargetSeconds: Double = 45
+
+    /// Main thread, from the background-transition observers.
+    private func handleBackgroundTransition(leftBackground: Bool) {
+        isBackgrounded = leftBackground
+        // The snapshot line is the diagnostic the 2026-10-06 log lacked:
+        // engine state, bank depth, session activation — one line at the
+        // moment iOS decides whether this process keeps running.
+        bankLock.lock()
+        let banked = bankedSecondsSnapshot
+        let target = bankTargetSecondsSnapshot
+        bankLock.unlock()
+        Log.shared.info("\(config.logPrefix) \(leftBackground ? "backgrounded" : "foregrounded") — state \(state), banked \(String(format: "%.1f", banked))s / target \(String(format: "%.1f", target))s, scheduled through chunk \(scheduledUpTo + 1), engine \(audioEngineRunning ? "running" : "STOPPED"), session active \(AVAudioSession.sharedInstance().isActive)")
+        // Re-size the bank for the new target now; recomputeBank's heartbeat
+        // would get there within ~0.3 s, but the backgrounding instant is
+        // the one moment the main thread is guaranteed responsive.
+        recomputeBank()
+    }
+
     // MARK: - Rate-change buffer drain
 
     /// True once per session: a rate change was committed and the pending
@@ -312,6 +343,28 @@ final class StreamingTTSPlaybackCore: NSObject {
         ) { [weak self] _ in
             self?.handleMediaServicesReset()
         }
+        // Background transitions (2026-10-06): the device log shows BOTH
+        // Kokoro sessions dying ~15–25 s after backgrounding — exactly when
+        // the already-scheduled audio ran out — while the deep-banked
+        // Supertonic session survived. Two responses: log a one-line state
+        // snapshot at the transition (the next device log then answers
+        // engine-running / bank-depth / session-active without guessing),
+        // and deepen the bank while backgrounded so a main-thread stall has
+        // far more scheduled audio to ride out.
+        backgroundObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.handleBackgroundTransition(leftBackground: true)
+        }
+        foregroundObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.handleBackgroundTransition(leftBackground: false)
+        }
         Log.shared.info("\(config.logPrefix) core created")
     }
 
@@ -330,6 +383,12 @@ final class StreamingTTSPlaybackCore: NSObject {
         }
         if let mediaResetObserver {
             NotificationCenter.default.removeObserver(mediaResetObserver)
+        }
+        if let backgroundObserver {
+            NotificationCenter.default.removeObserver(backgroundObserver)
+        }
+        if let foregroundObserver {
+            NotificationCenter.default.removeObserver(foregroundObserver)
         }
         // Backstop for the audio graph: every deliberate path stops it via
         // teardownPlayback(), but a core dropped by a path that skipped that
@@ -577,7 +636,12 @@ final class StreamingTTSPlaybackCore: NSObject {
         let rate = sampleRate
         let thermal = ThermalPressure(
             thermalStateRawValue: ProcessInfo.processInfo.thermalState.rawValue)
-        let target = bankPolicy.pressuredTargetSeconds(thermal: thermal, sampleRate: rate)
+        // Background boost: the thermal-sized target assumes a responsive
+        // main thread; backgrounded, a stall cannot be ridden out on a
+        // thin bank (both Kokoro deaths). The byte cap never binds here.
+        let target = max(
+            bankPolicy.pressuredTargetSeconds(thermal: thermal, sampleRate: rate),
+            isBackgrounded ? Self.backgroundBankTargetSeconds : 0)
         let bankedFrames = max(0, generatedFrames - playedFrames)
         let banked = Double(bankedFrames) / max(1, rate)
         bankLock.lock()

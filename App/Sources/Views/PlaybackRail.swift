@@ -111,11 +111,18 @@ struct PlaybackRail: View {
     }
 
     var body: some View {
-        if minimized {
-            minimizedCapsule
-        } else {
-            fullPanel
+        Group {
+            if minimized {
+                minimizedCapsule
+            } else {
+                fullPanel
+            }
         }
+        // One spring for the collapse/expand reflow: the host columns read
+        // `hostColumnWidth(minimized:)`, so the reading surface re-flows as
+        // the column animates — the display room animates back instead of
+        // snapping, and the capsule cannot appear mid-screen mid-transition.
+        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: minimized)
     }
 
     /// The full panel: three pinned zones; the middle one centers ITSELF in
@@ -262,20 +269,32 @@ struct PlaybackRail: View {
                 .strokeBorder(Color.primary.opacity(0.07))
         )
         .padding(.horizontal, Self.horizontalPadding)
-        // The SAME column footprint as the expanded panel. Without this the
-        // capsule's natural width (a 46 pt circle plus its own padding, ~66)
-        // replaces the panel's pinned 170, so the host HStack re-flows the
-        // whole screen on every minimize and every re-expand — which is what
-        // the user saw as the rail jumping to the middle on open and hanging
-        // off the edge (minimize button unreachable) after the round trip.
-        .frame(width: Self.idealWidth + 2 * Self.horizontalPadding)
+        // The capsule pins to the MINIMIZED width, not the expanded one: the
+        // whole point of minimizing is the display room (2026-10-06 user
+        // report — the old full-footprint frame meant the PDF/note kept
+        // paying the 170 pt column with the rail collapsed). The host
+        // columns read `hostColumnWidth`, so the surface re-flows wider as
+        // the column animates; the capsule aligns trailing inside it, which
+        // is what keeps the old "jumped to the middle / hung off the edge"
+        // round-trip bug fixed — the reflow is animated, not a snap.
+        .frame(width: Self.hostColumnWidth(minimized: true), alignment: .trailing)
         .frame(maxHeight: .infinity, alignment: .center)
     }
 
-    /// ReadAlongView's trailing inset keeps using idealWidth, so the text
-    /// column simply gains breathing room while the rail is collapsed;
-    /// nothing can run under it either way.
-    static let minimizedWidth: CGFloat = 40
+    /// The trailing column's width, by rail state. Hosts (BookReaderView,
+    /// NoteEditorView, ReadAlongView's trailing inset) size their reserve
+    /// from this so a minimized rail hands the width back to the content.
+    static func hostColumnWidth(minimized: Bool) -> CGFloat {
+        minimized
+            ? minimizedWidth + 2 * horizontalPadding
+            : idealWidth + 2 * horizontalPadding
+    }
+
+    /// The capsule itself is ~46 pt; the column around it keeps the padding
+    /// so the material never kisses the bezel — which lands the minimized
+    /// column at the capsule's natural width, the footprint the pre-2026-10
+    /// full-footprint frame refused to give back.
+    static let minimizedWidth: CGFloat = 46
 
     // MARK: - Zones
 

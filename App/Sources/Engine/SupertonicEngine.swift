@@ -40,12 +40,12 @@ final class SupertonicEngine: NSObject, SpeechEngine {
     private static let chunkMaxChars = 200
     /// Thermal-driven render-ahead policy — Batch B. The bank (targets,
     /// byte cap) lives in the core; the engine reads the same policy for the
-    /// denoising step count: 8 upstream default, 4 under thermal pressure
-    /// (the device log measured RTF 0.48 at nominal but 1.68 at critical —
-    /// past 1.0 the model cannot keep real time, and halving the steps is
-    /// the lever that halves per-chunk work). Duration comes from the
-    /// duration predictor, not the step count, so pacing arithmetic is
-    /// unaffected.
+    /// denoising step count. The 2026-10-06 device verdict: shedding at
+    /// `serious` (where real sessions sit ~always) rendered whole books at
+    /// 4 steps — artifacts and pitch drift; the policy now sheds ONLY at
+    /// critical, where the Batch A log measured RTF 1.68 at 8 steps.
+    /// Duration comes from the duration predictor, not the step count, so
+    /// pacing arithmetic is unaffected.
     private let bankPolicy = RenderAheadBankPolicy()
 
     private let core: StreamingTTSPlaybackCore
