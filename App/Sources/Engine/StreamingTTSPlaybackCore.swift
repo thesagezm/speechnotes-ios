@@ -224,7 +224,8 @@ final class StreamingTTSPlaybackCore: NSObject {
         let banked = bankedSecondsSnapshot
         let target = bankTargetSecondsSnapshot
         bankLock.unlock()
-        Log.shared.info("\(config.logPrefix) \(leftBackground ? "backgrounded" : "foregrounded") — state \(state), banked \(String(format: "%.1f", banked))s / target \(String(format: "%.1f", target))s, scheduled through chunk \(scheduledUpTo + 1), engine \(audioEngineRunning ? "running" : "STOPPED"), session active \(AVAudioSession.sharedInstance().isActive)")
+        let session = AVAudioSession.sharedInstance()
+        Log.shared.info("\(config.logPrefix) \(leftBackground ? "backgrounded" : "foregrounded") — state \(state), banked \(String(format: "%.1f", banked))s / target \(String(format: "%.1f", target))s, scheduled through chunk \(scheduledUpTo + 1), engine \(audioEngineRunning ? "running" : "STOPPED"), session \(session.category)/\(session.mode) (category \(session.categoryOptions.rawValue))")
         // Re-size the bank for the new target now; recomputeBank's heartbeat
         // would get there within ~0.3 s, but the backgrounding instant is
         // the one moment the main thread is guaranteed responsive.
