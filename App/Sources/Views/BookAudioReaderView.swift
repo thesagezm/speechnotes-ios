@@ -101,10 +101,17 @@ struct BookAudioReaderView: View {
                             Spacer(minLength: 0)
                             if blockedReason != nil { blockedBanner }
                         }
+                        .layoutPriority(-1)
                         // Speed + sleep do NOT ride inside the rail (user:
                         // "they should be near/under the playback controls")
                         // — they float in a row directly beneath it, where
                         // the trailing column has room to spare.
+                        //
+                        // The ZStack is centered in the column so the chips
+                        // stay put while the rail column narrows on minimize:
+                        // with a trailing alignment the whole chip row slid
+                        // off-screen when the rail collapsed to 66 pt (left
+                        // alignment would slide them off the leading edge).
                         ZStack(alignment: .bottom) {
                             audioRail
                             HStack(spacing: 10) {
@@ -113,6 +120,8 @@ struct BookAudioReaderView: View {
                             }
                             .padding(.bottom, 18)
                         }
+                        .frame(width: PlaybackRail.hostColumnWidth(minimized: railMinimized))
+                        .layoutPriority(1)
                     }
                     .transition(.opacity.combined(with: .move(edge: .trailing)))
                 } else {
@@ -443,6 +452,12 @@ struct BookAudioReaderView: View {
                 fullAudioRail
             }
         }
+        // The column is ONE function of the shared preference, exactly like
+        // PlaybackRail's `body` — the host never reserves the width, the rail
+        // promises it. One spring animates the round trip.
+        .frame(width: PlaybackRail.hostColumnWidth(minimized: railMinimized))
+        .frame(maxHeight: .infinity, alignment: .center)
+        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: railMinimized)
     }
 
     private var minimizedAudioRail: some View {
@@ -492,12 +507,10 @@ struct BookAudioReaderView: View {
                 .strokeBorder(Color.primary.opacity(0.07))
         )
         .padding(.horizontal, PlaybackRail.horizontalPadding)
-        // Same footprint as `fullAudioRail` below (which pins
-        // idealWidth + 2 × horizontalPadding). Without it the capsule's own
-        // ~66 pt width replaces the panel's column and the trailing column
-        // re-flows the screen on every toggle — the audiobook twin of the
-        // rail jump PlaybackRail.swift has the same guard for.
-        .frame(width: PlaybackRail.idealWidth + 2 * PlaybackRail.horizontalPadding)
+        // The outer width frame now lives in `audioRail` — one function of the
+        // shared preference for both states, matching PlaybackRail. What used
+        // to live here pinned the EXPANDED column while minimized, so the
+        // minimized capsule still took the full 170 pt and gave no room back.
         .frame(maxHeight: .infinity, alignment: .center)
     }
 
@@ -594,6 +607,11 @@ struct BookAudioReaderView: View {
         .overlay(alignment: .topTrailing) {
             // Minimize — the PlaybackRail's chevron affordance (the shared
             // preference, so the strip matches the other surfaces).
+            //
+            // The overlay is the LAST modifier, so its alignment slot is the
+            // FULL rail column (audioRail's frame) rather than the speed/sleep
+            // chips' narrower wrapper — which used to sit INSIDE the ZStack
+            // under `body` and would have had to be kept in sync by hand.
             Button {
                 Haptics.tap()
                 railMinimized = true

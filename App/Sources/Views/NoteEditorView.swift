@@ -61,6 +61,12 @@ struct NoteEditorView: View {
     /// swallows the tap that would bring it back — the user was stranded.
     /// Each reader now hides/shows its own bar independently.
     @AppStorage("immersiveBars.editor") private var immersiveBarsHidden = false
+    /// Mirrors PlaybackRail's own storage. The rail is a separate subtree, so
+    /// without reading the preference here the HOST would re-flow the reading
+    /// column on a different transaction from the one that animates the rail
+    /// itself — the content snaps while the capsule glides, which is half of
+    /// the "it moved" report on the minimize/maximize round trip.
+    @AppStorage("landscapeRailMinimized") private var railMinimized = false
 
     /// The chrome only ever hides on a READING surface (preview / read-along).
     /// Editing always shows the nav bar: its back button and ⋯ menu are the
@@ -244,7 +250,21 @@ struct NoteEditorView: View {
                 if landscape {
                     HStack(spacing: 0) {
                         editorContent
+                            // The leading column is the FLEXIBLE one. This is
+                            // what makes the minimize/maximize round trip work:
+                            // SwiftUI splits an HStack's width between
+                            // flexible children, and every child here is
+                            // flexible, so the rail's width promise (150 pt, or
+                            // 66 pt minimized) is only an IDEAL that the editor
+                            // text happily takes a share of — the rail ends up
+                            // mid-screen or squashed, and it looks like the rail
+                            // "moved" after the round trip. The book readers
+                            // have no such bug because their leading children
+                            // (webview / PDFKit) take exactly the width they
+                            // are offered and never compete.
+                            .layoutPriority(-1)
                         editorRail
+                            .layoutPriority(1)
                     }
                     .transition(.opacity.combined(with: .move(edge: .trailing)))
                 } else {
@@ -260,6 +280,11 @@ struct NoteEditorView: View {
                 }
             }
             .animation(.easeInOut(duration: 0.22), value: landscape)
+            // The reading column re-flows with the SAME spring as the rail's
+            // own swap (PlaybackRail.body), so the host and the capsule move
+            // on one clock instead of the content snapping while the capsule
+            // glides.
+            .animation(.spring(response: 0.35, dampingFraction: 0.85), value: railMinimized)
         }
     }
 

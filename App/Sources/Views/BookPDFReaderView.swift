@@ -90,7 +90,12 @@ struct BookPDFReaderView: View {
                     // the rail carries playback.
                     HStack(spacing: 0) {
                         readerSurface
+                            // Leading column is the flexible one (see
+                            // PlaybackRail.body for why the rail's width can
+                            // never be left to the host HStack).
+                            .layoutPriority(-1)
                         railPlayerBar
+                            .layoutPriority(1)
                     }
                     .transition(.opacity.combined(with: .move(edge: .trailing)))
                 } else {

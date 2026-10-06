@@ -118,10 +118,16 @@ struct PlaybackRail: View {
                 fullPanel
             }
         }
-        // One spring for the collapse/expand reflow: the host columns read
-        // `hostColumnWidth(minimized:)`, so the reading surface re-flows as
-        // the column animates — the display room animates back instead of
-        // snapping, and the capsule cannot appear mid-screen mid-transition.
+        // The column's width is a DETERMINISTIC function of the preference,
+        // pinned by the frame below — the rail never relies on the host
+        // HStack to reserve space for it (that was the round-trip bug: the
+        // book readers' hosts take the width they are offered, but the note
+        // editor's text/preview/edit children are flexible too, so a
+        // flexible rail loses its share and drifts). One spring animates the
+        // capsule/panel swap; the width frame below animates on the same
+        // value so the reading surface re-flows smoothly rather than snapping.
+        .frame(width: Self.hostColumnWidth(minimized: minimized))
+        .frame(maxHeight: .infinity, alignment: .center)
         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: minimized)
     }
 
@@ -210,6 +216,9 @@ struct PlaybackRail: View {
             // position and survives it.
             .defaultScrollAnchor(.top)
         }
+        // The inner column: card width plus its side padding. The OUTER
+        // width frame — the one the host HStack sees — is in `body`, so it is
+        // one function of the shared preference for both states.
         .frame(width: Self.idealWidth + 2 * Self.horizontalPadding)
         .frame(maxHeight: .infinity, alignment: .center)
     }
@@ -269,21 +278,22 @@ struct PlaybackRail: View {
                 .strokeBorder(Color.primary.opacity(0.07))
         )
         .padding(.horizontal, Self.horizontalPadding)
-        // The capsule pins to the MINIMIZED width, not the expanded one: the
-        // whole point of minimizing is the display room (2026-10-06 user
-        // report — the old full-footprint frame meant the PDF/note kept
-        // paying the 170 pt column with the rail collapsed). The host
-        // columns read `hostColumnWidth`, so the surface re-flows wider as
-        // the column animates; the capsule aligns trailing inside it, which
-        // is what keeps the old "jumped to the middle / hung off the edge"
-        // round-trip bug fixed — the reflow is animated, not a snap.
-        .frame(width: Self.hostColumnWidth(minimized: true), alignment: .trailing)
+        // The capsule's own natural size is what the minimized column hands
+        // back to the content (2026-10-06 user report — the earlier
+        // full-footprint frame meant the note/PDF kept paying the expanded
+        // 170 pt with the rail collapsed). Its outer width frame lives in
+        // `body`: one function of the shared preference for both states, so
+        // the host column re-flows on the same animated transaction as the
+        // capsule swap — the old "jumped to the middle / hung off the edge"
+        // round-trip bug stays fixed.
         .frame(maxHeight: .infinity, alignment: .center)
     }
 
-    /// The trailing column's width, by rail state. Hosts (BookReaderView,
-    /// NoteEditorView, ReadAlongView's trailing inset) size their reserve
-    /// from this so a minimized rail hands the width back to the content.
+    /// The trailing column's width, by rail state. The rail PINS this itself
+    /// (see `body`), and the hosts that cannot take the rail's word for it
+    /// (ReadAlongView's text inset, the audiobook reader's speed/sleep chips)
+    /// read the SAME function off the SAME `landscapeRailMinimized`
+    /// preference, so every surface agrees on one column width at any instant.
     static func hostColumnWidth(minimized: Bool) -> CGFloat {
         minimized
             ? minimizedWidth + 2 * horizontalPadding

@@ -116,7 +116,15 @@ struct BookReaderView: View {
                     // playback.
                     HStack(spacing: 0) {
                         readerSurface
+                            // Leading column is the flexible one — the rail's
+                            // width is a promise (see PlaybackRail.body). The
+                            // book readers' leading children take the width
+                            // they are offered, so this is belt-and-braces for
+                            // the note editor's failure mode rather than a
+                            // fix the books need.
+                            .layoutPriority(-1)
                         railPlayerBar
+                            .layoutPriority(1)
                     }
                     .transition(.opacity.combined(with: .move(edge: .trailing)))
                 } else {
