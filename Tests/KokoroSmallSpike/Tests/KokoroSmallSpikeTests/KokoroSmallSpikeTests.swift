@@ -592,6 +592,22 @@ final class KokoroSmallSpikeTests: XCTestCase {
         XCTAssertGreaterThan(fp32Samples.count, 1_000, "fp32 render too short to compare")
         XCTAssertGreaterThan(uint8Samples.count, 1_000, "uint8 render too short to compare")
 
+        // Per-tier loudness BEFORE the comparison. The correlation numbers
+        // say the two renders are different utterances; they cannot say
+        // WHICH one is broken, and a silicon-degenerate tier (all-NaN, all
+        // -1, or clipped to full scale) correlates ~0 against anything while
+        // looking "loud". Peak + RMS per tier is the first thing that
+        // distinguishes a corrupt render from an honest one, and the B4
+        // verdict ("uint8 is corrupting speech") rests on exactly this
+        // evidence — without it the verdict names the wrong suspect when it
+        // is the NEW fp32 graph that moved upstream.
+        for (label, samples) in [("uint8", uint8Samples), ("fp32", fp32Samples)] {
+            let peak = samples.map { abs(Double($0)) }.max() ?? 0
+            let rms = sqrt(samples.reduce(0.0) { $0 + Double($1) * Double($1) } / Double(samples.count))
+            let nonFinite = samples.reduce(0) { $0 + (Double($1).isFinite ? 0 : 1) }
+            print("KOKORO-SMALL-SPIKE quantization gate: \(label) peak \(String(format: "%.4f", peak)), RMS \(String(format: "%.4f", rms)), non-finite \(nonFinite)/\(samples.count)")
+        }
+
         // Length first: the duration predictor is part of the graph, so
         // gross corruption moves it. A boundary phoneme rounding differently
         // across precisions shifts one phoneme's duration — allow 0.1 s or
@@ -685,6 +701,63 @@ final class KokoroSmallSpikeTests: XCTestCase {
                           "quantized render diverges from fp32 at best alignment (rel-RMS \(alignedRelativeRMS)) — uint8 is corrupting speech")
         XCTAssertGreaterThan(bestLagCorrelation, 0.9,
                              "quantized render does not correlate with fp32 at any lag within ±0.5 s (best \(bestLagCorrelation) at lag \(bestLag)) — uint8 is corrupting speech")
+    }
+
+    /// Batch B4's control: the SAME graph, rendered twice in the SAME
+    /// process with the SAME inputs, must agree EXACTLY.
+    ///
+    /// Without this, a zero correlation against fp32 has two possible
+    /// causes and the gate cannot tell them apart: (a) the uint8 weights
+    /// genuinely corrupt the speech, or (b) ONNX Runtime CPU is producing
+    /// nondeterministic output for this graph at all (float atomics in a
+    /// parallel reduction, a race in an unsupported thread pool, a
+    /// denormal-FTZ difference between two sessions) — in which case
+    /// NO render ever matches any other and the gate indicts quantization
+    /// for a property of the runtime. The control settles it in one run:
+    /// two identical-model renders that differ mean the oracle itself is
+    /// unstable and the verdict must say so, not blame the tier.
+    func testRenderIsDeterministicAcrossSessions() throws {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: modelPath), fm.fileExists(atPath: voicePath) else {
+            throw XCTSkip("determinism control needs the uint8 model and voice matrix")
+        }
+        let vocab = try loadVocab()
+        let voiceFlat = try Data(contentsOf: URL(fileURLWithPath: voicePath)).withUnsafeBytes {
+            Array($0.bindMemory(to: Float.self))
+        }
+        let phonemes = Self.phonemeCorpus[0]
+
+        // A FRESH session per render (as the gate does) — the question is
+        // process-to-process stability, not one session re-running itself.
+        let first = try renderSamples(modelPath: modelPath, phonemes: phonemes, voiceFlat: voiceFlat, vocab: vocab)
+        let second = try renderSamples(modelPath: modelPath, phonemes: phonemes, voiceFlat: voiceFlat, vocab: vocab)
+
+        XCTAssertEqual(first.count, second.count,
+                       "two renders of the SAME graph produced different lengths — the duration predictor is not thread-stable")
+        XCTAssertGreaterThan(first.count, 1_000, "render too short to compare")
+
+        let n = first.count
+        var differing = 0
+        var maxDelta: Double = 0
+        var diffEnergy = 0.0
+        var refEnergy = 0.0
+        for i in 0..<n {
+            let a = Double(first[i])
+            let b = Double(second[i])
+            if a != b { differing += 1 }
+            maxDelta = max(maxDelta, abs(a - b))
+            diffEnergy += (a - b) * (a - b)
+            refEnergy += b * b
+        }
+        let relativeRMS = sqrt(diffEnergy / Double(n)) / max(sqrt(refEnergy / Double(n)), 1e-9)
+        print("KOKORO-SMALL-SPIKE determinism: same-graph renders differ in \(differing)/\(n) samples, max delta \(String(format: "%.6g", maxDelta)), rel-RMS \(String(format: "%.6f", relativeRMS))")
+
+        // Exact reproducibility is the expectation for CPU inference; a
+        // handful of least-significant-bit differences would still leave
+        // the quantization gate meaningful, so the bar is "not a different
+        // utterance" rather than "bit-identical".
+        XCTAssertLessThan(relativeRMS, 0.05,
+                          "two renders of the SAME graph diverge (rel-RMS \(relativeRMS)) — ONNX Runtime CPU is not reproducing itself, so the fp32 comparison above cannot indict quantization")
     }
 
     /// One artifact per corpus slice, as the spike always did.
