@@ -110,6 +110,51 @@ The spike job is therefore failing BY DESIGN (masked green by its
 calibration set, or drop the tier — a decision that belongs to the release
 plan, not this doc. The other six spike proofs keep passing.
 
+**Re-verified 2026-10-06 (`87245df`, run `37483053407`) with the controls
+the verdict was missing.** Two controls and one audit of the artifacts
+themselves, because a zero cross-correlation says the renders differ but
+not WHICH one is broken, and the recorded reading assumed the answer:
+
+- **Determinism control — the oracle is sound.** The same uint8 graph,
+  rendered twice through two fresh sessions in one process, matches
+  SAMPLE-FOR-SAMPLE (`0/92400` differing, max delta `0`, rel-RMS
+  `0.000000`). ORT CPU reproduces this graph exactly, so the fp32
+  comparison in the gate is meaningful and the divergence is real rather
+  than a property of the runtime. (Deterministic enough that the two runs
+  two days apart printed the SAME rel-RMS to four decimals — 1.3655 both
+  times — and the same peak.)
+- **Neither render is silicon garbage.** uint8 peak 0.6406 / RMS 0.0670,
+  0 non-finite samples; fp32 peak 0.5611 / RMS 0.0678, 0 non-finite.
+  Both tiers produce loud, clean, finite, identical-length audio. This is
+  not a NaN or clipping failure — it is two confident, different
+  utterances, which is what makes the verdict usable: a merely louder or
+  quieter tier would have shown up here as a scale difference.
+- **Both files are byte-pinned and stable** (verified against the HF API):
+  `onnx/model.onnx` 325,532,232 B, `model_uint8.onnx` 177,464,632 B.
+  No shifting download, no moving target.
+
+One further audit of the files themselves, which explains the SHAPE of the
+divergence. `model_uint8.onnx` was produced by `onnx.quantize 0.1.0`
+against a `pytorch 2.6.0` original, and it is not a pure weight
+quantization: its graph carries FIVE nodes the fp32 graph does not —
+`MatMul_6704_quantized`, `MatMul_6704_scale`, `MatMul_6886_quantized`,
+`MatMul_6886_scale`, `MatMul_6886_zero_point` — i.e. the optimizer
+inserted QLinearMatMul + per-tensor scale/zero-point handling for two
+matmuls rather than only dequantizing weights. Two different graphs on
+the same token stream is therefore the actual artifact under test, and
+the read stands: **uint8 is corrupting speech, deterministically.**
+
+The consequence for the tier decision: this is not a calibration problem
+that better thresholds would fix, and it is not flaky. The quantized graph
+diverges from its fp32 original at the graph level, on every run, on CI's
+CPU. Options remain as recorded above — ship fp32, re-quantize with a
+calibration set, or drop the tier. **The default engine has been `.kokoroOnnx`
+(fp32) since v1.5, and fp32 is what the device builds ship as the working
+Kokoro tier, so this does not block any release — but the uint8 tier must
+not be re-enabled on the strength of its file size.** See
+`UINT8-TIER-FORENSICS.md` for the byte-level evidence.
+
+
 ### What that means per engine
 
 Kokoro, `c1 ≈ 160`:
