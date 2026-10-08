@@ -202,3 +202,47 @@ speaker-notes extraction from PPTX, BookDrop for Linux/Android (ported
 separately per Docs/BOOKDROP.md).
 
 **Version:** 1.7.2 / 39 (project.yml 4-field bump + NSLocalNetworkUsageDescription).
+
+## [2026-10-08] Notes-surface bug batch — orientation, rail round trip, play glyph, emoji
+
+Commit `289cb6b` on `batch-c-d-session` (CI run 37766970471). Four device
+reports on NOTES (books untouched), each root-caused from source:
+
+1. **Orientation freeze/slow + minimize→maximize padding distortion — ONE
+   cause.** The editor held `editorContent` at two different tree POSITIONS
+   (HStack child in landscape, VStack child in portrait); positional
+   structural identity meant every rotation REMOUNTED the editor/preview:
+   full synchronous re-parse of a long rich note (the freeze) plus every
+   @State geometry reset mid-transition. The landscape HStack also made the
+   rail's column a width NEGOTIATION between flexible children (preview's
+   scrollable tables/code compete); a bad claim survived in @State,
+   GeometryReader centered the over-wide result ("screen moved right, rail
+   off the edge"), and it persisted across rotation into portrait until the
+   editor unmounted — why going back to the list "reverts everything".
+   Books were clean because webview/PDFKit take the width offered.
+   Fix: content at ONE position; portrait bar via `safeAreaInset(.bottom)`;
+   rail an overlay SIBLING; content pads its trailing edge by the SAME
+   `hostColumnWidth` the rail pins (promise, not negotiation).
+
+2. **Landscape play/pause glyph stops changing.** Rail inputs were host-
+   evaluated snapshots; taps that only moved player state never re-ran the
+   host body, so the glyph froze while audio worked. `PlaybackRail.observesPlayer`
+   (editor sets it) gives the rail its own `@EnvironmentObject SpeechPlayer`
+   — live glyph/progress/session/voice chip, paused shows play.fill like
+   the portrait bar. Book readers keep host-passed values (per-chapter
+   narrowing).
+
+3. **Emoji missing (keycaps 1️⃣, circles 🔴, more).** Note-creation paths
+   stored `SpeechSanitizer.clean` output as the NOTE BODY — and clean strips
+   emoji-presentation scalars (correct for speech, silent data loss for
+   storage). New `SpeechSanitizer.displaySafe`: keeps emoji + FE0F + ZWJ +
+   combining keycap, still strips control bytes/soft hyphens/bidi/PUA.
+   All 3 storage paths switched (ImportService, NotesListView.addNote,
+   JexImporter); speech paths unchanged (re-derived at play time). 4 new
+   tests pin the speech-vs-storage split.
+
+4. **ReadAlongView inset + preview table width** went stale on layout-only
+   reflows (probe updated only via the update cycle; magic 500pt test).
+   Read-along keeps clear air only (width > height, recomputed per body);
+   host pads the column. Preview probe gains `.task(id: width)` so tables
+   re-measure in the rail reflow's own transaction.
