@@ -167,8 +167,16 @@ public enum MobiParser {
             }
             body = out
         } else {
-            body = [UInt8](decompress(Data(records), compression: header.compression))
+            // The PalmDOC path concatenates the per-record payloads first —
+            // a back-reference may reach across a record boundary, which is
+            // exactly why collectTextRecords returns the STRIPPED records
+            // rather than a joined blob.
+            var joined = Data()
+            joined.reserveCapacity(records.reduce(0) { $0 + $1.count })
+            for record in records { joined.append(record) }
+            body = [UInt8](decompress(joined, compression: header.compression))
         }
+
         // Some writers end the last record with a sentinel '#'; it is not
         // content.
         if body.last == UInt8(ascii: "#") { body.removeLast() }
