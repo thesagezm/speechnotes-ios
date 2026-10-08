@@ -171,8 +171,10 @@ public enum Mp4OpusReader {
         if timescale > 0, timescale != 48_000 {
             let scale = Double(48_000) / Double(timescale)
             packets = packets.map { packet in
+                // MP4 reads are always EAGER — the payload exists; the
+                // optional is the lazy-stream shape's addition.
                 OpusPacketStream.Packet(
-                    payload: packet.payload,
+                    payload: packet.payload ?? Data(),
                     granule: UInt64((Double(packet.granule) * scale).rounded()),
                     index: packet.index
                 )
