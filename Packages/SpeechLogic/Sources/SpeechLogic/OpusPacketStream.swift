@@ -10,21 +10,46 @@ import Foundation
 /// ordered list of codec packets, each with the sample position at which it
 /// ends, at Opus' fixed 48 kHz output rate.
 ///
+/// ## Two payload shapes (2026-10-08, the 1.7 GB book)
+///
+/// Eager streams hold every packet's bytes — fine for a 40 MB book, fatal
+/// for the 11-hour full-cast one: `Data(contentsOf:)` + the walk's own
+/// `[UInt8]` copies put ~3× the file in memory and iOS killed the process
+/// (`NSPOSIXErrorDomain Code=12, cannot allocate memory`). Lazy streams
+/// keep only granules and byte RANGES (~40 bytes per packet resident) and
+/// read each payload on demand from a MAPPED file — the OS pages payload
+/// bytes in and out, so peak memory is one chunk, whatever the book weighs.
+/// The decoder reads packets strictly in order, which is exactly the access
+/// pattern a mapped file likes.
+///
 /// Foundation-only, like the readers — this is what the engine-side decoder
 /// consumes, and it has to be testable where no audio stack exists.
 public struct OpusPacketStream: Sendable {
 
     /// One codec packet, with the sample position at which it ends.
     public struct Packet: Sendable {
-        /// Codec payload — what `AVAudioConverter` decodes.
-        public let payload: Data
+        /// Codec payload — what the decoder decodes. nil for a LAZY packet:
+        /// `OpusPacketStream.payload(of:)` supplies it on demand.
+        public let payload: Data?
+        /// For lazy packets: the payload's byte range in the source file.
+        public let range: Range<Int>?
         /// Samples (at `sampleRate`) decoded up to the END of this packet.
         public let granule: UInt64
         /// Position in the stream, so a seek can name a packet.
         public let index: Int
 
+        /// Eager packet — the shape every pre-1.7.4 caller built.
         public init(payload: Data, granule: UInt64, index: Int) {
             self.payload = payload
+            self.range = nil
+            self.granule = granule
+            self.index = index
+        }
+
+        /// Lazy packet — payload read on demand from `source` via `range`.
+        public init(range: Range<Int>, granule: UInt64, index: Int) {
+            self.payload = nil
+            self.range = range
             self.granule = granule
             self.index = index
         }
@@ -45,7 +70,17 @@ public struct OpusPacketStream: Sendable {
     /// Decoder output starts this many samples late. Left in, the first
     /// fraction of a second plays as a click.
     public let preSkip: Int
+    /// LAZY ONLY: a memory-mapped view of the source file the lazy packets
+    /// read their payloads from. Eager streams hold nil.
+    ///
+    /// `Data(contentsOf:options: .mappedIfSafe)` does not read the file —
+    /// it maps it; the pages come in on touch and the evictor drops them
+    /// under pressure. A file the OS will not map (moved, partially evicted
+    /// provider storage) makes `payload(of:)` return nil and the feed dies
+    /// the ordinary decode-failure way, which is survivable.
+    private let mappedSource: Data?
 
+    /// Eager stream — payloads resident.
     public init(
         packets: [Packet],
         headerPacket: [UInt8]? = nil,
@@ -58,7 +93,40 @@ public struct OpusPacketStream: Sendable {
         self.sampleRate = sampleRate > 0 ? sampleRate : 48_000
         self.channels = max(1, channels)
         self.preSkip = max(0, preSkip)
+        self.mappedSource = nil
     }
+
+    /// Lazy stream — a header + packet byte RANGES over a mapped file.
+    public init(
+        packets: [Packet],
+        headerPacket: [UInt8]? = nil,
+        sampleRate: Int,
+        channels: Int,
+        preSkip: Int,
+        mappedSource: Data
+    ) {
+        self.packets = packets
+        self.headerPacket = headerPacket
+        self.sampleRate = sampleRate > 0 ? sampleRate : 48_000
+        self.channels = max(1, channels)
+        self.preSkip = max(0, preSkip)
+        self.mappedSource = mappedSource
+    }
+
+    /// The payload of one packet, eager or lazy. nil only for a lazy packet
+    /// whose source stopped being readable (moved file, evicted provider
+    /// storage).
+    public func payload(of packet: Packet) -> Data? {
+        if let payload = packet.payload { return payload }
+        guard let source = mappedSource, let range = packet.range else { return nil }
+        guard range.upperBound <= source.count else { return nil }
+        let base = source.startIndex + range.lowerBound
+        return source[base..<(source.startIndex + range.upperBound)]
+    }
+
+    /// True when the stream reads payloads from the mapped file rather than
+    /// holding them — the property a loader uses to pick its read path.
+    public var isLazy: Bool { mappedSource != nil }
 
     /// Samples at `sampleRate` at the end of the stream.
     public var totalSamples: UInt64 { packets.last?.granule ?? 0 }
@@ -88,7 +156,8 @@ public struct OpusPacketStream: Sendable {
     }
 
     /// Uniform chapter boundaries, for a file with no chapter metadata —
-    /// the "Full audiobook" case every other format gets from its own tags.
+    /// the "Full audiobook" case every other format gets from its own
+    /// tags.
     public func chapterBoundaries(stepSeconds: TimeInterval) -> [Double] {
         guard stepSeconds > 0, sampleRate > 0, !packets.isEmpty else { return [] }
         let step = UInt64(stepSeconds * Double(sampleRate))

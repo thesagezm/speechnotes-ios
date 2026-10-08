@@ -158,19 +158,25 @@ final class OpusAudioBackend: BookAudioBackend {
     /// Reads and parses the whole Ogg stream off-main, then reports its
     /// duration. A parse failure is permanent — `onFailed` fires and the
     /// reader shows why.
+    ///
+    /// 2026-10-08 device log: the eager `OggReader.read` holds every
+    /// packet's bytes, so the 11-hour full-cast book (1.7 GB) died at the
+    /// load with `NSPOSIXErrorDomain Code=12, cannot allocate memory` —
+    /// before a single sample decoded. The lazy walk keeps granules and
+    /// byte ranges only (~80 MB for 2 M packets) and reads each payload
+    /// from the MAPPED file on demand, so peak memory is one chunk no
+    /// matter what the book weighs.
     func loadOgg(url: URL) {
         let generation0 = nextGeneration()
         Task.detached(priority: .userInitiated) { [weak self] in
             do {
-                let data = try Data(contentsOf: url)
-                let ogg = try OggReader.read(data)
-                let stream = ogg.packetStream
+                let stream = try OggReader.readLazy(url: url)
                 DispatchQueue.main.async { [weak self] in
-                    if case .other(let codec) = ogg.info.codec {
-                        self?.streamDidFail(NotOpusError(codec: codec), generation: generation0)
-                    } else {
-                        self?.streamDidLoad(stream, generation: generation0)
-                    }
+                    self?.streamDidLoad(stream, generation: generation0)
+                }
+            } catch let error as OggReader.NotOpusStreamError {
+                DispatchQueue.main.async { [weak self] in
+                    self?.streamDidFail(NotOpusError(codec: error.codec), generation: generation0)
                 }
             } catch {
                 DispatchQueue.main.async { [weak self] in

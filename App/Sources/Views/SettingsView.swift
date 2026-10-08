@@ -15,8 +15,7 @@ struct SettingsView: View {
     /// Any neural engine is selected AND its model is ready — the system
     /// engine (and so the system voice) is not in the playback path.
     private var neuralEngineIsActive: Bool {
-        (player.engineKind == .kokoroOnnx || player.engineKind == .kokoroSmall
-            || player.engineKind == .supertonic)
+        (player.engineKind == .kokoro || player.engineKind == .supertonic)
             && !player.usingSystemFallback
     }
 
@@ -30,8 +29,7 @@ struct SettingsView: View {
 
     private var neuralModelMissing: Bool {
         switch player.engineKind {
-        case .kokoroOnnx: return !models.isReady
-        case .kokoroSmall: return !models.smallIsReady
+        case .kokoro: return !models.isReady && !models.smallIsReady
         case .supertonic: return !models.supertonicIsReady
         default: return false
         }
@@ -39,7 +37,6 @@ struct SettingsView: View {
 
     private var voicePickerScope: VoicePickerSheet.Scope {
         switch player.engineKind {
-        case .kokoroSmall: return .kokoroSmall
         case .supertonic: return .supertonic
         default: return .kokoro
         }
@@ -47,7 +44,6 @@ struct SettingsView: View {
 
     private var voiceSectionHeader: String {
         switch player.engineKind {
-        case .kokoroSmall, .kokoroOnnx: return "Kokoro voice"
         case .supertonic: return "Supertonic voice"
         default: return "Kokoro voice"
         }

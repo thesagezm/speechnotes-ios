@@ -22,6 +22,16 @@ final class OggReaderTests: XCTestCase {
         return try Data(contentsOf: URL(fileURLWithPath: name))
     }
 
+    /// The same fixture as a FILE URL — `readLazy` takes one (it maps the
+    /// file rather than reading it), and writing it back lets the lazy walk
+    /// be tested against exactly the bytes the eager walk sees.
+    private func writeFixture(_ name: String) throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ogg-lazy-\(name)")
+        try load(name).write(to: url)
+        return url
+    }
+
     // MARK: - Opus
 
     func testReadsOpusIdentificationAndDuration() throws {
@@ -41,6 +51,45 @@ final class OggReaderTests: XCTestCase {
         let head = stream.packets[0].payload
         XCTAssertEqual(String(bytes: head.prefix(8), encoding: .isoLatin1), "OpusHead")
         XCTAssertEqual(head[8], 1, "OpusHead version must be 1")
+    }
+
+    // MARK: - The lazy walk (the 1.7 GB book path)
+
+    /// readLazy against read on the same fixture: identical packet count,
+    /// identical granules, identical payloads read back through the mapped
+    /// source. This is the contract `OpusPacketDecoder` depends on — the
+    /// eager and lazy walks must be two views of one stream, or a book that
+    /// fits memory and one that does not would play differently.
+    func testLazyWalkMatchesEagerWalk() throws {
+        let eager = try OggReader.read(try load("plain.opus")).packetStream
+        let lazy = try OggReader.readLazy(url: writeFixture("plain.opus"))
+        XCTAssertTrue(lazy.isLazy, "readLazy produced an eager stream")
+        XCTAssertEqual(lazy.packets.count, eager.packets.count)
+        XCTAssertEqual(lazy.duration, eager.duration, accuracy: 1e-9)
+        XCTAssertEqual(lazy.sampleRate, eager.sampleRate)
+        XCTAssertEqual(lazy.channels, eager.channels)
+        XCTAssertEqual(lazy.preSkip, eager.preSkip)
+        XCTAssertEqual(String(bytes: lazy.headerPacket?.prefix(8) ?? [], encoding: .isoLatin1), "OpusHead")
+        for (eagerPacket, lazyPacket) in zip(eager.packets, lazy.packets) {
+            XCTAssertEqual(lazyPacket.granule, eagerPacket.granule, "granule drift at packet \(eagerPacket.index)")
+            XCTAssertEqual(lazy.payload(of: lazyPacket), eagerPacket.payload,
+                           "payload drift at packet \(eagerPacket.index)")
+        }
+    }
+
+    /// A packet that SPANS pages is the case the lazy walk stitches. The
+    /// long fixture (6 003 packets on 123 pages) carries them whenever the
+    /// header pages pack differently; the per-packet payload equality is
+    /// the assertion that matters — the eager and lazy walks must agree on
+    /// every byte of every packet, whatever pages they crossed.
+    func testLazyWalkStitchesSpanningPackets() throws {
+        let eager = try OggReader.read(try load("long.opus")).packetStream
+        let lazy = try OggReader.readLazy(url: writeFixture("long.opus"))
+        XCTAssertEqual(lazy.packets.count, eager.packets.count)
+        for (eagerPacket, lazyPacket) in zip(eager.packets, lazy.packets) {
+            XCTAssertEqual(lazy.payload(of: lazyPacket), eagerPacket.payload,
+                           "payload drift at packet \(eagerPacket.index)")
+        }
     }
 
     func testSecondPacketIsOpusTags() throws {

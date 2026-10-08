@@ -465,6 +465,118 @@ public enum OggReader {
     /// including `endingAt`.
     private static func payloadData(_ bytes: [UInt8]) -> Data { Data(bytes) }
 
+    // MARK: - Lazy stream (the 1.7 GB book)
+
+    /// The walk `read` performs, but keeping only each packet's GRANULE and
+    /// byte RANGE — payloads stay in the mapped file and are read per packet
+    /// by `OpusPacketStream.payload(of:)`.
+    ///
+    /// Why this exists: `read` holds every payload's bytes, so peak memory
+    /// is the file's own size plus copies. The 11-hour full-cast book
+    /// (~1.7 GB, 2.07 M packets) took the process down with
+    /// `NSPOSIXErrorDomain Code=12` before a single sample decoded. This walk
+    /// holds ~40 bytes per packet — the 2 M-packet stream costs ~80 MB of
+    /// index, whatever the audio weighs — and the mapped source lets the OS
+    /// page payload bytes in and out.
+    ///
+    /// The header page's first packet (OpusHead) IS materialized eagerly —
+    /// the decoder needs it whole for the channel map, and it is 19-ish
+    /// bytes. OpusTags (the second/third header packets) are granule-0
+    /// packets the decoder skips anyway; they stay lazy.
+    ///
+    /// A packet that spans pages is LAZY too, represented as one packet
+    /// whose range stitches the spans — a range can only be contiguous, so a
+    /// spanning packet keeps a RANGE PER SPAN and this walk stitches them
+    /// into a materialized payload at completion (a spanning Opus packet is
+    /// at most ~127 KB of payload; materializing one is bounded by that).
+    public static func readLazy(url: URL) throws -> OpusPacketStream {
+        // mappedIfSafe: no read happens here — pages come in on touch and
+        /// the evictor drops them under pressure.
+        let data = try Data(contentsOf: url, options: .mappedIfSafe)
+        var info: StreamInfo?
+        var packets: [OpusPacketStream.Packet] = []
+        packets.reserveCapacity(65_536)
+        /// The byte ranges of the spans of the packet currently being
+        /// assembled — one entry while the packet lives on one page, several
+        /// while it spans pages, emptied when it completes.
+        var pending: [Range<Int>] = []
+        var previousGranule: UInt64 = 0
+        var offset = 0
+        let count = data.count
+        var sawPage = false
+
+        while offset < count {
+            guard let page = Page(data: data, at: offset) else {
+                if sawPage, allZero(data, from: offset, to: count) { break }
+                throw sawPage ? OggError.truncated : OggError.notOgg
+            }
+            sawPage = true
+            guard page.end <= count else { throw OggError.truncated }
+            let packetsEndingHere = page.segments.filter { $0.count < 255 }.count
+
+            var completed = 0
+            for segment in page.segments {
+                guard segment.upperBound <= count else { throw OggError.truncated }
+                pending.append(segment)
+                guard segment.count < 255 else { continue }   // 255: packet continues
+                completed += 1
+                let granule = granuleFor(
+                    completedPacket: completed, packetsEndingHere: packetsEndingHere,
+                    page: page, previousGranule: previousGranule)
+                if packets.isEmpty, pending.count == 1 {
+                    // OpusHead — materialize: the decoder needs it whole.
+                    let payload = Data(data[data.startIndex + pending[0].lowerBound..<data.startIndex + pending[0].upperBound])
+                    info = streamInfo(firstPacket: payload)
+                    packets.append(OpusPacketStream.Packet(payload: payload, granule: granule, index: 0))
+                } else if pending.count == 1 {
+                    packets.append(OpusPacketStream.Packet(range: pending[0], granule: granule, index: packets.count))
+                } else {
+                    // A packet that spans pages: stitch its spans now. The
+                    // result is at most one packet's payload (~127 KB cap
+                    // in Opus), so materializing it costs nothing against
+                    // the mapped read it replaces.
+                    var stitched = Data()
+                    stitched.reserveCapacity(pending.reduce(0) { $0 + $1.count })
+                    for span in pending {
+                        stitched.append(data[data.startIndex + span.lowerBound..<data.startIndex + span.upperBound])
+                    }
+                    packets.append(OpusPacketStream.Packet(payload: stitched, granule: granule, index: packets.count))
+                }
+                pending.removeAll(keepingCapacity: true)
+            }
+            previousGranule = page.granule
+            offset = page.end
+        }
+
+        guard pending.isEmpty else { throw OggError.truncated }
+        guard let info else { throw OggError.notOgg }
+        if case .other(let codec) = info.codec {
+            // Not Opus — report the codec by NAME, the way the eager walk
+            // does, so the reader's message names what the file holds. The
+            // magic lives in the first packet's first bytes (already read).
+            throw NotOpusStreamError(codec: codec)
+        }
+        let headerBytes = packets.first?.payload.map { [UInt8]($0) }
+        return OpusPacketStream(
+            packets: packets,
+            headerPacket: headerBytes,
+            sampleRate: info.sampleRate,
+            channels: info.channels,
+            preSkip: info.preSkip,
+            mappedSource: data
+        )
+    }
+
+    /// A lazy read of a valid Ogg stream that carries something other than
+    /// Opus — the lazy counterpart of the eager walk's "give the codec
+    /// name to the caller's failure path".
+    public struct NotOpusStreamError: LocalizedError, Sendable {
+        public let codec: String
+        public var errorDescription: String? {
+            "This Ogg stream holds \(codec), not Opus."
+        }
+    }
+
     private static func allZero(_ data: Data, from: Int, to: Int) -> Bool {
         for index in from..<to where data[data.startIndex + index] != 0 { return false }
         return true

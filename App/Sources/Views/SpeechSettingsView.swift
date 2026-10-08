@@ -11,42 +11,46 @@ struct SpeechSettingsView: View {
     /// next chunk with no restart.
     @AppStorage("supertonicRenderQuality") private var supertonicRenderQuality = "high"
 
-    /// Kokoro's quality dial — a two-state mirror of the Engine picker's
-    /// Kokoro rows, presented as a quality setting (2026-10-08 user ask).
-    /// Kokoro has no step parameter; its quality knob IS the model tier
-    /// (fp32 vs uint8). The Binding maps onto `player.engineKind` directly
-    /// so this picker and the Engine picker can never disagree.
+    /// Kokoro's quality dial (2026-10-08 device feedback: the Engine picker
+    /// had TWO Kokoro rows AND a separate quality picker — three ways to say
+    /// the same thing). Now the Engine picker has ONE Kokoro row and this
+    /// section is the tier choice. Kokoro has no step parameter; its quality
+    /// knob IS the model tier (fp32 vs uint8), stored under `kokoroTier` and
+    /// read by `SpeechPlayer.kokoroWantsBigModel` — the one kind maps onto
+    /// whichever tier this dial picks.
     ///
     /// Extracted into its own View-builder member: as an inline Section the
     /// whole `body` Form grew past the type-checker's patience (the CI
-    /// "unable to type-check in reasonable time" round), and `$kokoroQuality`
-    /// inside the huge body also sent the member-lookup sideways.
+    /// "unable to type-check in reasonable time" round).
     private var kokoroQualitySection: some View {
         Section {
-            Picker("Render quality", selection: kokoroQuality) {
-                Text("High — fp32 (~341 MB)").tag("high")
-                Text("Compact — uint8 (~177 MB)").tag("compact")
+            Picker("Kokoro quality", selection: kokoroQuality) {
+                Text("High (~341 MB)").tag("high")
+                Text("Compact (~177 MB)").tag("compact")
             }
             .pickerStyle(.inline)
         } header: {
             Text("Kokoro quality")
         } footer: {
-            Text("Kokoro's quality setting is its model tier: High is the full-precision model, Compact is the uint8 build — same voices, half the size, a small quality step down. The tier in use downloads from its section below; switching here takes effect immediately.")
+            Text("Kokoro's quality setting is its model tier: High is the full-precision model, Compact is the smaller uint8 build — same 28 voices, roughly half the size, a small quality step down. The tier in use downloads from its section below; switching takes effect immediately.")
         }
     }
 
     private var kokoroQuality: Binding<String> {
         Binding(
-            get: { player.engineKind == .kokoroSmall ? "compact" : "high" },
+            get: { player.kokoroWantsBigModel ? "high" : "compact" },
             set: { newValue in
-                player.engineKind = newValue == "compact" ? .kokoroSmall : .kokoroOnnx
+                UserDefaults.standard.set(newValue == "compact" ? "compact" : "high", forKey: "kokoroTier")
+                // Re-drive the engine through the same rebuild a kind switch
+                // uses, so the tier change applies NOW (a rebuild is
+                // idempotent when the tier did not actually change).
+                player.rebuildKokoroTier()
             }
         )
     }
 
     private var neuralEngineIsActive: Bool {
-        (player.engineKind == .kokoroOnnx || player.engineKind == .kokoroSmall
-            || player.engineKind == .supertonic)
+        (player.engineKind == .kokoro || player.engineKind == .supertonic)
             && !player.usingSystemFallback
     }
 
@@ -59,8 +63,7 @@ struct SpeechSettingsView: View {
 
     private var neuralModelMissing: Bool {
         switch player.engineKind {
-        case .kokoroOnnx: return !models.isReady
-        case .kokoroSmall: return !models.smallIsReady
+        case .kokoro: return !models.isReady && !models.smallIsReady
         case .supertonic: return !models.supertonicIsReady
         default: return false
         }
@@ -68,7 +71,6 @@ struct SpeechSettingsView: View {
 
     private var voicePickerScope: VoicePickerSheet.Scope {
         switch player.engineKind {
-        case .kokoroSmall: return .kokoroSmall
         case .supertonic: return .supertonic
         default: return .kokoro
         }
@@ -76,7 +78,6 @@ struct SpeechSettingsView: View {
 
     private var voiceSectionHeader: String {
         switch player.engineKind {
-        case .kokoroSmall, .kokoroOnnx: return "Kokoro voice"
         case .supertonic: return "Supertonic voice"
         default: return "Kokoro voice"
         }
@@ -108,18 +109,13 @@ struct SpeechSettingsView: View {
             } header: {
                 Text("Speech engine")
             } footer: {
-                Text("Listed worst to best. Supertonic sounds the best (10 voice styles, 31 languages). Kokoro uint8 (~177 MB) is the lightweight tier; Kokoro fp32 is the solid default. All use the same 28 voices.")
+                Text("Listed worst to best. Supertonic sounds the best (10 voice styles, 31 languages). Kokoro runs on-device with 28 voices — its High/Compact download choice is in the Kokoro quality section below.")
             }
 
-            // Kokoro's quality dial, mirroring the Supertonic one's shape.
-            // Kokoro has NO step parameter — its quality knob IS the model
-            // tier (fp32 vs the uint8 quantization), so this picker switches
-            // engineKind between the two tiers the same way the Engine picker
-            // above does. Shown only when a Kokoro tier is active. A tier
-            // whose model is not downloaded shows its download hint from the
-            // sections below — the switch itself stays enabled so the user
-            // can read what Compact offers before committing to the download.
-            if player.engineKind == .kokoroOnnx || player.engineKind == .kokoroSmall {
+            // Kokoro's quality dial — the tier choice (fp32/uint8), shown
+            // while the one Kokoro engine is active. See the property's
+            /// comment for why it is a separate member.
+            if player.engineKind == .kokoro {
                 kokoroQualitySection
             }
 
@@ -208,9 +204,9 @@ struct SpeechSettingsView: View {
 
             if player.engineKind == .supertonic {
                 Section {
-                    Picker("Render quality", selection: $supertonicRenderQuality) {
+                    Picker("Supertonic quality", selection: $supertonicRenderQuality) {
                         Text("High — always full").tag("high")
-                        Text("Balanced — 6 steps").tag("balanced")
+                        Text("Balanced — middle step").tag("balanced")
                         Text("Automatic — sheds when very hot").tag("automatic")
                         Text("Fast — lowest quality").tag("fast")
                     }

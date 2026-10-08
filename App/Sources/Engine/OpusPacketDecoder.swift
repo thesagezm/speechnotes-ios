@@ -50,6 +50,9 @@ public final class OpusPacketDecoder {
     /// 1.0 for the common unity case.
     private let outputGain: Double
     private let packets: [OpusPacketStream.Packet]
+    /// The stream itself — a LAZY stream's payloads are read from its
+    /// mapped source through this reference (`payload(of:)`).
+    private let stream: OpusPacketStream
     private var index: Int
     private var scratch: [Float]
 
@@ -96,6 +99,7 @@ public final class OpusPacketDecoder {
         format = built
         self.opus = lib
         self.packets = stream.packets
+        self.stream = stream
         // Never start on the headers (granule 0, an Ogg-only concept).
         let firstAudio = stream.packets.firstIndex { $0.granule > 0 } ?? stream.packets.count
         self.index = max(startAtPacket, firstAudio)
@@ -123,8 +127,16 @@ public final class OpusPacketDecoder {
         let limit = max(1, packetLimit)
 
         while produced < limit, index < packets.count {
-            let packet = Array(packets[index].payload)
+            let packetMeta = packets[index]
             index += 1
+            // Lazy streams keep payloads in the mapped source; a payload
+            // that stops being readable (moved file, evicted provider
+            /// storage) ends the chunk rather than the session.
+            guard let packetData = stream.payload(of: packetMeta) else {
+                if produced == 0 { throw OpusDecoderError.noOutput }
+                break
+            }
+            let packet = [UInt8](packetData)
             let frames = OpusLib.frameCount(packet: packet)
             guard frames > 0, frames * channels <= scratch.count else { continue }
             for slot in scratch.indices { scratch[slot] = 0 }
@@ -203,13 +215,25 @@ public final class OpusPacketDecoder {
                     left = base[frameBase] + 0.707 * base[frameBase + 1]
                     right = base[frameBase + 2] + 0.707 * base[frameBase + 1]
                     if channels >= 5 {
-                        left += 0.5 * base[frameBase + 3]
-                        right += 0.5 * base[frameBase + 4]
+                        // Full-cast books (the 2026-10-09 device report:
+                        // "the background... details you have decided to
+                        // remove that should be audible... they don't have
+                        // to be as loud as the main audio but should be
+                        // quite audible") put ambience, music and crowd in
+                        // the surrounds. −3 dB (0.707) is the ITU Lo/Ro
+                        // upper bound and keeps them clearly present without
+                        // competing with the narration in the center.
+                        left += 0.707 * base[frameBase + 3]
+                        right += 0.707 * base[frameBase + 4]
                     }
                     if channels >= 6 {
+                        // LFE at −6 dB (was −12): a full-cast mix's low
+                        // bed (room rumble, score swells) lives here and
+                        // −12 made it inaudible. −6 keeps texture without
+                        // the rumble masking speech.
                         let lfe = base[frameBase + channels - 1]
-                        left += 0.25 * lfe
-                        right += 0.25 * lfe
+                        left += 0.5 * lfe
+                        right += 0.5 * lfe
                     }
                 }
                 peak = max(peak, abs(left), abs(right))

@@ -4,22 +4,22 @@ import SwiftUI
 /// tap-to-audition so a voice is heard before it's committed. Works for both
 /// neural engines via `scope`.
 struct VoicePickerSheet: View {
+    /// 2026-10-08: `kokoroSmall` is gone — the two Kokoro tiers merged into
+    /// ONE engine with a quality dial, so the picker has one Kokoro scope
+    /// (either tier plays the same 28 voices).
     enum Scope {
         case kokoro
-        case kokoroSmall
         case supertonic
 
         var engineKind: SpeechPlayer.EngineKind {
             switch self {
-            case .kokoroSmall: return .kokoroSmall
             case .supertonic: return .supertonic
-            case .kokoro: return .kokoroOnnx
+            case .kokoro: return .kokoro
             }
         }
 
         var title: String {
             switch self {
-            case .kokoroSmall: return "Kokoro voice (small model)"
             case .supertonic: return "Supertonic voice"
             case .kokoro: return "Kokoro voice"
             }
@@ -39,16 +39,15 @@ struct VoicePickerSheet: View {
 
     private var selectedVoice: String {
         switch scope {
-        case .kokoroSmall, .kokoro: return player.voice
+        case .kokoro: return player.voice
         case .supertonic: return player.supertonicVoice
         }
     }
 
     private var modelReady: Bool {
         switch scope {
-        case .kokoroSmall: return models.smallIsReady
+        case .kokoro: return models.isReady || models.smallIsReady
         case .supertonic: return models.supertonicIsReady
-        case .kokoro: return models.isReady
         }
     }
 
@@ -70,7 +69,6 @@ struct VoicePickerSheet: View {
 
     private var recentKey: String {
         switch scope {
-        case .kokoroSmall: return "recentKokoroSmallVoices"
         case .supertonic: return "recentSupertonicVoices"
         case .kokoro: return "recentKokoroVoices"
         }
@@ -255,7 +253,7 @@ struct VoicePickerSheet: View {
     private func select(_ descriptor: VoiceDescriptor) {
         Haptics.tap()
         switch scope {
-        case .kokoroSmall, .kokoro: player.voice = descriptor.id
+        case .kokoro: player.voice = descriptor.id
         case .supertonic: player.supertonicVoice = descriptor.id
         }
         // An explicit pick during a sounding audition wins over the restore.

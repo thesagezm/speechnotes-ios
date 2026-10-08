@@ -64,8 +64,10 @@ final class OpusDecodeRealBookTests: XCTestCase {
         let opus = try OpusLib(head: headerPacket)
         var frames = 0
         var peak: Float = 0
-        for packet in stream.packets.prefix(40) {
-            let bytes = Array(packet.payload)
+        for packetMeta in stream.packets.prefix(40) {
+            // Eager or lazy: `payload(of:)` is the one access path.
+            guard let packetData = stream.payload(of: packetMeta) else { continue }
+            let bytes = [UInt8](packetData)
             let expected = OpusLib.frameCount(packet: bytes)
             guard expected > 0 else { continue }
             var pcm = [Float](repeating: 0, count: expected * opus.channels)

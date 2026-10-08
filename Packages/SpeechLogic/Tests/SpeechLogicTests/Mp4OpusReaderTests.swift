@@ -177,6 +177,8 @@ final class Mp4OpusReaderTests: XCTestCase {
         XCTAssertEqual(stream.sampleRate, 48_000)
         // Two 960-sample samples per chunk, granulated in stts order.
         XCTAssertEqual(stream.packets.map { $0.granule }, [960, 1_920, 2_880, 3_840])
+        // `payload` is optional since the lazy-stream shape arrived (eager
+        // packets always carry it; lazy ones read through the mapped source).
         XCTAssertEqual(stream.packets[0].payload, Data([0xFC, 0xFF, 0xFE]))
         XCTAssertEqual(stream.duration, (3_840 - 312) / 48_000.0, accuracy: 1e-9)
     }

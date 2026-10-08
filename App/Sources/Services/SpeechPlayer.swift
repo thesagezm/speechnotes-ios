@@ -9,24 +9,31 @@ import SpeechLogic
 @MainActor
 final class SpeechPlayer: ObservableObject {
     enum EngineKind: String, CaseIterable, Identifiable {
-        // Declaration order = picker order, worst quality first (user-set):
-        // Apple system voice, small Kokoro (uint8), full Kokoro (fp32),
-        // Supertonic. The Settings picker and download sections mirror this.
+        // Declaration order = picker order (user-set). Kokoro is ONE engine
+        // with a quality dial (2026-10-08 device feedback: two Kokoro rows
+        // in the Engine picker + a separate "Kokoro quality" picker read as
+        // three ways to say the same thing) — the uint8/fp32 tier choice
+        // lives in the quality section, and the picker rows below expose
+        // only the engines that are genuinely different machines.
         case system
-        case kokoroSmall
-        case kokoroOnnx
+        case kokoro
         case supertonic
 
         var id: String { rawValue }
 
         var label: String {
             switch self {
-            case .kokoroSmall: return "Kokoro — small · uint8 (~177 MB)"
             case .system: return "Apple system voice"
-            case .kokoroOnnx: return "Kokoro — on-device neural, 28 voices"
+            case .kokoro: return "Kokoro — on-device neural, 28 voices"
             case .supertonic: return "Supertonic — best quality, multilingual"
             }
         }
+
+        /// The stored-preference tier this engine kind resolves to when the
+        /// Kokoro fp32 model is missing but the small one is present — and
+        /// the tier the quality dial switches between. `kokoro` is the one
+        /// kind; `kokoroSmall`/`kokoroOnnx` are TIERS the kind maps onto.
+        var isKokoro: Bool { self == .kokoro }
     }
 
     @Published private(set) var state: SpeechState = .idle
@@ -566,15 +573,10 @@ final class SpeechPlayer: ObservableObject {
         switch engineKind {
         case .system:
             return "Apple voice"
-        case .kokoroOnnx:
+        case .kokoro:
             return usingSystemFallback
                 ? "Apple voice (model missing)"
-                : VoiceCatalog.subtitle(for: voice, kind: .kokoroOnnx)
-        case .kokoroSmall:
-            // The small tier shares the fp32 set's 28-voice catalog.
-            return usingSystemFallback
-                ? "Apple voice (model missing)"
-                : VoiceCatalog.subtitle(for: voice, kind: .kokoroOnnx)
+                : VoiceCatalog.subtitle(for: voice, kind: .kokoro)
         case .supertonic:
             return usingSystemFallback
                 ? "Apple voice (model missing)"
@@ -590,33 +592,33 @@ final class SpeechPlayer: ObservableObject {
     init() {
         let defaults = UserDefaults.standard
         rateMultiplier = defaults.object(forKey: "rateMultiplier") as? Double ?? 1.0
-        // v0.6 and earlier also shipped a Metal Kokoro engine ("kokoro");
-        // it was removed in v0.7 — carry that preference over to the ONNX engine.
-        // v1.3 shipped a Kitten engine ("kitten"), removed in this round —
-        // its slot in the picker is now the small Kokoro tier, so carry that
-        // preference over too.
+        // v1.7.4 merged the two Kokoro picker rows into ONE engine with a
+        // quality dial, so the preference becomes `kokoro` + a separate
+        // tier flag. Older stored values all carry over:
+        //  - "kokoroOnnx" (v1.5–1.7.3 fp32) and the v0.6–v0.7 "kokoro"
+        //    (removed Metal engine) → Kokoro at High;
+        //  - "kokoroSmall"/"kitten" (the uint8 tier, both spellings) →
+        //    Kokoro at Compact;
+        //  - "soprano" (removed v1.7.1) → Kokoro at High, voice cleared.
         let storedEngine = defaults.string(forKey: "engineKind")
-        if storedEngine == "kokoro" {
-            defaults.set(EngineKind.kokoroOnnx.rawValue, forKey: "engineKind")
-            engineKind = .kokoroOnnx
-        } else if storedEngine == "kitten" {
-            defaults.set(EngineKind.kokoroSmall.rawValue, forKey: "engineKind")
-            defaults.removeObject(forKey: "kittenVoice")
-            defaults.removeObject(forKey: "recentKittenVoices")
-            engineKind = .kokoroSmall
-        }
-        // v1.7.1 removed the failed Soprano engine entirely — carry the
-        // preference over like the removed Metal/Kitten engines before it,
-        // and clear the voice id it shipped with.
-        else if storedEngine == "soprano" {
-            defaults.set(EngineKind.kokoroOnnx.rawValue, forKey: "engineKind")
-            if defaults.string(forKey: "voice") == "soprano" {
+        let carriedKind: EngineKind
+        if storedEngine == "kokoro" || storedEngine == "kokoroOnnx" || storedEngine == "soprano" {
+            carriedKind = .kokoro
+            if storedEngine == "soprano", defaults.string(forKey: "voice") == "soprano" {
                 defaults.set("am_eric", forKey: "voice")
             }
-            engineKind = .kokoroOnnx
+        } else if storedEngine == "kokoroSmall" || storedEngine == "kitten" {
+            carriedKind = .kokoro
+            defaults.set("kokoroTier", forKey: "compact")
+            defaults.removeObject(forKey: "kittenVoice")
+            defaults.removeObject(forKey: "recentKittenVoices")
         } else {
-            engineKind = EngineKind(rawValue: storedEngine ?? "") ?? .system
+            carriedKind = EngineKind(rawValue: storedEngine ?? "") ?? .system
         }
+        if storedEngine != nil, storedEngine != carriedKind.rawValue {
+            defaults.set(carriedKind.rawValue, forKey: "engineKind")
+        }
+        engineKind = carriedKind
         voice = defaults.string(forKey: "voice") ?? "am_eric"
         supertonicVoice = defaults.string(forKey: "supertonicVoice") ?? "M1"
         supertonicLang = defaults.string(forKey: "supertonicLang") ?? "en"
@@ -750,17 +752,17 @@ final class SpeechPlayer: ObservableObject {
     private var kokoroIdleUnloadTask: Task<Void, Never>?
     private func scheduleKokoroIdleUnload() {
         kokoroIdleUnloadTask?.cancel()
-        guard (engineKind == .kokoroOnnx || engineKind == .kokoroSmall), onnxEngine != nil else { return }
+        guard engineKind == .kokoro, onnxEngine != nil else { return }
         kokoroIdleUnloadTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 5 * 60 * 1_000_000_000)
             guard !Task.isCancelled, let self else { return }
-            guard self.engineKind == .kokoroOnnx || self.engineKind == .kokoroSmall else { return }
+            guard self.engineKind == .kokoro else { return }
             guard self.state == .idle, !self.isExporting else { return }
             guard self.onnxEngine?.hasLoadedModel == true else { return }
             Log.shared.info("SpeechPlayer: unloading idle Kokoro sessions")
             let keepVoice = self.voice
             self.onnxEngine = nil
-            self.onnxEngineFileIsBig = self.engineKind == .kokoroOnnx
+            self.onnxEngineFileIsBig = self.kokoroWantsBigModel
             self.rebuildEngine()
             self.onnxEngine?.voice = keepVoice
         }
@@ -770,6 +772,14 @@ final class SpeechPlayer: ObservableObject {
     /// the fp32 and uint8 tiers share one slot, so a tier switch must
     /// rebuild it rather than reuse the other tier's session.
     private var onnxEngineFileIsBig = true
+
+    /// The user's Kokoro tier choice: true = fp32 (High), false = uint8
+    /// (Compact). A Compact choice whose model is missing falls back to
+    /// fp32 at build time (`rebuildEngine` decides from what is actually
+    /// downloaded) — the dial is the INTENT, the build is the reality.
+    var kokoroWantsBigModel: Bool {
+        UserDefaults.standard.string(forKey: "kokoroTier") != "compact"
+    }
 
     private func rebuildOnnxEngine(big: Bool) {
         if onnxEngine == nil || onnxEngineFileIsBig != big {
@@ -835,6 +845,16 @@ final class SpeechPlayer: ObservableObject {
         abandonLiveSession(reason: "self-heal")
     }
 
+    /// Re-drives the engine build after a Kokoro TIER change (the quality
+    /// dial) — the same rebuild a kind switch performs, public because the
+    /// settings view owns the dial. A tier change mid-session abandons the
+    /// live session exactly like an engine switch: the fp32 and uint8
+    /// graphs are different sessions and audio cannot continue across them.
+    func rebuildKokoroTier() {
+        guard engineKind == .kokoro else { return }
+        rebuildEngine()
+    }
+
     private func rebuildEngine() {
         // A live session belongs to the OLD engine. Stopping it makes that
         // core publish .idle — but its onStateChanged closure fails the
@@ -868,23 +888,37 @@ final class SpeechPlayer: ObservableObject {
             engine = supertonicEngine
             usingSystemFallback = false
             Log.shared.info("SpeechPlayer: engine → Supertonic (\(supertonicVoice), \(supertonicLang))")
-        } else if engineKind == .kokoroSmall, ModelManager.shared.smallIsReady {
-            rebuildOnnxEngine(big: false)
-            engine = onnxEngine
-            usingSystemFallback = false
-            Log.shared.info("SpeechPlayer: engine → Kokoro small uint8 (\(voice))")
-        } else if engineKind == .kokoroOnnx, ModelManager.shared.isReady {
-            rebuildOnnxEngine(big: true)
-            engine = onnxEngine
-            usingSystemFallback = false
-            Log.shared.info("SpeechPlayer: engine → Kokoro ONNX (\(voice))")
+        } else if engineKind == .kokoro {
+            // The tier the DIAL asks for, falling back to whichever Kokoro
+            // model is actually present — Compact with only fp32 downloaded
+            // plays fp32, and vice versa; the pick is logged either way.
+            let wantsBig = kokoroWantsBigModel
+            let big = wantsBig
+                ? (ModelManager.shared.isReady || !ModelManager.shared.smallIsReady)
+                : (ModelManager.shared.smallIsReady || !ModelManager.shared.isReady)
+            let bigReady = big ? ModelManager.shared.isReady : ModelManager.shared.smallIsReady
+            if bigReady {
+                rebuildOnnxEngine(big: big)
+                engine = onnxEngine
+                usingSystemFallback = false
+                Log.shared.info("SpeechPlayer: engine → Kokoro \(big ? "fp32" : "uint8") (\(voice))")
+            } else {
+                // Neither model present — the system fallback.
+                if systemEngine == nil {
+                    systemEngine = SystemEngine()
+                }
+                systemEngine?.voiceIdentifier = systemVoiceIdentifier
+                engine = systemEngine
+                usingSystemFallback = true
+                Log.shared.info("SpeechPlayer: neural engine selected but model missing — system voice in use")
+            }
         } else {
             if systemEngine == nil {
                 systemEngine = SystemEngine()
             }
             systemEngine?.voiceIdentifier = systemVoiceIdentifier
             engine = systemEngine
-            usingSystemFallback = (engineKind == .kokoroOnnx || engineKind == .kokoroSmall || engineKind == .supertonic)
+            usingSystemFallback = engineKind == .supertonic
             if usingSystemFallback {
                 Log.shared.info("SpeechPlayer: neural engine selected but model missing — system voice in use")
             }
@@ -1207,13 +1241,12 @@ final class SpeechPlayer: ObservableObject {
 
         // Resolve the codename to its engine kind — a Supertonic style code
         // auditioned while Kokoro is active would play through the wrong
-        // engine. Kokoro codenames keep the CURRENT Kokoro tier (small or
-        // fp32) instead of always jumping to the big model.
+        // engine. Kokoro codenames keep the CURRENT tier (the dial's choice).
         let targetKind: EngineKind
         if ModelManager.supertonicVoices.contains(codename) {
             targetKind = .supertonic
         } else if ModelManager.knownVoices.contains(codename) {
-            targetKind = engineKind == .kokoroSmall ? .kokoroSmall : .kokoroOnnx
+            targetKind = .kokoro
         } else {
             return
         }
@@ -1226,9 +1259,9 @@ final class SpeechPlayer: ObservableObject {
 
         let modelReady: Bool
         switch targetKind {
-        case .kokoroSmall: modelReady = ModelManager.shared.smallIsReady
+        case .kokoro:
+            modelReady = ModelManager.shared.isReady || ModelManager.shared.smallIsReady
         case .supertonic: modelReady = ModelManager.shared.supertonicIsReady
-        case .kokoroOnnx: modelReady = ModelManager.shared.isReady
         case .system: modelReady = false
         }
         guard modelReady else { return }
@@ -1238,7 +1271,7 @@ final class SpeechPlayer: ObservableObject {
         }
         switch targetKind {
         case .supertonic: supertonicVoice = codename
-        case .kokoroOnnx, .kokoroSmall: voice = codename
+        case .kokoro: voice = codename
         case .system: break // single-voice engines need no assignment
         }
         if commit {
@@ -1260,8 +1293,7 @@ final class SpeechPlayer: ObservableObject {
     /// once so the audition's commit path and the sheet cannot drift apart.
     private func recentKey(for kind: EngineKind) -> String {
         switch kind {
-        case .kokoroOnnx: return "recentKokoroVoices"
-        case .kokoroSmall: return "recentKokoroSmallVoices"
+        case .kokoro: return "recentKokoroVoices"
         case .supertonic: return "recentSupertonicVoices"
         case .system: return "recentSystemVoices"
         }
@@ -1287,7 +1319,7 @@ final class SpeechPlayer: ObservableObject {
             preAuditionState = nil
             auditioningVoice = nil
             switch saved.kind {
-            case .kokoroOnnx, .kokoroSmall:
+            case .kokoro:
                 voice = saved.voice
             case .supertonic:
                 supertonicVoice = saved.supertonicVoice
