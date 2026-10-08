@@ -30,8 +30,10 @@ import Foundation
 /// 3. **EXTH lives INSIDE record 0**, right after the fixed header. There is
 ///    no separate EXTH record; text starts at record 1.
 ///
-/// Not supported, and said so rather than half-done: Huff/CDIC compression
-/// (`'DH'`), KFX containers, and incremental INDX updates.
+/// Not supported, and said so rather than half-done: KFX containers and
+/// incremental INDX updates. Huff/CDIC compression ('DH') IS supported —
+/// `HuffCdicReader.swift` — which is what every store-bought `.azw`/`.azw3`
+/// carries.
 public enum MobiParser {
 
     // MARK: - Errors
@@ -39,9 +41,8 @@ public enum MobiParser {
     public enum MobiError: Error, Equatable {
         /// Not a Palm Database, or one whose `type`/`creator` is not a book.
         case notAMobi
-        /// A book this reader cannot decode: DRM-locked, or Huff/CDIC
-        /// compressed. Both are proprietary, and silent noise is worse than an
-        /// honest message.
+        /// A book this reader cannot decode: DRM-locked, or a KFX container.
+        /// Silent noise is worse than an honest message.
         case unsupportedVariant(String)
         case malformed(String)
     }
@@ -139,21 +140,39 @@ public enum MobiParser {
         switch header.compression {
         case 1, 2:
             break
-        case 17480:  // 0x4448 'DH' — Huff/CDIC tables, NOT "no compression";
-                     // reading its bitstream as raw bytes is binary noise.
-            throw MobiError.unsupportedVariant(
-                "This book uses Huff/CDIC compression, which isn't supported yet."
-            )
+        case 17480:  // 0x4448 'DH' — Huff/CDIC, the compression every
+                     // Kindle-produced .azw/.azw3 carries. The tables live in
+                     // two resource records after the text records (a HUFF
+                     // record + its CDIC dictionary records); decompressed
+                     // differently, below.
+            break
         default:
             throw MobiError.malformed("unknown compression \(header.compression)")
         }
 
         let records = try collectTextRecords(pdb: pdb, header: header)
-        var body = decompress(records, compression: header.compression)
+        var body: [UInt8]
+        if header.compression == 17480 {
+            let huffTables = try collectHuffCdicRecords(pdb: pdb, header: header)
+            var reader = try HuffCdicReader(huff: huffTables.huff, cdics: huffTables.cdics)
+            var out: [UInt8] = []
+            out.reserveCapacity(header.textLength)
+            for record in records {
+                out.append(contentsOf: reader.unpack(record))
+                if out.count > maxTextBytes {
+                    throw MobiError.malformed(
+                        "text records exceed the \(maxTextBytes / (1024 * 1024)) MB cap"
+                    )
+                }
+            }
+            body = out
+        } else {
+            body = [UInt8](decompress(Data(records), compression: header.compression))
+        }
         // Some writers end the last record with a sentinel '#'; it is not
         // content.
         if body.last == UInt8(ascii: "#") { body.removeLast() }
-        let html = decode(body, encoding: header.textEncoding)
+        let html = decode(Data(body), encoding: header.textEncoding)
         let meta = Exth(record: header.exthBlob)
         // One flatten, two consumers: the chapters AND the shelf summary read
         // the same item stream (the summary pass used to re-walk the whole
@@ -169,8 +188,8 @@ public enum MobiParser {
             author: meta.author,
             publisher: meta.publisher,
             language: meta.language,
-            cover: coverImage(pdb: pdb, header: header),
-            chapters: chapters(from: displayHTML),
+            cover: coverImage(pdb: pdb, header: header, exth: meta),
+            chapters: chapters(from: displayHTML, variant: header.isKF8 ? "kf8" : "mobi6"),
             inlineImages: inlineImages,
             variant: header.isKF8 ? "kf8" : "mobi6",
             summary: summary(from: items)
@@ -317,29 +336,60 @@ public enum MobiParser {
     /// Concatenates the text records, stripping each one's trailing-entry
     /// table first. Text always starts at record 1: EXTH lives INSIDE record 0
     /// in mobipocket books, there is no separate EXTH record.
-    static func collectTextRecords(pdb: PalmDatabase, header: MobiHeader) throws -> Data {
+    ///
+    /// Returns the STRIPPED records rather than a joined blob: PalmDOC
+    /// decompresses the concatenation (a back-reference may span records),
+    /// but Huff/CDIC decompresses RECORD BY RECORD (its bitstream restarts at
+    /// each record boundary), so the caller needs the per-record payloads.
+    static func collectTextRecords(pdb: PalmDatabase, header: MobiHeader) throws -> [Data] {
         let count = header.textRecordCount
         guard pdb.recordCount >= 1 + count else {
             throw MobiError.malformed(
                 "header declares \(count) text record(s) but the file has \(pdb.recordCount)"
             )
         }
-        var out = Data()
-        out.reserveCapacity(count * min(header.recordSize, 8192))
+        var out: [Data] = []
+        out.reserveCapacity(count)
+        var total = 0
         for index in 0..<count {
             guard let record = pdb.record(1 + index) else {
                 throw MobiError.malformed("text record \(index + 1) of \(count) is missing")
             }
             let cut = trailingEntryBytes(in: record, extraFlags: header.extraFlags)
             let payload = cut < record.count ? record.prefix(record.count - cut) : record
-            out.append(payload)
-            if out.count > maxTextBytes {
+            out.append(Data(payload))
+            total += payload.count
+            if total > maxTextBytes {
                 throw MobiError.malformed(
                     "text records exceed the \(maxTextBytes / (1024 * 1024)) MB cap"
                 )
             }
         }
         return out
+    }
+
+    /// The HUFF record and its CDIC dictionary records, which sit among the
+    /// resource records after the text records (found by magic — their
+    /// position is not fixed). Missing tables are an error, not a fallback:
+    /// the alternative is decoding the bitstream as noise.
+    static func collectHuffCdicRecords(pdb: PalmDatabase, header: MobiHeader) throws -> (huff: Data, cdics: [Data]) {
+        let firstResource = 1 + header.textRecordCount
+        var huff: Data?
+        var cdics: [Data] = []
+        for index in firstResource..<pdb.recordCount {
+            guard let record = pdb.record(index), record.count >= 16 else { continue }
+            if record[0..<4] == Data("HUFF".utf8), huff == nil {
+                huff = record
+            } else if record[0..<4] == Data("CDIC".utf8) {
+                cdics.append(record)
+            }
+        }
+        guard let huff, !cdics.isEmpty else {
+            throw MobiError.malformed(
+                "Huff/CDIC compression is declared but its tables are missing"
+            )
+        }
+        return (huff, cdics)
     }
 
     /// One variable-length count, read BACKWARDS from `size - 1`: seven bits
@@ -393,8 +443,7 @@ public enum MobiParser {
     /// the output, is skipped rather than clamped, exactly as the reference
     /// implementation does: clamping would splice unrelated bytes into prose.
     static func decompress(_ input: Data, compression: UInt16) -> Data {
-        if compression == 1 { return input }
-        let bytes = [UInt8](input)
+        if compression == 1 { return input }        let bytes = [UInt8](input)
         var out = [UInt8]()
         out.reserveCapacity(min(bytes.count * 4, maxTextBytes))
         var index = 0
@@ -577,17 +626,100 @@ public enum MobiParser {
 
     /// Splits the book into chapters that keep their own markup.
     ///
-    /// When the book carries at least two level-1/2 headings (every
-    /// chaptered book does — this is the readest/Koodo/Anx model too: the
-    /// foliate-js family renders each mobi SECTION as its own HTML file),
-    /// each chapter is one heading-delimited segment, verbatim — italics,
-    /// tables and illustrations come through. The title is the segment's
-    /// own opening heading text, never invented.
+    /// KF8 (`.azw3`) and MOBI6 carry different structure, and the one
+    /// h1/h2-heading rule served both badly:
     ///
-    /// A book with no headings at all (older Kindle conversions, and the
-    /// `.doc`-style fixture set) keeps the old path: headless chunking into
-    /// ~12 000-character spans of paragraphs, no HTML to preserve.
-    static func chapters(from html: String) -> [MobiChapter] {
+    /// * **KF8** rawML is a sequence of XHTML "flows" — `<html>…</html>` —
+    ///   whose section content sits AFTER each flow's close, and a
+    ///   reference-book's flows carry 165 `<h1>`s and 265 `<h2>`s
+    ///   (the 2026-10-08 device report: "the division of chapters is not
+    ///   accurate"). The flow boundary is the book's own chapter structure:
+    ///   each flow plus the content that follows it up to the next flow is
+    ///   one chapter, titled by its first `<h1>`.
+    /// * **MOBI6** keeps the heading rule: chapters at level-1/2 headings,
+    ///   h3+ staying inside as prose.
+    ///
+    /// Both paths keep the markup verbatim — italics, headings and
+    /// illustrations reach the generated EPUB. A book with no structure at
+    /// all (older conversions, the `.doc`-style fixture set) chunks into
+    /// ~12 000-character spans of paragraphs.
+    static func chapters(from html: String, variant: String) -> [MobiChapter] {
+        if variant == "kf8" {
+            let flowChapters = kf8FlowChapters(from: html)
+            if !flowChapters.isEmpty { return flowChapters }
+        }
+        return headingChapters(from: html)
+    }
+
+    /// KF8: one chapter per flow. The flow's `<html>…</html>` wrapper and its
+    /// following bare content (the section markup a KF8 writer puts after
+    /// `</html>`) both belong to the chapter; the title is the chapter's own
+    /// first `<h1>` text, never invented. Front-matter flows without an h1
+    /// take their `epub:type` (titlepage, copyright-page, toc…) as a title.
+    static func kf8FlowChapters(from html: String) -> [MobiChapter] {
+        guard let flowRegex = try? NSRegularExpression(pattern: "(?i)<html\\b[^>]*>.+?</html\\s*>") else {
+            return []
+        }
+        let ns = html as NSString
+        let matches = flowRegex.matches(in: html, range: NSRange(location: 0, length: ns.length))
+        // The flows must actually tile the book — a single stray <html>…</html>
+        // inside one MOBI6-style document is not a KF8 structure, and cutting
+        // it would throw away everything around it.
+        guard matches.count >= 2 else { return [] }
+
+        var result: [MobiChapter] = []
+        var boundaries: [Int] = []
+        for match in matches where result.count < maxChapters {
+            // Chapter span: this flow's OPEN through the next flow's open
+            // (the flow itself + the section content after its close).
+            boundaries.append(match.range.location)
+        }
+        guard !boundaries.isEmpty else { return [] }
+        // Preamble before the first flow (the XML declaration) belongs to
+        // the first chapter; a real KF8 file starts its first flow within
+        // the first hundred bytes.
+        for (index, start) in boundaries.enumerated() {
+            let end = index + 1 < boundaries.count ? boundaries[index + 1] : ns.length
+            let span = ns.substring(with: NSRange(location: start, length: end - start))
+            let prepared = prepare(span)
+            let items = Self.items(from: prepared)
+            var title: String?
+            var paragraphs: [String] = []
+            for item in items {
+                switch item {
+                case .heading(let text):
+                    if title == nil { title = text } else { paragraphs.append(text) }
+                case .paragraph(let text):
+                    paragraphs.append(text)
+                }
+            }
+            if paragraphs.isEmpty && title == nil { continue }
+            if title == nil, let sectionTitle = kf8SectionTitle(in: prepared) {
+                title = sectionTitle
+            }
+            result.append(MobiChapter(title: title, paragraphs: paragraphs, html: prepared))
+        }
+        return result
+    }
+
+    /// A title for a front-matter flow with no `<h1>`: its own
+    /// `epub:type="…"` on the section element ("titlepage", "toc", …) —
+    /// capitalized for the contents list. nil when the flow declares neither.
+    static func kf8SectionTitle(in prepared: String) -> String? {
+        guard let typeRegex = try? NSRegularExpression(pattern: #"epub:type="([a-z-]+)""#) else {
+            return nil
+        }
+        guard let match = typeRegex.firstMatch(
+            in: prepared, range: NSRange(prepared.startIndex..., in: prepared)
+        ), let range = Range(match.range(at: 1), in: prepared) else { return nil }
+        let raw = String(prepared[range])
+        let readable = raw.replacingOccurrences(of: "-", with: " ")
+        return readable.prefix(1).uppercased() + readable.dropFirst()
+    }
+
+    /// MOBI6: the heading-delimited path (KF8's fallback too, for a book
+    /// whose flows did not tile).
+    static func headingChapters(from html: String) -> [MobiChapter] {
         let prepared = prepare(html)
         let segments = chapterSegments(from: prepared)
         if segments.count <= 1 {
@@ -822,13 +954,19 @@ public enum MobiParser {
 
     // MARK: - EXTH
 
-    /// Metadata records. Only the handful the shelf shows are read; subjects,
-    /// ASINs, UUIDs and update stamps are skipped rather than decoded.
+    /// Metadata records. The handful the shelf and the cover path show are
+    /// read; subjects, ASINs, UUIDs and update stamps are skipped rather
+    /// than decoded.
     struct Exth {
         var title: String?
         var author: String?
         var publisher: String?
         var language: String?
+        /// EXTH 201/203, decoded: the record offset (from the first resource
+        /// record) of the cover / cover thumbnail. KindleUnpack's semantics;
+        /// `-1` when the writer left the field unset (`0xFFFFFFFF`).
+        var coverOffset: Int = -1
+        var thumbnailOffset: Int = -1
 
         init(record: Data) {
             guard record.count >= 12,
@@ -849,6 +987,12 @@ public enum MobiParser {
                 case 101 where !text.isEmpty: publisher = publisher ?? text
                 case 503 where !text.isEmpty: title = title ?? text
                 case 524 where !text.isEmpty: language = language ?? text
+                case 201 where payload.count >= 4:
+                    let value = Int(u32(payload, payload.count - 4))
+                    if value != 0xFFFF_FFFF { coverOffset = value }
+                case 203 where payload.count >= 4:
+                    let value = Int(u32(payload, payload.count - 4))
+                    if value != 0xFFFF_FFFF { thumbnailOffset = value }
                 default: break
                 }
                 cursor += length
@@ -858,28 +1002,55 @@ public enum MobiParser {
 
     // MARK: - Cover
 
-    /// The first image record. On every writer measured it is the cover. A
-    /// record that isn't a JPEG or PNG payload means the layout differs, and
-    /// writing it as `cover.jpg` would produce an undecodable file — so nil.
-    static func coverImage(pdb: PalmDatabase, header: MobiHeader) -> Data? {
+    /// The book's cover image record.
+    ///
+    /// The 2026-10-08 device report ("the cover page doesn't show") had two
+    /// layers: Huff/CDIC books never got this far (unsupported-variant
+    /// import error), and for the books that did, FIRST-image-record is
+    /// wrong on every KF8 — the real book measured had a 243×65 publisher
+    /// LOGO as its first image record while the cover (517×372) sat at the
+    /// EXTH 201 offset, 97 records later. Order of preference:
+    ///
+    /// 1. **EXTH 201 (KF8 cover offset)** — the writer's own declaration.
+    /// 2. **EXTH 203 (thumbnail offset)** — calibre writes this one.
+    /// 3. **First image record** — MOBI6 books and writers that set neither.
+    static func coverImage(pdb: PalmDatabase, header: MobiHeader, exth: Exth) -> Data? {
         let firstResource = 1 + header.textRecordCount
         guard pdb.recordCount > firstResource else { return nil }
+        for offset in [exth.coverOffset, exth.thumbnailOffset] where offset >= 0 {
+            let index = firstResource + offset
+            guard index < pdb.recordCount, let record = pdb.record(index),
+                  let image = Self.imagePayload(record) else { continue }
+            return image
+        }
         // The first resource record is NOT the cover. In a real book it is
         // usually the two-byte `INDX` index — which is exactly why no mobi
         // ever showed a cover: the magic-byte check ran against `INDX` and
         // gave up there. The resource records hold an index, a FLIS/FCIS
         // pair, a DCTL and then the book's images, in no guaranteed order, so
-        // the cover is the first record that actually IS an image. EXTH
-        // 201/203 (the KF8 cover offsets) would be the precise answer, but
-        // plenty of writers — calibre among them — leave those unset.
+        // the cover is the first record that actually IS an image. Writers
+        // that set neither EXTH field land here — but note a KF8's first
+        // image may be a small logo rather than the cover; that is the
+        // writer's choice, honored as declared.
         for index in firstResource..<pdb.recordCount {
-            guard let record = pdb.record(index), record.count > 8 else { continue }
-            let isJPEG = record[0] == 0xFF && record[1] == 0xD8
-            let isPNG = record[0] == 0x89 && record[1] == 0x50
-                && record[2] == 0x4E && record[3] == 0x47
-            if isJPEG || isPNG { return record }
+            guard let record = pdb.record(index), record.count > 8,
+                  let image = Self.imagePayload(record) else { continue }
+            return image
         }
         return nil
+    }
+
+    /// A record's bytes when they are a decodable image payload (JPEG, PNG
+    /// or GIF), nil otherwise. A record that is none of these is index or
+    /// layout furniture, and writing it as `cover.jpg` would produce an
+    /// undecodable file.
+    static func imagePayload(_ record: Data) -> Data? {
+        guard record.count > 8 else { return nil }
+        let isJPEG = record[0] == 0xFF && record[1] == 0xD8
+        let isPNG = record[0] == 0x89 && record[1] == 0x50
+            && record[2] == 0x4E && record[3] == 0x47
+        let isGIF = record[0] == 0x47 && record[1] == 0x49 && record[2] == 0x46
+        return isJPEG || isPNG || isGIF ? record : nil
     }
 
     // MARK: - Byte helpers

@@ -11,6 +11,20 @@ struct SpeechSettingsView: View {
     /// next chunk with no restart.
     @AppStorage("supertonicRenderQuality") private var supertonicRenderQuality = "high"
 
+    /// Kokoro's quality dial — a two-state mirror of the Engine picker's
+    /// Kokoro rows, presented as a quality setting (2026-10-08 user ask).
+    /// Kokoro has no step parameter; its quality knob IS the model tier
+    /// (fp32 vs uint8). The Binding maps onto `player.engineKind` directly
+    /// so this picker and the Engine picker can never disagree.
+    private var kokoroQuality: Binding<String> {
+        Binding(
+            get: { player.engineKind == .kokoroSmall ? "compact" : "high" },
+            set: { newValue in
+                player.engineKind = newValue == "compact" ? .kokoroSmall : .kokoroOnnx
+            }
+        )
+    }
+
     private var neuralEngineIsActive: Bool {
         (player.engineKind == .kokoroOnnx || player.engineKind == .kokoroSmall
             || player.engineKind == .supertonic)
@@ -76,6 +90,28 @@ struct SpeechSettingsView: View {
                 Text("Speech engine")
             } footer: {
                 Text("Listed worst to best. Supertonic sounds the best (10 voice styles, 31 languages). Kokoro uint8 (~177 MB) is the lightweight tier; Kokoro fp32 is the solid default. All use the same 28 voices.")
+            }
+
+            // Kokoro's quality dial, mirroring the Supertonic one's shape.
+            // Kokoro has NO step parameter — its quality knob IS the model
+            // tier (fp32 vs the uint8 quantization), so this picker switches
+            // engineKind between the two tiers the same way the Engine picker
+            // above does. Shown only when a Kokoro tier is active. A tier
+            // whose model is not downloaded shows its download hint from the
+            // sections below — the switch itself stays enabled so the user
+            // can read what Compact offers before committing to the download.
+            if player.engineKind == .kokoroOnnx || player.engineKind == .kokoroSmall {
+                Section {
+                    Picker("Render quality", selection: $kokoroQuality) {
+                        Text("High — fp32 (~341 MB)").tag("high")
+                        Text("Compact — uint8 (~177 MB)").tag("compact")
+                    }
+                    .pickerStyle(.inline)
+                } header: {
+                    Text("Kokoro quality")
+                } footer: {
+                    Text("Kokoro's quality setting is its model tier: High is the full-precision model, Compact is the uint8 build — same voices, half the size, a small quality step down. The tier in use downloads from its section below; switching here takes effect immediately.")
+                }
             }
 
             Section {
@@ -165,6 +201,7 @@ struct SpeechSettingsView: View {
                 Section {
                     Picker("Render quality", selection: $supertonicRenderQuality) {
                         Text("High — always full").tag("high")
+                        Text("Balanced — 6 steps").tag("balanced")
                         Text("Automatic — sheds when very hot").tag("automatic")
                         Text("Fast — lowest quality").tag("fast")
                     }
@@ -172,7 +209,7 @@ struct SpeechSettingsView: View {
                 } header: {
                     Text("Supertonic quality")
                 } footer: {
-                    Text("High renders every chunk with the full 8 denoising steps — the best sound, roughly twice the generation work (still faster than playback). Automatic drops to 4 steps only when the phone runs critically hot. Fast always uses 4 steps: quickest, with audible artifacts. Applies from the next chunk — no restart needed.")
+                    Text("High renders every chunk with the full 8 denoising steps — the best sound, roughly twice the generation work (still faster than playback). Balanced is the middle step: 6 steps, most of High's quality at ~3/4 of its time. Automatic drops to 4 steps only when the phone runs critically hot. Fast always uses 4 steps: quickest, with audible artifacts. Applies from the next chunk — no restart needed.")
                 }
             }
 

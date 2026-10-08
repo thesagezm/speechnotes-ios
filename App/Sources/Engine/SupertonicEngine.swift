@@ -44,15 +44,34 @@ final class SupertonicEngine: NSObject, SpeechEngine {
     /// the dial the user asked for lives in `userStep(for:)`.
     private let bankPolicy = RenderAheadBankPolicy()
 
-    // MARK: - The quality dial (2026-10-06 user ask)
+    // MARK: - The quality dial (2026-10-06 user ask; Balanced added 2026-10-08)
 
     /// How the user trades render quality against speed. Stored under
     /// `supertonicRenderQuality`; the default is HIGH — the user's stated
     /// preference ("likely to only ever use the high quality one").
-    enum RenderQuality: String {
+    ///
+    /// BALANCED is the 2026-10-08 ask ("step 4 lightning fast — poor
+    /// quality… step 8 slower — amazing quality… an intermediate"): 6 of
+    /// the 8 flow-matching steps. The step ladder is not linear in time —
+    /// the first steps do the coarse trajectory and the last ones the
+    /// detail — so 6 steps land measurably closer to 8 in quality while
+    /// costing roughly a quarter less synthesis time. A slider-driven
+    /// 5–8 range stays one user request away without re-architecting:
+    /// every consumer reads `userStep`, one switch.
+    enum RenderQuality: String, CaseIterable {
         case high        // 8 steps, always — the best sound
+        case balanced    // 6 steps, always — the intermediate the user asked for
         case automatic   // the policy's thermal gear (8; 4 at critical only)
         case fast        // 4 steps, always — fastest, audible artifacts
+
+        var label: String {
+            switch self {
+            case .high: return "High"
+            case .balanced: return "Balanced"
+            case .automatic: return "Automatic"
+            case .fast: return "Fast"
+            }
+        }
 
         static var current: RenderQuality {
             RenderQuality(rawValue: UserDefaults.standard.string(forKey: "supertonicRenderQuality") ?? "") ?? .high
@@ -66,6 +85,8 @@ final class SupertonicEngine: NSObject, SpeechEngine {
         switch RenderQuality.current {
         case .high:
             return RenderAheadBankPolicy.fullQualityTotalStep
+        case .balanced:
+            return 6
         case .automatic:
             return RenderAheadBankPolicy().totalStep(for: thermal)
         case .fast:

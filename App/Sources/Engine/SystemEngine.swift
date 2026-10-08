@@ -417,8 +417,22 @@ final class SystemEngine: NSObject, SpeechEngine {
     /// break (two or more newlines), ~0.2 s for a single line break, none
     /// for a plain sentence (Apple's own punctuation pause applies).
     ///
-    /// Read-along offsets are unaffected: `chunk.offset` addresses the
-    /// chunk's START, and only trailing characters are dropped.
+    /// The 2026-10-08 report ("long pauses between paragraphs AND SOME
+    /// PUNCTUATIONS") is the same pause INSIDE the chunk, not at its edge:
+    /// a paragraph boundary mid-chunk hands the utterance a blank line (the
+    /// unbounded pause again), and Apple also stretches each mark of a
+    /// sentence-punctuation run ("…", "!!!" — the dot-dot-dot is the one
+    /// users notice). Mid-text blank lines collapse to a single comma
+    /// (Apple's shortest break), and punctuation runs compact to one mark
+    /// before Apple ever sees them.
+    ///
+    /// Read-along is unaffected: the compaction only shortens runs
+    /// (`willSpeakRange` never spans a removed character — ranges end at the
+    /// word boundary Apple is about to speak), and it only fires mid-chunk
+    /// where ranges index the SPOKEN string, not the original. `chunk.offset`
+    /// still addresses the chunk's start in the original, so `charsDone`
+    /// drifts at most a few characters per chunk — far under the
+    /// sentence-piece spans the read-along highlights.
     static func spokenTextAndPause(for text: String) -> (text: String, pause: TimeInterval) {
         var newlineCount = 0
         var index = text.endIndex
@@ -429,9 +443,45 @@ final class SystemEngine: NSObject, SpeechEngine {
             index = previous
         }
         let trimmed = String(text[..<index])
-        let spoken = trimmed.isEmpty ? text : trimmed
+        let spoken = trimmed.isEmpty ? text : compactForSpeech(trimmed)
         let pause: TimeInterval = newlineCount >= 2 ? 0.45 : (newlineCount == 1 ? 0.2 : 0)
         return (spoken, pause)
+    }
+
+    /// The mid-chunk compaction: every newline (run) becomes one comma —
+    /// a paragraph pause the listener hears as a beat, not a dead-air
+    /// stretch — and every sentence-punctuation run compacts to its first
+    /// mark. Deliberately conservative: quotes, dashes, ellipsis-characters
+    /// and CJK punctuation pass through untouched.
+    static func compactForSpeech(_ text: String) -> String {
+        var out = ""
+        out.reserveCapacity(text.utf16.count)
+        var pendingNewline = false
+        var previousWasSentenceMark = false
+        for character in text {
+            if character == "\n" || character == "\r" {
+                pendingNewline = true
+                continue
+            }
+            if pendingNewline {
+                out.append(",")
+                pendingNewline = false
+                previousWasSentenceMark = false
+                // Fall through to emit the character that ended the run.
+            }
+            if ".!?…".contains(character) {
+                // A RUN of the SAME mark compacts ("..." → ".", "!!!" → "!");
+                // "?!" is two marks with different intents and passes whole.
+                if previousWasSentenceMark, out.last == character { continue }
+                out.append(character)
+                previousWasSentenceMark = true
+                continue
+            }
+            out.append(character)
+            previousWasSentenceMark = false
+        }
+        if pendingNewline { out.append(",") }
+        return out
     }
 
     private func startNextChunk() {

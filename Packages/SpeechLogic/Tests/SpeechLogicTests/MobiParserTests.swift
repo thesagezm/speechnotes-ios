@@ -64,8 +64,9 @@ final class MobiParserTests: XCTestCase {
         data.replaceSubrange(offset..<offset + 4, with: withUnsafeBytes(of: value.bigEndian) { Data($0) })
     }
 
-    /// A MOBI6 header with an EXTH block (title/author) appended, as real
-    /// books have it inside record 0.
+    /// A MOBI6 header with an EXTH block appended, as real books have it
+    /// inside record 0. `exthExtra` adds raw typed entries (used for the
+    /// cover-offset tests, where the payload is a u32, not text).
     private func makeHeaderRecord(
         compression: UInt16 = 2,
         textLength: Int,
@@ -75,6 +76,7 @@ final class MobiParserTests: XCTestCase {
         extraFlags: UInt16 = 0,
         exthTitle: String? = nil,
         exthAuthor: String? = nil,
+        exthExtra: [(Int, Data)] = [],
         headerLength: Int = 232
     ) -> Data {
         // EXTH records are built with appends: the `put` helper wraps
@@ -93,6 +95,13 @@ final class MobiParserTests: XCTestCase {
             appended(UInt32(type), to: &entry)
             appended(UInt32(8 + value.utf8.count), to: &entry)
             entry.append(contentsOf: Array(value.utf8))
+            entries.append(entry)
+        }
+        for (type, payload) in exthExtra {
+            var entry = Data()
+            appended(UInt32(type), to: &entry)
+            appended(UInt32(8 + payload.count), to: &entry)
+            entry.append(payload)
             entries.append(entry)
         }
         let exthPayloadBytes = entries.reduce(0) { $0 + $1.count }
@@ -214,9 +223,8 @@ final class MobiParserTests: XCTestCase {
     func testUncompressedCompressionReturnsInput() {
         let input = Data("plain text".utf8)
         XCTAssertEqual(MobiParser.decompress(input, compression: 1), input)
-        // 17480 ('DH', Huff/CDIC) is NOT a pass-through — parse() rejects it
-        // as an unsupported variant rather than decoding its bitstream as
-        // PalmDOC commands and producing noise.
+        // 17480 ('DH', Huff/CDIC) has its own decoder now — HuffCdicReader —
+        // and testHuffCDICDecodesATerminalLiteralBook covers it end to end.
     }
 
     // MARK: - Trailing entries
@@ -339,16 +347,15 @@ final class MobiParserTests: XCTestCase {
         }
     }
 
-    func testHuffCDICBookSaysSoRatherThanProducingNoise() {
-        // 'DH' = 0x4448 = 17480 — the compression word IS the two ASCII
-        // bytes, read big-endian.
+    func testHuffCDICBookWithoutTablesSaysMalformedNotNoise() {
+        // 'DH' declared but the HUFF/CDIC records are missing — an honest
+        // malformed error, never a decode of the bitstream as noise.
         let header = makeHeaderRecord(compression: 17480, textLength: 10, textRecordCount: 1)
         let pdb = makePDB(records: [header, Data("x".utf8)])
         XCTAssertThrowsError(try MobiParser.parse(book: pdb)) { error in
-            guard case MobiParser.MobiError.unsupportedVariant(let message) = error else {
-                return XCTFail("expected unsupportedVariant, got \(error)")
+            guard case MobiParser.MobiError.malformed = error else {
+                return XCTFail("expected malformed, got \(error)")
             }
-            XCTAssertTrue(message.contains("Huff/CDIC"), message)
         }
     }
 
@@ -395,7 +402,7 @@ final class MobiParserTests: XCTestCase {
     func testChaptersFromMarkupKeepHTMLAndTitles() {
         let html = "<h1>The Beginning</h1><p>It was <i>dark</i>.</p>"
             + "<h1>The End</h1><p>Fin.</p>"
-        let chapters = MobiParser.chapters(from: html)
+        let chapters = MobiParser.chapters(from: html, variant: "mobi6")
         XCTAssertEqual(chapters.count, 2)
         XCTAssertEqual(chapters[0].title, "The Beginning")
         XCTAssertTrue(chapters[0].html.contains("<i>dark</i>"), "inline emphasis lost")
@@ -411,9 +418,135 @@ final class MobiParserTests: XCTestCase {
         // whole book is one chapter and the assertion below proves nothing:
         // 24 paragraphs × ~1 000 characters is ~24k, i.e. two chunk flushes.
         let html = String(repeating: "<p>" + String(repeating: "word ", count: 200) + "</p>", count: 24)
-        let chapters = MobiParser.chapters(from: html)
+        let chapters = MobiParser.chapters(from: html, variant: "mobi6")
         XCTAssertGreaterThan(chapters.count, 1)
         XCTAssertTrue(chapters.allSatisfy { $0.html.isEmpty })
         XCTAssertTrue(chapters.allSatisfy { !$0.paragraphs.isEmpty })
+    }
+
+    // MARK: - KF8 flow chapters
+
+    /// The KF8 rawML shape, distilled from a real store book: each flow is a
+    /// complete `<html>…</html>` document whose section content sits AFTER
+    /// the flow's close, one flow per chapter.
+    private let kf8RawML =
+        "<html><head><title>t</title></head><body></body></html>"
+        + "<section epub:type=\"titlepage\"><p>Title page art</p></section>"
+        + "<html><head><title>t</title></head><body></body></html>"
+        + "<section epub:type=\"chapter\"><h1>DEVELOPMENTAL MILESTONES</h1>"
+        + "<p>Chapter body.</p><h2>A subsection</h2><p>Still this chapter.</p></section>"
+        + "<html><head><title>t</title></head><body></body></html>"
+        + "<section epub:type=\"chapter\"><h1>TRAUMA EXAM</h1><p>Next body.</p></section>"
+
+    func testKF8FlowsSplitAtDocumentBoundariesNotEveryHeading() throws {
+        // The 2026-10-08 device report: a reference `.azw3` whose 165 h1s and
+        // 265 h2s all opened "chapters". The flow boundary is the book's own
+        // structure: three flows here, three chapters — the h2 stays inside.
+        let chapters = MobiParser.chapters(from: kf8RawML, variant: "kf8")
+        XCTAssertEqual(chapters.count, 3)
+        // Flow 1 has no h1: its epub:type becomes the title.
+        XCTAssertEqual(chapters[0].title, "Titlepage")
+        XCTAssertEqual(chapters[1].title, "DEVELOPMENTAL MILESTONES")
+        XCTAssertTrue(chapters[1].text.contains("Still this chapter."))
+        XCTAssertEqual(chapters[2].title, "TRAUMA EXAM")
+    }
+
+    func testKF8FlowChaptersKeepMarkup() throws {
+        let chapters = MobiParser.chapters(from: kf8RawML, variant: "kf8")
+        XCTAssertTrue(chapters[1].html.contains("<section epub:type=\"chapter\">"))
+        XCTAssertTrue(chapters[1].html.contains("<h1>DEVELOPMENTAL MILESTONES</h1>"))
+    }
+
+    func testKF8RequiresTwoFlowsFallsBackToHeadings() {
+        // One stray <html>…</html> inside a MOBI6-shaped document is not a
+        // KF8 structure — the heading path must run, not a one-chapter cut.
+        let html = "<h1>One</h1><p>First.</p>"
+            + "<html><head><title>t</title></head><body></body></html>"
+            + "<h1>Two</h1><p>Second.</p>"
+        let chapters = MobiParser.chapters(from: html, variant: "kf8")
+        XCTAssertEqual(chapters.count, 2)
+        XCTAssertEqual(chapters[0].title, "One")
+        XCTAssertEqual(chapters[1].title, "Two")
+    }
+
+    // MARK: - EXTH cover offsets
+
+    func testExthCoverOffsetWinsOverFirstImage() throws {
+        // The real-book layout: the first image record is a small logo, the
+        // cover sits at the EXTH 201 offset many records later.
+        let logo = Data([0xFF, 0xD8, 0xFF, 0xE0]) + Data(repeating: 0x11, count: 40)
+        let cover = Data([0xFF, 0xD8, 0xFF, 0xE0]) + Data(repeating: 0x22, count: 60)
+        let html = "<html><body><p>x</p></body></html>"
+        let header = makeHeaderRecord(
+            textLength: html.utf8.count,
+            textRecordCount: 1,
+            exthExtra: [(201, Data([0, 0, 0, 3]))]
+        )
+        // records: [header, text, logo, filler, filler, cover]
+        let pdb = makePDB(records: [header, palmdocEncode(html), logo, Data([0x00]), Data([0x00]), cover])
+        let book = try MobiParser.parse(book: pdb)
+        XCTAssertEqual(book.cover, cover)
+    }
+
+    func testCoverFallsBackToFirstImageWithoutExth() throws {
+        let logo = Data([0xFF, 0xD8, 0xFF, 0xE0]) + Data(repeating: 0x11, count: 40)
+        let html = "<html><body><p>x</p></body></html>"
+        let header = makeHeaderRecord(textLength: html.utf8.count, textRecordCount: 1)
+        let pdb = makePDB(records: [header, palmdocEncode(html), logo])
+        let book = try MobiParser.parse(book: pdb)
+        XCTAssertEqual(book.cover, logo)
+    }
+
+    // MARK: - Huff/CDIC
+
+    /// A minimal but REAL Huff/CDIC table pair: a canonical Huffman code
+    /// where every top byte is a terminal 8-bit entry, and a CDIC dictionary
+    /// of 256 identical phrases. Codes 0x00 decode through dict1[0] to
+    /// dictionary index (maxcode − code) >> 24 = 255 — proving the whole
+    /// path: HUFF table parse, CDIC dictionary parse, terminal lookup, output.
+    func testHuffCDICDecodesATerminalLiteralBook() throws {
+        func be32(_ v: UInt32) -> Data {
+            withUnsafeBytes(of: v.bigEndian) { Data($0) }
+        }
+        func be16(_ v: UInt16) -> Data {
+            withUnsafeBytes(of: v.bigEndian) { Data($0) }
+        }
+
+        // HUFF: magic, header length 0x18, off1 = 24, off2 = 24 + 4·256.
+        // off1 counts from the record's START, so the 24-byte header is
+        // magic(4) + length(4) + off1(4) + off2(4) + 8 bytes of padding —
+        // the real book's layout has two more u32s in there.
+        var huff = Data("HUFF".utf8)
+        huff.append(be32(0x18))
+        huff.append(be32(24))                      // off1
+        huff.append(be32(24 + 4 * 256))            // off2
+        huff.append(contentsOf: Data(repeating: 0, count: 8))
+        for _ in 0..<256 {
+            // codelen 8 (bits 0–4), terminal (bit 7), maxcode byte 0xFF:
+            // value 0xFF88 → maxcode = ((0xFF + 1) << 24) − 1 = 0xFFFFFFFF,
+            // so code 0x00 resolves to dictionary index 255.
+            huff.append(be32(0xFF88))
+        }
+        // dict2: 64 zero u32s — terminal entries never walk it, zeros parse.
+        huff.append(contentsOf: Data(repeating: 0, count: 4 * 64))
+
+        // CDIC: 256 phrases (index bits 8 → 1<<8 = 256), all "Hi ".
+        let phrase = Data("Hi ".utf8)
+        var cdic = Data("CDIC".utf8)
+        cdic.append(be32(0x10))                    // header length
+        cdic.append(be32(256))                     // phrase count
+        cdic.append(be32(8))                       // index bits: 1<<8 = 256
+        for _ in 0..<256 {
+            cdic.append(be16(UInt16(phrase.count)))  // length, bit 15 clear = expanded
+        }
+        for _ in 0..<256 {
+            cdic.append(phrase)
+        }
+
+        let payload = Data([0x00, 0x00, 0x00])     // 3 codes → "Hi Hi Hi "
+        let header = makeHeaderRecord(compression: 17480, textLength: 9, textRecordCount: 1)
+        let pdb = makePDB(records: [header, payload, huff, cdic])
+        let book = try MobiParser.parse(book: pdb)
+        XCTAssertEqual(book.summary, "Hi Hi Hi")
     }
 }

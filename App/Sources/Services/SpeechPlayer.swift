@@ -1187,7 +1187,15 @@ final class SpeechPlayer: ObservableObject {
     /// the picker's audition button. Tapping the sounding audition stops it;
     /// engine/voice are restored when the sample ends. No-op while a note is
     /// playing or the engine's model isn't downloaded.
-    func audition(voice codename: String) {
+    ///
+    /// `commit: true` (the row tap in the picker) SELECTS the voice as part
+    /// of the audition, so the sample's end restores nothing — the played
+    /// voice IS the selection now. This is the "Kokoro voices can't persist"
+    /// fix (2026-10-08): the old audition always queued a restore, so a
+    /// tapped-and-heard voice snapped back to the previous one the moment
+    /// the sample finished. `commit: false` (the waveform button) keeps the
+    /// listen-only contract the button always had.
+    func audition(voice codename: String, commit: Bool = true) {
         guard state == .idle, !isExporting else { return }
         if auditioningVoice == codename {
             stop()
@@ -1225,7 +1233,7 @@ final class SpeechPlayer: ObservableObject {
         }
         guard modelReady else { return }
 
-        if preAuditionState == nil {
+        if preAuditionState == nil, !commit {
             preAuditionState = (engineKind, voice, supertonicVoice)
         }
         switch targetKind {
@@ -1233,10 +1241,30 @@ final class SpeechPlayer: ObservableObject {
         case .kokoroOnnx, .kokoroSmall: voice = codename
         case .system: break // single-voice engines need no assignment
         }
+        if commit {
+            // The tap selected this voice AND plays its sample — the
+            // selection is the user's, so there is nothing to restore. The
+            // recents list reflects the pick, as a plain select() would.
+            var recent = UserDefaults.standard.stringArray(forKey: recentKey(for: targetKind)) ?? []
+            recent.removeAll { $0 == codename }
+            recent.insert(codename, at: 0)
+            UserDefaults.standard.set(Array(recent.prefix(5)), forKey: recentKey(for: targetKind))
+        }
         auditioningVoice = codename
         let name = VoiceCatalog.shortName(for: codename, kind: targetKind)
-        Log.shared.info("SpeechPlayer: auditioning \(codename)")
+        Log.shared.info("SpeechPlayer: auditioning \(codename) (commit \(commit))")
         engine?.speak(VoiceCatalog.auditionText(for: name), rateMultiplier: 1.0)
+    }
+
+    /// The recents key for an engine kind — the picker's own keys, spelled
+    /// once so the audition's commit path and the sheet cannot drift apart.
+    private func recentKey(for kind: EngineKind) -> String {
+        switch kind {
+        case .kokoroOnnx: return "recentKokoroVoices"
+        case .kokoroSmall: return "recentKokoroSmallVoices"
+        case .supertonic: return "recentSupertonicVoices"
+        case .system: return "recentSystemVoices"
+        }
     }
 
     /// An explicit selection made while an audition is still sounding wins:

@@ -227,7 +227,10 @@ struct VoicePickerSheet: View {
                 Haptics.tap()
             } else {
                 Haptics.press()
-                player.audition(voice: descriptor.id)
+                // The waveform button is the LISTEN-ONLY path: it auditions
+                // without committing, and the pre-audition voice comes back
+                // when the sample ends. Selecting is the row tap.
+                player.audition(voice: descriptor.id, commit: false)
             }
         } label: {
             ZStack {
@@ -257,6 +260,16 @@ struct VoicePickerSheet: View {
         }
         // An explicit pick during a sounding audition wins over the restore.
         player.cancelAuditionRestore()
+
+        // TAP-TO-AUDITION: a selection also plays the sample, COMMITTED —
+        // the sample's end restores nothing because the played voice is the
+        // selection now. This is the "Kokoro voices can't persist" fix: the
+        // old flow's restore-on-finish flipped a tapped-and-heard voice back
+        // to the previous one seconds later. The waveform button keeps the
+        // listen-only contract.
+        if modelReady, player.auditioningVoice != descriptor.id {
+            player.audition(voice: descriptor.id, commit: true)
+        }
 
         var recent = UserDefaults.standard.stringArray(forKey: recentKey) ?? []
         recent.removeAll { $0 == descriptor.id }

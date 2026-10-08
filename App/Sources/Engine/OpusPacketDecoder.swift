@@ -46,6 +46,9 @@ public final class OpusPacketDecoder {
     /// The OUTPUT's channel count — min(2, `channels`); see the format note
     /// in `init`. Multichannel streams are downmixed on the way out.
     private let outputChannels: Int
+    /// The header's output gain as a linear multiplier (RFC 7845 §4.2.1),
+    /// 1.0 for the common unity case.
+    private let outputGain: Double
     private let packets: [OpusPacketStream.Packet]
     private var index: Int
     private var scratch: [Float]
@@ -74,6 +77,14 @@ public final class OpusPacketDecoder {
         // `decoder rearm failed — noOutput` right after `stream ready`).
         channels = lib.channels
         outputChannels = min(2, channels)
+        // RFC 7845 §4.2.1: the header's output gain is "a gain to be
+        // applied by the decoder", in Q7.8 dB — the 2026-10-08 "something is
+        // lost quality wise" report on books that decode at the wrong
+        // loudness. libopus does NOT apply it (opus_multistream_decode has
+        // no such argument); players that honor the format apply it here.
+        // Unity gain (0) skips the multiply entirely.
+        let q78 = Double(lib.gain) / 256.0
+        outputGain = pow(10.0, q78 / 20.0)
         guard let built = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
             sampleRate: Double(lib.sampleRate),
@@ -152,15 +163,34 @@ public final class OpusPacketDecoder {
             // 3 = L C R, 5 = L C R Ls Rs, 6 = L C R Ls Rs LFE, 7 = … BC LFE,
             // 8 = … BL BR LFE — LFE is always LAST from 6 channels up, which
             // is why the index is derived rather than hard-coded.
+            //
+            // The downmix is NOT peak-normalized: five summed channels can
+            // exceed ±1.0, and the clamp here is the quality loss a listener
+            // hears as fuzz on loud passages — the 2026-10-08 "something is
+            // lost" report. A book's loudest moment scales the WHOLE chunk
+            // back inside range instead, so the crest keeps its shape.
             if outputChannels == channels {
-                for channel in 0..<outputChannels {
-                    let destination = destinations[channel]
-                    for frame in 0..<frames {
-                        destination[frame] = base[frame * channels + channel]
+                if outputGain != 1.0 {
+                    let gain = Float(outputGain)
+                    for channel in 0..<outputChannels {
+                        let destination = destinations[channel]
+                        for frame in 0..<frames {
+                            destination[frame] = base[frame * channels + channel] * gain
+                        }
+                    }
+                } else {
+                    for channel in 0..<outputChannels {
+                        let destination = destinations[channel]
+                        for frame in 0..<frames {
+                            destination[frame] = base[frame * channels + channel]
+                        }
                     }
                 }
                 return
             }
+            var mixed: [Float] = []
+            mixed.reserveCapacity(frames * 2)
+            var peak: Float = 0
             for frame in 0..<frames {
                 let frameBase = frame * channels
                 var left: Float
@@ -182,9 +212,20 @@ public final class OpusPacketDecoder {
                         right += 0.25 * lfe
                     }
                 }
-                destinations[0][frame] = max(-1, min(1, left))
+                peak = max(peak, abs(left), abs(right))
+                mixed.append(left)
+                mixed.append(right)
+            }
+            // Headroom: the gain the header asked for, then — only when the
+            // chunk actually clips — scale back so the crest sits at ±1.0.
+            // A quiet chapter pays nothing.
+            let gain = Float(outputGain)
+            let attenuation = peak * gain > 1 ? 1 / (peak * gain) : 1
+            let scale = gain * attenuation
+            for frame in 0..<frames {
+                destinations[0][frame] = mixed[frame * 2] * scale
                 if outputChannels == 2 {
-                    destinations[1][frame] = max(-1, min(1, right))
+                    destinations[1][frame] = mixed[frame * 2 + 1] * scale
                 }
             }
         }

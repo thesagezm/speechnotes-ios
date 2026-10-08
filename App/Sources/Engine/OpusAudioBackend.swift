@@ -94,7 +94,25 @@ final class OpusAudioBackend: BookAudioBackend {
 
     var rate: Float {
         get { timePitch.rate }
-        set { timePitch.rate = max(0.5, min(3.0, newValue)) }
+        set {
+            let clamped = max(0.5, min(3.0, newValue))
+            timePitch.rate = clamped
+            // Crossing the unity boundary re-routes the graph. The rate
+            // applies to buffers scheduled AFTER the reconnect — the ones in
+            // the node's queue keep their node-clock sample time, so position
+            // stays continuous across the swap.
+            if abs(clamped - 1.0) < 0.01 {
+                if graphRoutesThroughTimePitch, node.engine != nil {
+                    connectBypassingTimePitch()
+                    if engine.isRunning, wantsPlayback, !node.isPlaying { node.play() }
+                }
+            } else {
+                if !graphRoutesThroughTimePitch, node.engine != nil {
+                    connectThroughTimePitch()
+                    if engine.isRunning, wantsPlayback, !node.isPlaying { node.play() }
+                }
+            }
+        }
     }
 
     var isRendering: Bool { engine.isRunning && node.isPlaying }
@@ -321,10 +339,18 @@ final class OpusAudioBackend: BookAudioBackend {
             engine.attach(timePitch)
             nodesAttached = true
         }
-        if connectedFormat != decoder.format {
-            engine.connect(node, to: timePitch, format: decoder.format)
-            engine.connect(timePitch, to: engine.mainMixerNode, format: decoder.format)
-            connectedFormat = decoder.format
+        // AVAudioUnitTimePitch is a phase-vocoder: even at rate 1.0 it
+        // re-synthesizes every buffer through its FFT overlap-add, and that
+        // pass is audibly lossy on speech ("something is lost quality wise",
+        // 2026-10-08 — the same class of smear AVAudioUnitTimePitch adds to
+        // music). At unity the graph bypasses it: player → mixer. Any other
+        // rate re-connects through it, and `rate`'s setter keeps working on
+        // the bypass because `connectTimePitch` re-routes on the next
+        // non-unity rate.
+        if abs(rate - 1.0) < 0.01 {
+            connectBypassingTimePitch()
+        } else {
+            connectThroughTimePitch()
         }
         if !engine.isRunning {
             do {
@@ -346,6 +372,32 @@ final class OpusAudioBackend: BookAudioBackend {
         pump()
     }
 
+    /// Which graph the player node feeds. `graphRoutesThroughTimePitch` is
+    /// the one piece of connect-state the rate path needs — `connectedFormat`
+    /// alone cannot tell "connected straight to the mixer" from "connected
+    /// through time-pitch", and a rate change that assumed the wrong one
+    /// would leave the node feeding a detached filter.
+    private var graphRoutesThroughTimePitch = false
+
+    private func connectBypassingTimePitch() {
+        guard let decoder else { return }
+        if !graphRoutesThroughTimePitch, connectedFormat == decoder.format { return }
+        engine.disconnectNodeOutput(node)
+        engine.connect(node, to: engine.mainMixerNode, format: decoder.format)
+        connectedFormat = decoder.format
+        graphRoutesThroughTimePitch = false
+    }
+
+    private func connectThroughTimePitch() {
+        guard let decoder else { return }
+        if graphRoutesThroughTimePitch, connectedFormat == decoder.format { return }
+        engine.disconnectNodeOutput(node)
+        engine.connect(node, to: timePitch, format: decoder.format)
+        engine.connect(timePitch, to: engine.mainMixerNode, format: decoder.format)
+        connectedFormat = decoder.format
+        graphRoutesThroughTimePitch = true
+    }
+
     /// The hardware sample rate changed under us. Repair the graph REGARDLESS
     /// of playback state — a resume against a graph invalidated by the route
     /// change is the silent-node condition (the same commit's own comment in
@@ -357,11 +409,19 @@ final class OpusAudioBackend: BookAudioBackend {
         Log.shared.info("OpusAudioBackend: engine configuration change — reconnecting")
         guard let decoder else { return }
         // Force the reconnect: a configuration change can invalidate the
-        // graph even when the node→mixer format is unchanged.
-        connectedFormat = nil
-        engine.connect(node, to: timePitch, format: decoder.format)
-        engine.connect(timePitch, to: engine.mainMixerNode, format: decoder.format)
-        connectedFormat = decoder.format
+        // graph even when the node→mixer format is unchanged. The rebuilt
+        // graph keeps the CURRENT routing (bypass at unity rate, time-pitch
+        // otherwise) — a config change must not silently re-introduce the
+        // phase-vocoder the rate path deliberately removed.
+        if abs(timePitch.rate - 1.0) < 0.01 {
+            connectedFormat = nil
+            graphRoutesThroughTimePitch = true   // so connectBypassing actually rewires
+            connectBypassingTimePitch()
+        } else {
+            connectedFormat = nil
+            graphRoutesThroughTimePitch = false
+            connectThroughTimePitch()
+        }
         engine.prepare()
         guard wantsPlayback else { return }
         AudioSessionSetup.activate(prefix: "OpusAudioBackend")
