@@ -246,3 +246,35 @@ reports on NOTES (books untouched), each root-caused from source:
    Read-along keeps clear air only (width > height, recomputed per body);
    host pads the column. Preview probe gains `.task(id: width)` so tables
    re-measure in the rail reflow's own transaction.
+
+## [2026-10-08 PM] Preview edge-shift REGRESSION — table probe feedback loop
+
+Commit `92eaebb` on `batch-c-d-session` (CI run 37787051212). Device report on
+the `289cb6b` build: preview content shoved to the leading edge in BOTH
+orientations, trailing padding gone, rotation no longer clears it. Editor
+fine, preview only. v1.7.2 (`ee04b30`) was clean — divergence began with the
+GFM tables.
+
+**Root cause — the width probe fed its own overflow back into layout.** Since
+the GFM tables landed, the container-width probe sat at the TOP of the content
+VStack as a bare `Color.clear`. `Color.clear` adopts ANY proposal, including a
+corrupt one: a table that laid out too wide pushed the VStack wider, the probe
+measured the overflow, the column math built a table to MATCH it, and the
+wider table pushed the VStack wider still — a self-consistent loop that
+pinned the document to the leading edge. `289cb6b`'s `.task(id: width)`
+amplifier re-committed the corrupt measurement even when the update cycle
+didn't fire, making it terminal. v1.7.2 was immune BY TOPOLOGY: its probe rode
+`.background()` of the table's own ScrollView — background children never
+influence the size of the view they measure. Second enabler: the GFM wrapper
+added the pan ScrollView only when the (corruptible) math said "overflows", so
+a mis-sized table rendered bare and pushed the document; v1.7.2 always
+wrapped its Grid in the pan ScrollView.
+
+**Fix (GFM tables kept):** probe back on the table's pan-scroll frame,
+background-only, no task amplifier; pan ScrollView UNCONDITIONAL (overflow
+pans within the table's bounds, the document cannot be pushed). The
+`overflows` flag stays in the cached layout as a diagnostic only.
+
+**Why books/editor were never affected:** the editor renders raw text (no
+table layout at all); the book readers host webview/PDFKit, which take the
+width they are offered.
