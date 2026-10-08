@@ -87,8 +87,12 @@ final class ImportService {
         // soft hyphen from a wrapped line, zero-width joiners, control bytes
         // from a broken export. Cleaning at import means the stored note is
         // speakable from the moment it lands, and the reader says exactly what
-        // the user sees.
-        let text = SpeechSanitizer.clean(raw)
+        // the user sees. DISPLAY-SAFE clean (2026-10-08): the stored note body
+        // is content, not speech text — emoji the file carried (keycaps,
+        // color circles, skin tones) must survive to the screen; the speech
+        // path re-derives its own cleaned text at play time and never reads
+        // the stored body as engine input.
+        let text = SpeechSanitizer.displaySafe(raw)
         guard !text.isEmpty else {
             Log.shared.error("ImportService: \(url.lastPathComponent) had no speakable text after cleaning")
             return nil

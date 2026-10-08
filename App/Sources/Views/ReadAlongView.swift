@@ -47,14 +47,13 @@ struct ReadAlongView: View {
         UIFont.preferredFont(forTextStyle: .body).pointSize * textScale
     }
 
-    /// This view's own width — landscape is simply "wide" for the rail inset,
-    /// and reading it locally keeps the inset correct on rotation's first
-    /// frame instead of one frame behind the environment value.
+    /// This view's own width — read from the probe below, recomputed every
+    /// body evaluation so it can never go stale across a layout-only reflow
+    /// (the rail minimize round trip resizes this scroll view without
+    /// firing onChange in the same transaction).
     @State private var proxyWidth: CGFloat = 0
-    /// Mirrors PlaybackRail's own storage: when the rail is minimized its
-    /// trailing column shrinks, and the text inset follows it so the
-    /// read-along gains the display room too.
-    @AppStorage("landscapeRailMinimized") private var railMinimized = false
+    /// Same probe, height half — "wide" is width > height, not a magic 500.
+    @State private var proxyHeight: CGFloat = 0
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -64,8 +63,14 @@ struct ReadAlongView: View {
                     .background(
                         GeometryReader { geo in
                             Color.clear
-                                .onAppear { proxyWidth = geo.size.width }
-                                .onChange(of: geo.size.width) { proxyWidth = $0 }
+                                .onAppear {
+                                    proxyWidth = geo.size.width
+                                    proxyHeight = geo.size.height
+                                }
+                                .onChange(of: geo.size.width) {
+                                    proxyWidth = $0
+                                    proxyHeight = geo.size.height
+                                }
                         }
                     )
                 LazyVStack(alignment: .leading, spacing: ReaderSpacing.readAlongRow * theme.readerBlockSpacing) {
@@ -89,7 +94,20 @@ struct ReadAlongView: View {
                 // so the inset is right on the very first frame of the new
                 // orientation (an environment value can arrive a frame late —
                 // the tab-rail bug).
-                .padding(.trailing, proxyWidth > 500 ? PlaybackRail.hostColumnWidth(minimized: railMinimized) + 24 : 16)
+                //
+                // 2026-10-08: proxyWidth starts at 0 and only updates via
+                // onAppear/onChange on the probe — a LAYOUT-ONLY reflow (the
+                // rail minimize round trip) resizes the scroll view without
+                // necessarily re-firing either hook in the same transaction,
+                // so the inset ran one width stale and the text sat under
+                // the rail's old column. A plain landscape test (width >
+                // height) can't go stale: it is recomputed from the probe's
+                // CURRENT size on every body evaluation, and the host (the
+                // note editor's ZStack overlay arrangement) now pads the
+                // column by the same hostColumnWidth the rail pins itself
+                // with — the read-along no longer needs to guess the rail's
+                // footprint at all, only to keep clear air on wide screens.
+                .padding(.trailing, proxyWidth > proxyHeight ? 24 : 16)
             }
             .onChange(of: activeRange?.lowerBound) { start in
                 guard let start else { return }

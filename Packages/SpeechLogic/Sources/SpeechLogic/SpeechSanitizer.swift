@@ -76,9 +76,61 @@ public enum SpeechSanitizer {
     /// U+2764 ❤ is the one deliberate edge: it carries both properties but
     /// its default presentation is text, and an existing test pins
     /// clean("Hello ❤ world") unchanged, so it stays.
+    ///
+    /// IMPORTANT (2026-10-08 device report): emoji are stripped from SPEECH
+    /// text only. They must NEVER reach stored note bodies — see
+    /// `displaySafe`: the display pipeline renders the note's own text and
+    /// re-derives speech text independently, so what the user typed (or what
+    /// an import brought in) is what the screen shows. The round-4 fix's
+    /// tests pinned this strip for the speech path and that contract is
+    /// unchanged.
     private static func isEmojiSymbol(_ scalar: Unicode.Scalar) -> Bool {
         if scalar.value == 0x2764 { return false }   // pinned text-default
         return scalar.properties.isEmojiPresentation
+    }
+
+    /// Storage-safe clean: control bytes, zero-width junk and bidi
+    /// controls have no business in a stored document either way, but EMOJI
+    /// — including keycap sequences, color circles and skin-tone modifiers
+    /// — are legitimate content a user typed on purpose. This variant keeps
+    /// them; `clean` still strips them for the speech engines.
+    ///
+    /// Why this exists: the note-creation paths (file import, clipboard,
+    /// drop, JEX) run their text through `SpeechSanitizer.clean` and store
+    /// the RESULT as the note body. Emoji-presentation scalars were
+    /// replaced by spaces there, so every note created from an import
+    /// silently lost its emoji — the "emojis/icons not showing" report
+    /// (number keycaps 🔟…1️⃣, color circles 🔴🟠🟢, and more). Sanitizing for
+    /// STORAGE is a different contract from sanitizing for SPEECH; this is
+    /// the storage one.
+    ///
+    /// Beyond the emoji themselves, the SEQUENCE scalars survive here and
+    /// only here: variation selectors (FE0F is half of every "1️⃣"), the
+    /// zero-width joiner (family/profession compounds), and the combining
+    /// keycap (20E3). They are invisible outside an emoji sequence and
+    /// essential inside one, so the display contract keeps them and the
+    /// speech contract drops them.
+    public static func displaySafe(_ text: String) -> String {
+        guard !text.isEmpty else { return text }
+        var out = String.UnicodeScalarView()
+        out.reserveCapacity(text.unicodeScalars.count)
+        for scalar in text.unicodeScalars {
+            if isEmojiSymbol(scalar)
+                || variationSelectors.contains(scalar)
+                || scalar == "\u{200D}"     // ZWJ: compounds emoji families
+                || scalar == "\u{20E3}" {    // combining keycap: 1 + FE0F + 20E3
+                out.append(scalar)
+                continue
+            }
+            if isUnspeakable(scalar) {
+                // Same replacement policy as clean(): never glue two words
+                // the source document kept apart.
+                out.append(" ")
+                continue
+            }
+            out.append(scalar)
+        }
+        return normalizeWhitespace(String(out))
     }
 
     /// Private Use Area — glyphs from an embedded font with no agreed

@@ -233,57 +233,63 @@ struct NoteEditorView: View {
                 && speechText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    /// Content + controls, arranged per orientation.
+    /// Content + controls, ONE identity across orientations.
     ///
-    /// Guided rotation (same fix as the book readers): one GeometryReader, one
-    /// content identity, explicit transition. The editor / preview /
-    /// read-along child never unmounts, so the text, the caret and the scroll
-    /// position survive; only the control strip re-arranges, under an
-    /// animation, instead of being rebuilt as a different container type
-    /// (a VStack→HStack swap is structural, so SwiftUI cannot interpolate it
-    /// — that was the flicker).
+    /// The 2026-10-08 restructure (round-trip distortion + rotation freeze
+    /// reports): `editorContent` sits at one stable position in the tree —
+    /// child 0 of the ZStack in BOTH orientations. The old
+    /// portrait-VStack / landscape-HStack branches placed it at two
+    /// DIFFERENT positions, and SwiftUI's structural identity is
+    /// positional: every rotation tore the subtree down and rebuilt it.
+    /// The preview's parse cache died with it (a full synchronous
+    /// re-parse of a long rich note on the main thread — the rotation
+    /// freeze), and the UITextView was remounted from scratch (caret,
+    /// scroll position and first responder gone). Only the cheap control
+    /// strip re-arranges now, as an overlay.
+    ///
+    /// The landscape rail is an overlay SIBLING, not a layout participant:
+    /// the reading column pads its own trailing edge by the rail's
+    /// documented column width (`hostColumnWidth`, the same function every
+    /// other surface reads), so there is no width negotiation between
+    /// flexible content and the rail to corrupt. The old HStack split
+    /// negotiated: content that claimed more than its leftover share made
+    /// the HStack over-wide, and GeometryReader CENTERED the over-wide
+    /// child — "the whole screen moved right, the rail was half off the
+    /// edge", persisting across rotation because the bad width claim
+    /// survived in @State until the editor unmounted. An overlay cannot
+    /// push anything.
     @ViewBuilder
     private var editorLayout: some View {
         GeometryReader { proxy in
             let landscape = proxy.size.width > proxy.size.height
-            ZStack(alignment: .bottom) {
+            ZStack(alignment: .bottomLeading) {
+                editorContent
+                    .safeAreaInset(edge: .bottom, spacing: 0) {
+                        if !landscape {
+                            PlayerControlsBar(
+                                speechText: speechText,
+                                note: currentNote,
+                                onBeforeToggle: { if player.state == .idle { updateSpeechCaches() } }
+                            )
+                        }
+                    }
+                    // The rail's column is a promise the CONTENT honours
+                    // directly — same width function the rail pins itself
+                    // with, so the two can never disagree.
+                    .padding(.trailing, landscape ? PlaybackRail.hostColumnWidth(minimized: railMinimized) : 0)
                 if landscape {
-                    HStack(spacing: 0) {
-                        editorContent
-                            // The leading column is the FLEXIBLE one. This is
-                            // what makes the minimize/maximize round trip work:
-                            // SwiftUI splits an HStack's width between
-                            // flexible children, and every child here is
-                            // flexible, so the rail's width promise (150 pt, or
-                            // 66 pt minimized) is only an IDEAL that the editor
-                            // text happily takes a share of — the rail ends up
-                            // mid-screen or squashed, and it looks like the rail
-                            // "moved" after the round trip. The book readers
-                            // have no such bug because their leading children
-                            // (webview / PDFKit) take exactly the width they
-                            // are offered and never compete.
-                            .layoutPriority(-1)
-                        editorRail
-                            .layoutPriority(1)
-                    }
-                    .transition(.opacity.combined(with: .move(edge: .trailing)))
-                } else {
-                    VStack(spacing: 0) {
-                        editorContent
-                        PlayerControlsBar(
-                            speechText: speechText,
-                            note: currentNote,
-                            onBeforeToggle: { updateSpeechCaches() }
-                        )
-                    }
-                    .transition(.opacity)
+                    editorRail
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                        .transition(.opacity.combined(with: .move(edge: .trailing)))
                 }
             }
             .animation(.easeInOut(duration: 0.22), value: landscape)
-            // The reading column re-flows with the SAME spring as the rail's
-            // own swap (PlaybackRail.body), so the host and the capsule move
-            // on one clock instead of the content snapping while the capsule
-            // glides.
+            // The reading column re-flows on the rail's own spring
+            // (PlaybackRail.body swaps on the same value), so the padding
+            // and the capsule move on one clock. Each property is animated
+            // by exactly ONE modifier — the old arrangement drove the rail's
+            // frame from two nested springs, and an interrupted double-drive
+            // could commit an intermediate frame.
             .animation(.spring(response: 0.35, dampingFraction: 0.85), value: railMinimized)
         }
     }
@@ -319,6 +325,14 @@ struct NoteEditorView: View {
     }
 
     /// Trailing rail carrying this note's playback controls in landscape.
+    /// `observesPlayer` — the rail reads play state live from the shared
+    /// SpeechPlayer (its own @EnvironmentObject) instead of waiting for this
+    /// view to re-evaluate. The bug it fixes: the landscape play glyph
+    /// stopped tracking taps "after a click or two" while the audio kept
+    /// starting/stopping fine — the rail's inputs were snap-shotted when
+    /// THIS body last ran, and a body that doesn't re-run can't refresh
+    /// them. Progress and generating now tick live, same as the portrait
+    /// PlayerControlsBar.
     private var editorRail: some View {
         PlaybackRail(
             action: PlaybackRail.Action(
@@ -329,7 +343,7 @@ struct NoteEditorView: View {
                     // Speak-time flush — the same synchronous cache update the
                     // portrait bar's onBeforeToggle performs, so the engine
                     // hears edits made in the last 300 ms.
-                    updateSpeechCaches()
+                    if player.state == .idle { updateSpeechCaches() }
                     player.togglePlay(SpeechText.forText(speechText), note: currentNote)
                 },
                 onStop: { player.stop() },
@@ -346,7 +360,8 @@ struct NoteEditorView: View {
                      && speechText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty),
             sessionActive: player.state == .speaking
                 || player.state == .paused
-                || player.state == .generating
+                || player.state == .generating,
+            observesPlayer: true
         )
     }
 

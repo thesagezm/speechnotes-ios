@@ -1,4 +1,5 @@
 import SwiftUI
+import SpeechLogic
 
 /// Lateral playback controls for landscape: a panel pinned to the trailing
 /// edge, with the playback surface kept to its leading side.
@@ -94,8 +95,22 @@ struct PlaybackRail: View {
     var sessionActive: Bool = false
     /// Surface-specific extra button (PDF per-chapter export).
     var extraTrailing: AnyView? = nil
+    /// 2026-10-08 landscape-notes report: the play glyph stopped tracking
+    /// taps after a click or two while playback itself kept working. The
+    /// rail derived every live value (progress, generating, session) from
+    /// inputs its HOST evaluated — so the glyph only refreshed when the
+    /// host happened to re-render. The portrait PlayerControlsBar holds
+    /// its own @EnvironmentObject and never had the bug. With this flag the
+    /// rail subscribes to the shared SpeechPlayer directly and reads play
+    /// state live, exactly like the portrait bar. The note editor sets it;
+    /// the book readers keep host-passed values because their `sessionActive`
+    /// is a per-chapter narrowing the rail cannot derive.
+    var observesPlayer: Bool = false
 
     @EnvironmentObject private var theme: AppTheme
+    /// The live player — the rail's own subscription, used when
+    /// `observesPlayer` is set (see there for why).
+    @EnvironmentObject private var livePlayer: SpeechPlayer
 
     /// Collapsed to a slim strip — the landscape twin of the portrait bar's
     /// `editorBarMinimized` pill (user request, round 6: minimize the rail
@@ -103,10 +118,39 @@ struct PlaybackRail: View {
     /// is the same control on every surface.
     @AppStorage("landscapeRailMinimized") private var minimized = false
 
+    // MARK: - Live state (observesPlayer)
+
+    /// The generating flag as it is RIGHT NOW — live from the player when
+    /// this rail observes it, the host's snapshot otherwise.
+    private var effectiveIsGenerating: Bool {
+        observesPlayer ? livePlayer.state == .generating : isGenerating
+    }
+
+    /// Whether a session is live RIGHT NOW. Live form mirrors the portrait
+    /// bar's state set (.speaking/.paused/.generating all count).
+    private var effectiveSessionActive: Bool {
+        if observesPlayer {
+            switch livePlayer.state {
+            case .speaking, .paused, .generating: return true
+            case .idle: return false
+            }
+        }
+        return sessionActive
+    }
+
+    private var effectiveProgress: Double? {
+        observesPlayer ? livePlayer.progress : progress
+    }
+
     /// Matches the portrait PlayerControlsBar's play glyph logic exactly, so
-    /// the same state reads the same in both orientations.
+    /// the same state reads the same in both orientations. Paused shows
+    /// play.fill (tap to continue) — the old rail showed pause.fill for
+    /// paused too, which read as "the button never changed".
     private var playIcon: String {
-        if isGenerating { return "hourglass" }
+        if effectiveIsGenerating { return "hourglass" }
+        if observesPlayer {
+            return livePlayer.state == .speaking ? "pause.fill" : "play.fill"
+        }
         return sessionActive && progress != nil ? "pause.fill" : "play.fill"
     }
 
@@ -238,7 +282,7 @@ struct PlaybackRail: View {
                     Circle()
                         .fill(.ultraThinMaterial)
                         .shadow(color: .black.opacity(0.18), radius: 8, y: 3)
-                    if let progress {
+                    if let progress = effectiveProgress {
                         Circle()
                             .trim(from: 0, to: max(0.001, min(1, progress)))
                             .stroke(theme.accentGradient, style: StrokeStyle(lineWidth: 3, lineCap: .round))
@@ -252,7 +296,7 @@ struct PlaybackRail: View {
             }
             .buttonStyle(.plain)
             .disabled(!isPlayEnabled)
-            .accessibilityLabel(sessionActive ? "Pause" : "Play")
+            .accessibilityLabel(effectiveSessionActive ? "Pause" : "Play")
 
             Button {
                 Haptics.tap()
@@ -366,7 +410,7 @@ struct PlaybackRail: View {
     private var middleGroup: some View {
         VStack(spacing: 14) {
             playButton
-            if sessionActive {
+            if effectiveSessionActive {
                 controlsRow
             }
         }
@@ -382,7 +426,7 @@ struct PlaybackRail: View {
             GeometryReader { proxy in
                 ZStack(alignment: .leading) {
                     Capsule().fill(Color.secondary.opacity(0.25))
-                    if let progress, progress > 0 {
+                    if let progress = effectiveProgress, progress > 0 {
                         Capsule()
                             .fill(theme.accentFadeGradient)
                             .frame(width: max(4, proxy.size.width * progress))
@@ -390,7 +434,7 @@ struct PlaybackRail: View {
                 }
             }
             .frame(height: 4)
-            if let progress {
+            if let progress = effectiveProgress {
                 Text("\(Int((progress * 100).rounded()))%")
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.secondary)
@@ -411,7 +455,9 @@ struct PlaybackRail: View {
                     HStack(spacing: 6) {
                         Image(systemName: "person.wave.2.fill")
                             .font(.caption)
-                        Text(voiceLabel)
+                        Text(observesPlayer && !livePlayer.currentVoiceDescription.isEmpty
+                              ? livePlayer.currentVoiceDescription
+                              : voiceLabel)
                             .font(.caption.weight(.medium))
                             .lineLimit(1)
                             .minimumScaleFactor(0.8)
@@ -441,7 +487,7 @@ struct PlaybackRail: View {
                 Circle()
                     .fill(theme.accentGradient)
                     .shadow(color: .black.opacity(0.15), radius: 6, y: 3)
-                if isGenerating {
+                if effectiveIsGenerating {
                     ProgressView()
                         .tint(.white)
                 } else {
@@ -454,7 +500,7 @@ struct PlaybackRail: View {
         }
         .buttonStyle(.plain)
         .disabled(!isPlayEnabled)
-        .accessibilityLabel(sessionActive ? "Pause" : "Play")
+        .accessibilityLabel(effectiveSessionActive ? "Pause" : "Play")
     }
 
     /// Read-along, stop and the surface's extra button — the same trio row

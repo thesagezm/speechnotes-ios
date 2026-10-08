@@ -580,7 +580,14 @@ struct NotesListView: View {
         // URL — because they all funnel through this one call. ImportService
         // already cleans file reads; this is the second, idempotent pass that
         // catches the paths that never touch a file.
-        let cleaned = SpeechText.forText(text)
+        //
+        // DISPLAY-SAFE (2026-10-08): the note body is content, not speech
+        // text. The old pass (`SpeechText.forText`) stripped emoji — number
+        // keycaps, color circles, skin-tone variants — out of every note
+        // created from a paste or drop, which is exactly the "emojis not
+        // showing" report. Control bytes and zero-width junk still go; the
+        // speech path derives its own emoji-free text at play time.
+        let cleaned = SpeechSanitizer.displaySafe(text)
         guard !cleaned.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             Haptics.warning()
             importErrorMessage = "That text has nothing to read aloud."

@@ -118,7 +118,10 @@ enum JexImporter {
             }
 
             // Rewrite image links: ../resources/<id>.png → local stored image.
-            var markdown = body
+            // DISPLAY-SAFE clean (2026-10-08): a Joplin note is stored
+            // content — its emoji must survive to the screen. The speech
+            // path re-derives cleaned text at play time.
+            var markdown = SpeechSanitizer.displaySafe(body)
             var imageTargets: [String: String] = [:]
             for (resourceID, link) in imported.resources {
                 guard let resource = resourcesByID[resourceID] else { continue }

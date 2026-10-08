@@ -177,4 +177,57 @@ final class SpeechSanitizerTests: XCTestCase {
         XCTAssertEqual(cleaned.utf16.count, raw.utf16.count - 1,
                        "an astral scalar is 2 UTF-16 units and one scalar replaces it")
     }
+
+    // MARK: - displaySafe (storage boundary, 2026-10-08)
+
+    /// The stored note body is CONTENT, not speech text. The note-creation
+    /// paths (import, clipboard, drop, JEX) store the sanitized result, so
+    /// an emoji-stripping pass there was silent data loss — the device
+    /// report of "number keycaps, colored circles and more not showing".
+    /// displaySafe keeps every emoji class clean() strips.
+    func testDisplaySafeKeepsEmoji() {
+        // Keycap sequence, colored circle, diversity (base + skin tone),
+        // flag pair, plain pictograph, VS-16 forms.
+        let raw = "Priorities: 1\u{FE0F}\u{20E3} 2\u{FE0F}\u{20E3} 🔟\n"
+            + "Status: 🔴 🟠 🟡 🟢\n"
+            + "Thumbs: \u{1F44D}\u{1F3FB} \u{1F44D}\u{1F3FF}\n"
+            + "Party \u{1F389} and \u{2705} done \u{274C} no \u{2B50} star"
+        let safe = SpeechSanitizer.displaySafe(raw)
+        XCTAssertEqual(safe, raw, "storage clean must not touch emoji content")
+    }
+
+    /// The other half of the storage contract: displaySafe still removes
+    /// what no document should carry — control bytes, soft hyphens, bidi
+    /// overrides, private-use glyphs. The zero-width JOINER is the one
+    /// zero-width scalar kept: it is essential inside emoji compounds
+    /// (family, profession sequences) and invisible everywhere else.
+    func testDisplaySafeStillStripsControlJunk() {
+        let raw = "Body\u{07}text with a soft\u{00AD}hyphen, \u{202E}bidi and \u{E000}pu"
+        let safe = SpeechSanitizer.displaySafe(raw)
+        XCTAssertFalse(safe.contains("\u{07}"))
+        XCTAssertFalse(safe.contains("\u{00AD}"))
+        XCTAssertFalse(safe.contains("\u{202E}"))
+        XCTAssertFalse(safe.contains("\u{E000}"))
+        XCTAssertTrue(safe.contains("Body text"),
+                      "the replacement must not glue two words the source kept apart")
+    }
+
+    /// Idempotence: a second pass over stored text must be a no-op (the
+    /// import paths may clean text that was already cleaned).
+    func testDisplaySafeIsIdempotent() {
+        let raw = "Clean \u{1F389} once 1\u{FE0F}\u{20E3} and \u{1F44D}\u{1F3FD} again"
+        let once = SpeechSanitizer.displaySafe(raw)
+        XCTAssertEqual(SpeechSanitizer.displaySafe(once), once)
+    }
+
+    /// The two contracts side by side: the SAME input, speech-cleaned on one
+    /// side (emoji gone) and storage-cleaned on the other (emoji intact).
+    func testSpeechVsStorageContractsDivergeExactlyOnEmoji() {
+        let raw = "🟢 go \u{07} and \u{1F389} ok"
+        let spoken = SpeechSanitizer.clean(raw)
+        let stored = SpeechSanitizer.displaySafe(raw)
+        XCTAssertFalse(spoken.contains("🟢"))
+        XCTAssertTrue(stored.contains("🟢"))
+        XCTAssertFalse(stored.contains("\u{07}"), "control bytes never survive storage")
+    }
 }

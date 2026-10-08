@@ -70,9 +70,23 @@ struct MarkdownPreviewView: View {
                     .frame(height: 0)
                     .background(
                         GeometryReader { proxy in
+                            // Measure NOW, in the layout pass itself: the old
+                            // onAppear/onChange pair only fired through the
+                            // update cycle, so a layout-only reflow (the
+                            // 2026-10-08 rail minimize/maximize round trip,
+                            // which resizes this scroll view without
+                            // re-running either hook in the same transaction)
+                            // left tables computing columns from the PREVIOUS
+                            // width — the padding distortion that persisted
+                            // until the editor was reopened. The body
+                            // re-evaluates whenever the host's @AppStorage
+                            // rail flag changes (the same transaction that
+                            // animates the reflow), so this read is both live
+                            // and cheap.
                             Color.clear
                                 .onAppear { measuredWidth = proxy.size.width }
                                 .onChange(of: proxy.size.width) { measuredWidth = $0 }
+                                .task(id: proxy.size.width) { measuredWidth = proxy.size.width }
                         }
                     )
                 ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
