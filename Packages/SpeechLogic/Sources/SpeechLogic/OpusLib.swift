@@ -64,9 +64,12 @@ public final class OpusLib {
         public let nbCoupled: Int
         public let streamMap: [UInt8]
     }
-
     public let channels: Int
     public let sampleRate = 48_000
+    /// The header's output gain, Q7.8 dB (RFC 7845 §4.2.1) — "a gain to be
+    /// applied by the decoder". libopus does not apply it; consumers of this
+    /// type do, as a linear multiplier: `pow(10, gain / 256 / 20)`.
+    public let gain: Int
 
     private let decoder: OpaquePointer
     private let map: [UInt8]
@@ -83,6 +86,7 @@ public final class OpusLib {
             throw OpusLibError.unsupportedMapping
         }
         channels = header.channels
+        gain = header.gain
         map = header.streamMap
         var error: Int32 = 0
         let created: OpaquePointer? = map.withUnsafeBufferPointer { buffer in

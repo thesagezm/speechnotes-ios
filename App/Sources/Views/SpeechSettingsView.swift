@@ -16,6 +16,25 @@ struct SpeechSettingsView: View {
     /// Kokoro has no step parameter; its quality knob IS the model tier
     /// (fp32 vs uint8). The Binding maps onto `player.engineKind` directly
     /// so this picker and the Engine picker can never disagree.
+    ///
+    /// Extracted into its own View-builder member: as an inline Section the
+    /// whole `body` Form grew past the type-checker's patience (the CI
+    /// "unable to type-check in reasonable time" round), and `$kokoroQuality`
+    /// inside the huge body also sent the member-lookup sideways.
+    private var kokoroQualitySection: some View {
+        Section {
+            Picker("Render quality", selection: kokoroQuality) {
+                Text("High — fp32 (~341 MB)").tag("high")
+                Text("Compact — uint8 (~177 MB)").tag("compact")
+            }
+            .pickerStyle(.inline)
+        } header: {
+            Text("Kokoro quality")
+        } footer: {
+            Text("Kokoro's quality setting is its model tier: High is the full-precision model, Compact is the uint8 build — same voices, half the size, a small quality step down. The tier in use downloads from its section below; switching here takes effect immediately.")
+        }
+    }
+
     private var kokoroQuality: Binding<String> {
         Binding(
             get: { player.engineKind == .kokoroSmall ? "compact" : "high" },
@@ -101,17 +120,7 @@ struct SpeechSettingsView: View {
             // sections below — the switch itself stays enabled so the user
             // can read what Compact offers before committing to the download.
             if player.engineKind == .kokoroOnnx || player.engineKind == .kokoroSmall {
-                Section {
-                    Picker("Render quality", selection: $kokoroQuality) {
-                        Text("High — fp32 (~341 MB)").tag("high")
-                        Text("Compact — uint8 (~177 MB)").tag("compact")
-                    }
-                    .pickerStyle(.inline)
-                } header: {
-                    Text("Kokoro quality")
-                } footer: {
-                    Text("Kokoro's quality setting is its model tier: High is the full-precision model, Compact is the uint8 build — same voices, half the size, a small quality step down. The tier in use downloads from its section below; switching here takes effect immediately.")
-                }
+                kokoroQualitySection
             }
 
             Section {
