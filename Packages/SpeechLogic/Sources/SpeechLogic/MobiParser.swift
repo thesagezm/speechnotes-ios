@@ -443,7 +443,8 @@ public enum MobiParser {
     /// the output, is skipped rather than clamped, exactly as the reference
     /// implementation does: clamping would splice unrelated bytes into prose.
     static func decompress(_ input: Data, compression: UInt16) -> Data {
-        if compression == 1 { return input }        let bytes = [UInt8](input)
+        if compression == 1 { return input }
+        let bytes = [UInt8](input)
         var out = [UInt8]()
         out.reserveCapacity(min(bytes.count * 4, maxTextBytes))
         var index = 0

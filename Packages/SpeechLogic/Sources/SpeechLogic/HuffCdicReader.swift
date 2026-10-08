@@ -40,7 +40,7 @@ struct HuffCdicReader {
     /// Canonical-code ladders for the non-terminal walk, indexed by codelen
     /// 0…32, values pre-shifted to the 32-bit lookahead's scale.
     private let mincode: [Int]
-    private let maxcode: [Int]
+    private let maxLadder: [Int]
     /// The CDIC phrase dictionary; entries expand in place on first use.
     private var dictionary: [(bytes: [UInt8], expanded: Bool)]
 
@@ -85,7 +85,7 @@ struct HuffCdicReader {
             maxs.append(((max + 1) << (32 - codelen)) - 1)
         }
         mincode = mins
-        maxcode = maxs
+        maxLadder = maxs
 
         var entries: [(bytes: [UInt8], expanded: Bool)] = []
         var remainingPhrases = -1
@@ -149,11 +149,13 @@ struct HuffCdicReader {
             var codelen = baseCodelen
             var maxcode = tableMax
             if !term {
+                // Canonical walk: extend the code length until the code falls
+                // inside [mincode[codelen], maxcode[codelen]].
                 while codelen < mincode.count, code < mincode[codelen] {
                     codelen += 1
                 }
-                guard codelen < maxcode.count else { break }
-                maxcode = maxcode[codelen]
+                guard codelen < maxLadder.count else { break }
+                maxcode = maxLadder[codelen]
             }
             n -= codelen
             bitsLeft -= codelen
