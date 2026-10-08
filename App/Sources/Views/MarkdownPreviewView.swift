@@ -61,34 +61,6 @@ struct MarkdownPreviewView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                // The table container-width probe. `Color.clear` adopts ANY
-                // proposal, so the width measured here IS the space tables
-                // get — where build 421 measured the table itself, read back
-                // its own (possibly overflowing) laid-out width and fed the
-                // column math its own overflow.
-                Color.clear
-                    .frame(height: 0)
-                    .background(
-                        GeometryReader { proxy in
-                            // Measure NOW, in the layout pass itself: the old
-                            // onAppear/onChange pair only fired through the
-                            // update cycle, so a layout-only reflow (the
-                            // 2026-10-08 rail minimize/maximize round trip,
-                            // which resizes this scroll view without
-                            // re-running either hook in the same transaction)
-                            // left tables computing columns from the PREVIOUS
-                            // width — the padding distortion that persisted
-                            // until the editor was reopened. The body
-                            // re-evaluates whenever the host's @AppStorage
-                            // rail flag changes (the same transaction that
-                            // animates the reflow), so this read is both live
-                            // and cheap.
-                            Color.clear
-                                .onAppear { measuredWidth = proxy.size.width }
-                                .onChange(of: proxy.size.width) { measuredWidth = $0 }
-                                .task(id: proxy.size.width) { measuredWidth = proxy.size.width }
-                        }
-                    )
                 ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
                     blockView(block)
                 }
@@ -283,22 +255,44 @@ struct MarkdownPreviewView: View {
     /// a table that wraps: long cells break across lines, columns share the
     /// width fairly, and the table only scrolls sideways when even a fair
     /// share cannot fit (a genuinely wide table, not a long sentence).
+    ///
+    /// 2026-10-08 regression fix (device report: content shoved to the left
+    /// edge in BOTH orientations after the GFM tables landed): the probe
+    /// used to sit at the TOP of the content VStack as a bare `Color.clear`
+    /// — but `Color.clear` adopts ANY proposal, including a corrupt one.
+    /// When a wide table (or a transient layout hiccup) made the VStack's
+    /// proposed width wider than the screen, the probe MEASURED that
+    /// overflow and the column math built a table to match it; the wider
+    /// table pushed the VStack wider still — a self-consistent feedback
+    /// loop that shoved the whole document toward the leading edge and
+    /// starved the trailing padding. v1.7.2 never had this because its
+    /// probe rode `.background()` of the table's OWN ScrollView: a
+    /// background child is laid out at the size of the view it is attached
+    /// to and never influences that view's size, so the probe reads the
+    /// table's proposed width without feeding the result back into layout.
+    /// The probe is back on that topology — per table, background-only —
+    /// and the pan ScrollView is UNCONDITIONAL so even a mis-sized table
+    /// pans inside its own bounds instead of pushing the document.
     @ViewBuilder
     private func tableView(headers: [[MarkdownText.StyledSpan]], rows: [[[MarkdownText.StyledSpan]]]) -> some View {
         let columnCount = max(headers.count, rows.map(\.count).max() ?? 0)
-        // Measure the CONTAINER width with a background-only GeometryReader:
-        // `.background()` content is laid out at the size of the view it is
-        // attached to and never influences that view's own size, so there is
-        // no collapse and no rounding feedback loop. (Wrapping the table in a
-        // foreground GeometryReader collapsed it to zero height — a
-        // horizontally-scrollable table reports ~zero ideal height — and the
-        // following block rendered on top of it.)
         grid(
             headers: headers,
             rows: rows,
             columnCount: columnCount
         )
-        .frame(maxWidth: .infinity, alignment: .leading)
+        // Background-only measure of the space the PAN SCROLL VIEW was
+        // offered (never of the table's laid-out content — that is the
+        // feedback loop). Multiple tables share one measuredWidth; the
+        // probe fires per layout pass, so a reflow (rail round trip,
+        // rotation) re-measures without waiting for the update cycle.
+        .background(
+            GeometryReader { proxy in
+                Color.clear
+                    .onAppear { measuredWidth = proxy.size.width }
+                    .onChange(of: proxy.size.width) { measuredWidth = $0 }
+            }
+        )
     }
 
     /// Last container width reported by the tables' measuring reader. Shared
@@ -341,11 +335,14 @@ struct MarkdownPreviewView: View {
             horizontalPadding: layout.horizontalPadding,
             rowSpacing: tableRowSpacing
         )
-        if layout.overflows {
-            ScrollView(.horizontal, showsIndicators: false) { content }
-        } else {
-            content
-        }
+        // UNCONDITIONAL pan. The conditional wrapper meant a table whose
+        // column math ran against a stale/corrupt width overflowed the
+        // document and pushed every following block — the reader's whole
+        // content slid toward the leading edge with the trailing padding
+        // gone. Inside a ScrollView, overflow pans within the table's own
+        // bounds and the document never moves. (v1.7.2 always wrapped its
+        // Grid this way and never pushed content.)
+        ScrollView(.horizontal, showsIndicators: false) { content }
     }
 
     /// The grid itself. Split out of `grid` so the scrolling wrapper can be
