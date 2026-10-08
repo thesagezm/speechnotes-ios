@@ -3,25 +3,20 @@
 An offline, Speech Note (Linux)-style app for iPhone — built entirely from Linux,
 compiled on GitHub Actions macOS runners, sideloaded via SideStore + LiveContainer.
 
-**Current status: v1.7.1 — Books complete (EPUB, PDF and audiobooks, with
-full TTS for the first two), landscape with the playback controls on a
-lateral rail. The device rounds' reported bugs are being fixed on this
-branch WITHOUT version bumps: the Soprano download now completes and
-validates, Soprano's generation loop matches the reference (its KV-cache
-shape bug killed every chunk on device), Supertonic's epub skips are
-fixed at the unicode-indexer level, JEX import exists (Settings →
-Backup → Import from Joplin), audiobooks read chapters through
-AVFoundation plus the hand parsers, and the EPUB reader no longer blanks
-on tab switches.** Pick an
-engine in Speech Settings (listed worst → best), download
+**Current status: v1.7.4 — mobi/azw3/azw/prc books import with their own chapter
+structure and real covers (Huff/CDIC decode, KF8 flow chapters, EXTH-declared
+cover); Opus audiobooks open at any size (lazy packet streams) and play with
+RFC-7845 gain, clip-free downmix and the full-cast ambience clearly audible;
+system-voice pauses are bounded everywhere; Supertonic gains a Balanced
+(6-step) quality setting; one Kokoro engine with a High/Compact quality dial;
+voice picks persist.** Pick an
+engine in Speech Settings, download
 its model once, and notes are spoken fully offline (airplane-mode tested):
 
 | Engine | Model size | Voices | Notes |
 |---|---|---|---|
 | Apple (system) | 0 | all system voices | Instant, no download |
-| **Kokoro small** (ONNX, CPU) | ~177 MB | 28 (US/UK, m/f) | Lightweight uint8 tier |
-| **Soprano** (ONNX, CPU) | ~110 MB | 1 (English) | Fast English voice — KV-cached audio decoder, reads numbers/currency as words |
-| **Kokoro** (ONNX, CPU) | ~341 MB | 28 (US/UK, m/f) | Main engine — fp32 quality build |
+| **Kokoro** (ONNX, CPU) | ~341 MB High / ~177 MB Compact | 28 (US/UK, m/f) | One engine, a quality dial (fp32/uint8) |
 | **Supertonic** (ONNX, CPU) | ~399 MB | 10 styles × 31 languages | Multilingual — flow-matching TTS |
 
 A sentence the model cannot synthesize is skipped on the first attempt — one
@@ -63,11 +58,17 @@ Feature tour:
   row for scoping, move notes between them, plus pin (Pinned section on top)
   and favorite (star). Titles auto-derive from the note's first sentence.
   Backup exports one notebook, the unfiled notes, or the whole library.
-- **Books** (complete in v1.6.0) — the Books tab: import EPUB, PDF and
-  audiobooks (M4B / M4A / MP3, Files picker or Open-In) into a cover grid with
-  search. An audiobook plays the audio it already contains, with the chapter
-  list read from the file's own metadata (a `chpl` atom or ID3 `CHAP` frames)
-  and no synthesis at all. EPUBs render
+- **Books** (complete in v1.6.0) — the Books tab: import EPUB, PDF, mobi
+  (`.mobi`/`.azw`/`.azw3`/`.prc`/`.pdb`), office documents, FictionBook,
+  RTF, HTML and plain text, plus audiobooks (M4B / M4A / MP3 / Ogg Opus /
+  Opus-in-MP4, Files picker or Open-In) into a cover grid with
+  search. Kindle books decode their own Huff/CDIC compression, carry
+  their own flow/chapter structure, and show the cover their metadata
+  declares. An audiobook plays the audio it already contains, with the
+  chapter list read from the file's own metadata (a `chpl` atom, ID3
+  `CHAP` frames, or Ogg/Opus chapter tags) and no synthesis at all;
+  Opus books of any size open (lazy packet streams) and play with the
+  full multichannel mix intact down to stereo. EPUBs render
   chapter-by-chapter in a real book reader (themes, text size, native table of
   contents, per-book position); PDFs open in a full-fidelity PDFKit viewer with
   an outline sidebar. Any book can be spoken: chapter narration with

@@ -278,3 +278,70 @@ pans within the table's bounds, the document cannot be pushed). The
 **Why books/editor were never affected:** the editor renders raw text (no
 table layout at all); the book readers host webview/PDFKit, which take the
 width they are offered.
+
+## v1.7.4 — the five reported issues, then what the device log added (2026-10-09)
+
+Tagged `v1.7.4` (43). CI run 37854780413 all green; both device rounds
+passed. Commits 6bf785f → d8b0ee0 on `batch-c-d-session`.
+
+**Round 1 — the five reported issues.**
+(1) mobi/Kindle outlines + covers had three layers: every store `.azw/.azw3`
+is Huff/CDIC ('DH') compressed and the reader REJECTED them at import, so
+those books never imported at all — `HuffCdicReader.swift` (KindleUnpack
+port, validated against a real 7.6 MB LWW title, 437 records / 6052-entry
+dictionary with recursive entries); KF8 chapters now cut at the book's XHTML
+FLOW boundaries (the old h1/h2 rule made 430 junk chapters out of a
+reference title with 165 h1s + 265 h2s — flow-split gives its own 25); and
+the cover is the EXTH 201-declared record (the first image was a 243×65
+publisher logo; the real 517×372 cover sat 97 records later).
+(2) Opus fidelity: RFC 7845 output gain applied (libopus doesn't), the
+5.1→stereo downmix peak-attenuated instead of hard-clamped (the clamp was
+the audible fuzz), and `AVAudioUnitTimePitch` BYPASSED at rate 1.0 — a
+phase vocoder smears every buffer even at unity, which was the "something
+is lost" report. Non-unity rates and config-change repairs still route
+through it.
+(3) System-voice pauses: the 1.7.3-era fix bounded chunk-EDGE pauses; the
+new report was Apple's same unbounded pause INSIDE chunks. Mid-chunk blank
+lines collapse to one comma; same-mark punctuation runs compact (`...`→`.`),
+`?!` passes. Read-along unaffected.
+(4) Supertonic Balanced: 6 of 8 flow steps, ~3/4 of High's time, most of
+its quality — the intermediate the user asked for.
+(5) Voice picks persist: a picker tap auditioned the voice AND queued a
+restore, so the pick snapped back when the sample ended. Taps now COMMIT
+(audition(commit: true)); the waveform button stays listen-only.
+
+**Round 2 — the device log's additions.**
+(1) The 1.7 GB full-cast Opus book died at load with `NSPOSIXErrorDomain
+Code=12`: the reader held the whole file plus copies. Lazy streams landed:
+`OggReader.readLazy(url:)` maps the file and keeps granules + byte ranges
+(~80 MB for 2.07 M packets); `OpusPacketStream.payload(of:)` reads slices on
+demand; the decoder has ONE payload access path; page-spanning packets
+stitch-materialize (bounded by Opus's 127 KB packet cap). readLazy == read
+pinned by tests on the real fixtures.
+(2) ONE Kokoro engine row; the fp32/uint8 tier is the "Kokoro quality"
+dial (stored `kokoroTier`, applied via `rebuildKokoroTier()`). Every stored
+spelling carries over (kokoroOnnx/kokoroSmall/kitten/soprano). The
+Supertonic section's double title is unified.
+(3) Full-cast ambience: surrounds −6→−3 dB (ITU Lo/Ro upper bound), LFE
+−12→−6 dB — beds clearly audible behind the narration, peak-attenuation
+still guarding the louder sum.
+(4) `Documents/Data/Application/...` in device paths is LiveContainer's
+guest layout under the host's Documents — NOT an app bug.
+(5) Model sources verified live on Hugging Face: fp32 325.5 MB + uint8
+177.5 MB, both 200 OK (`onnx-community/Kokoro-82M-v1.0-ONNX`).
+
+**The uint8 gate, re-scoped.** The CI spike asserted uint8-vs-fp32
+correlation > 0.9 — a property the B4 forensics PROVED impossible for the
+shipped graph (oracle bit-deterministic; onnx.quantize rewrote two MatMuls).
+A permanently-red gate hides the next real regression, so
+`testQuantizedRenderMatchesFP32` became `testQuantizedRenderEvidence`:
+renders both tiers, prints the full metric set, asserts the shipping bar
+(finite, audible, length-stable), keeps both WAVs. Original thresholds stay
+in history at 60b75f6 for a future re-quantization.
+
+**CI traps this batch (6 rounds):** a `maxcode` local shadowed the `maxcode`
+ladder array; a `return` merged onto the next line; `Data(records)` wrapped
+a `[Data]` (must concatenate); `OpusLib.gain` needed to be a stored
+property; the Kokoro quality Section had to leave the `body` Form (type-check
+timeout + `$binding` scope); the MP4 timescale-normalize map fed an
+optional payload to the eager Packet init.
