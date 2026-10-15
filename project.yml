@@ -123,6 +123,19 @@ targets:
           - CFBundleTypeName: Web page
             LSHandlerRank: Alternate
             LSItemContentTypes: [public.html, org.speechnotes.htmlz]
+          # The catch-all that makes the app appear in EVERY share sheet and
+          # "Open In" menu — a website URL, a .pptx from an app that tags its
+          # files with a type none of the rows above name, whatever comes
+          # next. The receiver (NotesList.handleOpenURL) still validates per
+          # file and shows "Unsupported file type" for junk, so this widens
+          # VISIBILITY, not acceptance. public.url is what Safari hands over
+          # when the user shares a page.
+          - CFBundleTypeName: Any file
+            LSHandlerRank: Alternate
+            LSItemContentTypes: [public.data]
+          - CFBundleTypeName: URL
+            LSHandlerRank: Alternate
+            LSItemContentTypes: [public.url]
         CFBundleURLTypes:
           - CFBundleURLName: com.speechnotes.ios
             CFBundleURLSchemes: [speechnotes]

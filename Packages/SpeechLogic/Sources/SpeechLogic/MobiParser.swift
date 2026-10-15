@@ -400,44 +400,46 @@ public enum MobiParser {
         return (huff, cdics)
     }
 
-    /// One variable-length count, read BACKWARDS from `size - 1`: seven bits
-    /// per byte, least significant first, top bit marks the last byte.
-    static func trailingCount(in record: Data, upTo size: Int) -> Int {
-        var bitPosition = 0
-        var result = 0
-        var cursor = size
-        while cursor > 0 && bitPosition < 28 {
-            let byte = Int(record[record.startIndex + cursor - 1])
-            result |= (byte & 0x7F) << bitPosition
-            bitPosition += 7
-            cursor -= 1
-            if byte & 0x80 != 0 { return result }
+    /// One variable-length count sitting at the END of `data` (already cut to
+    /// the record's un-stripped length): up to four bytes whose top bits mark
+    /// continuation, read BACKWARD from the last byte. KindleUnpack's
+    /// `getSizeOfTrailingDataEntry` verbatim — the backward four-byte window
+    /// (not an unbounded walk) is what the reference does, and the difference
+    /// is load-bearing: a forward walk runs INTO the text when the last
+    /// entry's continuation bits line up wrong, mis-stripping every record.
+    static func trailingCount(in data: Data, upTo size: Int) -> Int {
+        var num = 0
+        // The reference inspects only the last four bytes.
+        let window = min(4, size)
+        for offset in 0..<window {
+            let byte = data[data.startIndex + size - 1 - offset]
+            if byte & 0x80 == 0 { break }
+            num += 1
         }
-        return result
+        return num
     }
 
-    /// How many trailing bytes `extraFlags` says a record ends with:
-    /// `extraFlags >> 1` is a bitfield of variable-length counts, and bit 0
-    /// adds a final one-or-two-byte count. Getting this wrong is the classic
-    /// "text decodes, but every record is a few characters off" bug.
+    /// How many trailing bytes `extraFlags` says a record ends with.
+    ///
+    /// Bit order is the classic trap, pinned on a real book (extraFlags 0x3):
+    /// the flags read in ASCENDING bit order — bit 0 (the multibyte
+    /// `(byte & 0x3) + 1` count) is peeled FIRST because it sits nearest the
+    /// text, and each higher bit's varint stacks outside the previous one.
+    /// The descending peel this file used to run consumed the varints in the
+    /// wrong order and over-stripped (5 bytes where the reference strips 1),
+    /// corrupting the last back-reference of every record — the fixed-early-
+    /// point truncation on real KF8 books.
     static func trailingEntryBytes(in record: Data, extraFlags: UInt16) -> Int {
         guard extraFlags != 0, !record.isEmpty else { return 0 }
         var total = 0
-        // Entries occur in bit order — bit 1 (0x1, multibyte) nearest the
-        // text, higher bits stacked toward the record's end — so peeling
-        // from the END means the highest varint bit comes off first.
-        var bit = 15
-        while bit >= 1 {
-            if extraFlags & (1 << bit) != 0 {
-                guard record.count > total else { return 0 }
-                total += trailingCount(in: record, upTo: record.count - total)
-            }
-            bit -= 1
+        for bit in 0..<15 where extraFlags & (1 << bit) != 0 {
+            guard record.count > total else { return 0 }
+            total += trailingCount(in: record, upTo: record.count - total)
         }
-        if extraFlags & 1 == 1 {
+        if extraFlags & 0x8000 != 0 {
             let offset = record.count - total - 1
             guard offset >= 0, offset < record.count else { return 0 }
-            total += (Int(record[record.startIndex + offset]) & 0x3) + 1
+            total = (Int(record[record.startIndex + offset]) & 0x3) + 1
         }
         return total
     }
@@ -690,7 +692,7 @@ public enum MobiParser {
         for (index, start) in boundaries.enumerated() {
             let end = index + 1 < boundaries.count ? boundaries[index + 1] : ns.length
             let span = ns.substring(with: NSRange(location: start, length: end - start))
-            let prepared = prepare(span)
+            let prepared = prepare(stripKF8Wrapper(span))
             let items = Self.items(from: prepared)
             var title: String?
             var paragraphs: [String] = []
@@ -706,9 +708,35 @@ public enum MobiParser {
             if title == nil, let sectionTitle = kf8SectionTitle(in: prepared) {
                 title = sectionTitle
             }
+            // The same heading twice in a row is the writer re-stating the
+            // title (a section label div following the h1), not two chapters
+            // — the duplicate made the contents list repeat every title.
+            if result.last?.title == title, paragraphs.isEmpty { continue }
             result.append(MobiChapter(title: title, paragraphs: paragraphs, html: prepared))
         }
         return result
+    }
+
+    /// Removes a flow's own `<html>…</html>` (plus any `<?xml …?>`
+    /// declaration and `<head>` block) so the chapter keeps only content.
+    /// The span's wrapper goes INTO the generated EPUB chapter verbatim
+    /// otherwise, and a `<html>` inside a chapter `<body>` is where epub.js
+    /// stops rendering — the "error then truncation" on real KF8 books.
+    static func stripKF8Wrapper(_ span: String) -> String {
+        var working = span
+        if let regex = try? NSRegularExpression(pattern: "(?is)^[^<]*<\\?xml[^>]*>\\s*") {
+            working = replacing(regex, in: working, with: "")
+        }
+        if let regex = try? NSRegularExpression(pattern: "(?is)<head\\b[^>]*>.*?</head\\s*>") {
+            working = replacing(regex, in: working, with: " ")
+        }
+        if let regex = try? NSRegularExpression(pattern: "(?is)^\\s*<html\\b[^>]*>") {
+            working = replacing(regex, in: working, with: "")
+        }
+        if let regex = try? NSRegularExpression(pattern: "(?is)</html\\s*>\\s*$") {
+            working = replacing(regex, in: working, with: "")
+        }
+        return working
     }
 
     /// A title for a front-matter flow with no `<h1>`: its own
@@ -790,6 +818,11 @@ public enum MobiParser {
                 }
             }
             if paragraphs.isEmpty && title == nil { continue }
+            // A titleless segment that only repeats the previous chapter's
+            // title is the writer re-stating the header, not new content.
+            if title == nil, paragraphs.count == 1, paragraphs[0] == result.last?.title {
+                continue
+            }
             result.append(MobiChapter(
                 title: title,
                 paragraphs: paragraphs,

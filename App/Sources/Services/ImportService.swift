@@ -242,6 +242,69 @@ final class ImportService {
         return result?.text
     }
 
+    // MARK: - Web pages
+
+    /// Caps so a shared website stays a note: 3 MB of HTML (a page beyond
+    /// this is an app shell or a download link, not an article) and 200k
+    /// characters of extracted text.
+    private static let maxWebPageBytes = 3 * 1024 * 1024
+    private static let maxWebPageTextChars = 200_000
+
+    /// Downloads a shared URL and extracts the page's readable text — what
+    /// "share a website into notes" means. Bounded fetch (size + timeout),
+    /// script/style bodies dropped, tags stripped, entities decoded. nil on
+    /// any failure — the caller then saves the bare URL so the share never
+    /// silently vanishes.
+    static func websiteText(from url: URL) async -> String? {
+        guard url.scheme == "http" || url.scheme == "https" else { return nil }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 20
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        guard let (data, response) = try? await URLSession.shared.data(for: request) else {
+            Log.shared.error("ImportService: web fetch failed for \(url.absoluteString)")
+            return nil
+        }
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            Log.shared.error("ImportService: web fetch bad status for \(url.absoluteString)")
+            return nil
+        }
+        guard data.count <= maxWebPageBytes else {
+            Log.shared.error("ImportService: web page too large (\(data.count) bytes) — \(url.absoluteString)")
+            return nil
+        }
+        guard let html = String(data: data, encoding: .utf8)
+            ?? String(data: data, encoding: .isoLatin1) else { return nil }
+        // Script/style/noscript bodies are never article text; comments and
+        // tags go next; entities decode last (XhtmlText's lenient decoder).
+        var working = html
+        for pattern in ["(?is)<(script|style|noscript|svg|head)\\b[^>]*>.*?</\\1\\s*>",
+                        "(?s)<!--.*?-->"] {
+            if let regex = try? NSRegularExpression(pattern: pattern) {
+                working = regex.stringByReplacingMatches(
+                    in: working, range: NSRange(working.startIndex..., in: working), with: " ")
+            }
+        }
+        if let tagRegex = try? NSRegularExpression(pattern: "<[^>]{0,400}>") {
+            working = tagRegex.stringByReplacingMatches(
+                in: working, range: NSRange(working.startIndex..., in: working), with: "\n")
+        }
+        let text = XhtmlText.decodingEntitiesLeniently(working)
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n\n")
+        let trimmed = String(text.prefix(maxWebPageTextChars))
+        guard trimmed.trimmingCharacters(in: .whitespacesAndNewlines).count > 40 else {
+            // Less than a sentence of extractable text: a JS app shell. The
+            // bare URL in the note is worth more than 40 characters of nav
+            // labels pretending to be an article.
+            Log.shared.error("ImportService: web page had no extractable text — \(url.absoluteString)")
+            return nil
+        }
+        Log.shared.info("ImportService: web page imported (\(trimmed.utf16.count) chars) — \(url.absoluteString)")
+        return trimmed
+    }
+
     // MARK: - Clipboard
 
     /// Text currently on the pasteboard, if it looks like prose.

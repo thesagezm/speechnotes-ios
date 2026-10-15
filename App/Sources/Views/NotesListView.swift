@@ -562,6 +562,10 @@ struct NotesListView: View {
             importFile(at: url)
             return
         }
+        if url.scheme?.lowercased() == "http" || url.scheme?.lowercased() == "https" {
+            importWebsite(url)
+            return
+        }
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
               components.scheme?.lowercased() == "speechnotes" else { return }
         guard let text = components.queryItems?.first(where: { $0.name == "text" })?.value,
@@ -570,6 +574,23 @@ struct NotesListView: View {
             return
         }
         addNote(text: text)
+    }
+
+    /// A shared website: fetch the page and save its readable text as a note;
+    /// on any failure the bare URL lands as the note instead, so the share
+    /// never silently vanishes.
+    private func importWebsite(_ url: URL) {
+        Task.detached(priority: .userInitiated) {
+            let fetched = await ImportService.websiteText(from: url)
+            await MainActor.run {
+                if let text = fetched {
+                    Haptics.success()
+                    addNote(text: text)
+                } else {
+                    addNote(text: url.absoluteString)
+                }
+            }
+        }
     }
 
     /// Imported text lands verbatim; the note's title derives from its first

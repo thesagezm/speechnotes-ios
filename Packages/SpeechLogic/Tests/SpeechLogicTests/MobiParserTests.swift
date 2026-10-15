@@ -229,23 +229,42 @@ final class MobiParserTests: XCTestCase {
 
     // MARK: - Trailing entries
 
+    /// The trailing-entry layout, pinned against the reference (KindleUnpack /
+    /// calibre) on a real LWW `.azw3` (extraFlags 0x3): entries peel in
+    /// ASCENDING bit order — bit 0's multibyte count sits NEAREST the text,
+    /// higher bits' varints stack outside it — and a varint entry is up to
+    /// four bytes whose top bit marks continuation, read backward from the
+    /// last byte.
     func testTrailingEntryBytesAreStripped() {
-        // extraFlags 3 = the multibyte overlap (0x1, nearest the text) plus
-        // one backward-varint entry (0x2, toward the record's end). Real
-        // record tails look exactly like this — calibre books end
-        // `…<text> 00 81`: a 0x00 multibyte count (N = 0) and a one-byte
-        // size varint 0x81 (high bit = terminator, value 1).
-        //
-        // Here the varint entry carries one data byte. Entries peel from the
-        // END, and bit 0 (multibyte) sits nearest the text, so the byte
-        // order is [text][multibyte][entry data][size varint]:
+        // Byte order: [text][multibyte count][entry data][size varint].
         var record = Data("body".utf8)
-        record.append(0x00)   // multibyte count byte: N = (0x00 >> 1) & 3 = 0
+        record.append(0x00)   // multibyte count byte: N = (0x00 & 0x3) + 1 = 1
         record.append(0x41)   // the entry's one data byte
-        record.append(0x82)   // size varint: high bit set, value 2
+        record.append(0x82)   // size varint: high bit set, one more byte follows
+        record.append(0x01)   // varint continuation, value 1 (total 2)
         let cut = MobiParser.trailingEntryBytes(in: record, extraFlags: 3)
-        XCTAssertEqual(cut, 3)
+        XCTAssertEqual(cut, 4)
         XCTAssertEqual(String(decoding: record.prefix(record.count - cut), as: UTF8.self), "body")
+    }
+
+    /// The exact tail the real book's records carry — `… 00 00 86 88 02 84`
+    /// (hex-dumped from record 1 of Pocket Pediatrics). extraFlags 0x3 must
+    /// strip 2 bytes here (one multibyte count byte + one one-byte varint),
+    /// NOT 5: the old descending peel over-stripped every record by 4 bytes
+    /// and corrupted the last back-reference — the fixed-early-point
+    /// truncation users saw on real KF8 books.
+    func testTrailingBytesMatchReferenceOnRealRecordTail() {
+        var record = Data("x".utf8)
+        record.append(contentsOf: [0x00, 0x00, 0x86, 0x88, 0x02, 0x84])
+        XCTAssertEqual(MobiParser.trailingEntryBytes(in: record, extraFlags: 3), 2)
+    }
+
+    /// The bit-15 multibyte case: when extraFlags sets bit 15, the count is
+    /// `(last byte & 0x3) + 1` and REPLACES the accumulated total.
+    func testBitFifteenMultibyteReplacesTotal() {
+        var record = Data("body".utf8)
+        record.append(0x03)   // (0x03 & 0x3) + 1 = 4 trailing bytes
+        XCTAssertEqual(MobiParser.trailingEntryBytes(in: record, extraFlags: 0x8000), 4)
     }
 
     func testZeroExtraFlagsMeansNoStripping() {
@@ -424,6 +443,20 @@ final class MobiParserTests: XCTestCase {
         XCTAssertTrue(chapters.allSatisfy { !$0.paragraphs.isEmpty })
     }
 
+    /// The heading path's duplicate: a titleless segment that only restates
+    /// the previous chapter's title is a writer's repeated header, not a
+    /// chapter of its own.
+    func testTitlelessRepeatOfPreviousTitleIsSkipped() {
+        let html = "<h1>One</h1><p>First body.</p>"
+            + "<div>One</div>"
+            + "<h1>Two</h1><p>Second body.</p>"
+        let chapters = MobiParser.chapters(from: html, variant: "mobi6")
+        XCTAssertEqual(chapters.count, 2)
+        XCTAssertEqual(chapters[0].title, "One")
+        XCTAssertEqual(chapters[1].title, "Two")
+        XCTAssertFalse(chapters[1].text.contains("First body."))
+    }
+
     // MARK: - KF8 flow chapters
 
     /// The KF8 rawML shape, distilled from a real store book: each flow is a
@@ -455,6 +488,35 @@ final class MobiParserTests: XCTestCase {
         let chapters = MobiParser.chapters(from: kf8RawML, variant: "kf8")
         XCTAssertTrue(chapters[1].html.contains("<section epub:type=\"chapter\">"))
         XCTAssertTrue(chapters[1].html.contains("<h1>DEVELOPMENTAL MILESTONES</h1>"))
+    }
+
+    func testKF8FlowChaptersDropTheirOwnHTMLWrapper() {
+        // A flow's <html>…</html> must NOT ride into the chapter markup:
+        // the generated EPUB wraps every chapter in its own <html>, and a
+        // nested one is where epub.js stops rendering (the "error then
+        // truncation" report on real KF8 books).
+        let chapters = MobiParser.chapters(from: kf8RawML, variant: "kf8")
+        for chapter in chapters {
+            XCTAssertFalse(chapter.html.lowercased().contains("<html"),
+                           "chapter still carries a nested <html> wrapper")
+            XCTAssertFalse(chapter.html.lowercased().contains("</html"))
+        }
+        // The content itself survives the strip.
+        XCTAssertTrue(chapters[1].html.contains("Chapter body."))
+    }
+
+    /// The real-book duplicate: the chapter's <h1> AND a re-stated section
+    /// label with the same text — the contents list showed the title twice.
+    func testKF8RepeatedTitleOnlyAppearsOnce() {
+        let html = "<html><head><title>t</title></head><body></body></html>"
+            + "<section><h1>DEVELOPMENTAL MILESTONES</h1><p>Body one.</p></section>"
+            + "<html><head><title>t</title></head><body></body></html>"
+            + "<section><h1>DEVELOPMENTAL MILESTONES</h1></section>"
+            + "<html><head><title>t</title></head><body></body></html>"
+            + "<section><h1>TRAUMA EXAM</h1><p>Body two.</p></section>"
+        let chapters = MobiParser.chapters(from: html, variant: "kf8")
+        let titles = chapters.compactMap(\.title)
+        XCTAssertEqual(titles, ["DEVELOPMENTAL MILESTONES", "TRAUMA EXAM"])
     }
 
     func testKF8RequiresTwoFlowsFallsBackToHeadings() {

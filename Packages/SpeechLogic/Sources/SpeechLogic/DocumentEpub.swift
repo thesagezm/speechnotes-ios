@@ -1585,11 +1585,21 @@ public enum DocumentEpubConverter {
                 ? ns.substring(with: match.range(at: 2)) : ""
             return "<\(name)\(attrs)/>"
         }
-        // Bare `&` → `&amp;` (an existing entity is left alone).
+        // A stray `<` that opens nothing (a truncated back-reference leaves
+        // these behind) breaks the chapter's XML — escape it so the glitch
+        // renders as text instead of truncating the chapter there.
+        out = replacing(
+            try? NSRegularExpression(pattern: #"<(?!/?[A-Za-z][^>]*>|!--|!\[CDATA\[)"#),
+            in: out, with: "<"
+        )
+        // Bare `&` → `&` (an existing entity is left alone).
         out = replacing(
             try? NSRegularExpression(pattern: #"&(?!(?:[A-Za-z][A-Za-z0-9]*|#\d+|#x[0-9A-Fa-f]+);)"#),
-            in: out, with: "&amp;"
+            in: out, with: "&"
         )
+        // Control characters XML forbids — entities are untouched text here,
+        // so this is a straight scalar filter.
+        out = String(out.unicodeScalars.filter { $0.value > 0x1F || $0 == "\t" || $0 == "\n" || $0 == "\r" })
         return out
     }
 
