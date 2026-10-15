@@ -454,6 +454,12 @@ final class AudioBookPlayer: ObservableObject {
         // Playback intent has ended; a grace armed for a chapter boundary
         // must not ride to system expiration afterwards.
         endChapterGapGrace()
+        // The resume point survives the stop (persistPosition just wrote it
+        // into the manifest AND into lastFraction/lastSeconds below) — only
+        // the session dies. The next play tap cold-opens exactly here.
+        if let book = activeBook {
+            boundBook = book
+        }
         activeBookID = nil
         activeBook = nil
         isPlaying = false
@@ -473,6 +479,24 @@ final class AudioBookPlayer: ObservableObject {
     func stopIfPlaying(_ book: Book) {
         guard activeBookID == book.id else { return }
         stop()
+    }
+
+    /// The resume point a STOPPED session left behind, for the reader's play
+    /// tap. The reader's own `book` snapshot is captured at push time and
+    /// goes stale the moment an in-session stop persists a new position —
+    /// reading the point from the player (which wrote it) instead is what
+    /// makes "stop → play" resume rather than restart (the 2026-10-15
+    /// device report: restart-from-chapter-top after stop). Nil when this
+    /// book was never loaded this session (a cold app open falls through to
+    /// the manifest-driven path in the reader).
+    struct StoppedResumePoint {
+        let chapterIndex: Int
+        let audioSeconds: Double
+    }
+
+    func stoppedResumePoint(bookID: UUID) -> StoppedResumePoint? {
+        guard boundBook?.id == bookID, activeBookID == nil, lastSeconds > 0 else { return nil }
+        return StoppedResumePoint(chapterIndex: chapterIndex, audioSeconds: lastSeconds)
     }
 
     /// Resumes the loaded book, or the bound book on first use. The remote
@@ -839,12 +863,16 @@ final class AudioBookPlayer: ObservableObject {
         // markers sit at coarse boundaries that reconstruction is minutes
         // off from the paused playhead — the 2026-10-13 "resumes 10–20
         // minutes back" report. The backend's own clock is exact.
+        let seconds = backend?.currentTime
+        if let seconds {
+            lastSeconds = seconds
+        }
         store.updatePosition(
             book,
             chapterIndex: chapterIndex,
             chapterFraction: chapterProgress,
             cfi: nil,
-            audioSeconds: backend?.currentTime
+            audioSeconds: seconds
         )
     }
 

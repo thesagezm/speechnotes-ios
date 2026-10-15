@@ -791,9 +791,26 @@ struct BookAudioReaderView: View {
             scrubValue = audioBook.chapterProgress
             return
         }
-        // Cold open: the persisted ABSOLUTE playhead when this tap targets
-        // the persisted chapter — it survives quits and Control-Center pauses
-        // that the fraction reconstruction does not. A different chapter
+        // A STOPPED session (stop button, app restart): the player kept the
+        // resume point when it stopped (persistPosition wrote the backend's
+        // own clock into lastSeconds + the manifest), so ask IT rather than
+        // this view's Book snapshot — `book` is the value struct captured at
+        // push time and its position is stale after any in-session stop.
+        // The reader-side checks below are only for a COLD app open where
+        // the player has never seen this book.
+        if !isActive,
+           let resume = audioBook.stoppedResumePoint(bookID: book.id),
+           index == resume.chapterIndex {
+            audioBook.play(
+                book: book,
+                chapterIndex: index,
+                atSeconds: resume.audioSeconds > 0 ? resume.audioSeconds : nil
+            )
+            scrubValue = audioBook.chapterProgress
+            return
+        }
+        // Cold open from a fresh app launch: the persisted ABSOLUTE playhead
+        // when this tap targets the persisted chapter. A different chapter
         // pick starts at that chapter's top, as before.
         var seconds: Double?
         if !isActive,
