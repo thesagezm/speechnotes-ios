@@ -411,7 +411,7 @@ struct NoteEditorView: View {
         if delta == 1 {
             target = pieces.first(where: { $0.offset > range.lowerBound })
         } else {
-            target = pieces.last(where: { $0.offset < range.lowerBound })
+            target = pieces.lastIndex(where: { $0.offset < range.lowerBound }).map { pieces[$0] }
         }
         guard let target else {
             if delta == -1 {

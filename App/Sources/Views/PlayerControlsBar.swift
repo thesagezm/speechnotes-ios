@@ -283,7 +283,7 @@ struct PlayerControlsBar: View {
             // The piece that starts strictly before the current one; a mash
             // lands on successive earlier pieces because the anchor (readAlong
             // range) follows the re-spoken audio.
-            guard let idx = pieces.last(where: { $0.offset < range.lowerBound }) else {
+            guard let idx = pieces.lastIndex(where: { $0.offset < range.lowerBound }) else {
                 player.restartFromBeginning(full, note: note)
                 return
             }
