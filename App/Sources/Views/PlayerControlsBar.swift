@@ -136,6 +136,28 @@ struct PlayerControlsBar: View {
                 .accessibilityLabel(player.state == .speaking ? "Pause" : "Play")
 
                 if player.state == .speaking || player.state == .paused || player.state == .generating {
+                    // Sentence rewind/forward (2026-10-13): re-speak one
+                    // sentence back or skip one ahead, for "I didn't catch
+                    // that" / "skip this". Both rebuild the speak call from
+                    // the CURRENT played-char position — the engine's own
+                    // played-chars tracker is the source of truth — and the
+                    // new start becomes the bookmark, so a suspension right
+                    // after still resumes where the listener actually is.
+                    // The sentence boundaries come from the same
+                    // SentenceChunker pieces the read-along highlight uses,
+                    // so button and highlight can never disagree.
+                    Button {
+                        Haptics.tap()
+                        stepSpeechSentence(-1)
+                    } label: {
+                        Image(systemName: "arrow.uturn.backward")
+                            .font(.body.weight(.medium))
+                            .foregroundStyle(Color.accentColor)
+                            .frame(width: 36, height: 36)
+                            .background(Circle().fill(Color.secondary.opacity(0.12)))
+                    }
+                    .accessibilityLabel("Rewind one sentence")
+
                     // Live read-along toggle: sentence-highlighted reader
                     // replaces the editor while this note is speaking.
                     Button {
@@ -149,6 +171,18 @@ struct PlayerControlsBar: View {
                             .background(Circle().fill(Color.secondary.opacity(0.12)))
                     }
                     .accessibilityLabel(readAlongEnabled ? "Read-along on" : "Read-along off")
+
+                    Button {
+                        Haptics.tap()
+                        stepSpeechSentence(1)
+                    } label: {
+                        Image(systemName: "arrow.uturn.forward")
+                            .font(.body.weight(.medium))
+                            .foregroundStyle(Color.accentColor)
+                            .frame(width: 36, height: 36)
+                            .background(Circle().fill(Color.secondary.opacity(0.12)))
+                    }
+                    .accessibilityLabel("Forward one sentence")
 
                     Button {
                         Haptics.press()
@@ -213,6 +247,49 @@ struct PlayerControlsBar: View {
             .foregroundStyle(.secondary)
         }
         .buttonStyle(.plain)
+    }
+
+    /// Sentence rewind/forward for the note being spoken. `delta` is -1
+    /// (re-speak the previous sentence) or +1 (skip to the next). The math
+    /// runs over the FULL speech text with the engine's played-char position
+    /// as the anchor:
+    ///   forward  → first sentence boundary strictly after the currently
+    ///              sounding sentence's end;
+    ///   backward → the boundary at-or-before (playedChars - currentSentence
+    ///              length), i.e. the START of the previous sentence — mashing
+    ///              rewind keeps stepping back one sentence per press because
+    ///              the anchor moves with each re-speak.
+    /// The restart goes through SpeechPlayer.playFrom, which snaps, primes
+    /// the bookmark at the new offset and keeps the read-along pieces in
+    /// sync — one code path for both directions.
+    ///
+    /// Works while speaking AND while paused (a paused step re-arms from the
+    /// new sentence and stays paused is NOT attempted — speech restarts,
+    /// which matches every podcast-style rewind UX).
+    private func stepSpeechSentence(_ delta: Int) {
+        guard delta == -1 || delta == 1 else { return }
+        guard let range = player.readAlongRange else { return }
+        guard let full = player.activeSpeechText, !full.isEmpty else { return }
+        let pieces = SentenceChunker.sentencePieces(in: full)
+        guard !pieces.isEmpty else { return }
+        let newIndex: Int
+        if delta == 1 {
+            // First piece that STARTS after the current piece's start.
+            guard let idx = pieces.firstIndex(where: { $0.offset > range.lowerBound }) else {
+                return  // already on the last sentence
+            }
+            newIndex = idx
+        } else {
+            // The piece that starts strictly before the current one; a mash
+            // lands on successive earlier pieces because the anchor (readAlong
+            // range) follows the re-spoken audio.
+            guard let idx = pieces.last(where: { $0.offset < range.lowerBound }) else {
+                player.restartFromBeginning(full, note: note)
+                return
+            }
+            newIndex = idx
+        }
+        player.playFrom(full, at: pieces[newIndex].offset, note: note)
     }
 }
 

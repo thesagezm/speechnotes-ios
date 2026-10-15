@@ -206,6 +206,25 @@ struct NoteEditorView: View {
         }
     }
 
+    /// The caret's position within the SPEECH text (what the engine will be
+    /// handed), not the raw draft — with markdown rendering on, the spoken
+    /// text is the stripped draft and offsets must follow it. Nil when the
+    /// caret sits at the very top (nothing to skip) or the selection can't
+    /// be mapped. Used by the ⋯ menu's "Play from caret" (way #1 of the
+    /// 2026-10-13 start-from-point set).
+    private var playFromCaretOffset: Int? {
+        // Raw-draft caret → speech-text offset: with rendering off they are
+        // the same string; with rendering on, map by prefix — the stripped
+        // text is always a subsequence of the draft, and the caret's
+        // character position in the draft upper-bounds its position in the
+        // stripped text. The snap inside SpeechPlayer makes exact mapping
+        // unnecessary — it lands on the sentence boundary anyway.
+        guard let selection = selectionUTF16, selection.lowerBound > 0 else { return nil }
+        let rawText = SpeechText.forText(draft)
+        guard rawText.utf16.count > 40 else { return nil }
+        return min(selection.lowerBound, rawText.utf16.count - 1)
+    }
+
     private var draftWordCount: Int { cachedWordCount }
 
     /// "412 words · ~3 min listen" — live stats for the keyboard bar.
@@ -300,11 +319,23 @@ struct NoteEditorView: View {
         Group {
             if showsReadAlong {
                 // Read-along is pure reading — tap toggles the immersive
-                // chrome, same as the preview and the book readers.
+                // chrome, same as the preview and the book readers. A tap on
+                // a PARAGRAPH (2026-10-13, way #2 of the start-from-point
+                // set) starts speech from that paragraph's start instead:
+                // the row start is the exact UTF-16 offset playFrom expects.
                 ReadAlongView(
                     text: player.activeSpeechText ?? "",
                     activeRange: player.readAlongRange,
-                    textScale: theme.previewTextScale
+                    textScale: theme.previewTextScale,
+                    onTapParagraph: { offset in
+                        Haptics.tap()
+                        updateSpeechCaches()
+                        player.playFrom(
+                            SpeechText.forText(speechText),
+                            at: offset,
+                            note: currentNote
+                        )
+                    }
                 )
                 .contentShape(Rectangle())
                 .onTapGesture {
@@ -349,7 +380,9 @@ struct NoteEditorView: View {
                 onToggleReadAlong: { readAlongEnabled.toggle() },
                 readAlongOn: readAlongEnabled,
                 rate: player.rateMultiplier,
-                onRateChange: { player.rateMultiplier = $0 }
+                onRateChange: { player.rateMultiplier = $0 },
+                onStepBack: { stepSpeechFromRail(-1) },
+                onStepForward: { stepSpeechFromRail(1) }
             ),
             voiceLabel: player.currentVoiceDescription,
             progress: player.progress,
@@ -362,6 +395,31 @@ struct NoteEditorView: View {
                 || player.state == .generating,
             observesPlayer: true
         )
+    }
+
+    /// Sentence rewind/forward from the LANDSCAPE rail — the same math the
+    /// portrait bar's stepSpeechSentence runs, living here because the rail's
+    /// callbacks close over the editor (the bar owns its copy; the editor's
+    /// speech-text cache is the one this view refreshes).
+    private func stepSpeechFromRail(_ delta: Int) {
+        guard delta == -1 || delta == 1 else { return }
+        guard let range = player.readAlongRange,
+              let full = player.activeSpeechText, !full.isEmpty else { return }
+        let pieces = SentenceChunker.sentencePieces(in: full)
+        guard !pieces.isEmpty else { return }
+        let target: (offset: Int, endOffset: Int)?
+        if delta == 1 {
+            target = pieces.first(where: { $0.offset > range.lowerBound })
+        } else {
+            target = pieces.last(where: { $0.offset < range.lowerBound })
+        }
+        guard let target else {
+            if delta == -1 {
+                player.restartFromBeginning(full, note: currentNote)
+            }
+            return
+        }
+        player.playFrom(full, at: target.offset, note: currentNote)
     }
 
     var body: some View {
@@ -888,6 +946,25 @@ struct NoteEditorView: View {
                     showingSettings = true
                 } label: {
                     Label("Speech settings", systemImage: "speaker.wave.2")
+                }
+                // Play from the caret / selection (2026-10-13, way #1 of the
+                // start-from-point set): the editor KNOWS where the cursor is
+                // (selectionUTF16 tracks it live), so "speak from here" is
+                // one menu tap — no selection gymnastics. The offset is
+                // snapped to a sentence boundary inside SpeechPlayer, so a
+                // caret mid-word still starts on the sentence it sits in.
+                if let caret = playFromCaretOffset, player.state == .idle {
+                    Button {
+                        Haptics.tap()
+                        updateSpeechCaches()
+                        player.playFrom(
+                            SpeechText.forText(speechText),
+                            at: caret,
+                            note: currentNote
+                        )
+                    } label: {
+                        Label("Play from caret", systemImage: "play.circle")
+                    }
                 }
                 if player.hasResumeOption(for: noteId, text: speechText) {
                     Button {

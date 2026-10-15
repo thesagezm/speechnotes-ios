@@ -212,6 +212,21 @@ struct SpeechnotesApp: App {
                 .onChange(of: scenePhase) { phase in
                     if phase == .background {
                         wasBackgrounded = true
+                        // The one sanctioned keep-alive: iOS grants a short
+                        // background task to every app at backgrounding, and
+                        // a TTS session that is mid-synthesis needs it — the
+                        // render-ahead producer runs on a queue, but its bank
+                        // recompute and every callback hop run on the main
+                        // thread, which iOS stops servicing the moment the
+                        // app suspends. The task ends the moment speech
+                        // finishes or the grace expires (whichever first) —
+                        // the same shape as the chapter-gap graces, and
+                        // explicitly NOT a general keep-alive (guideline
+                        // 2.4.2). This is the "playing from the book's own
+                        // screen dies when I switch apps" report: playback
+                        // begun from the reader was the one path that never
+                        // held a task.
+                        player.beginPlaybackGraceIfNeeded()
                     }
                     // The watchdog is armed only while foregrounded: a
                     // suspended process freezes the probe thread with it,

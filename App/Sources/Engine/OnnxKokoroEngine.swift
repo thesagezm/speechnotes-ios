@@ -5,8 +5,8 @@ import MLXUtilsLibrary
 import OnnxRuntimeBindings
 
 /// Kokoro via ONNX Runtime on the CPU — fp32 `model.onnx` (~326 MB) or the
-/// small uint8 tier `model_uint8.onnx` (~177 MB — same graph), plus the
-/// shared tokenizer.json/voices.npz in Documents/KokoroOnnx. Inference spec
+/// small quantized tier `model_quantized.onnx` (~92 MB — same graph), plus
+/// the shared tokenizer.json/voices.npz in Documents/KokoroOnnx. Inference spec
 /// (verified against PocketPal's react-native-speech engine): inputs
 /// `input_ids` int64 [1, N], `style` float32 [1, 256] (flat voice array
 /// sliced at clamp(N-1, 0, 509) * 256 — Batch B2), `speed` float32 [1];
@@ -38,7 +38,7 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
     }
 
     /// Which model file + validator this instance serves — the fp32 tier and
-    /// the small uint8 tier share one engine class.
+    /// the small quantized tier share one engine class.
     private let modelFileURL: URL
     private let modelFilesValid: () -> Bool
 
@@ -77,7 +77,7 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
     /// point of tagging it.
     static func tierName(for url: URL) -> String {
         switch url.lastPathComponent {
-        case "model_uint8.onnx": return "kokoro-small-uint8"
+        case "model_quantized.onnx": return "kokoro-small-int8"
         case "model.onnx": return "kokoro-fp32"
         default: return "kokoro-unknown"
         }

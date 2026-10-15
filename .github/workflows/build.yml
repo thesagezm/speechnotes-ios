@@ -60,7 +60,7 @@ jobs:
   # history (Tests/KokoroSpike, removed in the same commit).
 
   kokoro-small-spike:
-    name: Kokoro small spike (validates uint8 on ORT CPU)
+    name: Kokoro small spike (validates compact int8 on ORT CPU)
     runs-on: macos-latest
     timeout-minutes: 25
     # Informative and non-blocking by design (the phone is the real bench)
@@ -70,12 +70,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download Kokoro uint8 model + shared files
+      - name: Download Kokoro compact (int8) model + shared files
         run: |
           mkdir -p ~/kokoro-small-spike
           curl -L --retry 3 --progress-bar \
-            -o ~/kokoro-small-spike/model_uint8.onnx \
-            "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/onnx/model_uint8.onnx"
+            -o ~/kokoro-small-spike/model_quantized.onnx \
+            "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/onnx/model_quantized.onnx"
           curl -L --retry 3 --progress-bar \
             -o ~/kokoro-small-spike/tokenizer.json \
             "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/tokenizer.json"

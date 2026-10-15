@@ -291,10 +291,27 @@ struct BookReaderView: View {
     private var readerSurface: some View {
         Group {
             if showsReadAlong {
+                // Tap a paragraph to start speaking from it (2026-10-13, way
+                // #2): the book's speech text IS player.activeSpeechText
+                // (BookPlaybackController cached + sanitized the chapter), so
+                // the row offset feeds playFrom directly and the book ref
+                // keeps the chapter chain + lock-screen dressing intact.
                 ReadAlongView(
                     text: player.activeSpeechText ?? "",
                     activeRange: player.readAlongRange,
-                    textScale: appTheme.previewTextScale
+                    textScale: appTheme.previewTextScale,
+                    onTapParagraph: { offset in
+                        Haptics.tap()
+                        player.playFrom(
+                            player.activeSpeechText ?? "",
+                            at: offset,
+                            book: SpeechPlayer.BookPlaybackRef(
+                                id: book.id.uuidString,
+                                title: book.title,
+                                chapterIndex: chapterIndex
+                            )
+                        )
+                    }
                 )
                 .contentShape(Rectangle())
                 .onTapGesture {

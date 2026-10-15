@@ -16,10 +16,17 @@ enum BookFormat: String, Codable {
 /// manifest and the resume logic format-agnostic. `cfi` is EPUB-only and
 /// survives font-size/rotation better than the index+fraction pair — when
 /// set it wins on restore and the other fields are the fallback.
+/// `audioSeconds` is audio-only: the absolute position in the FILE, written
+/// whenever a real clock is available (every AVPlayer tick, and the Opus
+/// engine path whose node clock is frame-exact). A Control-Center pause
+/// resumes from this value instead of reconstructing seconds from a chapter
+/// fraction, which is what lost 10–20 minutes on every resume (the 2026-10-13
+/// report). Optional so manifests written before it keep decoding.
 struct BookPosition: Codable, Equatable, Hashable {
     var chapterIndex: Int
     var chapterFraction: Double
     var cfi: String?
+    var audioSeconds: Double?
 }
 
 /// One TOC row snapshotted at import time (epub: from EpubInfo's native

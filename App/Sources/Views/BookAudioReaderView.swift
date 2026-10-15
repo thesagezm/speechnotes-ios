@@ -782,12 +782,33 @@ struct BookAudioReaderView: View {
     private func playChapter(_ index: Int) {
         guard chapters.indices.contains(index) else { return }
         chapterIndex = index
-        // Resume where the playhead is: a fresh chapter start only when the
-        // user picked a DIFFERENT chapter or the playhead sits at zero.
-        let fraction = (index == audioBook.chapterIndex && displayProgress > 0.005 && !audioBook.isPlaying)
-            ? displayProgress
+        // Paused mid-chapter on the LIVE session: resume exactly — the
+        // backend's own clock is the playhead, and re-deriving seconds from
+        // a chapter fraction (start + fraction × span) is the reconstruction
+        // that landed "minutes earlier" on resume (2026-10-13 report).
+        if isActive, !audioBook.isPlaying, index == audioBook.chapterIndex, audioBook.elapsed > 0 {
+            audioBook.resumeCurrent()
+            scrubValue = audioBook.chapterProgress
+            return
+        }
+        // Cold open: the persisted ABSOLUTE playhead when this tap targets
+        // the persisted chapter — it survives quits and Control-Center pauses
+        // that the fraction reconstruction does not. A different chapter
+        // pick starts at that chapter's top, as before.
+        var seconds: Double?
+        if !isActive,
+           index == (book.position?.chapterIndex ?? 0),
+           let persisted = book.position?.audioSeconds, persisted > 0 {
+            seconds = persisted
+        }
+        // Resume fraction only when no absolute playhead exists (legacy
+        // manifests) — otherwise a fresh chapter start only when the user
+        // picked a DIFFERENT chapter.
+        let fraction = seconds == nil
+            ? (index == audioBook.chapterIndex && displayProgress > 0.005 && !audioBook.isPlaying
+               ? displayProgress : nil)
             : nil
-        audioBook.play(book: book, chapterIndex: index, withinChapterFraction: fraction)
+        audioBook.play(book: book, chapterIndex: index, withinChapterFraction: fraction, atSeconds: seconds)
         scrubValue = audioBook.chapterProgress
     }
 

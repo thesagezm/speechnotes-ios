@@ -77,7 +77,7 @@ struct OnboardingView: View {
                 .font(.title2.bold())
             VStack(alignment: .leading, spacing: 14) {
                 featureRow("apple.logo", "Apple system voice — works instantly")
-                featureRow("cpu", "Kokoro — neural, 28 voices (small ~177 MB, full ~341 MB)")
+                featureRow("cpu", "Kokoro — neural, 28 voices (small ~92 MB, full ~341 MB)")
                 featureRow("globe", "Supertonic — best quality, 31 languages (~399 MB)")
             }
             .padding(.horizontal, 34)

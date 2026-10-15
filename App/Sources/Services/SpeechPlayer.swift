@@ -12,7 +12,7 @@ final class SpeechPlayer: ObservableObject {
         // Declaration order = picker order (user-set). Kokoro is ONE engine
         // with a quality dial (2026-10-08 device feedback: two Kokoro rows
         // in the Engine picker + a separate "Kokoro quality" picker read as
-        // three ways to say the same thing) — the uint8/fp32 tier choice
+        // three ways to say the same thing) — the compact/fp32 tier choice
         // lives in the quality section, and the picker rows below expose
         // only the engines that are genuinely different machines.
         case system
@@ -486,17 +486,83 @@ final class SpeechPlayer: ObservableObject {
 
     /// Stop + speak the full text from the start, clearing any bookmark.
     func restartFromBeginning(_ text: String, note: Note?) {
+        playFrom(text, at: 0, note: note)
+    }
+
+    /// Stop + speak `text` starting at a UTF-16 offset (the 2026-10-13
+    /// start-from-point work). The offset is SNAPPED to the sentence
+    /// boundary at-or-before it — the same resume math bookmarks use — so
+    /// playback always starts on a sentence, never mid-word, and the
+    /// read-along + bookmark math inherits the same suffix machinery a
+    /// suspension-resume uses.
+    ///
+    /// Offset 0 is the plain restartFromBeginning path. The start point
+    /// becomes the new bookmark (charsDone: offset) exactly like a resume,
+    /// so an interruption five seconds later still resumes from HERE, not
+    /// from the top.
+    func playFrom(_ text: String, at offset: Int, note: Note? = nil, book: BookPlaybackRef? = nil) {
+        guard offset > 0 else {
+            ensureNowPlayingWired()
+            clearBookmark()
+            stop()
+            nowPlayingTitle = note?.title ?? book?.title
+            nowPlayingNoteId = note?.id
+            nowPlayingBookId = book?.id
+            resumeBaseFraction = 0
+            lastRawProgress = 0
+            beginReadAlong(fullText: text)
+            engineSpeechOffset = Self.leadingWhitespaceUTF16(text)
+            if let note { primeBookmark(noteId: note.id, fullText: text) }
+            if let book { primeBookBookmark(bookId: book.id, chapterIndex: book.chapterIndex, fullText: text) }
+            engine?.speak(text, rateMultiplier: rateMultiplier)
+            return
+        }
+        // Snap to the sentence boundary at-or-before the offset, then
+        // speak the suffix — identical to a bookmark resume, which is what
+        // makes read-along, progress remapping and the bookmark itself all
+        // correct for a mid-text start.
+        guard let plan = Self.snapResume(
+            mark: PlaybackBookmark(
+                noteId: note?.id,
+                bookId: book?.id,
+                chapterIndex: book?.chapterIndex,
+                charsDone: offset,
+                textLength: text.utf16.count,
+                textHash: Self.stableHash(text),
+                savedAt: Date()
+            ),
+            fullText: text
+        ) else {
+            // The offset sat past the last sentence boundary (or the text
+            // has none past it) — nothing to speak from there; fall back to
+            // a clean restart rather than silently doing nothing.
+            playFrom(text, at: 0, note: note, book: book)
+            return
+        }
         ensureNowPlayingWired()
+        // stop() below clears onNaturalFinish unconditionally (an explicit
+        // stop ends the chapter chain) — but a BOOK play-from-point must
+        // keep the chain armed so the chapter still auto-advances. Save and
+        // restore around the stop; togglePlay's book branch relies on the
+        // same ordering (BookPlaybackController re-arms it after speak()).
+        let savedFinish = onNaturalFinish
         clearBookmark()
         stop()
-        nowPlayingTitle = note?.title
+        if book != nil { onNaturalFinish = savedFinish } else { onNaturalFinish = nil }
+        nowPlayingTitle = note?.title ?? book?.title
         nowPlayingNoteId = note?.id
-        resumeBaseFraction = 0
+        nowPlayingBookId = book?.id
+        resumeBaseFraction = Double(plan.offset) / Double(max(1, text.utf16.count))
         lastRawProgress = 0
-        beginReadAlong(fullText: text)
-        engineSpeechOffset = Self.leadingWhitespaceUTF16(text)
-        if let note { primeBookmark(noteId: note.id, fullText: text) }
-        engine?.speak(text, rateMultiplier: rateMultiplier)
+        beginReadAlong(fullText: text, pieces: plan.pieces)
+        engineSpeechOffset = plan.offset + Self.leadingWhitespaceUTF16(plan.suffix)
+        if let note {
+            primeBookmark(noteId: note.id, fullText: text, charsDone: plan.offset)
+        } else if let book {
+            primeBookBookmark(bookId: book.id, chapterIndex: book.chapterIndex, fullText: text, charsDone: plan.offset)
+        }
+        Log.shared.info("SpeechPlayer: playing from char \(plan.offset)/\(text.utf16.count)")
+        engine?.speak(plan.suffix, rateMultiplier: rateMultiplier)
     }
 
     private func primeBookmark(noteId: UUID, fullText: String, charsDone: Int = 0) {
@@ -597,7 +663,7 @@ final class SpeechPlayer: ObservableObject {
         // tier flag. Older stored values all carry over:
         //  - "kokoroOnnx" (v1.5–1.7.3 fp32) and the v0.6–v0.7 "kokoro"
         //    (removed Metal engine) → Kokoro at High;
-        //  - "kokoroSmall"/"kitten" (the uint8 tier, both spellings) →
+        //  - "kokoroSmall"/"kitten" (the compact tier, both spellings) →
         //    Kokoro at Compact;
         //  - "soprano" (removed v1.7.1) → Kokoro at High, voice cleared.
         let storedEngine = defaults.string(forKey: "engineKind")
@@ -742,7 +808,7 @@ final class SpeechPlayer: ObservableObject {
     }
 
     /// Same idle-unload contract for the Kokoro session (fp32 ~326 MB of
-    /// resident weights, uint8 ~177 MB). Supertonic already had one; the
+    /// resident weights, compact int8 ~92 MB). Supertonic already had one; the
     /// Kokoro instance was pinned for the whole session once the user
     /// switched off it, and in LiveContainer the jetsam budget is shared
     /// across guests. Reload-on-next-use is transparent (and logged) —
@@ -769,11 +835,11 @@ final class SpeechPlayer: ObservableObject {
     }
 
     /// Which model file the cached OnnxKokoroEngine instance points at —
-    /// the fp32 and uint8 tiers share one slot, so a tier switch must
+    /// the fp32 and compact tiers share one slot, so a tier switch must
     /// rebuild it rather than reuse the other tier's session.
     private var onnxEngineFileIsBig = true
 
-    /// The user's Kokoro tier choice: true = fp32 (High), false = uint8
+    /// The user's Kokoro tier choice: true = fp32 (High), false = compact
     /// (Compact). A Compact choice whose model is missing falls back to
     /// fp32 at build time (`rebuildEngine` decides from what is actually
     /// downloaded) — the dial is the INTENT, the build is the reality.
@@ -823,6 +889,7 @@ final class SpeechPlayer: ObservableObject {
         clearBookmark()
         engine?.stop()
         state = .idle
+        endPlaybackGraceIfNeeded()
         lastRawProgress = 0
         resumeBaseFraction = 0
         nowPlayingTitle = nil
@@ -848,7 +915,7 @@ final class SpeechPlayer: ObservableObject {
     /// Re-drives the engine build after a Kokoro TIER change (the quality
     /// dial) — the same rebuild a kind switch performs, public because the
     /// settings view owns the dial. A tier change mid-session abandons the
-    /// live session exactly like an engine switch: the fp32 and uint8
+    /// live session exactly like an engine switch: the fp32 and compact
     /// graphs are different sessions and audio cannot continue across them.
     func rebuildKokoroTier() {
         guard engineKind == .kokoro else { return }
@@ -901,7 +968,7 @@ final class SpeechPlayer: ObservableObject {
                 rebuildOnnxEngine(big: big)
                 engine = onnxEngine
                 usingSystemFallback = false
-                Log.shared.info("SpeechPlayer: engine → Kokoro \(big ? "fp32" : "uint8") (\(voice))")
+                Log.shared.info("SpeechPlayer: engine → Kokoro \(big ? "fp32" : "compact") (\(voice))")
             } else {
                 // Neither model present — the system fallback.
                 if systemEngine == nil {
@@ -941,6 +1008,7 @@ final class SpeechPlayer: ObservableObject {
                     // the bookmark. This branch must NOT run for a book —
                     // clearing nowPlayingTitle here would wipe the next
                     // chapter's title that onNaturalFinish just set.
+                    self.endPlaybackGraceIfNeeded()
                     guard self.onNaturalFinish == nil else { return }
                     if self.lastRawProgress >= 0.98 {
                         self.clearBookmark()
@@ -1035,6 +1103,7 @@ final class SpeechPlayer: ObservableObject {
                     self.finishAuditionIfActive()
                     self.endReadAlong()
                     self.onNaturalFinish = nil
+                    self.endPlaybackGraceIfNeeded()
                     NowPlayingCenter.shared.clear()
                     return
                 }
@@ -1073,6 +1142,39 @@ final class SpeechPlayer: ObservableObject {
     /// current chapter. A note taking over, an explicit stop, or an audition
     /// clears it.
     var onNaturalFinish: (() -> Void)?
+
+    // MARK: - Background playback grace
+
+    /// The scenePhase-background keep-alive (see SpeechnotesApp). Held ONLY
+    /// while speech is actually live, and ended the moment it isn't —
+    /// `endPlaybackGraceIfNeeded` runs from every idle transition, so an
+    /// abandoned session can't pin the app in the background.
+    private var playbackGraceTask: UIBackgroundTaskIdentifier = .invalid
+
+    /// Arms the background grace if (and only if) speech is live. Called by
+    /// SpeechnotesApp on .background. Playback started from any surface —
+    /// the note editor, a book reader, the mini-player — gets the same
+    /// coverage; the window where nothing held a task was exactly the
+    /// "force-quits when I leave the book's own screen" report
+    /// (2026-10-13): audio renders, but the first main-thread stall has no
+    /// scheduled audio behind it and iOS suspends the process.
+    func beginPlaybackGraceIfNeeded() {
+        guard state == .speaking || state == .generating else { return }
+        guard playbackGraceTask == .invalid else { return }
+        playbackGraceTask = UIApplication.shared.beginBackgroundTask(withName: "SpeechPlaybackGrace") { [weak self] in
+            self?.endPlaybackGraceIfNeeded()
+        }
+        Log.shared.info("SpeechPlayer: background grace armed for live speech")
+    }
+
+    /// Ends the grace — idempotent, safe to call from any state transition
+    /// that means "speech is over" (natural finish, stop, abandon) or from
+    /// the system's expiration handler.
+    func endPlaybackGraceIfNeeded() {
+        guard playbackGraceTask != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(playbackGraceTask)
+        playbackGraceTask = .invalid
+    }
 
     private func nowPlayingSubtitle() -> String? { nowPlayingPayload.subtitle }
     /// Cached cover decode — see NowPlayingPayload.resolvedArtwork(). The
@@ -1119,6 +1221,15 @@ final class SpeechPlayer: ObservableObject {
         case .off:
             break
         }
+    }
+
+    /// Remaining seconds on the armed sleep timer, for the lock-screen /
+    /// background surface. Nil when nothing is armed. The minutes timer is
+    /// wall-clock (Task.sleep), so the value is derived from the arming
+    /// moment, not a live countdown the caller has to poll.
+    var sleepTimerRemainingSeconds: TimeInterval? {
+        if case .minutes(let minutes) = sleepTimer { return TimeInterval(minutes * 60) }
+        return nil
     }
 
     func togglePlay(_ text: String, note: Note? = nil, book: BookPlaybackRef? = nil) {

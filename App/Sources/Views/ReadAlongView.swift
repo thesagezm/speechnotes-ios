@@ -23,6 +23,12 @@ struct ReadAlongView: View {
     /// UTF-16 range in `text` of the sentence currently sounding.
     let activeRange: Range<Int>?
     let textScale: CGFloat
+    /// Tap-a-paragraph to start speaking from it (2026-10-13, way #2 of the
+    /// start-from-point set): the row's own UTF-16 start is exactly the
+    /// offset SpeechPlayer.playFrom expects. Nil = taps do nothing (the
+    /// read-along surface in a context with no playback identity, e.g. an
+    /// audition) — the rows stay static text.
+    var onTapParagraph: ((Int) -> Void)? = nil
 
     @EnvironmentObject private var theme: AppTheme
 
@@ -84,6 +90,10 @@ struct ReadAlongView: View {
                         )
                         .equatable()
                         .id(paragraph.id)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            onTapParagraph?(paragraph.start)
+                        }
                     }
                 }
                 .padding(.leading, 16)

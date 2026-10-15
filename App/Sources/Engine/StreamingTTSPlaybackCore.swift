@@ -50,7 +50,7 @@ final class StreamingTTSPlaybackCore: NSObject {
         let exportInterChunkSilence: Float
         let logPrefix: String
         /// Which model file this session renders with (Batch A3). Kokoro has
-        /// two tiers sharing one engine class — fp32 and uint8 — and a device
+        /// two tiers sharing one engine class — fp32 and compact — and a device
         /// log that does not say which one ran cannot size `firstMaxChars`
         /// from the RTF it printed.
         var tier: String? = nil
@@ -366,7 +366,82 @@ final class StreamingTTSPlaybackCore: NSObject {
         ) { [weak self] _ in
             self?.handleBackgroundTransition(leftBackground: false)
         }
+        // The background self-heal (2026-10-13, "Kokoro cannot persist even
+        // 10 seconds"): the scheduled-audio path can die in the background
+        // WITHOUT any observable event — the node stops draining while the
+        // engine still runs (a route reconfig under the lock screen), or a
+        // session deactivation lands between our re-asserts. Nothing in the
+        // per-schedule re-assert covers the minutes AFTER the last schedule
+        // when the producer is parked on a full bank. This watchdog notices
+        // "state says speaking, but the playhead has not advanced in 10 s"
+        // and repairs it the same way handleEngineConfigurationChange does:
+        // re-activate the session, restart the engine if it died, and
+        // re-drive the schedule from the bank. It runs only while
+        // backgrounded (foreground stalls are the HangWatchdog's job) and
+        // only while state claims audible speech.
+        backgroundHealTimer = Timer(timeInterval: 10.0, repeats: true) { [weak self] _ in
+            self?.backgroundHealthCheck()
+        }
+        RunLoop.main.add(backgroundHealTimer!, forMode: .common)
         Log.shared.info("\(config.logPrefix) core created")
+    }
+
+    /// The background watchdog's state, main thread only.
+    private var backgroundHealTimer: Timer?
+    /// The tracker's played-frames sample the last health check saw. The
+    /// playhead advancing between checks is the definition of "audibly
+    /// alive"; frozen while state == .speaking is the wedge.
+    private var lastHealthPlayedFrames: Int64 = -1
+
+    /// Main thread, every 10 s while the core exists. A live, playing
+    /// session passes silently; a backgrounded wedge gets ONE repair per
+    /// occurrence (repairs are logged, and a repair that changes nothing
+    /// does not repeat as spam — the next check just sees the same frozen
+    /// playhead and logs again).
+    private func backgroundHealthCheck() {
+        guard isBackgrounded else {
+            // Foreground: keep the baseline fresh so the FIRST background
+            // check never mistakes a pre-background stall for a new one.
+            lastHealthPlayedFrames = playedFrames
+            return
+        }
+        guard state == .speaking else {
+            lastHealthPlayedFrames = playedFrames
+            return
+        }
+        let nowPlayed = playedFrames
+        defer { lastHealthPlayedFrames = nowPlayed }
+        guard lastHealthPlayedFrames >= 0 else { return }
+        if nowPlayed > lastHealthPlayedFrames { return }  // playhead moving — alive
+
+        // Frozen: state claims speech, the playhead says nothing is being
+        // consumed. Diagnose and repair, exactly like a configuration
+        // change: the session may have been deactivated behind our back
+        // (the silent killer — the engine "runs", no audio renders, iOS
+        // suspends the process seconds later), or the whole engine died.
+        let session = AVAudioSession.sharedInstance()
+        Log.shared.error(
+            "\(config.logPrefix) background health check — playhead frozen at \(nowPlayed) frames while claiming speech; " +
+            "engine \(audioEngineRunning ? "running" : "STOPPED"), node \(playerNode.isPlaying ? "playing" : "idle"), " +
+            "session \(session.category)/\(session.mode), banked \(String(format: "%.1f", bankedSeconds()))s"
+        )
+        AudioSessionSetup.activate(prefix: config.logPrefix)
+        if !audioEngineRunning {
+            do {
+                audioEngine.prepare()
+                try audioEngine.start()
+                audioEngineRunning = true
+            } catch {
+                Log.shared.error("\(config.logPrefix) background heal could not restart the engine: \(error)")
+                return
+            }
+        }
+        if !playerNode.isPlaying {
+            playerNode.play()
+        }
+        // Re-drive: buffers that finished while wedged never triggered the
+        // next schedule; the bank holds them.
+        scheduleReadyChunks(generation: playbackGeneration)
     }
 
     deinit {
@@ -376,6 +451,7 @@ final class StreamingTTSPlaybackCore: NSObject {
         // `stopStallWatchdog()` from teardownPlayback() and from stop(); this
         // is the backstop for a core dropped without either.
         stallWatchdog?.invalidate()
+        backgroundHealTimer?.invalidate()
         if let interruptionObserver {
             NotificationCenter.default.removeObserver(interruptionObserver)
         }

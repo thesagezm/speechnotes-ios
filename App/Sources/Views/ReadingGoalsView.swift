@@ -60,6 +60,23 @@ final class GoalStore: ObservableObject {
         persist()
     }
 
+    /// Edits an existing goal's schedule in place (the 2026-10-13 ask:
+    /// "edit the goal once I've already made it" — extending a deadline no
+    /// longer costs delete + recreate, which lost nothing but felt heavy and
+    /// reset nothing but felt risky). Identity and progress derivation are
+    /// untouched: same id, same book, same derived progress.
+    func update(_ goal: ReadingGoal, start: Date, deadline: Date) {
+        guard let index = goals.firstIndex(where: { $0.id == goal.id }) else { return }
+        goals[index].startDate = start
+        goals[index].deadline = deadline
+        // A completed goal re-armed past its finish line should compete for
+        // pace again rather than staying pinned at "done" forever.
+        if goals[index].completedAt != nil {
+            goals[index].completedAt = nil
+        }
+        persist()
+    }
+
     /// Marks goals complete once their book's live progress crosses the
     /// line — called on every dashboard reload.
     func refreshCompletion(progressOf: (ReadingGoal) -> Double?) {
@@ -236,6 +253,9 @@ struct GoalsCard: View {
                 onDelete: {
                     goalStore.remove(goal)
                     selectedGoal = nil
+                },
+                onUpdate: { start, deadline in
+                    goalStore.update(goal, start: start, deadline: deadline)
                 }
             )
         }
@@ -523,8 +543,12 @@ struct GoalDetailView: View {
     let goal: ReadingGoal
     let book: Book?
     let onDelete: () -> Void
+    /// Edit-in-place (2026-10-13): re-arms the schedule without losing the
+    /// goal. Called with the new start + deadline from the edit sheet.
+    var onUpdate: ((Date, Date) -> Void)? = nil
 
     @Environment(\.dismiss) private var dismiss
+    @State private var showingEditor = false
 
     var body: some View {
         NavigationStack {
@@ -592,6 +616,38 @@ struct GoalDetailView: View {
                         .multilineTextAlignment(.center)
                         .padding(.horizontal, 10)
 
+                    // Continue reading: jump straight back into the book the
+                    // goal tracks, at its saved position (the 2026-10-13 ask —
+                    // "continue reading my book from the goal"). Same
+                    // notification + object contract the mini-player uses
+                    // (a book id string), so the Books tab pushes the right
+                    // reader and it opens where the book left off.
+                    if let book, book.importError == nil {
+                        Button {
+                            Haptics.tap()
+                            NotificationCenter.default.post(
+                                name: .miniPlayerJumpToBook,
+                                object: book.id.uuidString
+                            )
+                            dismiss()
+                        } label: {
+                            Label("Continue reading", systemImage: "book")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+
+                    if onUpdate != nil {
+                        Button {
+                            Haptics.tap()
+                            showingEditor = true
+                        } label: {
+                            Label("Edit schedule", systemImage: "calendar.badge.plus")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                    }
+
                     Button(role: .destructive) {
                         Haptics.press()
                         onDelete()
@@ -611,6 +667,12 @@ struct GoalDetailView: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
                 }
+            }
+            .sheet(isPresented: $showingEditor) {
+                GoalScheduleEditorView(goal: goal) { start, deadline in
+                    onUpdate?(start, deadline)
+                }
+                .presentationDetents([.medium])
             }
         }
     }
@@ -638,7 +700,7 @@ struct GoalDetailView: View {
         case .noBook:
             return "The book this goal pointed at is no longer on the shelf."
         case .overdue:
-            return "The deadline passed at \(Int(((progress.fraction ?? 0) * 100).rounded()))% — extend it by deleting and recreating the goal."
+            return "The deadline passed at \(Int(((progress.fraction ?? 0) * 100).rounded()))% — extend it with Edit schedule."
         case .behind:
             return String(format: "Behind pace: %.0f%% expected by today. A little every day closes the gap.", progress.expectedFraction * 100)
         case .ahead:
@@ -672,5 +734,79 @@ struct GoalDetailView: View {
 
     private func shortDate(_ date: Date) -> String {
         date.formatted(date: .abbreviated, time: .omitted)
+    }
+}
+
+/// Edit an existing goal's schedule — start + finish-by, same rules as the
+/// create flow (finish strictly after start). The book is fixed: a goal that
+/// pointed at a different book is a new goal.
+struct GoalScheduleEditorView: View {
+    let goal: ReadingGoal
+    var onSave: (Date, Date) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var startDate: Date = Date()
+    @State private var deadline: Date = Date()
+
+    private let calendar = Calendar.current
+
+    private var datesValid: Bool {
+        calendar.startOfDay(for: deadline) > calendar.startOfDay(for: startDate)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    DatePicker(
+                        "Start reading",
+                        selection: $startDate,
+                        displayedComponents: .date
+                    )
+                    DatePicker(
+                        "Finish by",
+                        selection: $deadline,
+                        in: calendar.startOfDay(for: startDate).addingTimeInterval(86_400)...,
+                        displayedComponents: .date
+                    )
+                } footer: {
+                    if !datesValid {
+                        Text("The finish date must be after the start date.")
+                    }
+                }
+                Section {
+                    Button {
+                        Haptics.success()
+                        onSave(startDate, deadline)
+                        dismiss()
+                    } label: {
+                        Text("Save Changes")
+                            .font(.headline)
+                            .foregroundStyle(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 6)
+                            .background(
+                                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                    .fill(datesValid ? Color.green : Color.green.opacity(0.4))
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!datesValid)
+                    .listRowBackground(Color.clear)
+                    .listRowInsets(EdgeInsets())
+                }
+            }
+            .navigationTitle("Edit Schedule")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+            }
+            .onAppear {
+                startDate = goal.startDate
+                deadline = goal.deadline
+            }
+        }
     }
 }

@@ -189,7 +189,7 @@ final class PlaybackMetrics {
     /// tap supersedes the first without going through `stop()` — then stamps t0.
     ///
     /// `tier` (Batch A3) names the model file in play for this session, so a
-    /// log read a week later can tell fp32 from uint8 without matching
+    /// log read a week later can tell fp32 from compact without matching
     /// timestamps to a build.
     func beginSession(chunkCount: Int, firstChunkChars: Int, rate: Float, tier: String? = nil) {
         if sessionActive { endSession(reason: "superseded") }
@@ -233,7 +233,7 @@ final class PlaybackMetrics {
         let drift = Self.driftLabel(firstQuartileMean: firstQuartileMeanRTF, overallMean: synthesisRTF)
         // Batch A3: the tier rides the summary, because the summary is the
         // only line that prints RTF. The two Kokoro tiers produce materially
-        // different figures (fp32 and uint8 are the same graph at different
+        // different figures (fp32 and compact are the same graph at different
         // precision), and an untagged RTF cannot be read twice.
         let tierTag = sessionTier.map { " [\($0)]" } ?? ""
         emit("session \(reason) — \(generatedChunks) chunks (\(skippedChunks) skipped), "

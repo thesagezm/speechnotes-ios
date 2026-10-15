@@ -316,10 +316,24 @@ struct BookPDFReaderView: View {
 
     @ViewBuilder private var readerSurface: some View {
         if showsReadAlong {
+            // Tap a paragraph to start speaking from it (2026-10-13, way #2
+            // — same contract as the epub reader's read-along).
             ReadAlongView(
                 text: player.activeSpeechText ?? "",
                 activeRange: player.readAlongRange,
-                textScale: appTheme.previewTextScale
+                textScale: appTheme.previewTextScale,
+                onTapParagraph: { offset in
+                    Haptics.tap()
+                    player.playFrom(
+                        player.activeSpeechText ?? "",
+                        at: offset,
+                        book: SpeechPlayer.BookPlaybackRef(
+                            id: book.id.uuidString,
+                            title: book.title,
+                            chapterIndex: chapterForCurrentPage ?? 0
+                        )
+                    )
+                }
             )
         } else {
             GeometryReader { geo in

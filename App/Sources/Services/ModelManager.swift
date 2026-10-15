@@ -1,9 +1,10 @@
 import Foundation
 
 /// Downloads and owns the Kokoro model files (Documents/KokoroOnnx/):
-/// fp32 ONNX model (~326 MB, best quality) + uint8 ONNX model (~177 MB, small
-/// tier) sharing one voice bank (~15 MB) + tokenizer (~4 KB), plus the
-/// Supertonic set. One-time downloads; everything is offline after that.
+/// fp32 ONNX model (~326 MB, best quality) + int8-quantized ONNX model
+/// (~92 MB, small tier) sharing one voice bank (~15 MB) + tokenizer (~4 KB),
+/// plus the Supertonic set. One-time downloads; everything is offline after
+/// that.
 @MainActor
 final class ModelManager: ObservableObject {
     static let shared = ModelManager()
@@ -51,27 +52,33 @@ final class ModelManager: ObservableObject {
     /// Voice bank: 28 style vectors shared by every Kokoro voice.
     static let voicesURL = URL(string: "https://raw.githubusercontent.com/mlalma/KokoroTestApp/main/Resources/voices.npz")!
 
-    // MARK: Small Kokoro model set (uint8 tier)
+    // MARK: Small Kokoro model set (compact tier)
 
-    /// Kokoro uint8 weight-only quant (~177 MB) — the lightweight tier that
-    /// replaces the removed Kitten engine. Same graph, tokenizer, voice bank
-    /// and inference contract as the fp32 set; roughly half the download and
-    /// memory footprint, a small quality step down. The fp16 variant was
-    /// spike-tested first and produces NaN on ORT CPU (CI 34008548349), so
-    /// the proven v0.9–v1.4 uint8 build ships instead. Lives in the SAME
-    /// directory as the fp32 set under its own filename — never as
+    /// Kokoro `model_quantized.onnx` — the lightweight tier that replaces
+    /// the removed Kitten engine, and the small tier the 2026-10-13 device
+    /// round asked to shrink: the uint8 build was 177.5 MB and the user asked
+    /// for 80–130 MB. Same graph, same inputs, same tokenizer/voice bank as
+    /// the fp32 set; onnxruntime's dynamic-quantized export runs the whole
+    /// network in int8 rather than the weight-only uint8 pass, which is why
+    /// it lands at ~92 MB. The four-way spike (fp32 oracle vs uint8 177 MB,
+    /// uint8f16 114 MB, quantized 92 MB) picked this one: equal-or-better
+    /// spectral fidelity in 5 of 6 cases, and no NaN — the fp16 sibling
+    /// (model_fp16.onnx) was spike-tested first and produces NaN on ORT CPU
+    /// (CI 34008548349), which is why fp16 is still banned here. Lives in the
+    /// SAME directory as the fp32 set under its own filename — never as
     /// `model.onnx`, which `removeQuantizedDownloads()` deletes when <200 MB.
-    static let smallModelURL = URL(string: "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/onnx/model_uint8.onnx")!
+    static let smallModelURL = URL(string: "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/onnx/model_quantized.onnx")!
 
     nonisolated static var smallModelFileURL: URL {
-        onnxDirectory.appendingPathComponent("model_uint8.onnx")
+        onnxDirectory.appendingPathComponent("model_quantized.onnx")
     }
 
     nonisolated static func smallFilesAreValid() -> Bool {
         let fm = FileManager.default
-        // Threshold rejects the q8f16 variant (~86 MB) so it re-downloads.
+        // Window rejects the old uint8 file (~177 MB) so it re-downloads as
+        // the smaller quantized build, and rejects a truncated download.
         guard let modelSize = (try? fm.attributesOfItem(atPath: smallModelFileURL.path))?[.size] as? Int64,
-              modelSize > 120_000_000 else { return false }
+              modelSize > 80_000_000, modelSize < 100_000_000 else { return false }
         return kokoroVoicesAreValid() && kokoroTokenizerIsValid()
     }
 
@@ -389,14 +396,14 @@ final class ModelManager: ObservableObject {
         }
 
         smallState = .downloading(progress: 0)
-        Log.shared.info("ModelManager: starting small Kokoro download (~177 MB uint8)")
+        Log.shared.info("ModelManager: starting small Kokoro download (~92 MB int8)")
 
         Task.detached { [weak self] in
             do {
                 try await self?.download(
                     from: Self.smallModelURL,
                     to: Self.smallModelFileURL,
-                    expectedBytes: 177_464_632,
+                    expectedBytes: 92_361_116,
                     progressRange: 0.0...0.9,
                     publishingTo: { [weak self] value in self?.reportSmallProgress(value) }
                 )

@@ -15,7 +15,7 @@ struct SpeechSettingsView: View {
     /// had TWO Kokoro rows AND a separate quality picker — three ways to say
     /// the same thing). Now the Engine picker has ONE Kokoro row and this
     /// section is the tier choice. Kokoro has no step parameter; its quality
-    /// knob IS the model tier (fp32 vs uint8), stored under `kokoroTier` and
+    /// knob IS the model tier (fp32 vs compact), stored under `kokoroTier` and
     /// read by `SpeechPlayer.kokoroWantsBigModel` — the one kind maps onto
     /// whichever tier this dial picks.
     ///
@@ -26,7 +26,7 @@ struct SpeechSettingsView: View {
         Section {
             Picker("Kokoro quality", selection: kokoroQuality) {
                 Text("High (~341 MB)").tag("high")
-                Text("Compact (~177 MB)").tag("compact")
+                Text("Compact (~92 MB)").tag("compact")
             }
             .pickerStyle(.inline)
         } header: {
@@ -112,7 +112,7 @@ struct SpeechSettingsView: View {
                 Text("Listed worst to best. Supertonic sounds the best (10 voice styles, 31 languages). Kokoro runs on-device with 28 voices — its High/Compact download choice is in the Kokoro quality section below.")
             }
 
-            // Kokoro's quality dial — the tier choice (fp32/uint8), shown
+            // Kokoro's quality dial — the tier choice (fp32/compact), shown
             // while the one Kokoro engine is active. See the property's
             /// comment for why it is a separate member.
             if player.engineKind == .kokoro {
@@ -239,7 +239,7 @@ struct SpeechSettingsView: View {
             Section {
                 switch models.smallState {
                 case .notDownloaded:
-                    Button { models.startSmallDownload() } label: { Label("Download Kokoro small model (~177 MB)", systemImage: "arrow.down.circle") }
+                    Button { models.startSmallDownload() } label: { Label("Download Kokoro small model (~92 MB)", systemImage: "arrow.down.circle") }
                 case .downloading(let progress):
                     ProgressView(value: progress) { Text("Downloading Kokoro small… \(Int(progress*100))%") }
                 case .failed(let message):
@@ -247,7 +247,7 @@ struct SpeechSettingsView: View {
                     Button("Retry") { models.startSmallDownload() }
                 case .ready:
                     Label("Small model ready — fully offline", systemImage: "checkmark.circle")
-                    Button("Delete small model (frees ~177 MB)", role: .destructive) { models.deleteSmallModel() }
+                    Button("Delete small model (frees ~92 MB)", role: .destructive) { models.deleteSmallModel() }
                 }
             } header: { Text("Kokoro small model") } footer: {
                 Text("The uint8 build of the same Kokoro graph — half the footprint of fp32 with a small quality step down. Shares the 28-voice catalog, tokenizer and voice bank with the model above.")

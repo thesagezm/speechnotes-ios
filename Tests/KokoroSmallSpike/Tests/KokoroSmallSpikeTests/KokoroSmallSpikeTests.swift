@@ -22,7 +22,7 @@ final class KokoroSmallSpikeTests: XCTestCase {
 
     private let fixtureDir = NSHomeDirectory() + "/kokoro-small-spike"
 
-    private var modelPath: String { "\(fixtureDir)/model_uint8.onnx" }
+    private var modelPath: String { "\(fixtureDir)/model_quantized.onnx" }
     private var voicePath: String { "\(fixtureDir)/voice.f32" }
     private var tokenizerPath: String { "\(fixtureDir)/tokenizer.json" }
     private var voicesNPZPath: String {
@@ -593,7 +593,7 @@ final class KokoroSmallSpikeTests: XCTestCase {
         let fp32Path = "\(fixtureDir)/model.onnx"
         guard fm.fileExists(atPath: modelPath), fm.fileExists(atPath: fp32Path),
               fm.fileExists(atPath: voicePath) else {
-            throw XCTSkip("quantization evidence needs model_uint8.onnx AND model.onnx AND voice.f32 in \(fixtureDir)")
+            throw XCTSkip("quantization evidence needs model_quantized.onnx AND model.onnx AND voice.f32 in \(fixtureDir)")
         }
         let vocab = try loadVocab()
         let voiceFlat = try Data(contentsOf: URL(fileURLWithPath: voicePath)).withUnsafeBytes {

@@ -151,6 +151,10 @@ final class AudioBookPlayer: ObservableObject {
     private var chapters: [AudioChapter] = []
     /// In-chapter fraction for a cold resume (remote play after stop).
     private var lastFraction: Double = 0
+    /// Absolute file seconds for a cold resume — persisted alongside the
+    /// fraction (see persistPosition) and used whenever non-zero, because
+    /// it is the playhead itself rather than a reconstruction of it.
+    private var lastSeconds: Double = 0
     private var cachedArtwork: UIImage?
     /// Set by pause(), cleared by play() — a chapter end reached while the
     /// user deliberately parked there must not auto-advance.
@@ -195,12 +199,15 @@ final class AudioBookPlayer: ObservableObject {
         let position = book.position
         chapterIndex = min(max(0, position?.chapterIndex ?? 0), max(0, chapters.count - 1))
         lastFraction = min(max(0, position?.chapterFraction ?? 0), 0.999)
+        // A persisted absolute playhead wins over the reconstructed fraction
+        // — see persistPosition. This is the resume source for a cold start.
+        lastSeconds = min(max(0, position?.audioSeconds ?? 0), max(0, book.audioDuration ?? 0))
         loadedURL = nil
     }
 
     // MARK: Transport
 
-    func play(book: Book, chapterIndex index: Int, withinChapterFraction fraction: Double? = nil) {
+    func play(book: Book, chapterIndex index: Int, withinChapterFraction fraction: Double? = nil, atSeconds seconds: Double? = nil) {
         // Single slot: playing another book retires the previous one.
         if let current = activeBookID, current != book.id {
             teardownAudio()
@@ -238,7 +245,11 @@ final class AudioBookPlayer: ObservableObject {
             }
             guard let backend else { return }
             let fileDuration = fileLength
-            let start = clampToChapterStart(fraction: fraction, fileDuration: fileDuration)
+            // A persisted absolute playhead is the exact spot the clock said
+            // the file was at — it needs no chapter-table reconstruction.
+            // When absent (legacy manifests, first open) the chapter start +
+            // fraction reconstructs it as before.
+            let start = seconds ?? clampToChapterStart(fraction: fraction, fileDuration: fileDuration)
             isPlaying = true
             totalDuration = fileDuration
             startTicker()
@@ -470,8 +481,11 @@ final class AudioBookPlayer: ObservableObject {
     func resumeCurrent() {
         guard let book = activeBook ?? boundBook else { return }
         if backend == nil {
-            // Cold resume: start the last chapter at the last fraction.
-            play(book: book, chapterIndex: chapterIndex, withinChapterFraction: lastFraction)
+            // Cold resume: the persisted absolute playhead when the last
+            // session wrote one (a real clock), else the last chapter at
+            // the last fraction.
+            let fraction = lastSeconds > 0 ? nil : lastFraction
+            play(book: book, chapterIndex: chapterIndex, withinChapterFraction: fraction, atSeconds: lastSeconds > 0 ? lastSeconds : nil)
         } else {
             userPaused = false
             backend?.play()
@@ -666,8 +680,13 @@ final class AudioBookPlayer: ObservableObject {
 
     private var chapterIsFinished: Bool {
         guard let backend else { return false }
+        // Nil clock = the stream is still loading (Opus's whole-file read
+        // on a multi-GB book takes seconds) or the item is still opening.
+        // "0 seconds in" would read as finished for a chapter that starts
+        // at 0 — the auto-advance then skipped chapter 1 of such books the
+        // moment the ticker first fired.
+        guard let here = backend.currentTime else { return false }
         guard let end = effectiveChapterEnd(fileDuration: fileLength) else { return false }
-        let here = backend.currentTime ?? 0
         return here >= end - 0.05
     }
 
@@ -798,10 +817,11 @@ final class AudioBookPlayer: ObservableObject {
         // A finished book restarts fresh on next open — the last chapter
         // would otherwise resume at its own end and instantly "finish" again.
         if let book = activeBook {
-            store?.updatePosition(book, chapterIndex: 0, chapterFraction: 0)
+            store?.updatePosition(book, chapterIndex: 0, chapterFraction: 0, audioSeconds: 0)
         }
         boundBook = nil
         lastFraction = 0
+        lastSeconds = 0
         stop()
     }
 
@@ -813,7 +833,19 @@ final class AudioBookPlayer: ObservableObject {
         if !force, let last = lastPersistAt, now.timeIntervalSince(last) < 5 { return }
         lastPersistAt = now
         lastFraction = chapterProgress
-        store.updatePosition(book, chapterIndex: chapterIndex, chapterFraction: chapterProgress, cfi: nil)
+        // Absolute file seconds whenever a real clock is available. The
+        // chapterFraction has to be RECONSTRUCTED from the chapter table
+        // on resume (start + fraction × span), and on books whose chapter
+        // markers sit at coarse boundaries that reconstruction is minutes
+        // off from the paused playhead — the 2026-10-13 "resumes 10–20
+        // minutes back" report. The backend's own clock is exact.
+        store.updatePosition(
+            book,
+            chapterIndex: chapterIndex,
+            chapterFraction: chapterProgress,
+            cfi: nil,
+            audioSeconds: backend?.currentTime
+        )
     }
 
     // MARK: Lock screen / Control Center
@@ -1023,6 +1055,10 @@ final class AudioBookPlayer: ObservableObject {
             // interruption is not the user parking the book.
             interruptedWhilePlaying = isPlaying
             if isPlaying { isPlaying = false }
+            // The process may never come back foreground (the user took the
+            // call and moved on, the system then suspends us) — flush the
+            // real playhead NOW so a later cold resume lands exactly here.
+            persistPosition(force: true)
         case .ended:
             defer { interruptedWhilePlaying = false }
             guard interruptedWhilePlaying, !userPaused else { return }
