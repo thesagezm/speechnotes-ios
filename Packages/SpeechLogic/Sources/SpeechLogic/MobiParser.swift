@@ -730,11 +730,19 @@ public enum MobiParser {
         if let regex = try? NSRegularExpression(pattern: "(?is)<head\\b[^>]*>.*?</head\\s*>") {
             working = replacing(regex, in: working, with: " ")
         }
-        if let regex = try? NSRegularExpression(pattern: "(?is)^\\s*<html\\b[^>]*>") {
-            working = replacing(regex, in: working, with: "")
+        // The flow's opening tag and ITS closing tag: the close sits before
+        // the section content, so the first `</html>` after the (removed)
+        // open goes too — a bare one left behind is still a nested close in
+        // the generated chapter's body.
+        if let openRegex = try? NSRegularExpression(pattern: "(?is)^\\s*<html\\b[^>]*>") {
+            working = replacing(openRegex, in: working, with: "")
         }
-        if let regex = try? NSRegularExpression(pattern: "(?is)</html\\s*>\\s*$") {
-            working = replacing(regex, in: working, with: "")
+        if let closeRegex = try? NSRegularExpression(pattern: "(?is)</html\\s*>") {
+            if let first = closeRegex.firstMatch(
+                in: working, range: NSRange(working.startIndex..., in: working)),
+               let range = Range(first.range, in: working) {
+                working.replaceSubrange(range, with: "")
+            }
         }
         return working
     }

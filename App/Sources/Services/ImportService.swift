@@ -281,12 +281,16 @@ final class ImportService {
                         "(?s)<!--.*?-->"] {
             if let regex = try? NSRegularExpression(pattern: pattern) {
                 working = regex.stringByReplacingMatches(
-                    in: working, range: NSRange(working.startIndex..., in: working), with: " ")
+                    in: working,
+                    range: NSRange(working.startIndex..., in: working),
+                    withTemplate: " ")
             }
         }
         if let tagRegex = try? NSRegularExpression(pattern: "<[^>]{0,400}>") {
             working = tagRegex.stringByReplacingMatches(
-                in: working, range: NSRange(working.startIndex..., in: working), with: "\n")
+                in: working,
+                range: NSRange(working.startIndex..., in: working),
+                withTemplate: "\n")
         }
         let text = XhtmlText.decodingEntitiesLeniently(working)
             .components(separatedBy: .newlines)

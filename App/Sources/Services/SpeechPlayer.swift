@@ -489,7 +489,7 @@ final class SpeechPlayer: ObservableObject {
         playFrom(text, at: 0, note: note)
     }
 
-    /// Stop + speak `text` starting at a UTF-16 offset (the 2026-10-13
+    /// Speak `text` starting at a UTF-16 offset (the 2026-10-13
     /// start-from-point work). The offset is SNAPPED to the sentence
     /// boundary at-or-before it — the same resume math bookmarks use — so
     /// playback always starts on a sentence, never mid-word, and the
@@ -500,14 +500,33 @@ final class SpeechPlayer: ObservableObject {
     /// becomes the new bookmark (charsDone: offset) exactly like a resume,
     /// so an interruption five seconds later still resumes from HERE, not
     /// from the top.
+    ///
+    /// SUPERSEDES IN PLACE — deliberately NO stop() call. The engines'
+    /// speak() contract already supersedes a live session (SystemEngine
+    /// bumps the epoch and drops stale didCancels; the streaming core bumps
+    /// the generation and floods the pacing gate). Going through stop()
+    /// here published an ASYNC .idle callback that landed AFTER this new
+    /// session had started — same engine instance, so the identity guard
+    /// passed — and its idle branch then wiped the brand-new read-along
+    /// state (activeSpeechText = nil → the read-along surface collapsed to
+    /// markdown preview) and churned nowPlayingNoteId → nil (→ the editor's
+    /// suppression flipped off → a second mini-player stacked under the
+    /// editor's own bar). The 2026-10-15 device report, both symptoms.
     func playFrom(_ text: String, at offset: Int, note: Note? = nil, book: BookPlaybackRef? = nil) {
+        ensureNowPlayingWired()
+        // A note taking over ends book auto-advance and the book's
+        // lock-screen dressing (togglePlay's rule); a book play-from-point
+        // keeps the chain armed so the chapter still auto-advances.
+        if book == nil {
+            onNaturalFinish = nil
+            nowPlayingPayload = NowPlayingPayload()
+        }
+        nowPlayingTitle = note?.title ?? book?.title
+        nowPlayingNoteId = note?.id
+        nowPlayingBookId = book?.id
+
         guard offset > 0 else {
-            ensureNowPlayingWired()
             clearBookmark()
-            stop()
-            nowPlayingTitle = note?.title ?? book?.title
-            nowPlayingNoteId = note?.id
-            nowPlayingBookId = book?.id
             resumeBaseFraction = 0
             lastRawProgress = 0
             beginReadAlong(fullText: text)
@@ -539,19 +558,7 @@ final class SpeechPlayer: ObservableObject {
             playFrom(text, at: 0, note: note, book: book)
             return
         }
-        ensureNowPlayingWired()
-        // stop() below clears onNaturalFinish unconditionally (an explicit
-        // stop ends the chapter chain) — but a BOOK play-from-point must
-        // keep the chain armed so the chapter still auto-advances. Save and
-        // restore around the stop; togglePlay's book branch relies on the
-        // same ordering (BookPlaybackController re-arms it after speak()).
-        let savedFinish = onNaturalFinish
         clearBookmark()
-        stop()
-        if book != nil { onNaturalFinish = savedFinish } else { onNaturalFinish = nil }
-        nowPlayingTitle = note?.title ?? book?.title
-        nowPlayingNoteId = note?.id
-        nowPlayingBookId = book?.id
         resumeBaseFraction = Double(plan.offset) / Double(max(1, text.utf16.count))
         lastRawProgress = 0
         beginReadAlong(fullText: text, pieces: plan.pieces)

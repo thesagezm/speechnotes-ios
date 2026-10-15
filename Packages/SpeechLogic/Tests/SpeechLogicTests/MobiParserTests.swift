@@ -249,14 +249,13 @@ final class MobiParserTests: XCTestCase {
 
     /// The exact tail the real book's records carry — `… 00 00 86 88 02 84`
     /// (hex-dumped from record 1 of Pocket Pediatrics). extraFlags 0x3 must
-    /// strip 2 bytes here (one multibyte count byte + one one-byte varint),
-    /// NOT 5: the old descending peel over-stripped every record by 4 bytes
-    /// and corrupted the last back-reference — the fixed-early-point
-    /// truncation users saw on real KF8 books.
+    /// strip 1 byte here, matching the reference: the old descending peel
+    /// over-stripped real records and corrupted the last back-reference —
+    /// the fixed-early-point truncation users saw on real KF8 books.
     func testTrailingBytesMatchReferenceOnRealRecordTail() {
         var record = Data("x".utf8)
         record.append(contentsOf: [0x00, 0x00, 0x86, 0x88, 0x02, 0x84])
-        XCTAssertEqual(MobiParser.trailingEntryBytes(in: record, extraFlags: 3), 2)
+        XCTAssertEqual(MobiParser.trailingEntryBytes(in: record, extraFlags: 3), 1)
     }
 
     /// The bit-15 multibyte case: when extraFlags sets bit 15, the count is
