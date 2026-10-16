@@ -28,6 +28,11 @@ struct BookPDFReaderView: View {
     @State private var pdfView: PDFView?
     @State private var outlineRows: [OutlineRow] = []
     @State private var showingOutline = false
+    /// The book's persisted force-OCR flag (scanner watermark the automatic
+    /// detector cannot recognize, or a mixed document the user wants fully
+    /// OCR'd). Local state mirrors the manifest so the button toggles
+    /// immediately; the write-back goes through the store.
+    @State private var forceOCROn: Bool
     /// True until the reader's document lands — the open itself is the
     /// expensive part and runs off main (see BookPDFView), so the surface
     /// says so instead of sitting blank.
@@ -50,6 +55,7 @@ struct BookPDFReaderView: View {
         let saved = book.position
         _currentPage = State(initialValue: saved?.chapterIndex ?? 0)
         _pageCount = State(initialValue: book.pageCount ?? 0)
+        _forceOCROn = State(initialValue: book.forceOCR)
     }
 
     private var showsReadAlong: Bool {
@@ -241,6 +247,20 @@ struct BookPDFReaderView: View {
             immersiveBarsHidden.toggle()
         }
         .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button {
+                    Haptics.tap()
+                    toggleForceOCR()
+                } label: {
+                    // Same glyph either way; tint carries the state (the
+                    // reader's other chrome is shape-coded, not color-coded,
+                    // and a second icon for one boolean isn't worth the
+                    // toolbar width).
+                    Image(systemName: "text.viewfinder")
+                        .foregroundStyle(forceOCROn ? Color.accentColor : Color.secondary)
+                }
+                .accessibilityLabel(forceOCROn ? "OCR on — tap to turn off" : "Force OCR — tap to turn on")
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 Button {
                     Haptics.tap()
@@ -659,6 +679,36 @@ struct BookPDFReaderView: View {
             guard let pdfView, pdfView.window != nil, pdfView.currentPage != page else { return }
             pdfView.go(to: page)
         }
+    }
+
+    // MARK: - Force OCR
+
+    /// Turns OCR on or off for this book. The flag is per-book and persists,
+    /// because "is this document a scan" is a property of the file, not of
+    /// the session.
+    ///
+    /// The cached chapter speech text is dropped as part of the toggle: it
+    /// was extracted with the OLD decision (watermark read as text, or real
+    /// text OCR'd away), and replaying it would look like the toggle did
+    /// nothing. Re-extraction happens on the next play/resume, which is what
+    /// the user actually wants to hear.
+    private func toggleForceOCR() {
+        let newValue = !forceOCROn
+        forceOCROn = newValue
+        var updated = book
+        updated.forceOCR = newValue
+        store.save(updated)
+        for index in 0..<(book.pdfChapters?.count ?? 0) {
+            try? FileManager.default.removeItem(
+                at: BooksStore.speechTextURL(updated, chapterIndex: index)
+            )
+            try? FileManager.default.removeItem(
+                at: BooksStore.speechTextOffsetsURL(updated, chapterIndex: index)
+            )
+        }
+        // Vision is not free — tell the user the cost in the log, where
+        // device reports can see it.
+        Log.shared.info("PDFReader: forced OCR \(newValue ? "ON" : "OFF") for \(updated.title); chapter text caches dropped")
     }
 
     // MARK: - Read-along page tracking

@@ -365,6 +365,16 @@ private struct BookGridCard: View {
                 parts.append("\(chapters) ch")
             }
         case .pdf:
+            // A scan announces itself on the shelf, so a book whose pages
+            // are images doesn't look like a broken import: the shelf is
+            // the first place the user would want to know that speech comes
+            // from OCR rather than from the file's own text.
+            if book.pdfIsScanned == true {
+                parts.append("Scanned — OCR")
+            }
+            if book.forceOCR {
+                parts.append("OCR forced")
+            }
             if let chapters = book.pdfChapters, !chapters.isEmpty {
                 parts.append("\(chapters.count) ch")
             } else if let pages = book.pageCount {

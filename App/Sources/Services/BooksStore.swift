@@ -335,6 +335,17 @@ final class BooksStore: ObservableObject {
                             book.pdfChapterSource = resolved.source
                         }
                     }
+                    // One scan probe per book, stamped the first time the
+                    // watermark-aware detector sees it (nil = never probed).
+                    // The shelf's "Scanned — OCR" row and the reader's
+                    // force-OCR toggle both read this flag; the per-page
+                    // decision itself always re-tests the page, so a false
+                    // stamp here costs nothing at playback time.
+                    if book.pdfIsScanned == nil {
+                        let verdict = PdfScanDetector.verdict(in: document)
+                        book.pdfIsScanned = verdict.needsOCR
+                        Log.shared.info("BooksStore: scan probe «\(book.title)» — \(verdict.reason)")
+                    }
                 case .audio:
                     // Round 5: legacy books kept their file as original.audio
                     // — an extension AVURLAsset cannot map to a container
@@ -597,6 +608,13 @@ final class BooksStore: ObservableObject {
                     book.pdfChapters = resolved.chapters
                     book.pdfChapterSource = resolved.source
                 }
+                // Scan verdict, stamped once: CamScanner's watermark has a
+                // real text layer, so the manifest cannot assume "PDF = has
+                // text". Playback re-tests each page anyway; this flag drives
+                // the shelf row and the reader's force-OCR switch.
+                let scan = PdfScanDetector.verdict(in: document)
+                book.pdfIsScanned = scan.needsOCR
+                Log.shared.info("BooksStore: scan probe «\(book.title)» — \(scan.reason)")
                 // Cover = page 1 rendered to a JPEG (epubs carry their real
                 // cover; without this PDFs show a generic glyph on the shelf).
                 if let page = document.page(at: 0) {

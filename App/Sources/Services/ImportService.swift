@@ -227,17 +227,24 @@ final class ImportService {
     /// reads them lazily and by chapter.
     private static let maxPdfPages = 150
     private static let maxPdfTextChars = 1_000_000
+    /// OCR is ~a third of a second per page on device and holds a full-page
+    /// bitmap while it runs. A scanned book pulled into a NOTE can be a
+    /// 300-page textbook; 25 OCR'd pages is a real note, and anything longer
+    /// belongs on the Books tab, which reads chapter by chapter. The
+    /// non-OCR pages are read from their text layer as before.
+    private static let maxPdfOcrPages = 25
 
     private static func pdfText(from url: URL) async -> String? {
-        // PDFKit, off-main. The caps below are the note importer's own — a
-        // note import is not a book import.
+        // PDFKit + Vision, off-main. The caps below are the note importer's
+        // own — a note import is not a book import.
         let result = await PdfTextExtractor.text(
             for: url,
             maxPages: maxPdfPages,
-            maxCharacters: maxPdfTextChars
+            maxCharacters: maxPdfTextChars,
+            maxOCRPages: maxPdfOcrPages
         )
         if let result {
-            Log.shared.info("ImportService: PDF text via pdfkit (\(result.text.utf16.count) chars)")
+            Log.shared.info("ImportService: PDF text via pdfkit (\(result.text.utf16.count) chars, scanned = \(result.isScanned))")
         }
         return result?.text
     }

@@ -69,6 +69,18 @@ struct Book: Identifiable, Codable, Equatable, Hashable {
     /// chapter pipeline reads these exactly like an epub's spine.
     var pdfChapters: [PdfChapter]?
     var pdfChapterSource: String?
+    /// pdf: the user forced OCR for this book. Set when the automatic
+    /// watermark test cannot recognize a scan (a producer variant the
+    /// detector has no token for), so the reader would otherwise read the
+    /// watermark aloud. Toggleable from the reader; persists per book.
+    /// Non-optional with a default so manifests written before this existed
+    /// keep decoding exactly as they did.
+    var forceOCR: Bool = false
+    /// pdf: the watermark-aware probe's answer, stamped once at import (or by
+    /// the first backfill pass that saw it). nil = never probed — books
+    /// written before the detector shipped. The shelf's "Scanned — OCR" row
+    /// and the reader's force-OCR toggle both read it.
+    var pdfIsScanned: Bool?
     /// audio: the chapters read out of the file's own metadata (chpl / ID3
     /// CHAP). One list, so the shelf, the player bar, lock screen and the
     /// mini-player all agree on the unit boundaries without re-parsing.
@@ -104,6 +116,7 @@ struct Book: Identifiable, Codable, Equatable, Hashable {
         pageCount: Int? = nil,
         pdfChapters: [PdfChapter]? = nil,
         pdfChapterSource: String? = nil,
+        forceOCR: Bool = false,
         audioChapters: [AudioChapter]? = nil,
         audioChapterSource: String? = nil,
         audioDuration: Double? = nil,

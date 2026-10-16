@@ -2,7 +2,7 @@
 """Generates the minimal PDF fixtures used by SpeechLogicTests/PdfTests.
 
 Hand-assembled PDF 1.4 (no deps): objects dict -> bytes with a computed xref
-table, Helvetica text runs, ASCII-only content. Three shapes the tests rely on:
+table, Helvetica text runs, ASCII-only content. Shapes the tests rely on:
 
   pdf-outline.pdf   3 pages + /Outlines with 3 top-level items (pages 1..3),
                     one nested child under item 2 (must NOT become a chapter).
@@ -10,6 +10,13 @@ table, Helvetica text runs, ASCII-only content. Three shapes the tests rely on:
                     drives the line-height heading fallback.
   pdf-columns.pdf   1 page, two text columns; RIGHT column is drawn FIRST so
                     content order != reading order (extraction must fix it).
+  pdf-blank.pdf     1 page, no text runs — the scanned-PDF shape (OCR routing).
+  pdf-watermark.pdf 4 pages whose ENTIRE text layer is "Scanned by CamScanner"
+                    — the CamScanner scan that read as three words. The scan
+                    detector must call it a scan.
+  pdf-prose.pdf     4 pages of real prose — the control case (NOT a scan).
+  pdf-thin.pdf      4 pages of short but distinct paragraphs — a running
+                    head, not a watermark (NOT a scan).
 
 Run from repo root:  python3 Scripts/make_pdf_fixtures.py
 """
@@ -172,9 +179,114 @@ def build_blank_fixture():
     write("pdf-blank.pdf", b.build(catalog))
 
 
+WATERMARK = b"Scanned by CamScanner"
+
+# A real textbook paragraph: the text layer of a genuine text-layer PDF, long
+# enough to clear the detector's 200-character prose bar with room to spare.
+PROSE = [
+    b"The history of paediatric cardiology begins with the recognition that",
+    b"congenital heart disease is not a single diagnosis but a family of",
+    b"conditions, each with its own haemodynamic signature and its own",
+    b"natural history. Early descriptions were confined to post-mortem",
+    b"findings, and it was not until the introduction of cardiac",
+    b"catheterisation that clinicians could study the living circulation.",
+    b"This chapter reviews the diagnostic reasoning that grew out of that",
+    b"shift, and sets out the framework the rest of the book applies.",
+]
+
+
+def build_watermark_fixture():
+    """CamScanner's shape: every page's WHOLE text layer is the watermark.
+
+    The page has a real, invisible, selectable text layer — which is why the
+    old "does this page have 16 characters" probe said YES, and the reader
+    read the watermark out loud instead of the page. The detector must call
+    this document a scan.
+    """
+    b = PdfBuilder()
+    font = b.add(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    pages = b.reserve()
+    kids = [
+        make_page(b, text_ops([WATERMARK], 72, 700, 18), font, pages)
+        for _ in range(4)
+    ]
+    b.set(pages, b"<< /Type /Pages /Kids [" + b" ".join(str(k).encode() for k in kids)
+        + b"] /Count 4 >>")
+    catalog = b.add(b"<< /Type /Catalog /Pages " + str(pages).encode() + b" 0 R >>")
+    write("pdf-watermark.pdf", b.build(catalog))
+
+
+def build_prose_fixture():
+    """A genuine text-layer document: dense prose on every page.
+
+    The control case — the watermark detector must NOT send this to OCR.
+    """
+    b = PdfBuilder()
+    font = b.add(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    pages = b.reserve()
+    kids = [
+        make_page(b, text_ops(PROSE + [b"continued from the previous page."], 72, 740, 16), font, pages)
+        for _ in range(4)
+    ]
+    b.set(pages, b"<< /Type /Pages /Kids [" + b" ".join(str(k).encode() for k in kids)
+        + b"] /Count 4 >>")
+    catalog = b.add(b"<< /Type /Catalog /Pages " + str(pages).encode() + b" 0 R >>")
+    write("pdf-prose.pdf", b.build(catalog))
+
+
+def build_thin_fixture():
+    """A running head, not a watermark: every page carries a short but genuine
+    paragraph. The pages differ from each other and each clears the prose
+    bar, so the detector must NOT call this a scan — a page-count or
+    character floor alone would."""
+    b = PdfBuilder()
+    font = b.add(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    pages = b.reserve()
+    kids = []
+    for i in range(4):
+        body = (
+            b"Running head %d. " % i
+            + b"This page carries a short but genuine paragraph of body text, "
+            + b"long enough to be spoken and clearly the work of a real "
+            + b"text layer rather than a scanner watermark left by an app."
+        )
+        kids.append(make_page(b, text_ops([body], 72, 700, 16), font, pages))
+    b.set(pages, b"<< /Type /Pages /Kids [" + b" ".join(str(k).encode() for k in kids)
+        + b"] /Count 4 >>")
+    catalog = b.add(b"<< /Type /Catalog /Pages " + str(pages).encode() + b" 0 R >>")
+    write("pdf-thin.pdf", b.build(catalog))
+
+
+def build_mixed_fixture():
+    """The mixed document: alternating real-text and watermark-only pages.
+
+    Common in practice — a text PDF scanned by an app that stamps its
+    watermark onto the pages it photographs, or a bundled workbook where
+    only some pages are images. The document verdict says "not a scan" (half
+    the pages have real prose), so the PER-PAGE test carries the odd pages:
+    each watermark page must still be OCR'd, and each prose page must not.
+    """
+    b = PdfBuilder()
+    font = b.add(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    pages = b.reserve()
+    kids = []
+    for i in range(6):
+        if i % 2 == 0:
+            kids.append(make_page(b, text_ops(PROSE, 72, 740, 16), font, pages))
+        else:
+            kids.append(make_page(b, text_ops([WATERMARK], 72, 700, 18), font, pages))
+    b.set(pages, b"<< /Type /Pages /Kids [" + b" ".join(str(k).encode() for k in kids)
+        + b"] /Count 6 >>")
+    catalog = b.add(b"<< /Type /Catalog /Pages " + str(pages).encode() + b" 0 R >>")
+    write("pdf-mixed.pdf", b.build(catalog))
+
+
 if __name__ == "__main__":
     os.makedirs(FIXTURE_DIR, exist_ok=True)
     build_outline_fixture()
     build_headings_fixture()
     build_columns_fixture()
     build_blank_fixture()
+    build_watermark_fixture()
+    build_prose_fixture()
+    build_thin_fixture()

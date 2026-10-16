@@ -107,4 +107,75 @@ final class PdfTextTests: XCTestCase {
         let scannedPage = try XCTUnwrap(scannedShape.page(at: 0))
         XCTAssertFalse(PdfText.pageHasTextLayer(scannedPage), "a page with no extractable text must not count as a text layer")
     }
+
+    // MARK: - Scan detection (CamScanner watermark / mixed documents)
+
+    func testAWatermarkOnlyLayerIsAScan() throws {
+        let document = try fixtureDocument("pdf-watermark")
+        let verdict = PdfScanDetector.verdict(in: document)
+        XCTAssertTrue(verdict.looksScanned, "a text layer of only the watermark must not pass as a text layer: \(verdict.reason)")
+        XCTAssertTrue(verdict.watermarkOnly)
+    }
+
+    func testProseIsNotAScan() throws {
+        let document = try fixtureDocument("pdf-prose")
+        let verdict = PdfScanDetector.verdict(in: document)
+        XCTAssertFalse(verdict.looksScanned, "real prose must never be routed to OCR: \(verdict.reason)")
+    }
+
+    func testARunningHeadIsNotAScan() throws {
+        // Short but genuine per-page text, every page different. The
+        // document-level verdict must not guess at density here — the
+        // per-page decision handles it at playback time, and a false "scan"
+        // would send real words to OCR (and lose them).
+        let document = try fixtureDocument("pdf-thin")
+        let verdict = PdfScanDetector.verdict(in: document)
+        XCTAssertFalse(verdict.looksScanned, "a document with words but no watermark is not a scan: \(verdict.reason)")
+        XCTAssertFalse(verdict.watermarkOnly)
+    }
+
+    func testABlankDocumentIsAScan() throws {
+        let document = try fixtureDocument("pdf-blank")
+        let verdict = PdfScanDetector.verdict(in: document)
+        XCTAssertTrue(verdict.looksScanned)
+        XCTAssertFalse(verdict.watermarkOnly, "no watermark — the pages are simply empty of text")
+    }
+
+    func testAMixedDocumentRoutesWatermarkPagesToOCRPerPage() throws {
+        // The "true PDF with images that need OCR" case, in the shape that
+        // actually occurs: a real-text document whose SOME pages are
+        // image-only or stamped with a scanner watermark. The document
+        // verdict does not call it a scan (prose pages exist), so the
+        // PER-PAGE test must carry those pages — each one on its own.
+        let document = try fixtureDocument("pdf-mixed")
+        XCTAssertFalse(PdfScanDetector.verdict(in: document).looksScanned,
+                       "the prose pages keep this document out of the document-level scan verdict")
+        let prosePage = try XCTUnwrap(document.page(at: 0))
+        let watermarkPage = try XCTUnwrap(document.page(at: 1))
+        XCTAssertFalse(PdfScanDetector.pageIsWatermark(prosePage))
+        XCTAssertTrue(PdfScanDetector.pageIsWatermark(watermarkPage),
+                      "a watermark page inside a mixed document must still be OCR'd")
+    }
+
+    func testImageOnlyPagesInAMixedDocumentAreOCRd() throws {
+        // A page with no text layer at all is the original OCR case; inside
+        // a mixed document the document verdict says "not a scan", so this
+        // proves the per-page test still routes it. Fixture has an empty
+        // text layer: `pageHasTextLayer` is the route, and it is false here.
+        let document = try fixtureDocument("pdf-blank")
+        let page = try XCTUnwrap(document.page(at: 0))
+        XCTAssertFalse(PdfText.pageHasTextLayer(page), "an image page is routed by the text-layer probe, not the watermark test")
+    }
+
+    func testSamplingCoversTheWholeDocument() {
+        // A long document must sample first AND last page, not the first N.
+        let indices = PdfScanDetector.sampleIndices(pageCount: 1000, limit: 12)
+        XCTAssertEqual(indices.first, 0)
+        XCTAssertEqual(indices.last, 999)
+        XCTAssertEqual(Set(indices).count, 12, "indices must be distinct")
+    }
+
+    func testSquashIgnoresLineBreaksThePdfOwns() {
+        XCTAssertEqual(PdfScanDetector.squash("Scanned\nby\nCamScanner"), "scanned by camscanner")
+    }
 }

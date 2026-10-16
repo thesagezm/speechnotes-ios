@@ -1,14 +1,22 @@
 import Foundation
 import PDFKit
-import UIKit
-import Vision
 import SpeechLogic
 
 /// PDF speech-text extraction for TTS: per-page `PdfText` extraction (lazy,
 /// page-cached for the session) with a Vision OCR fallback for scanned pages
-/// that have no text layer. All PDFKit + Vision work runs on a detached task
-/// — the main actor only ever sees the finished text, which
-/// BookPlaybackController then caches to `text/NNNN.txt` like an epub's.
+/// and for pages whose only text layer is a scanner watermark. All PDFKit +
+/// Vision work runs on a detached task — the main actor only ever sees the
+/// finished text, which BookPlaybackController then caches to `text/NNNN.txt`
+/// like an epub's.
+///
+/// The watermark rule is what makes CamScanner scans work. Those PDFs carry
+/// a real, invisible, selectable text layer whose entire content is
+/// "Scanned by CamScanner" (~21 characters), so the plain "does this page
+/// have 16 characters" probe said YES and the reader read the watermark out
+/// loud instead of the page. `PdfOCR.shouldOCR` now asks the detector, and
+/// `book.forceOCR` (manifest flag, user-toggleable) overrides it for the
+/// scanner apps nobody has named yet — which also covers the MIXED document,
+/// where the text pages read fine and only some pages are images.
 enum PdfSpeechText {
 
     /// Session page-text cache. Extraction AND OCR are too costly to repeat
@@ -26,13 +34,15 @@ enum PdfSpeechText {
     /// reader auto-scroll the PDFView to the sounding page.
     ///
     /// PDFKit owns this path outright (papero was purged 2026-10-03). A page
-    /// with no text layer is still OCR'd here, so scans keep working.
+    /// with no text layer, or only a scanner watermark, is OCR'd here, so
+    /// scans keep working.
     static func chapterText(book: Book, chapterIndex: Int) async -> (text: String, pageOffsets: [PdfPageOffset])? {
         guard let chapters = book.pdfChapters,
               chapterIndex >= 0, chapterIndex < chapters.count else { return nil }
         let chapter = chapters[chapterIndex]
         let documentURL = BooksStore.originalFileURL(book)
         let cachePrefix = book.id.uuidString
+        let forceOCR = book.forceOCR
 
         return await Task.detached(priority: .userInitiated) { () -> (String, [PdfPageOffset])? in
             guard let document = PDFDocument(url: documentURL) else { return nil }
@@ -41,7 +51,7 @@ enum PdfSpeechText {
             for pageNumber in chapter.startPage...chapter.endPage {
                 guard pageNumber >= 0, pageNumber < document.pageCount,
                       let page = document.page(at: pageNumber) else { continue }
-                let pageString = extract(page: page, cacheKey: "\(cachePrefix)-\(pageNumber)")
+                let pageString = extract(page: page, cacheKey: "\(cachePrefix)-\(pageNumber)", forceOCR: forceOCR)
                 guard !pageString.isEmpty else { continue }
                 offsets.append(PdfPageOffset(page: pageNumber, utf16Offset: text.utf16.count))
                 if !text.isEmpty { text += "\n\n" }
@@ -52,49 +62,21 @@ enum PdfSpeechText {
         }.value
     }
 
-    private static func extract(page: PDFPage, cacheKey: String) -> String {
+    private static func extract(page: PDFPage, cacheKey: String, forceOCR: Bool) -> String {
         let key = cacheKey as NSString
         if let cached = pageTextCache.object(forKey: key) {
             return cached as String
         }
         let result: String
-        if PdfText.pageHasTextLayer(page) {
-            result = PdfText.pageText(page)
+        if PdfOCR.shouldOCR(page: page, forceOCR: forceOCR) {
+            // Scanned page, or a watermark-only text layer: OCR it. An empty
+            // OCR result just means the page contributes nothing; the
+            // chapter continues.
+            result = PdfOCR.text(page: page) ?? ""
         } else {
-            // Scanned page: no text layer — OCR it. An empty OCR result just
-            // means the page contributes nothing; the chapter continues.
-            result = ocr(page: page) ?? ""
+            result = PdfText.pageText(page)
         }
         pageTextCache.setObject(result as NSString, forKey: key)
         return result
-    }
-
-    /// Vision OCR for scanned pages: render at ~2× and recognize with
-    /// `.accurate`, language correction OFF (the engine wants the original
-    /// words, not autocorrected ones). A failure degrades to an empty page,
-    /// never an abort — one bad page must not end a chapter.
-    private static func ocr(page: PDFPage) -> String? {
-        let bounds = page.bounds(for: .mediaBox)
-        let scale: CGFloat = 2.0
-        let thumbnail = page.thumbnail(
-            of: CGSize(width: bounds.width * scale, height: bounds.height * scale),
-            for: .mediaBox
-        )
-        guard let cgImage = thumbnail.cgImage else { return nil }
-        let request = VNRecognizeTextRequest()
-        request.recognitionLevel = .accurate
-        request.usesLanguageCorrection = false
-        let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-        do {
-            try handler.perform([request])
-            let lines = request.results?
-                .compactMap { $0.topCandidates(1).first?.string }
-                .joined(separator: "\n") ?? ""
-            Log.shared.info("PdfSpeechText: OCR page produced \(lines.utf16.count) chars")
-            return lines.isEmpty ? nil : PdfText.normalize(lines)
-        } catch {
-            Log.shared.info("PdfSpeechText: OCR failed — \(error.localizedDescription)")
-            return nil
-        }
     }
 }
