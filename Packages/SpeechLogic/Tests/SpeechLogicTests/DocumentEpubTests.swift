@@ -493,4 +493,28 @@ final class DocumentEpubTests: XCTestCase {
         ])
         XCTAssertEqual(chapter.textLines, ["Para.", "Apples", "12"])
     }
+
+    /// The user's page error, verbatim: a KF8 section's `epub:type`
+    /// attribute rides into the generated chapter, whose wrapper declares no
+    /// epub namespace — the XML parse dies at "Namespace prefix epub for
+    /// type on span is not defined" and the chapter truncates there.
+    func testInlineMarkupDropsUndefinedNamespaceAttributes() {
+        let markup = "<span epub:type=\"z3b-section\"><h2 class=\"chapter\">Repentance</h2>"
+            + "<p class=\"body\">How shall a man be just with God?</p></span>"
+        let out = DocumentEpubConverter.inlineMarkupXHTML(markup, imageHREFs: [])
+        XCTAssertFalse(out.contains("epub:"), "epub: attribute survived: \(out)")
+        XCTAssertTrue(out.contains("class=\"chapter\""), "plain attributes survive")
+        XCTAssertTrue(out.contains("How shall a man be just with God?"))
+        // A markup that declares its own namespaces is a full document — kept.
+        let doc = "<body xmlns:epub=\"http://www.idpf.org/2007/ops\" epub:type=\"chapter\">x</body>"
+        XCTAssertEqual(DocumentEpubConverter.inlineMarkupXHTML(doc, imageHREFs: []), doc)
+    }
+
+    /// A stray `<` that opens no tag must not kill the chapter's XML.
+    func testInlineMarkupEscapesStrayAngleBracket() {
+        let markup = "<p>Fine text.</p> <broken <p>More.</p>"
+        let out = DocumentEpubConverter.inlineMarkupXHTML(markup, imageHREFs: [])
+        XCTAssertTrue(out.contains("Fine text."))
+        XCTAssertTrue(out.contains("More."))
+    }
 }

@@ -1564,7 +1564,7 @@ public enum DocumentEpubConverter {
     /// forgivingly — this pass covers the structural cases, not a full XML
     /// rewrite.
     static func inlineMarkupXHTML(_ markup: String, imageHREFs: [String]) -> String {
-        var out = markup
+        var out = stripUndefinedNamespacePrefixes(markup)
         // Image tokens → pool hrefs. An unknown index becomes an empty src,
         // which the reader ignores, rather than a dangling reference.
         let tokenRegex = try? NSRegularExpression(pattern: #"data-pool-index="(\d+)""#)
@@ -1601,6 +1601,24 @@ public enum DocumentEpubConverter {
         // so this is a straight scalar filter.
         out = String(out.unicodeScalars.filter { $0.value > 0x1F || $0 == "\t" || $0 == "\n" || $0 == "\r" })
         return out
+    }
+
+    /// Drops `prefix:name="…"` attributes (epub:type is the common one — KF8
+    /// section tags carry it) from format-native markup that declares no
+    /// namespaces of its own. The generated chapter wrapper declares only the
+    /// XHTML namespace, so an undefined prefix is a hard XML parse error and
+    /// the reader stops rendering AT that attribute: "error on line 14 at
+    /// column 1669: Namespace prefix epub for type on span is not defined" —
+    /// the visible truncation. The attributes are reading-order semantics,
+    /// never rendered; dropping them loses nothing the reader shows.
+    static func stripUndefinedNamespacePrefixes(_ markup: String) -> String {
+        // A markup that declares its own namespaces (a full document) keeps
+        // them — only fragments get cleaned.
+        guard markup.range(of: "xmlns:") == nil,
+              let regex = try? NSRegularExpression(
+                pattern: #"\s+[A-Za-z][A-Za-z0-9_.-]*:[A-Za-z][A-Za-z0-9_.-]*\s*=\s*"[^"]*""#
+              ) else { return markup }
+        return replacing(regex, in: markup, with: "")
     }
 
     /// Tag-stripped text of native markup — the speech path for `.html`

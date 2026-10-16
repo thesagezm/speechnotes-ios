@@ -400,46 +400,51 @@ public enum MobiParser {
         return (huff, cdics)
     }
 
-    /// One variable-length count sitting at the END of `data` (already cut to
-    /// the record's un-stripped length): up to four bytes whose top bits mark
-    /// continuation, read BACKWARD from the last byte. KindleUnpack's
-    /// `getSizeOfTrailingDataEntry` verbatim — the backward four-byte window
-    /// (not an unbounded walk) is what the reference does, and the difference
-    /// is load-bearing: a forward walk runs INTO the text when the last
-    /// entry's continuation bits line up wrong, mis-stripping every record.
-    static func trailingCount(in data: Data, upTo size: Int) -> Int {
-        var num = 0
-        // The reference inspects only the last four bytes.
-        let window = min(4, size)
-        for offset in 0..<window {
-            let byte = data[data.startIndex + size - 1 - offset]
-            if byte & 0x80 == 0 { break }
-            num += 1
+    /// One trailing-entry varint VALUE: seven bits per byte, least
+    /// significant first, read BACKWARD from `size - 1`, top bit marks the
+    /// last byte, capped at 28 bits. This is calibre's
+    /// `sizeof_trailing_entry` (verified by disassembling its frozen 7.x
+    /// bytecode — the value, not a byte count, is what the caller adds).
+    static func trailingCount(in record: Data, upTo size: Int) -> Int {
+        var bitPosition = 0
+        var result = 0
+        var cursor = size
+        while cursor > 0 && bitPosition < 28 {
+            let byte = Int(record[record.startIndex + cursor - 1])
+            result |= (byte & 0x7F) << bitPosition
+            bitPosition += 7
+            cursor -= 1
+            if byte & 0x80 != 0 { return result }
         }
-        return num
+        return result
     }
 
     /// How many trailing bytes `extraFlags` says a record ends with.
     ///
-    /// Bit order is the classic trap, pinned on a real book (extraFlags 0x3):
-    /// the flags read in ASCENDING bit order — bit 0 (the multibyte
-    /// `(byte & 0x3) + 1` count) is peeled FIRST because it sits nearest the
-    /// text, and each higher bit's varint stacks outside the previous one.
-    /// The descending peel this file used to run consumed the varints in the
-    /// wrong order and over-stripped (5 bytes where the reference strips 1),
-    /// corrupting the last back-reference of every record — the fixed-early-
-    /// point truncation on real KF8 books.
+    /// This is calibre's `sizeof_trailing_entries`, verified BYTE-FOR-BYTE by
+    /// disassembling its frozen Python bytecode (mobi6.py lines 764–793):
+    /// bits 15…1 of the flags peel varint entries from the record's end
+    /// (highest first), and bit 0 adds `(byte & 0x3) + 1`. An earlier
+    /// "fix" here reordered the peel and silently corrupted every Huff/CDIC
+    /// book — the disassembly settled it: this order IS the reference.
     static func trailingEntryBytes(in record: Data, extraFlags: UInt16) -> Int {
         guard extraFlags != 0, !record.isEmpty else { return 0 }
         var total = 0
-        for bit in 0..<15 where extraFlags & (1 << bit) != 0 {
-            guard record.count > total else { return 0 }
-            total += trailingCount(in: record, upTo: record.count - total)
+        // Entries occur in bit order — bit 1 (0x1, multibyte) nearest the
+        // text, higher bits stacked toward the record's end — so peeling
+        // from the END means the highest varint bit comes off first.
+        var bit = 15
+        while bit >= 1 {
+            if extraFlags & (1 << bit) != 0 {
+                guard record.count > total else { return 0 }
+                total += trailingCount(in: record, upTo: record.count - total)
+            }
+            bit -= 1
         }
-        if extraFlags & 0x8000 != 0 {
+        if extraFlags & 1 == 1 {
             let offset = record.count - total - 1
             guard offset >= 0, offset < record.count else { return 0 }
-            total = (Int(record[record.startIndex + offset]) & 0x3) + 1
+            total += (Int(record[record.startIndex + offset]) & 0x3) + 1
         }
         return total
     }
@@ -709,9 +714,15 @@ public enum MobiParser {
                 title = sectionTitle
             }
             // The same heading twice in a row is the writer re-stating the
-            // title (a section label div following the h1), not two chapters
-            // — the duplicate made the contents list repeat every title.
+            // title (the chapter label the generator repeats inside the
+            // section), not two chapters — the duplicate is what made the
+            // reader show "Chapter 3—Repentance" twice.
             if result.last?.title == title, paragraphs.isEmpty { continue }
+            // The label can also ride INSIDE the same flow as a plain
+            // paragraph equal to the title — drop that echo from the prose.
+            if let title, paragraphs.first == title {
+                paragraphs.removeFirst()
+            }
             result.append(MobiChapter(title: title, paragraphs: paragraphs, html: prepared))
         }
         return result
@@ -830,6 +841,11 @@ public enum MobiParser {
             // title is the writer re-stating the header, not new content.
             if title == nil, paragraphs.count == 1, paragraphs[0] == result.last?.title {
                 continue
+            }
+            // The label can also ride INSIDE the same segment as a plain
+            // paragraph equal to the title — drop that echo from the prose.
+            if let title, paragraphs.first == title {
+                paragraphs.removeFirst()
             }
             result.append(MobiChapter(
                 title: title,
