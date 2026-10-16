@@ -210,7 +210,7 @@ def build_watermark_fixture():
         make_page(b, text_ops([WATERMARK], 72, 700, 18), font, pages)
         for _ in range(4)
     ]
-    b.set(pages, b"<< /Type /Pages /Kids [" + b" ".join(str(k).encode() for k in kids)
+    b.set(pages, b"<< /Type /Pages /Kids [" + b" ".join(f"{k} 0 R".encode() for k in kids)
         + b"] /Count 4 >>")
     catalog = b.add(b"<< /Type /Catalog /Pages " + str(pages).encode() + b" 0 R >>")
     write("pdf-watermark.pdf", b.build(catalog))
@@ -228,7 +228,7 @@ def build_prose_fixture():
         make_page(b, text_ops(PROSE + [b"continued from the previous page."], 72, 740, 16), font, pages)
         for _ in range(4)
     ]
-    b.set(pages, b"<< /Type /Pages /Kids [" + b" ".join(str(k).encode() for k in kids)
+    b.set(pages, b"<< /Type /Pages /Kids [" + b" ".join(f"{k} 0 R".encode() for k in kids)
         + b"] /Count 4 >>")
     catalog = b.add(b"<< /Type /Catalog /Pages " + str(pages).encode() + b" 0 R >>")
     write("pdf-prose.pdf", b.build(catalog))
@@ -251,7 +251,7 @@ def build_thin_fixture():
             + b"text layer rather than a scanner watermark left by an app."
         )
         kids.append(make_page(b, text_ops([body], 72, 700, 16), font, pages))
-    b.set(pages, b"<< /Type /Pages /Kids [" + b" ".join(str(k).encode() for k in kids)
+    b.set(pages, b"<< /Type /Pages /Kids [" + b" ".join(f"{k} 0 R".encode() for k in kids)
         + b"] /Count 4 >>")
     catalog = b.add(b"<< /Type /Catalog /Pages " + str(pages).encode() + b" 0 R >>")
     write("pdf-thin.pdf", b.build(catalog))
@@ -275,7 +275,7 @@ def build_mixed_fixture():
             kids.append(make_page(b, text_ops(PROSE, 72, 740, 16), font, pages))
         else:
             kids.append(make_page(b, text_ops([WATERMARK], 72, 700, 18), font, pages))
-    b.set(pages, b"<< /Type /Pages /Kids [" + b" ".join(str(k).encode() for k in kids)
+    b.set(pages, b"<< /Type /Pages /Kids [" + b" ".join(f"{k} 0 R".encode() for k in kids)
         + b"] /Count 6 >>")
     catalog = b.add(b"<< /Type /Catalog /Pages " + str(pages).encode() + b" 0 R >>")
     write("pdf-mixed.pdf", b.build(catalog))
@@ -290,3 +290,4 @@ if __name__ == "__main__":
     build_watermark_fixture()
     build_prose_fixture()
     build_thin_fixture()
+    build_mixed_fixture()
