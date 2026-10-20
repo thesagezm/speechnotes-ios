@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import SpeechLogic
 
 /// The vault that holds this device's Joplin-compatible encryption keys.
 ///
