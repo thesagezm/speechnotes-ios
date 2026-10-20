@@ -31,55 +31,17 @@ struct NotebookListView: View {
                     Text("Notebooks group your notes. A note lives in exactly one notebook; deleting a notebook keeps its notes (they become Unfiled).")
                 }
 
-                Section("Notebooks") {
+                Section {
                     if notebooks.notebooks.isEmpty {
                         Text("No notebooks yet — add one above.")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     } else {
                         ForEach(notebooks.notebooks) { notebook in
-                            Button {
-                                renameDraft = notebook.name
-                                renamingNotebook = notebook
-                            } label: {
-                                HStack {
-                                    Image(systemName: "folder")
-                                        .foregroundStyle(Color.accentColor)
-                                    Text(notebook.name)
-                                        .foregroundStyle(.primary)
-                                    Spacer()
-                                    Text("\(notes.notes(inNotebook: notebook.id).count)")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                    Image(systemName: "trash")
-                                        .font(.caption)
-                                        .foregroundStyle(.red)
-                                }
-                            }
-                            // Make deletion discoverable: a visible trash
-                            // glyph, a swipe action and the context menu all
-                            // route through the same confirmation.
-                            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                                Button {
-                                    deletingNotebook = notebook
-                                } label: {
-                                    Label("Delete", systemImage: "trash")
-                                }
-                                .tint(.red)
-                            }
-                            .contextMenu {
-                                Button {
-                                    renameDraft = notebook.name
-                                    renamingNotebook = notebook
-                                } label: {
-                                    Label("Rename", systemImage: "pencil")
-                                }
-                                Button(role: .destructive) {
-                                    deletingNotebook = notebook
-                                } label: {
-                                    Label("Delete notebook", systemImage: "trash")
-                                }
-                            }
+                            notebookRow(notebook)
+                        }
+                        .onMove { offsets, destination in
+                            notebooks.move(fromOffsets: offsets, toDestination: destination)
                         }
                         .onDelete { offsets in
                             for index in offsets {
@@ -88,6 +50,17 @@ struct NotebookListView: View {
                             }
                         }
                     }
+                } header: {
+                    HStack {
+                        Text("Notebooks")
+                            .font(.headline)
+                        Spacer()
+                        if !notebooks.notebooks.isEmpty {
+                            EditButton()
+                                .font(.subheadline)
+                        }
+                    }
+                    .textCase(nil)
                 }
             }
             .navigationTitle("Notebooks")
@@ -127,6 +100,51 @@ struct NotebookListView: View {
                     renamingNotebook = nil
                 }
                 Button("Cancel", role: .cancel) { renamingNotebook = nil }
+            }
+        }
+    }
+
+    /// One notebook row — the button opens rename, and deletion stays
+    /// discoverable through the visible trash glyph, the swipe action and the
+    /// context menu, all routed through the same confirmation dialog.
+    private func notebookRow(_ notebook: Notebook) -> some View {
+        Button {
+            renameDraft = notebook.name
+            renamingNotebook = notebook
+        } label: {
+            HStack {
+                Image(systemName: "folder")
+                    .foregroundStyle(Color.accentColor)
+                Text(notebook.name)
+                    .foregroundStyle(.primary)
+                Spacer()
+                Text("\(notes.notes(inNotebook: notebook.id).count)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Image(systemName: "trash")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        }
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            Button {
+                deletingNotebook = notebook
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
+            .tint(.red)
+        }
+        .contextMenu {
+            Button {
+                renameDraft = notebook.name
+                renamingNotebook = notebook
+            } label: {
+                Label("Rename", systemImage: "pencil")
+            }
+            Button(role: .destructive) {
+                deletingNotebook = notebook
+            } label: {
+                Label("Delete notebook", systemImage: "trash")
             }
         }
     }

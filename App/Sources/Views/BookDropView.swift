@@ -1,9 +1,10 @@
 import SwiftUI
 
-/// BookDrop — receive books and JEX archives over the local network from a
-/// PC running LocalSend (or another BookDrop/LocalSend receiver-protocol
-/// app). The receive-only half of the LocalSend protocol: the sender does
-/// all the discovering, so the iPhone needs no special entitlements.
+/// BookDrop — move books and JEX archives over the local network, in either
+/// direction. SEND: pick a peer on this Wi-Fi and push a book, a note or a
+/// .jex archive (LocalSend v2.2, works with the desktop LocalSend app).
+/// RECEIVE: a PC running LocalSend sends to this iPhone; the receive side
+/// needs no special entitlements because the sender does the discovering.
 struct BookDropView: View {
     @ObservedObject private var receiver: LocalSendReceiver
     @AppStorage("bookDropEnabled") private var enabled = false
@@ -17,8 +18,39 @@ struct BookDropView: View {
         _autoAccept = AppStorage(wrappedValue: true, "bookDropAutoAccept")
     }
 
+    @State private var showingSend = false
+
     var body: some View {
         Form {
+            Section {
+                HStack(spacing: 12) {
+                    Button {
+                        Haptics.tap()
+                        showingSend = true
+                    } label: {
+                        Label("Send to a device", systemImage: "paperplane.fill")
+                            .font(.subheadline.weight(.semibold))
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!LocalSendSender.shared.canSend)
+
+                    Button {
+                        Haptics.tap()
+                        toggleReceiver()
+                    } label: {
+                        Label(enabled ? "Stop" : "Start",
+                              systemImage: enabled ? "stop.fill" : "play.fill")
+                            .font(.subheadline.weight(.semibold))
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityLabel(enabled ? "Stop receiving" : "Start receiving")
+                }
+            } footer: {
+                Text("Send a book, a note or a .jex archive to a computer running LocalSend or another Speechnotes device. Receiving stays on its own toggle below.")
+            }
+
             Section {
                 Toggle("Nearby BookDrop", isOn: $enabled)
                 if enabled {
@@ -96,6 +128,9 @@ struct BookDropView: View {
             }
         }
         .navigationTitle("BookDrop")
+        .sheet(isPresented: $showingSend) {
+            BookDropSendView()
+        }
         .onChange(of: enabled) { newValue in
             receiver.setEnabled(newValue)
         }
@@ -110,6 +145,11 @@ struct BookDropView: View {
                 receiver.start()
             }
         }
+    }
+
+    private func toggleReceiver() {
+        Haptics.tap()
+        enabled.toggle()
     }
 
     private var deviceAlias: String {

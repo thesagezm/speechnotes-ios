@@ -84,8 +84,25 @@ public enum DocumentBook {
             // model readest/Koodo/Anx use — the foliate-js family renders
             // each mobi section as its own HTML file; here each chapter is
             // one EPUB XHTML file.
+            //
+            // When the book carries a CNCX, `book.toc` is the publisher's
+            // own contents page: its labels and its text-stream offsets. A
+            // TOC that names MORE structure than the chapter cut found (a
+            // contents page whose entries point into one long section — the
+            // "TOC and Introduction in one chapter" report) supplies the
+            // chapter split instead, so the reader's contents list and the
+            // pages agree.
+            let chapters = book.chapters
+            let tocSplit = book.toc.count > chapters.count
+                ? MobiParser.chapters(
+                    from: book.toc.isEmpty ? "" : Self.mobiHTML(from: book),
+                    variant: book.variant,
+                    toc: book.toc
+                )
+                : []
+            let resolved = tocSplit.isEmpty ? chapters : tocSplit
             return DocumentParseResult(
-                chapters: book.chapters.map { chapter in
+                chapters: resolved.map { chapter in
                     chapter.html.isEmpty
                         ? DocumentChapter(
                             title: chapter.title,
@@ -170,5 +187,13 @@ public enum DocumentBook {
         text.components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
+    }
+
+    /// Rebuilds a mobi book's whole markup from its chapters so a CNCX-driven
+    /// re-split can cut the same bytes the parser walked. The chapters' own
+    /// HTML is the verbatim markup (the headless fallback has none, and then
+    /// the CNCX path is skipped by the caller).
+    static func mobiHTML(from book: MobiParser.MobiBook) -> String {
+        book.chapters.map(\.html).joined(separator: "\n")
     }
 }

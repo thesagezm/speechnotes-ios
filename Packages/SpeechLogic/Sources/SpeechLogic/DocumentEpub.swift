@@ -1524,8 +1524,15 @@ public enum DocumentEpubConverter {
 
     private static func chapterXHTML(_ chapter: DocumentChapter, index: Int, imageHREFs: [String], imageClasses: [String]) -> String {
         var body = ""
-        if let title = chapter.title {
-            body += "<h1>\(escape(title))</h1>\n"
+        // The chapter title as a heading — UNLESS the chapter's own markup
+        // already opens with the same heading (mobi/KF8 chapters carry their
+        // `<h1>` verbatim, and emitting the title again showed every chapter
+        // label twice on the page: the user's "two depictions of the chapter
+        // title" report). A titleless chapter still falls back to the plain
+        // index label for the running head, which is not rendered as content.
+        let titleHeading = chapter.title.map { "<h1>\(escape($0))</h1>\n" } ?? ""
+        if !titleHeading.isEmpty, !opensWithSameHeading(titleHeading, chapter.blocks) {
+            body += titleHeading
         }
         for block in chapter.blocks {
             switch block {
@@ -1555,6 +1562,50 @@ public enum DocumentEpubConverter {
           </body>
         </html>
         """
+    }
+
+    /// True when the chapter's native markup ALREADY opens with the heading
+    /// the converter is about to emit — the mobi/KF8 chapter keeps its own
+    /// `<h1>`, so the title must not be prepended a second time. Compares the
+    /// leading markup stripped of attributes and whitespace, so
+    /// `<h1 class="c">Title</h1>` still matches a title of `Title`.
+    static func opensWithSameHeading(_ heading: String, _ blocks: [DocumentBlock]) -> Bool {
+        let wanted = headingText(heading)
+        guard !wanted.isEmpty else { return false }
+        for block in blocks {
+            guard case .html(let markup) = block else { return false }
+            return leadingHeadingText(markup) == wanted
+        }
+        return false
+    }
+
+    /// The words inside a generated `<h1>…</h1>` (or "" for anything else).
+    private static func headingText(_ heading: String) -> String {
+        guard let open = heading.range(of: "<h1>"),
+              let close = heading.range(of: "</h1>", range: open.upperBound..<heading.endIndex)
+        else { return "" }
+        return normalizedText(String(heading[open.upperBound..<close.lowerBound]))
+    }
+
+    /// The leading `<hN>…</hN>`'s words from native chapter markup.
+    private static func leadingHeadingText(_ markup: String) -> String {
+        guard let open = markup.range(of: "<h", options: [.caseInsensitive]),
+              let level = markup[open.upperBound].wholeNumberValue,
+              (1...6).contains(level),
+              let gt = markup.range(of: ">", range: open.upperBound..<markup.endIndex) else { return "" }
+        let closer = "</h\(level)"
+        guard let close = markup.range(of: closer, options: [.caseInsensitive], range: gt.upperBound..<markup.endIndex),
+              let end = markup.range(of: ">", range: close.upperBound..<markup.endIndex) else { return "" }
+        return normalizedText(String(markup[gt.upperBound..<close.lowerBound]))
+    }
+
+    /// Collapses whitespace and case-folds for comparison only — the emitted
+    /// markup keeps the original casing.
+    private static func normalizedText(_ text: String) -> String {
+        text.folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: nil)
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
     }
 
     /// Format-native markup → chapter body. Closes the void tags old HTML

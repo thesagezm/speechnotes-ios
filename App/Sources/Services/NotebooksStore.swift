@@ -17,7 +17,7 @@ final class NotebooksStore: ObservableObject {
     }
 
     init() {
-        notebooks = Self.loadNotebooks()
+        notebooks = Self.sorted(Self.loadNotebooks())
     }
 
     /// Creates a notebook with a unique, non-empty name. Returns nil (and
@@ -29,9 +29,15 @@ final class NotebooksStore: ObservableObject {
         guard !notebooks.contains(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) else {
             return nil
         }
-        let notebook = Notebook(name: name)
+        // A NEW notebook goes to the END of the user's order, not between
+        // older unmigrated entries — reordering must never shuffle a library
+        // that never asked for it. Placing a new notebook needs a full
+        // re-stamp anyway, so do it once: the newly created notebook gets the
+        // highest position and everything already placed keeps theirs.
+        let highest = (notebooks.compactMap(\.order).max() ?? -1) + 1
+        var notebook = Notebook(name: name, order: highest > 0 ? highest : nil)
         notebooks.append(notebook)
-        notebooks.sort { $0.createdAt < $1.createdAt }
+        applyOrder()
         save()
         return notebook
     }
@@ -58,6 +64,61 @@ final class NotebooksStore: ObservableObject {
     func name(for id: UUID?) -> String? {
         guard let id else { return nil }
         return notebooks.first(where: { $0.id == id })?.name
+    }
+
+    // MARK: - Order
+
+    /// The displayed order: explicitly-placed notebooks first (by `order`),
+    /// then the ones never moved (by `createdAt`). A library that never
+    /// reordered keeps the exact list it had, because every entry still has
+    /// `order == nil` and falls through to the date sort.
+    static func sorted(_ notebooks: [Notebook]) -> [Notebook] {
+        notebooks.sorted { lhs, rhs in
+            switch (lhs.order, rhs.order) {
+            case let (left?, right?):
+                return left == right
+                    ? lhs.createdAt < rhs.createdAt
+                    : left < right
+            case (nil, nil):
+                return lhs.createdAt < rhs.createdAt
+            case (.some, nil):
+                return true
+            case (nil, .some):
+                return false
+            }
+        }
+    }
+
+    /// Re-sorts the published list in place. Called after every mutation so
+    /// the array the views bind to is ALWAYS in display order — no view
+    /// sorts, no two screens disagreeing on where a notebook sits.
+    private func applyOrder() {
+        let ordered = Self.sorted(notebooks)
+        if ordered != notebooks {
+            notebooks = ordered
+        }
+    }
+
+    /// Moves the notebook at `offset` to `destination` (the indices SwiftUI's
+    /// `onMove` hands over, expressed in the CURRENT display order) and
+    /// stamps the whole list so the position survives a relaunch. A
+    /// contiguous stamp keeps two notebooks from ever sharing an `order`
+    /// value, which would leave the next move ambiguous.
+    func move(fromOffsets offsets: IndexSet, toDestination destination: Int) {
+        var list = Self.sorted(notebooks)
+        list.move(fromOffsets: offsets, toDestination: destination)
+        for index in list.indices {
+            list[index].order = index
+        }
+        notebooks = list
+        applyOrder()
+        save()
+    }
+
+    /// Current display order, for a view that needs the index of a notebook
+    /// it is holding (drag handles, context menus).
+    func index(of notebook: Notebook) -> Int? {
+        notebooks.firstIndex(where: { $0.id == notebook.id })
     }
 
     // MARK: - Persistence

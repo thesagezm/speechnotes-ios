@@ -517,4 +517,54 @@ final class DocumentEpubTests: XCTestCase {
         XCTAssertTrue(out.contains("Fine text."))
         XCTAssertTrue(out.contains("More."))
     }
+
+    // MARK: - The duplicated chapter heading
+
+    /// The user's report: every mobi/KF8 chapter showed its title TWICE —
+    /// once from the converter's own `<h1>` and once from the book's own
+    /// heading in the verbatim markup. The title must not be prepended when
+    /// the markup already opens with the same heading.
+    func testTitleNotDuplicatedWhenMarkupOpensWithIt() throws {
+        let chapters = [
+            DocumentChapter(title: "Chapter 3—Repentance", blocks: [
+                .html("<h1>Chapter 3—Repentance</h1><p>How shall a man be just with God?</p>")
+            ]),
+        ]
+        let epub = DocumentEpubConverter.epubData(chapters: chapters, title: "Book", author: nil)
+        let info = try EpubParser.parse(archive: epub)
+        let chapter = try ZipReader.readEntry(info.spine[0], in: epub)
+        let text = String(decoding: chapter, as: UTF8.self)
+        XCTAssertEqual(text.components(separatedBy: "Repentance").count - 1, 1,
+                       "the chapter title is rendered twice: \(text)")
+        XCTAssertTrue(text.contains("How shall a man be just with God?"))
+        // The TOC still carries the book's own label — only the page body
+        // drops the duplicate.
+        XCTAssertTrue(info.toc.contains { $0.label == "Chapter 3—Repentance" })
+    }
+
+    /// A chapter whose markup does NOT open with the title (office documents
+    /// carry paragraphs only) still gets the generated heading.
+    func testTitleHeadingStillEmittedForParagraphChapters() throws {
+        let chapters = [DocumentChapter(title: "One", paragraphs: ["Alpha"])]
+        let epub = DocumentEpubConverter.epubData(chapters: chapters, title: "Doc", author: nil)
+        let info = try EpubParser.parse(archive: epub)
+        let text = String(decoding: try ZipReader.readEntry(info.spine[0], in: epub), as: UTF8.self)
+        XCTAssertTrue(text.contains("<h1>One</h1>"))
+    }
+
+    /// Attribute-bearing headings match too, and a DIFFERENT heading in the
+    /// markup still earns the generated one (the label differs from the
+    /// chapter title).
+    func testTitleHeadingMatchesWithAttributesAndDifferentText() {
+        let attributed = DocumentChapter(title: "Repentance", blocks: [
+            .html("<h1 class=\"c\">Repentance</h1><p>x</p>")
+        ])
+        XCTAssertTrue(DocumentEpubConverter.opensWithSameHeading(
+            "<h1>\(DocumentEpubConverter.escape("Repentance"))</h1>\n", attributed.blocks))
+        let different = DocumentChapter(title: "Repentance", blocks: [
+            .html("<h1>Confession</h1><p>x</p>")
+        ])
+        XCTAssertFalse(DocumentEpubConverter.opensWithSameHeading(
+            "<h1>\(DocumentEpubConverter.escape("Repentance"))</h1>\n", different.blocks))
+    }
 }
