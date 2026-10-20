@@ -1,0 +1,12 @@
+{
+ "pbkdf2_keyv1_hex": "f601486f5c9805d18de24aa5294e041b89046baa7e7be21659e97f9d24832566",
+ "pbkdf2_stringv1_hex": "fcd4feb0aa05776d5310c40658f01babdcae3f16a43e6577a1f28fe40983b79d",
+ "salt_hex": "5d7e2d9b1dcbc85e7c890036a2cf2f9fe7b66554f2df08cec6aa9c0a25c99c21",
+ "keyv1_json": "{\"salt\":\"XX4tmx3LyF58iQA2os8vn+e2ZVTy3wjOxqqcCiXJnCE=\",\"iv\":\"AAECAwQFBgcICQoL\",\"ct\":\"j0z4DlsYnMg5MSQQNAZVh9S/pNg4dMQ5oWAEkFgBUSUpJ+md6DvqPwUjydKMhPUaCAibUnKcIFhISHbRqYnKN16TFsI+Vd5aP80YZ8ctL2DOuXJTePJdguUbXISZDzv8nn41qKBz2VoUfGXQva+oWPZrdEfZFTimaOMs7XZmYsknJfYBPqbgNe4HJxL8ELFdoODrwF/8EQrFEFIGIqf//lQkpmekScb84JQ9OxooZOMX4HyoLslk8nvAzxTKlf6677GzYpYHqprY/Crs6cr/gJxgWMb9H9AArNa1f9UPo4mSYjqNpiMiyKB2n8tbRyMg6bukG0HPUF4JeSJ3JSYlMuFCRlGBjNAMTbDGi2DG14g=\"}",
+ "stringv1_json": "{\"salt\":\"XX4tmx3LyF58iQA2os8vn+e2ZVTy3wjOxqqcCiXJnCE=\",\"iv\":\"AAECAwQFBgcICQoL\",\"ct\":\"snKf3zqn4W+Huobzje2N58AhT0mQc8cdqmGLrO2R1dNxFh8EQnt/XaGt9ODnmYpf47xOLSdM4bPMlez5yuTABa/bX+XCUaBbLdU2iVjmo8XAXGHJd9phh2J8Zl5ihipU5hC70xO6PuU6V4UeFYRZtqBFOWg=\"}",
+ "keyv1_envelope": "JED01000022080123456789abcdef0123456789abcdef0001c3{\"salt\":\"XX4tmx3LyF58iQA2os8vn+e2ZVTy3wjOxqqcCiXJnCE=\",\"iv\":\"AAECAwQFBgcICQoL\",\"ct\":\"j0z4DlsYnMg5MSQQNAZVh9S/pNg4dMQ5oWAEkFgBUSUpJ+md6DvqPwUjydKMhPUaCAibUnKcIFhISHbRqYnKN16TFsI+Vd5aP80YZ8ctL2DOuXJTePJdguUbXISZDzv8nn41qKBz2VoUfGXQva+oWPZrdEfZFTimaOMs7XZmYsknJfYBPqbgNe4HJxL8ELFdoODrwF/8EQrFEFIGIqf//lQkpmekScb84JQ9OxooZOMX4HyoLslk8nvAzxTKlf6677GzYpYHqprY/Crs6cr/gJxgWMb9H9AArNa1f9UPo4mSYjqNpiMiyKB2n8tbRyMg6bukG0HPUF4JeSJ3JSYlMuFCRlGBjNAMTbDGi2DG14g=\"}",
+ "stringv1_envelope": "JED010000220a0123456789abcdef0123456789abcdef0000f3{\"salt\":\"XX4tmx3LyF58iQA2os8vn+e2ZVTy3wjOxqqcCiXJnCE=\",\"iv\":\"AAECAwQFBgcICQoL\",\"ct\":\"snKf3zqn4W+Huobzje2N58AhT0mQc8cdqmGLrO2R1dNxFh8EQnt/XaGt9ODnmYpf47xOLSdM4bPMlez5yuTABa/bX+XCUaBbLdU2iVjmo8XAXGHJd9phh2J8Zl5ihipU5hC70xO6PuU6V4UeFYRZtqBFOWg=\"}",
+ "stringv1_plaintext": "Hello, Joplin! — typographic “quotes” and emoji 🔐",
+ "master_hex": "abababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab",
+ "password": "correct horse battery staple"
+}
