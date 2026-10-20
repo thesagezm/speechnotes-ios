@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import Security
 
 /// Joplin's end-to-end encryption, reimplemented from the format Joplin
 /// itself uses (packages/lib/services/e2ee/EncryptionService.ts and
@@ -81,29 +82,17 @@ public enum JoplinCrypto {
     /// the exact shape Joplin stores (it is a HEX STRING, and the string
     /// itself is what the data-key PBKDF2 consumes).
     public static func makeMasterKey() -> String {
-        var bytes = [UInt8](repeating: 0, count: masterKeyBytes)
-        let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
-        if status != errSecSuccess {
-            // SecRandomCopyBytes only fails when the system entropy source
-            // is broken; fall back to CryptoKit's generator rather than
-            // shipping a predictable key.
-            bytes = Array(SymmetricKey(size: .bits256 * 8).withUnsafeBytes { Array($0) })
-        }
+        let bytes = randomBytes(masterKeyBytes)
         return bytes.map { String(format: "%02x", $0) }.joined()
     }
 
     /// A master key id in Joplin's shape: 32 lowercase hex characters (Joplin
     /// uses an undashed uuid v4 for this).
     public static func makeMasterKeyId() -> String {
-        var bytes = [UInt8](repeating: 0, count: 16)
-        let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
-        if status != errSecSuccess {
-            bytes = Array(SymmetricKey(size: .bits128).withUnsafeBytes { Array($0) })
-        }
+        var bytes = Array(randomBytes(16))
         bytes[6] = (bytes[6] & 0x0F) | 0x40
         bytes[8] = (bytes[8] & 0x3F) | 0x80
-        let hex = bytes.map { String(format: "%02x", $0) }.joined()
-        return hex
+        return bytes.map { String(format: "%02x", $0) }.joined()
     }
 
     /// Wraps a master key with a passphrase (Joplin's KeyV1).
@@ -252,7 +241,7 @@ public enum JoplinCrypto {
             let end = min(cursor + chunkUnits, plaintext.count)
             let chunk = Array(plaintext[cursor..<end])
             cursor = end
-            let iv = randomBytes(12)
+            let iv = Data(randomBytes(12))
             let sealed = try AES.GCM.seal(
                 Data(chunk),
                 using: SymmetricKey(data: key),
@@ -260,7 +249,7 @@ public enum JoplinCrypto {
                 authenticating: Data()
             )
             var ciphertext = Data(sealed.ciphertext)
-            ciphertext.append(sealed.tag)
+            ciphertext.append(contentsOf: sealed.tag)
             let json = chunkJSON(salt: salt, iv: iv, ciphertext: ciphertext)
             out += String(format: "%06x", json.utf8.count)
             out += json
@@ -405,7 +394,7 @@ public enum JoplinCrypto {
     /// timestamp and an 8-byte counter. The salt is its SHA-256, so each
     /// envelope's data key is unique even under one master key.
     static func makeNonce() -> Data {
-        var nonce = randomBytes(nonceLength)
+        var nonce = Data(randomBytes(nonceLength))
         // Timestamp: 4 low bytes then 3 high bytes (Joplin's own layout).
         let timestamp = UInt64(Date().timeIntervalSince1970 * 1000)
         var littleEndian = timestamp
@@ -425,14 +414,14 @@ public enum JoplinCrypto {
         return nonce
     }
 
-    static func randomBytes(_ count: Int) -> [UInt8] {
-        guard count > 0 else { return [] }
+    static func randomBytes(_ count: Int) -> Data {
+        guard count > 0 else { return Data() }
         var bytes = [UInt8](repeating: 0, count: count)
         let status = SecRandomCopyBytes(kSecRandomDefault, count, &bytes)
         if status != errSecSuccess {
-            bytes = Array(SymmetricKey(size: .bits(8 * count)).withUnsafeBytes { Array($0) })
+            bytes = Array(SymmetricKey(size: SymmetricKeySize(bitCount: 8 * count)).withUnsafeBytes { Array($0) })
         }
-        return bytes
+        return Data(bytes)
     }
 
     private static func aesNonce(_ iv: Data) throws -> AES.GCM.Nonce {

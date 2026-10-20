@@ -1,4 +1,5 @@
 import Foundation
+import Security
 
 /// The vault that holds this device's Joplin-compatible encryption keys.
 ///
