@@ -323,7 +323,7 @@ struct BookDropSendView: View {
                 buildError = "Pick a book first."
                 throw SendError.nothing
             }
-            let url = BooksStore.resolveAudioOriginalURL(book)
+            let url = BooksStore.resolveAudioOriginalURL(book: book)
             let extensionName = url.pathExtension.lowercased()
             let fileName = "\(sanitizedTitle(book.title)).\(extensionName)"
             // Documents/ files are the payload themselves — copy into tmp so

@@ -124,7 +124,7 @@ final class LocalSendSender: ObservableObject {
     private nonisolated static func probeSubnet(_ subnet: String) async -> [Peer] {
         let concurrency = 48
         var found: [Peer] = []
-        await withTaskGroup(of: [Peer]?.self) { group in
+        await withTaskGroup(of: Peer?.self) { group in
             var nextHost = 1
             func addNext() {
                 guard nextHost <= 254 else { return }
@@ -381,12 +381,14 @@ final class LocalSendSender: ObservableObject {
                   let address = interface.ifa_addr,
                   address.pointee.sa_family == UInt8(AF_INET)
             else { continue }
-            // sockaddr_in: sin_len, sin_family occupy struct bytes 0…2, and
-            // sa_data begins right after them — so sin_port is sa_data[0…2]
-            // and sin_addr (4 bytes) is sa_data[2…6].
-            let bytes = UnsafeRawPointer(address.pointee.sa_data)
-                .assumingMemoryBound(to: UInt8.self)
-            let octets = (2..<6).map { bytes[$0] }
+            // sockaddr_in: sin_len, sin_family occupy struct bytes 0…2 and
+            // sa_data starts right after — so sin_port is sa_data[0…2] and
+            // sin_addr (4 bytes) is sa_data[2…6]. sa_data is an array tuple,
+            // which only UnsafeRawPointer can index via withUnsafePointer.
+            let octets = withUnsafePointer(to: address.pointee.sa_data) { tuple in
+                let raw = UnsafeRawPointer(tuple)
+                return (2..<6).map { raw.load(fromByteOffset: $0, as: UInt8.self) }
+            }
             if octets[0] != 127 {
                 return octets.dropLast().map { String($0) }.joined(separator: ".")
             }

@@ -106,7 +106,7 @@ final class NotebooksStore: ObservableObject {
     /// value, which would leave the next move ambiguous.
     func move(fromOffsets offsets: IndexSet, toDestination destination: Int) {
         var list = Self.sorted(notebooks)
-        list.move(fromOffsets: offsets, toDestination: destination)
+        list.move(fromOffsets: offsets, toOffset: destination)
         for index in list.indices {
             list[index].order = index
         }
