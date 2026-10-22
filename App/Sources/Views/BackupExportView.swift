@@ -176,10 +176,8 @@ struct BackupExportView: View {
         }
         .onDisappear {
             // The share sheet's staged copy is tmp — drop it when the screen
-            // leaves (an open share sheet keeps its own file URL alive).
-            if let sharingURL {
-                try? FileManager.default.removeItem(at: sharingURL.deletingLastPathComponent())
-            }
+            // leaves, unless a sheet is holding it right now.
+            sweepJexStaging(keeping: sharingURL)
         }
         .fileExporter(
             isPresented: Binding(
@@ -194,6 +192,17 @@ struct BackupExportView: View {
                 errorMessage = error.localizedDescription
             }
             exportDocument = nil
+        }
+    }
+
+    /// Removes this screen's leftover Share staging dirs (tmp/JexShare-*).
+    /// `keeping` skips the dir behind an open share sheet's live URL.
+    private func sweepJexStaging(keeping current: URL? = nil) {
+        let tmp = FileManager.default.temporaryDirectory
+        guard let contents = try? FileManager.default.contentsOfDirectory(at: tmp, includingPropertiesForKeys: nil) else { return }
+        let live = current?.deletingLastPathComponent()
+        for url in contents where url.lastPathComponent.hasPrefix("JexShare-") && url != live {
+            try? FileManager.default.removeItem(at: url)
         }
     }
 
@@ -277,6 +286,10 @@ struct BackupExportView: View {
     /// notebook exported to Files.
     private func build(for destination: Destination) {
         guard !isExporting else { return }
+        // Any staging dir from an earlier Share whose onDisappear never ran
+        // (share sheet dismissed after the screen, system purge pending) —
+        // sweep before making the next one.
+        sweepJexStaging(keeping: sharingURL)
         isExporting = true
         errorMessage = nil
         let notesSnapshot = scopedNotes
