@@ -88,6 +88,15 @@ struct Book: Identifiable, Codable, Equatable, Hashable {
     /// audio: where the chapters came from — "chpl", "id3" or "single" when
     /// the file has no chapter metadata at all (one implicit chapter).
     var audioChapterSource: String?
+    /// audio: the chapter-reader REVISION this manifest was last built with.
+    /// nil = written before the counter existed (treated as 0). One re-read
+    /// is needed after the adaptive-moov fix (rev 1): books imported under a
+    /// reader that cut the head slice at 8 MB carried ZERO chapters for any
+    /// faststart file whose moov exceeded it — stamped "single"/"-verified"
+    /// and frozen by the terminal stamp, so the plain `-verified` gate alone
+    /// would never repair them (the user's Dune: 16.3 MB moov, 55 missed
+    /// chapters).
+    var audioReaderRev: Int?
     /// audio: total duration in seconds, read at import for the player bar
     /// and the lock-screen scrubber.
     var audioDuration: Double?

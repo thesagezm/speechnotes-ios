@@ -83,6 +83,46 @@ final class AudiobookChaptersTests: XCTestCase {
         return Data(header + frames + [UInt8](repeating: 0, count: 64))
     }
 
+    // MARK: - moovEndOffset (the Dune slice-cap probe)
+
+    /// The user's Dune layout: small ftyp, then a moov whose declared length
+    /// runs past any default slice (16,269,487 bytes) — the probe reads only
+    /// the HEADER and must still return the full end offset.
+    func testMoovEndOffsetReadsDeclaredLength() {
+        let moov = box("moov", [UInt8](repeating: 0, count: 64))
+        let ftyp = box("ftyp", Array("M4A ".utf8) + be32(0) + Array("M4A ".utf8))
+        let data = Data(ftyp + moov)
+        XCTAssertEqual(AudiobookChapters.moovEndOffset(inHead: data), ftyp.count + moov.count)
+    }
+
+    /// A declared moov length bigger than the probe buffer (the real Dune
+    /// case: 16 MB declared, a few KB probed) still returns the declared END
+    /// — the header is all the caller needs to size its slice.
+    func testMoovEndOffsetWorksWhenMoovOverrunsProbe() {
+        let ftyp = box("ftyp", Array("M4A ".utf8) + be32(0) + Array("M4A ".utf8))
+        // moov header claims 5,000,000 bytes; the buffer holds 64 bytes of it.
+        var moovHeader = be32(5_000_000) + Array("moov".utf8)
+        moovHeader += [UInt8](repeating: 0, count: 64)
+        let data = Data(ftyp + moovHeader)
+        // End = ftyp's full box + the declared moov length.
+        XCTAssertEqual(AudiobookChapters.moovEndOffset(inHead: data), ftyp.count + 5_000_000)
+    }
+
+    /// mdat-first (moov at the tail): the leading box already overruns the
+    /// probe, so the honest answer is nil — the caller keeps its default
+    /// slice + tail signature scan rather than guessing.
+    func testMoovEndOffsetNilWhenMoovNotAtHead() {
+        let ftyp = box("ftyp", Array("M4B ".utf8) + be32(0) + Array("M4B ".utf8))
+        let mdat = be32(40_000_000) + Array("mdat".utf8) + [UInt8](repeating: 0, count: 16)
+        let data = Data(ftyp + mdat)
+        XCTAssertNil(AudiobookChapters.moovEndOffset(inHead: data))
+    }
+
+    func testMoovEndOffsetNilOnGarbage() {
+        XCTAssertNil(AudiobookChapters.moovEndOffset(inHead: Data([0x41, 0x41])))
+        XCTAssertNil(AudiobookChapters.moovEndOffset(inHead: Data()))
+    }
+
     // MARK: - MP4 / chpl
 
     func testChplChaptersAreRead() {

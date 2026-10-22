@@ -256,7 +256,7 @@ file:line references. Sorted by priority.
 | V4 | RecycleBinView "Delete Now" per-note swipe lacks confirmation (but "Empty" has one) | RecycleBinView.swift:56-62 | inconsistent destructive |
 | V5 | Settings: no delete-model confirmation (341/399 MB one tap) | SettingsView.swift:139-201 | alert needed |
 | V6 | ImagePicker: UIImagePickerController deprecated-era, pngData() on main, no downsample — 48MP photo = ~50-100 MB PNG in memory | ImagePicker.swift:29-31 | migrate to PhotosPicker |
-| V7 | OnboardingView: 72pt fixed-size icons, no Dynamic Type caps, page dots unlabeled | OnboardingView.swift | a11y |
+| V7 | OnboardingView: 72pt fixed-size icons, no Dynamic Type caps, page dots unlabeled | OnboardingView.swift | a11y — FIXED: scaled+DType-capped icons, glyphs/dots handled, five-page flow 2026-10-22 |
 | V8 | Reader: no in-EPUB search, no highlights/annotations, no paginated mode, no font-family/line-height, no margins — already cataloged Tier 4 | reader.js/index.html | known |
 | V9 | BookReaderView.handleRelocated persists fraction but reader.js never receives start scroll position | BookReaderView.swift:317-345 | fix = M20 |
 | V10 | playback-bars (playIcon state machine ×3, progress capsule ×2, voicePickerScope ×3) massively duplicated | PlayerControlsBar, MiniPlayerBar, NoteEditorView, SettingsView*2 | see MasterCatalog Tier 5 |

@@ -668,8 +668,13 @@ final class AudioBookPlayer: ObservableObject {
 
     /// App-scoped hook for scenePhase changes: flush the position so a
     /// suspension never loses more than the last few seconds of bookkeeping.
+    /// SYNC — this runs as the app is LEAVING the screen: iOS may freeze the
+    /// process the moment the scenePhase handler returns, and save()'s
+    /// detached encode+write would never get to run. Same contract as
+    /// NotesStore.flushNow; the audiobook position was lost on
+    /// background/kill precisely because this hook fed the detached path.
     func persistNow() {
-        persistPosition(force: true)
+        persistPosition(force: true, sync: true)
     }
 
     // MARK: Playhead
@@ -851,7 +856,7 @@ final class AudioBookPlayer: ObservableObject {
 
     // MARK: Position persistence
 
-    private func persistPosition(force: Bool = false) {
+    private func persistPosition(force: Bool = false, sync: Bool = false) {
         guard let book = activeBook, let store else { return }
         let now = Date()
         if !force, let last = lastPersistAt, now.timeIntervalSince(last) < 5 { return }
@@ -867,12 +872,22 @@ final class AudioBookPlayer: ObservableObject {
         if let seconds {
             lastSeconds = seconds
         }
+        // NEVER hand the manifest a nil playhead while a known one exists:
+        // `backend?.currentTime` is nil while an item is still opening (and
+        // for the whole of an Opus whole-file load), and writing that nil
+        // CLOBBERED the persisted absolute position — cold resume then fell
+        // back to chapter-fraction reconstruction and lost minutes, the old
+        // bug re-entering through the side door. lastSeconds is seeded from
+        // the manifest at bind() and updated on every real clock: it is the
+        // floor that keeps a known position alive.
+        let playhead = seconds ?? (lastSeconds > 0 ? lastSeconds : nil)
         store.updatePosition(
             book,
             chapterIndex: chapterIndex,
             chapterFraction: chapterProgress,
             cfi: nil,
-            audioSeconds: seconds
+            audioSeconds: playhead,
+            sync: sync
         )
     }
 
