@@ -744,6 +744,12 @@ final class BooksStore: ObservableObject {
     /// from AVURLAsset, which reads the header rather than the samples.
     nonisolated private static func buildAudioManifest(book: Book, directory: URL) -> Book {
         var book = book
+        // Stamped HERE, not only by the backfill: this function IS the
+        // reader, so a manifest it writes was built by the current rev. The
+        // backfill's rev clause then only ever matches legacy manifests
+        // (rev nil), instead of re-reading every freshly imported book once
+        // just to acquire the stamp.
+        book.audioReaderRev = Self.audioReaderRev
         let original = resolveAudioOriginalURL(book: book)
 
         // Ogg first: AVFoundation cannot parse the container at all, so every
