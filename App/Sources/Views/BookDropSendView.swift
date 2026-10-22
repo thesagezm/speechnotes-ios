@@ -185,6 +185,14 @@ struct BookDropSendView: View {
                 sender.reset()
                 if !sender.peers.isEmpty, peer == nil { showPeerPicker = true }
                 if peer == nil { sender.scan() }
+                // A prefilled note (context menu on a note far down the
+                // list) must be VISIBLE in the picker, not just counted —
+                // expand past the preview window when the selection
+                // isn't inside it.
+                if !selectedNoteIDs.isEmpty,
+                   !selectedNoteIDs.isSubset(of: Set(notes.notes.prefix(selectableNotePreviewLimit).map(\.id))) {
+                    showingAllNotes = true
+                }
             }
             // Whichever way the transfer ends, the staged copies of the
             // payload leave with the sheet — a 700 MB book must not linger
