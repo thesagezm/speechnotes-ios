@@ -1,4 +1,5 @@
 import SwiftUI
+import SpeechLogic
 
 /// Settings → Encryption: the passphrase gate over the notes library.
 ///
