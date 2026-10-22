@@ -228,6 +228,12 @@ struct BooksView: View {
                         .contextMenu {
                             Button {
                                 Haptics.tap()
+                                sendToBookDrop(book)
+                            } label: {
+                                Label("Send with BookDrop", systemImage: "wifi")
+                            }
+                            Button {
+                                Haptics.tap()
                                 bookToGoal = book
                             } label: {
                                 Label("Add a goal", systemImage: "target")
@@ -293,6 +299,15 @@ struct BooksView: View {
     }
 
     // MARK: - Import
+
+    /// Hands the book to the app-level BookDrop send sheet (already ticked)
+    /// — the same route Storage's Books sublist and the notes list use.
+    private func sendToBookDrop(_ book: Book) {
+        NotificationCenter.default.post(
+            name: .bookDropSendRequest,
+            object: BookDropRequest(payload: .book, bookIDs: [book.id])
+        )
+    }
 
     /// The mini-player tap races the tab switch: the notification can fire
     /// before this view installs its listener, so the overlay ALSO parks the

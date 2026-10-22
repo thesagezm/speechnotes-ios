@@ -28,10 +28,7 @@ struct SettingsTabView: View {
                 }
                 Section("Backup") {
                     NavigationLink("Export notes to Joplin (.jex)") {
-                        BackupExportView(
-                            notes: notes.notes,
-                            notebooks: notebooks.notebooks
-                        )
+                        BackupExportView()
                     }
                     Button {
                         showingJexImporter = true

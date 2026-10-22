@@ -4,7 +4,8 @@ import SpeechLogic
 
 /// Export to Joplin (.jex) — the whole library, any selection of notebooks
 /// (one or many), or the unfiled notes. Independent JEX reimplementation
-/// (see SpeechLogic/JexExport.swift).
+/// (see SpeechLogic/JexExport.swift), built through JexExporter so this
+/// screen and BookDrop cannot drift.
 ///
 /// The original screen had one button that always exported everything. With
 /// notebooks in the app that is rarely what someone wants: exporting
@@ -14,15 +15,23 @@ import SpeechLogic
 /// N folder entries per archive, and `JexExport.buildArchive` already took
 /// arrays, so the pipe needed no change. Three scopes, and the summary line
 /// states exactly what will be written before the share sheet opens.
+///
+/// v1.7.4: three destinations for the built archive — the system share
+/// sheet (Files, AirDrop, Mail…), Save to Files, and BookDrop to a nearby
+/// device — plus "send straight to BookDrop" that builds the SAME archive
+/// and opens the send sheet prefilled. A notebook exported this way lands
+/// as a .jex on the other device and imports into Notes there.
 struct BackupExportView: View {
+    @EnvironmentObject private var notes: NotesStore
+    @ObservedObject private var notebooks = NotebooksStore.shared
     @State private var exportDocument: JexDocument?
+    /// The built .jex staged on disk for the system share sheet (Share, not
+    /// Save — fileExporter is the save dialog, ShareSheet is the share one).
+    @State private var sharingURL: URL?
     @State private var isExporting = false
     @State private var errorMessage: String?
     /// Multi-select for the `.selected` scope.
     @State private var selectedNotebookIDs: Set<UUID> = []
-
-    private let notes: [Note]
-    private let notebooks: [Notebook]
 
     enum Scope: String, CaseIterable, Identifiable {
         case all
@@ -53,32 +62,28 @@ struct BackupExportView: View {
 
     @State private var scope: Scope = .all
 
-    init(notes: [Note], notebooks: [Notebook]) {
-        self.notes = notes
-        self.notebooks = notebooks
-    }
-
     // MARK: - Scoped selection
 
     private var scopedNotes: [Note] {
         switch scope {
-        case .all: return notes
+        case .all: return notes.notes
         case .selected:
-            return notes.filter { note in
+            return notes.notes.filter { note in
                 guard let id = note.notebookId else { return false }
                 return selectedNotebookIDs.contains(id)
             }
         case .unfiled:
-            return notes.filter { $0.notebookId == nil }
+            return notes.notes.filter { $0.notebookId == nil }
         }
     }
 
     private var scopedNotebooks: [Notebook] {
         switch scope {
-        case .all: return notebooks
+        case .all: return NotebooksStore.sorted(notebooks.notebooks)
         // Only the ticked containers go out — Joplin would otherwise create
         // empty folders for notebooks whose notes weren't exported.
-        case .selected: return notebooks.filter { selectedNotebookIDs.contains($0.id) }
+        case .selected: return NotebooksStore.sorted(notebooks.notebooks)
+            .filter { selectedNotebookIDs.contains($0.id) }
         case .unfiled: return []
         }
     }
@@ -106,16 +111,16 @@ struct BackupExportView: View {
 
             if scope == .selected {
                 Section {
-                    ForEach(notebooks) { notebook in
+                    ForEach(notebooks.notebooks) { notebook in
                         notebookRow(notebook)
                     }
-                    if notebooks.count > 1 {
-                        Button(selectedNotebookIDs.count == notebooks.count ? "Deselect all" : "Select all") {
+                    if notebooks.notebooks.count > 1 {
+                        Button(selectedNotebookIDs.count == notebooks.notebooks.count ? "Deselect all" : "Select all") {
                             Haptics.tap()
-                            if selectedNotebookIDs.count == notebooks.count {
+                            if selectedNotebookIDs.count == notebooks.notebooks.count {
                                 selectedNotebookIDs = []
                             } else {
-                                selectedNotebookIDs = Set(notebooks.map(\.id))
+                                selectedNotebookIDs = Set(notebooks.notebooks.map(\.id))
                             }
                         }
                     }
@@ -128,7 +133,7 @@ struct BackupExportView: View {
 
             Section {
                 Button {
-                    buildAndShare()
+                    build(for: .share)
                 } label: {
                     if isExporting {
                         HStack {
@@ -136,13 +141,29 @@ struct BackupExportView: View {
                             Text("Building archive…")
                         }
                     } else {
-                        Label("Export to .jex", systemImage: "square.and.arrow.up")
+                        Label("Share archive", systemImage: "square.and.arrow.up")
                     }
+                }
+                .disabled(isExporting || !canExport)
+
+                Button {
+                    build(for: .save)
+                } label: {
+                    Label("Save to Files…", systemImage: "folder")
+                }
+                .disabled(isExporting || !canExport)
+
+                Button {
+                    build(for: .bookDrop)
+                } label: {
+                    Label("Share with BookDrop", systemImage: "wifi")
                 }
                 .disabled(isExporting || !canExport)
             } footer: {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(summaryLine)
+                    Text("Share opens the system share sheet (Files, AirDrop, Mail…); Save writes the .jex straight to a location you pick; BookDrop pushes it to a device on this Wi-Fi.")
+                        .foregroundStyle(.secondary)
                     if let errorMessage {
                         Text(errorMessage).foregroundStyle(.red)
                     }
@@ -150,6 +171,16 @@ struct BackupExportView: View {
             }
         }
         .navigationTitle("Export")
+        .sheet(item: $sharingURL) { url in
+            ShareSheet(items: [url])
+        }
+        .onDisappear {
+            // The share sheet's staged copy is tmp — drop it when the screen
+            // leaves (an open share sheet keeps its own file URL alive).
+            if let sharingURL {
+                try? FileManager.default.removeItem(at: sharingURL.deletingLastPathComponent())
+            }
+        }
         .fileExporter(
             isPresented: Binding(
                 get: { exportDocument != nil },
@@ -218,42 +249,80 @@ struct BackupExportView: View {
     }
 
     private func defaultFilename() -> String {
-        let stamp = Date().formatted(.iso8601.year().month().day())
-        let suffix: String
+        JexExporter.fileName(scopeSuffix: scopeSuffix)
+    }
+
+    /// The filename slug for the current scope: "", "-<notebook-slug>", "-unfiled".
+    private var scopeSuffix: String {
         switch scope {
-        case .all: suffix = ""
+        case .all: return ""
         case .selected:
             let name = scopedNotebooks.first?.name ?? "notebooks"
             let slug = name
                 .lowercased()
                 .replacingOccurrences(of: " ", with: "-")
                 .filter { $0.isLetter || $0.isNumber || $0 == "-" }
-            suffix = slug.isEmpty ? "-notebooks" : "-" + slug
-        case .unfiled: suffix = "-unfiled"
+            return slug.isEmpty ? "-notebooks" : "-" + slug
+        case .unfiled: return "-unfiled"
         }
-        return "speechnotes\(suffix)-\(stamp).jex"
     }
 
-    private func buildAndShare() {
+    /// The three places a built archive can go — the argument that starts
+    /// the one shared build.
+    private enum Destination { case share, save, bookDrop }
+
+    /// Builds the archive for the picked scope, then routes it to the
+    /// destination that started the build. All three share one build so a
+    /// notebook exported to BookDrop is byte-identical to the same
+    /// notebook exported to Files.
+    private func build(for destination: Destination) {
+        guard !isExporting else { return }
         isExporting = true
         errorMessage = nil
         let notesSnapshot = scopedNotes
         let notebooksSnapshot = scopedNotebooks
-        Task.detached(priority: .userInitiated) {
-            let imageNoteTuples: [(UUID, String, String, UUID?, Date, Date)] = notesSnapshot.map {
-                ($0.id, $0.title, $0.text, $0.notebookId, $0.createdAt, $0.updatedAt)
-            }
-            let notebookTuples: [(UUID, String, Date)] = notebooksSnapshot.map {
-                ($0.id, $0.name, $0.createdAt)
-            }
-            let (notePayloads, notebookPayloads) = JexExport.payloads(
-                notes: imageNoteTuples,
-                notebooks: notebookTuples
-            )
-            let data = JexExport.buildArchive(notes: notePayloads, notebooks: notebookPayloads)
-            await MainActor.run {
-                isExporting = false
+        let suffix = scopeSuffix
+        Task {
+            let data = await JexExporter.build(notes: notesSnapshot, notebooks: notebooksSnapshot)
+            isExporting = false
+            switch destination {
+            case .save:
+                // fileExporter's defaultFilename() names it; the document
+                // only carries the bytes.
                 exportDocument = JexDocument(data: data)
+            case .share:
+                // Stage the bytes under the pretty name and hand the URL to
+                // the system share sheet — AirDrop/Mail/Files, whatever the
+                // user picks.
+                let staging = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("JexShare-\(UUID().uuidString)", isDirectory: true)
+                try? FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+                let target = staging.appendingPathComponent(JexExporter.fileName(scopeSuffix: suffix))
+                do {
+                    try data.write(to: target, options: .atomic)
+                    sharingURL = target
+                } catch {
+                    errorMessage = "Could not stage the archive for sharing."
+                }
+            case .bookDrop:
+                // Hand the BYTES to the send sheet — no second build, no
+                // staging round-trip. The request carries the archive as
+                // an inline payload the sheet writes to its own tmp dir.
+                NotificationCenter.default.post(
+                    name: .bookDropSendRequest,
+                    object: BookDropRequest(
+                        payload: .jex,
+                        jexScope: {
+                            switch scope {
+                            case .all: return .all
+                            case .selected: return .selected
+                            case .unfiled: return .unfiled
+                            }
+                        }(),
+                        inlineJex: data,
+                        inlineJexName: JexExporter.fileName(scopeSuffix: suffix)
+                    )
+                )
             }
         }
     }

@@ -11,12 +11,23 @@ struct StorageSettingsView: View {
     /// Shared so the global mini-player and this screen observe ONE playhead.
     @ObservedObject private var wavPlayer = WavPlayer.shared
     @EnvironmentObject private var player: SpeechPlayer
+    @EnvironmentObject private var audioBooks: AudioBookPlayer
     @EnvironmentObject private var notes: NotesStore
+    /// The app-level shelf (injected at the app root) — the Books library
+    /// usage row expands into THIS list, so deleting here and on the Books
+    /// tab mutate the same store and the shelf updates live.
+    @EnvironmentObject private var books: BooksStore
     @State private var sharingURL: URL?
     @State private var zoomedImage: CachedImageEntry?
     @State private var showingAllImages = false
     @State private var showingAllExports = false
     @State private var showingClearConfirm = false
+    /// Expanded "Books library" sublist — the per-book sizes + delete list.
+    @State private var showingBooksList = false
+    @State private var bookToDelete: Book?
+    /// Per-book directory sizes (manifest + original + cover + caches),
+    /// computed once off-main alongside the usage breakdown.
+    @State private var bookSizes: [UUID: Int64] = [:]
     /// Backs the PDF extractor picker; persisted to UserDefaults on change.
     /// ~4 rows of an 84 pt adaptive grid before "See all" appears.
     private let imagePreviewLimit = 16
@@ -85,7 +96,10 @@ struct StorageSettingsView: View {
 
     private func loadUsage() async {
         let noteTitles = Dictionary(uniqueKeysWithValues: notes.notes.map { ($0.id, $0.title) })
-        let (breakdown, images, perNote): (UsageBreakdown, [CachedImageEntry], [NoteImageUsage]) = await Task.detached(priority: .utility) {
+        // Snapshot the shelf on main before the detached walk — the store's
+        // @Published array is main-actor state.
+        let shelf = books.books
+        let (breakdown, images, perNote, sizes): (UsageBreakdown, [CachedImageEntry], [NoteImageUsage], [UUID: Int64]) = await Task.detached(priority: .utility) {
             let usage = UsageBreakdown(
                 notesBytes: NotesStoreSizeReader.notesBytes,
                 booksBytes: BooksStore.directorySize(),
@@ -120,12 +134,20 @@ struct StorageSettingsView: View {
                 perNote.append(NoteImageUsage(noteId: id, title: title, count: count, bytes: bytes))
             }
             perNote.sort { $0.bytes > $1.bytes }
-            return (usage, entries, perNote)
+            // One directory walk per book: manifest + original + cover +
+            // per-chapter speech-text cache. The Books row's sublist shows
+            // these so a 700 MB audiobook is findable and deletable.
+            var sizes: [UUID: Int64] = [:]
+            for book in shelf {
+                sizes[book.id] = ExportsStore.directorySize(BooksStore.bookDirectory(book.id))
+            }
+            return (usage, entries, perNote, sizes)
         }.value
         await MainActor.run {
             self.usage = breakdown
             self.cachedImages = images
             self.perNoteImages = perNote
+            self.bookSizes = sizes
         }
     }
 
@@ -135,7 +157,70 @@ struct StorageSettingsView: View {
         Section {
             if let usage {
                 usageRow("Notes (notes.json)", usage.notesBytes)
-                usageRow("Books library", usage.booksBytes)
+                // The Books row is a dropdown into the shelf itself: every
+                // book, its real on-disk size, and a menu with Delete +
+                // Send with BookDrop — the reason this list exists is that
+                // one 700 MB audiobook hides inside a single "Books library"
+                // number with no way to find or drop it.
+                DisclosureGroup(isExpanded: $showingBooksList) {
+                    if books.books.isEmpty {
+                        Text("No books on the shelf.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(books.books) { book in
+                            bookUsageRow(book)
+                        }
+                        if books.books.count > 1 {
+                            Button {
+                                Haptics.tap()
+                                sendBooksToBookDrop(books.books)
+                            } label: {
+                                Label("Send all with BookDrop", systemImage: "wifi")
+                                    .font(.subheadline.weight(.medium))
+                            }
+                        }
+                    }
+                } label: {
+                    HStack {
+                        Text("Books library")
+                        Spacer()
+                        Text(ByteCountFormatter.string(fromByteCount: usage.booksBytes, countStyle: .file))
+                            .foregroundStyle(.secondary)
+                    }
+                    .font(.subheadline)
+                }
+                // Attached HERE, not on the Form: a view carries one alert,
+                // and the Form's clear-temporary-files alert already owns the
+                // body-level slot.
+                .alert(
+                    "Delete book?",
+                    isPresented: Binding(
+                        get: { bookToDelete != nil },
+                        set: { if !$0 { bookToDelete = nil } }
+                    ),
+                    presenting: bookToDelete
+                ) { book in
+                    Button("Delete", role: .destructive) {
+                        Haptics.press()
+                        // Same guard the Books shelf uses: a playing book must
+                        // stop before its file leaves, or a ghost session keeps
+                        // sounding from a de-shelved book.
+                        if BookPlaybackController.shared.isBookActive(book) {
+                            player.stop()
+                        }
+                        if book.format == .audio {
+                            audioBooks.stopIfPlaying(book)
+                            NotificationCenter.default.post(name: .audioBookStopped, object: book.id)
+                        }
+                        books.delete(book)
+                        bookSizes.removeValue(forKey: book.id)
+                        bookToDelete = nil
+                        Task { await loadUsage() }
+                    }
+                } message: { book in
+                    Text("Move \"\(book.title)\" to the recycle bin? The file stays recoverable for \(Book.recycleRetentionDays) days (Books → … → Recently Deleted). Notes are not affected.")
+                }
                 usageRow("Kokoro models (fp32 + compact)", usage.onnxBytes)
                 usageRow("Supertonic model", usage.supertonicBytes)
                 usageRow("Exported audio", usage.exportsBytes)
@@ -146,7 +231,65 @@ struct StorageSettingsView: View {
         } header: {
             Text("Storage used")
         } footer: {
-            Text("Delete voice models in Settings → Speech Settings. Everything is stored on-device; nothing is uploaded.")
+            Text("Delete voice models in Settings → Speech Settings. Everything is stored on-device; nothing is uploaded. Tap \"Books library\" to list every book with its size — swipe a book to delete it or send it with BookDrop.")
+        }
+    }
+
+    /// One book inside the expanded Books library group: title, real
+    /// directory size, swipe-to-delete (soft, into the recycle bin) and a
+    /// menu carrying the same two actions for anyone who doesn't swipe.
+    private func bookUsageRow(_ book: Book) -> some View {
+        HStack(spacing: 10) {
+            BookCoverView(book: book, height: 34)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(book.title)
+                    .font(.subheadline)
+                    .lineLimit(1)
+                Text(book.authorOrFormat)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer()
+            Text(ByteCountFormatter.string(
+                fromByteCount: bookSizes[book.id] ?? 0,
+                countStyle: .file
+            ))
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(.secondary)
+        }
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            Button(role: .destructive) {
+                bookToDelete = book
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
+            Button {
+                sendBooksToBookDrop([book])
+            } label: {
+                Label("BookDrop", systemImage: "wifi")
+            }
+            .tint(.indigo)
+        }
+        .swipeActions(edge: .leading, allowsFullSwipe: false) {
+            Button {
+                sendBooksToBookDrop([book])
+            } label: {
+                Label("Send", systemImage: "wifi")
+            }
+            .tint(.indigo)
+        }
+        .contextMenu {
+            Button {
+                sendBooksToBookDrop([book])
+            } label: {
+                Label("Send with BookDrop", systemImage: "wifi")
+            }
+            Button(role: .destructive) {
+                bookToDelete = book
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
         }
     }
 
@@ -158,6 +301,25 @@ struct StorageSettingsView: View {
                 .foregroundStyle(.secondary)
         }
         .font(.subheadline)
+    }
+
+    // MARK: - BookDrop hand-offs
+
+    /// Opens the app-level BookDrop send sheet prefilled with these books.
+    private func sendBooksToBookDrop(_ list: [Book]) {
+        NotificationCenter.default.post(
+            name: .bookDropSendRequest,
+            object: BookDropRequest(payload: .book, bookIDs: list.map(\.id))
+        )
+    }
+
+    /// …and the same for exported WAVs (Storage is where they live, so
+    /// this is the natural place to push one or all of them).
+    private func sendExportsToBookDrop(_ urls: [URL]) {
+        NotificationCenter.default.post(
+            name: .bookDropSendRequest,
+            object: BookDropRequest(payload: .export, exportURLs: urls)
+        )
     }
 
     // MARK: - Exported audio
@@ -182,12 +344,46 @@ struct StorageSettingsView: View {
                                 Label("Delete", systemImage: "trash")
                             }
                             Button {
+                                sendExportsToBookDrop([item.url])
+                            } label: {
+                                Label("BookDrop", systemImage: "wifi")
+                            }
+                            .tint(.indigo)
+                            Button {
                                 sharingURL = item.url
                             } label: {
                                 Label("Share", systemImage: "square.and.arrow.up")
                             }
-                            .tint(.indigo)
+                            .tint(.teal)
                         }
+                        .contextMenu {
+                            Button {
+                                sendExportsToBookDrop([item.url])
+                            } label: {
+                                Label("Send with BookDrop", systemImage: "wifi")
+                            }
+                            Button {
+                                sharingURL = item.url
+                            } label: {
+                                Label("Share", systemImage: "square.and.arrow.up")
+                            }
+                            Button(role: .destructive) {
+                                wavPlayer.stop()
+                                exports.delete(item)
+                            } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
+                        }
+                }
+                // Whole-list hand-off: every WAV in one BookDrop session.
+                if exports.exports.count > 1 {
+                    Button {
+                        Haptics.tap()
+                        sendExportsToBookDrop(exports.exports.map(\.url))
+                    } label: {
+                        Label("Send all with BookDrop", systemImage: "wifi")
+                            .font(.subheadline.weight(.medium))
+                    }
                 }
                 // The playing export gets the full transport right where it
                 // was started — the "download the note in advance and play

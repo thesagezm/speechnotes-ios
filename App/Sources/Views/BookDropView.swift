@@ -9,6 +9,11 @@ struct BookDropView: View {
     @ObservedObject private var receiver: LocalSendReceiver
     @AppStorage("bookDropEnabled") private var enabled = false
     @AppStorage("bookDropAutoAccept") private var autoAccept = true
+    /// The optional receive-side access code. Written here, read by the
+    /// receiver per prepare-upload (LocalSendReceiver.requiredPin) and
+    /// offered as the sender-side field in BookDropSendView — same default
+    /// key, so both halves can never drift.
+    @AppStorage("bookDropPin") private var accessCode = ""
 
     /// The receiver is a @MainActor singleton — the default-value initializer
     /// would touch it from a nonisolated context, so the wiring is explicit.
@@ -16,6 +21,7 @@ struct BookDropView: View {
         _receiver = ObservedObject(wrappedValue: LocalSendReceiver.shared)
         _enabled = AppStorage(wrappedValue: false, "bookDropEnabled")
         _autoAccept = AppStorage(wrappedValue: true, "bookDropAutoAccept")
+        _accessCode = AppStorage(wrappedValue: "", "bookDropPin")
     }
 
     @State private var showingSend = false
@@ -48,7 +54,7 @@ struct BookDropView: View {
                     .accessibilityLabel(enabled ? "Stop receiving" : "Start receiving")
                 }
             } footer: {
-                Text("Send a book, a note or a .jex archive to a computer running LocalSend or another Speechnotes device. Receiving stays on its own toggle below.")
+                Text("Send a book or audiobook, a note, an exported recording or a .jex archive to a computer running LocalSend or another Speechnotes device. Receiving stays on its own toggle below.")
             }
 
             Section {
@@ -58,12 +64,15 @@ struct BookDropView: View {
                     if receiver.isRunning {
                         LabeledContent("Port", value: String(receiver.port))
                     }
+                    SecureField("Access code (optional)", text: $accessCode)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
                 }
                 Toggle("Accept transfers automatically", isOn: $autoAccept)
             } header: {
                 Text("Receive")
             } footer: {
-                Text("Devices on the same Wi-Fi can send files to this iPhone. Nothing leaves the network and no account is involved.")
+                Text("Devices on the same Wi-Fi can send files to this iPhone. Nothing leaves the network and no account is involved. An access code, when set, must be typed on the sending device before any transfer starts.")
             }
 
             Section {
@@ -73,11 +82,11 @@ struct BookDropView: View {
                 )
                 instructionRow(
                     step: "2",
-                    text: "Pick your .jex archive, an .epub, a PDF or an audiobook and hit Send."
+                    text: "Pick a book, audiobook, note, exported recording or .jex archive and hit Send."
                 )
                 instructionRow(
                     step: "3",
-                    text: "Choose this iPhone (\(deviceAlias)) as the recipient. Books land on the Books shelf; JEX archives import into Notes."
+                    text: "Choose this iPhone (\(deviceAlias)) as the recipient. Books land on the Books shelf; JEX archives and markdown notes import into Notes; WAVs land in Storage."
                 )
             } header: {
                 Text("How to send from a PC")

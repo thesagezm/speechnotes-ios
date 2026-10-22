@@ -358,6 +358,11 @@ struct NotesListView: View {
                             } label: {
                                 Label(note.isFavorite ? "Unfavorite" : "Favorite", systemImage: note.isFavorite ? "star.slash" : "star")
                             }
+                            Button {
+                                sendToBookDrop(note)
+                            } label: {
+                                Label("Send with BookDrop", systemImage: "wifi")
+                            }
                             Menu {
                                 Button("Unfiled") {
                                     notes.move(noteId: note.id, to: nil)
@@ -551,6 +556,17 @@ struct NotesListView: View {
         // The file lands in Documents/Exports named for the TITLE — the old
         // "Note-2026-…" told the user nothing two days later.
         player.export(note.text, title: note.title)
+    }
+
+    /// Hands the note to the app-level BookDrop send sheet (already ticked)
+    /// — the same route Storage's export rows and BackupExport use, so the
+    /// user never leaves the list to share over the local network.
+    private func sendToBookDrop(_ note: Note) {
+        Haptics.tap()
+        NotificationCenter.default.post(
+            name: .bookDropSendRequest,
+            object: BookDropRequest(payload: .note, noteIDs: [note.id])
+        )
     }
 
     private func jumpToPlayingNote() {

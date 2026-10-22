@@ -124,9 +124,52 @@ bug in `apps/readest-app/.claude/memory/bookdrop-ios-zombie-listener.md`)
 
 ## File routing (iOS)
 
-Landed files route by extension: `.epub/.pdf/.m4b/.m4a/.mp4/.mp3` → the Books
-importer, `.jex` → the JEX importer (Notes). The office formats
-(DOCX/ODT/PPTX/ODP/DOC) join the allowlist as their importers land.
+Landed files route by extension in `SpeechnotesApp`'s router:
+
+| Extension | Destination |
+|---|---|
+| `.jex` | JEX importer → Notes + notebooks |
+| `.md/.markdown/.txt/.text` | one new Note each (title from the first line) — NOT the Books shelf |
+| `.wav` | `Documents/Exports/` beside the note-export WAVs (Storage lists it immediately) |
+| everything else the allowlist takes (`.epub/.pdf/.m4b/.m4a/.mp4/.mp3`, Opus/Ogg, office/mobi/fb2/rtf/html) | the Books importer |
+
+The office formats (DOCX/ODT/PPTX/ODP/DOC) join the allowlist as their
+importers land.
+
+## Sending from inside the app
+
+One send sheet — `BookDropSendView` — lives at the APP level
+(`SpeechnotesApp` presents it on `.bookDropSendRequest`). Any screen posts a
+`BookDropRequest` (payload + ids) to open it prefilled; nobody hosts their
+own copy. Surfaces that post:
+
+| Surface | Payload |
+|---|---|
+| Settings → Backup → Export (.jex) | a prebuilt archive (`inlineJex` — built once by `JexExporter`, handed over as bytes; scope note carried along) |
+| Settings → Storage → Books library sublist (disclosure) | one book / all books; swipe or context menu also offers Delete (soft, recycle bin) |
+| Settings → Storage → Exported audio rows / "Send all" | one WAV / every WAV |
+| Notes list — context menu + swipe | the note as markdown |
+| Books shelf — context menu | the book / audiobook (original file) |
+| BookDropView → "Send to a device" | bare sheet, nothing preselected |
+
+Payloads inside the sheet: **books & audiobooks**, **notes**, **exported
+audio**, **a .jex archive** — each multi-tickable in one LocalSend session
+(`send(files:)` already batched). Books send `BooksStore.originalFileURL`
+(e.g. `original.epub`, never the audio-only `resolveAudioOriginalURL`
+fallback); audio books keep their true extension (`original.m4b`).
+
+Build path for archives is `JexExporter.build` — BackupExportView and the
+send sheet both call it, so an export can't drift between destinations.
+
+## Access code (PIN)
+
+Optional, receive side: BookDropView → Receive → Access code
+(`bookDropPin` default). Sender side: the SecureField in the send sheet
+(`bookDropSendPin` — deliberately a different key; a device can REQUIRE one
+code and SEND to a peer whose code is different). Protocol: `?pin=` query on
+prepare-upload **and** in the prepare body's `pin` field; re-validated on
+every upload; mismatch → **401** (spec: distinct from 403 "auto-accept
+off"). Sender surfaces 401 as "Access code needed or wrong".
 
 ## Porting notes (Linux / Android)
 

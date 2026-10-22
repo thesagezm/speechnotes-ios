@@ -239,6 +239,11 @@ final class LocalSendSender: ObservableObject {
         prepareRequest.httpMethod = "POST"
         prepareRequest.timeoutInterval = 20
         prepareRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let pin, !pin.isEmpty,
+           var components = URLComponents(url: prepareRequest.url!, resolvingAgainstBaseURL: false) {
+            components.queryItems = [URLQueryItem(name: "pin", value: pin)]
+            if let pinned = components.url { prepareRequest.url = pinned }
+        }
         prepareRequest.httpBody = try? JSONEncoder().encode(prepareBody)
 
         let prepared: LocalSendPrepareResponse
@@ -248,6 +253,9 @@ final class LocalSendSender: ObservableObject {
             switch http.statusCode {
             case 200:
                 prepared = try JSONDecoder().decode(LocalSendPrepareResponse.self, from: data)
+            case 401:
+                finishFailed("Access code needed or wrong for \(peer.alias)")
+                return
             case 403:
                 finishFailed("\(peer.alias) declined the transfer")
                 return
@@ -270,7 +278,7 @@ final class LocalSendSender: ObservableObject {
                 finishFailed("\(peer.alias) gave no token for \(entry.item.fileName)")
                 return
             }
-            await upload(entry.item, id: entry.id, token: token, session: prepared.sessionId, to: base, peer: peer)
+            await upload(entry.item, id: entry.id, token: token, session: prepared.sessionId, to: base, peer: peer, pin: pin)
             if cancelled { phase = .idle; return }
             progress.completedUnitCount = Int64(index + 1)
         }
@@ -286,7 +294,8 @@ final class LocalSendSender: ObservableObject {
         token: String,
         session: String,
         to base: URL,
-        peer: Peer
+        peer: Peer,
+        pin: String?
     ) async {
         let attributes = (try? FileManager.default.attributesOfItem(atPath: item.url.path))
         let size = (attributes?[.size] as? Int64) ?? 0
@@ -303,13 +312,18 @@ final class LocalSendSender: ObservableObject {
         request.timeoutInterval = 3600 // a 700 MB book on slow Wi-Fi is minutes
         request.setValue(String(size), forHTTPHeaderField: "Content-Length")
         // The session/file/token ride on the query string, as the spec's
-        // upload endpoint declares.
+        // upload endpoint declares. The PIN rides along when set — the
+        // receiver re-checks it per upload, not just at prepare.
         if var components = URLComponents(url: request.url!, resolvingAgainstBaseURL: false) {
-            components.queryItems = [
+            var items = [
                 URLQueryItem(name: "sessionId", value: session),
                 URLQueryItem(name: "fileId", value: id),
                 URLQueryItem(name: "token", value: token)
             ]
+            if let pin, !pin.isEmpty {
+                items.append(URLQueryItem(name: "pin", value: pin))
+            }
+            components.queryItems = items
             if let rebuilt = components.url { request.url = rebuilt }
         }
 
@@ -322,6 +336,8 @@ final class LocalSendSender: ObservableObject {
             switch http.statusCode {
             case 200:
                 return
+            case 401:
+                finishFailed("Access code needed or wrong for \(peer.alias)")
             case 403, 409:
                 finishFailed("\(peer.alias) rejected \(item.fileName) (HTTP \(http.statusCode))")
             default:

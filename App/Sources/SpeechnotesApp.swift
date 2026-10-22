@@ -1,4 +1,5 @@
 import SwiftUI
+import SpeechLogic
 
 @main
 struct SpeechnotesApp: App {
@@ -26,6 +27,9 @@ struct SpeechnotesApp: App {
     /// Selected tab — the global mini-player jumps here when the user taps
     /// the bar, then the notes list pushes the speaking note.
     @State private var selectedTab: Tab = .notes
+    /// Non-nil while the app-level BookDrop send sheet is up. Any screen
+    /// posts `.bookDropSendRequest` (a BookDropRequest) to open it prefilled.
+    @State private var bookDropRequest: BookDropRequest?
 
     private enum Tab: Hashable, CaseIterable, Identifiable {
         case notes, books, stats, settings
@@ -136,6 +140,53 @@ struct SpeechnotesApp: App {
                             try? FileManager.default.removeItem(at: url)
                             return
                         }
+                        // A WAV is exported audio, not a book: land it in
+                        // Documents/Exports beside the ones the note export
+                        // pipeline writes, so Storage lists it at once.
+                        if ext == "wav" {
+                            let dir = ExportsStore.exportsDirectory
+                            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                            var target = dir.appendingPathComponent(url.lastPathComponent)
+                            if FileManager.default.fileExists(atPath: target.path) {
+                                target = dir.appendingPathComponent(
+                                    String(UUID().uuidString.prefix(6)) + "-" + url.lastPathComponent
+                                )
+                            }
+                            do {
+                                try FileManager.default.moveItem(at: url, to: target)
+                                LocalSendReceiver.shared.reportImport(
+                                    name: target.deletingPathExtension().lastPathComponent,
+                                    size: 0,
+                                    outcome: .imported("Saved to Exported audio")
+                                )
+                            } catch {
+                                LocalSendReceiver.shared.reportImport(
+                                    name: url.lastPathComponent,
+                                    size: 0,
+                                    outcome: .failed("Could not save the recording")
+                                )
+                            }
+                            return
+                        }
+                        // Markdown/plain-text (a note shared from another
+                        // device) is a NOTE, not a book: the Books importer
+                        // would flatten it to a one-chapter EPUB. Everything
+                        // else — pdf, audio, epub, office/mobi documents —
+                        // keeps its book route.
+                        if ["md", "markdown", "txt", "text"].contains(ext),
+                           let imported = await ImportService.importText(from: url) {
+                            let note = notes.createNote()
+                            var updated = note
+                            updated.text = SpeechSanitizer.displaySafe(imported.text)
+                            notes.update(updated)
+                            LocalSendReceiver.shared.reportImport(
+                                name: imported.title,
+                                size: 0,
+                                outcome: .imported("Saved as a note")
+                            )
+                            try? FileManager.default.removeItem(at: url)
+                            return
+                        }
                         if let imported = await books.importBook(from: url) {
                             LocalSendReceiver.shared.reportImport(
                                 name: imported.title,
@@ -192,6 +243,19 @@ struct SpeechnotesApp: App {
                 // Toast surface — no environment dependency (uses
                 // ToastCenter.shared), so it can sit beside the mini-player.
                 .appToasts()
+                // BookDrop send sheet, app-level: BackupExport/Storage/note
+                // swipes/book context menus post .bookDropSendRequest with
+                // their selection instead of each hosting its own copy.
+                // Attached BEFORE the environmentObject chain for the same
+                // reason .globalMiniPlayer() is: the sheet resolves
+                // BooksStore/NotesStore from the injections applied below.
+                .sheet(item: $bookDropRequest) { request in
+                    BookDropSendView(initial: request)
+                }
+                .onReceive(NotificationCenter.default.publisher(for: .bookDropSendRequest)) { notification in
+                    guard let request = notification.object as? BookDropRequest else { return }
+                    bookDropRequest = request
+                }
                 .onReceive(NotificationCenter.default.publisher(for: .miniPlayerJumpToNote)) { _ in
                     selectedTab = .notes
                 }

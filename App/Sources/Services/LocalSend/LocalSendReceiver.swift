@@ -46,10 +46,18 @@ final class LocalSendReceiver: ObservableObject {
     /// Extensions we accept, route and import today.
     static let acceptedExtensions: Set<String> = Set([
         "epub", "pdf", "m4b", "m4a", "mp4", "mp3", "jex",
+        // A received WAV lands in Documents/Exports next to the ones the
+        // note export pipeline writes — Storage lists it immediately.
+        "wav",
         // Opus/Ogg audiobook containers (the format store books arrive in
         // when no DRM-less M4B exists) — refusing them read as "BookDrop
         // skipped my book".
         "opus", "ogg", "oga",
+        // A single note sent as markdown/plain text. DocumentBook carries
+        // txt/md too (they normalize to books on the shelf), but the ROUTER
+        // treats them as notes — this list is the accept gate, the router
+        // decides the destination.
+        "md", "markdown", "txt", "text",
         // Every document the Books importer normalizes to EPUB. The office set
         // plus the mobipocket/Kindle, FictionBook, RTF, HTML/HTMLZ and
         // plain-text/Markdown readers.
@@ -187,6 +195,15 @@ final class LocalSendReceiver: ObservableObject {
         )
     }
 
+    /// The access code currently demanded on incoming transfers ("" = none).
+    /// Both BookDrop screens write the `bookDropPin` default through
+    /// @AppStorage; the receiver reads it per-request so a code typed in
+    /// Settings takes effect on the next prepare without a restart.
+    var requiredPin: String {
+        (UserDefaults.standard.string(forKey: "bookDropPin") ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     // MARK: - Request routing
 
     /// Entry from the server queue (nonisolated): block that queue while the
@@ -223,6 +240,14 @@ final class LocalSendReceiver: ObservableObject {
               let payload = try? JSONDecoder().decode(LocalSendPrepareUpload.self, from: data) else {
             return .badRequest()
         }
+        // PIN first (spec: 401 = PIN required/wrong, distinct from 403
+        // "auto-accept off") so a locked device tells the peer WHY. Check
+        // BOTH places the spec lets a sender put it: the `pin` field of the
+        // prepare body AND the `?pin=` query parameter.
+        let bodyPin = (payload.pin ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let queryPin = (request.queryValue("pin") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let offeredPin = bodyPin.isEmpty ? queryPin : bodyPin
+        if !requiredPin.isEmpty, offeredPin != requiredPin { return .status(401) }
         guard autoAccept else { return .forbidden() }
         guard sessions.isEmpty else { return .conflict() } // one transfer at a time
 
@@ -251,6 +276,12 @@ final class LocalSendReceiver: ObservableObject {
         }
         guard session.tokens[fileId] == token else {
             return .forbidden()
+        }
+        // The PIN rides the upload query too — a sniffed session must not
+        // outlive the check that granted it.
+        if !requiredPin.isEmpty,
+           (request.queryValue("pin")?.trimmingCharacters(in: .whitespacesAndNewlines)) != requiredPin {
+            return .status(401)
         }
         guard !session.receivedIds.contains(fileId) else {
             return .conflict() // duplicate upload of the same file
