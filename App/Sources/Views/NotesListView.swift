@@ -14,6 +14,9 @@ struct NotesListView: View {
     @State private var sharingNote: Note?
     @State private var showingRecycleBin = false
     @State private var showingNotebookManager = false
+    /// Set by the "notes are locked" empty state so the user lands directly
+    /// on the passphrase field instead of hunting through Settings.
+    @State private var showingEncryptionSettings = false
 
     /// Which notebook the list is scoped to. Persisted as a string
     /// ("all" / "unfiled" / "nb-<uuid>") so relaunching restores the view.
@@ -141,7 +144,13 @@ struct NotesListView: View {
     var body: some View {
         NavigationStack(path: $path) {
             Group {
-                if notes.notes.isEmpty {
+                // A sealed library with no key in memory must NOT read as
+                // an empty one: the notes are on the device, just unreadable.
+                // This check comes first — `notes.notes.isEmpty` is true in
+                // this state too.
+                if notes.isLocked {
+                    lockedState
+                } else if notes.notes.isEmpty {
                     emptyState
                 } else if memoizedSections.allSatisfy({ $0.notes.isEmpty }) && !searchText.isEmpty {
                     ContentUnavailableView.search(text: searchText)
@@ -157,6 +166,10 @@ struct NotesListView: View {
             }
             .navigationDestination(isPresented: $showingRecycleBin) {
                 RecycleBinView()
+            }
+            .navigationDestination(isPresented: $showingEncryptionSettings) {
+                EncryptionSettingsView()
+                    .environmentObject(notes)
             }
             .searchable(text: $searchText, prompt: "Search notes")
             .onChange(of: sort) { newValue in
@@ -440,6 +453,25 @@ struct NotesListView: View {
                 path.append(note.id)
             } label: {
                 Label("New note", systemImage: "square.and.pencil")
+            }
+            .buttonStyle(.borderedProminent)
+        }
+    }
+
+    /// The notes file is encrypted and the vault has no key in memory.
+    /// Reading this as "no notes" would be a lie and a data-loss report
+    /// waiting to happen, so the screen says exactly what happened and
+    /// points at the one place the passphrase can be entered.
+    private var lockedState: some View {
+        ContentUnavailableView {
+            Label("Notes are locked", systemImage: "lock.fill")
+        } description: {
+            Text("Your notes are on this device, encrypted. Enter your passphrase in Settings → Encryption to read them.")
+        } actions: {
+            Button {
+                showingEncryptionSettings = true
+            } label: {
+                Label("Open encryption settings", systemImage: "key")
             }
             .buttonStyle(.borderedProminent)
         }

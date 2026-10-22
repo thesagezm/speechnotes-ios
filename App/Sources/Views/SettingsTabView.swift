@@ -39,6 +39,11 @@ struct SettingsTabView: View {
                         Label("Import from Joplin (.jex)", systemImage: "square.and.arrow.down")
                     }
                 }
+                Section("Privacy") {
+                    NavigationLink("Encryption") {
+                        EncryptionSettingsView()
+                    }
+                }
                 Section("Integrations") {
                     NavigationLink("BookDrop") {
                         BookDropView()

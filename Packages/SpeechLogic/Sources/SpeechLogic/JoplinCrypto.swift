@@ -180,6 +180,15 @@ public enum JoplinCrypto {
         text.hasPrefix("JED01") || text.hasPrefix("JED02")
     }
 
+    /// The master key id an envelope was sealed with, read from the header
+    /// alone — no key needed. This is how a vault holding several keys
+    /// routes a decryption to the right one, and how the app recovers the
+    /// id of the key it just unwrapped.
+    public static func masterKeyId(of envelope: String) -> String? {
+        guard let header = try? decodeHeader(envelope) else { return nil }
+        return header.masterKeyId
+    }
+
     // MARK: - Envelope
 
     /// The header: `JED01` + 6 hex digits of metadata length + the metadata

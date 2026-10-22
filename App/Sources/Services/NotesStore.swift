@@ -30,6 +30,16 @@ final class NotesStore: ObservableObject {
             .sorted { ($0.deletedAt ?? .distantPast) > ($1.deletedAt ?? .distantPast) }
     }
 
+    /// True while the store holds notes it CANNOT read — an encrypted
+    /// notes.json with no unlocked key. The list screens show the unlock
+    /// prompt instead of an empty library (an empty library is a lie; the
+    /// notes are there, just sealed).
+    @Published private(set) var isLocked: Bool = false
+
+    /// The shape of the last file image read/written. Lets the settings
+    /// screen say what the file on disk actually is, without stat-ing it.
+    @Published private(set) var fileIsSealed: Bool = false
+
     /// Cached per-note list-row metadata (derived title, ~120-char preview,
     /// word count, listen estimate). All of it is derived from `text` —
     /// recomputing it inline on every list re-render (including per
@@ -252,8 +262,9 @@ final class NotesStore: ObservableObject {
         saveTask?.cancel()
         saveTask = nil
         do {
-            let data = try JSONEncoder().encode(allNotes)
-            try data.write(to: fileURL, options: .atomic)
+            let sealed = try NotesFileSealer.seal(allNotes, key: EncryptionVault.shared.keyMaterial)
+            fileIsSealed = sealed.isSealed
+            try sealed.encoded.write(to: fileURL, options: .atomic)
         } catch {
             Log.shared.error("Failed to save notes (flush): \(error)")
         }
@@ -264,21 +275,39 @@ final class NotesStore: ObservableObject {
         // run it detached, then hop back to the main actor for the write so
         // successive saves stay ORDERED (two detached writers could finish
         // out of order and persist an older snapshot last).
+        //
+        // The SEALING rides in the same detached block: with encryption on,
+        // it is an AES-GCM pass over the whole library, and doing it here
+        // would put it back on the main thread. The key material is a
+        // value, so it crosses the boundary safely.
         let snapshot = allNotes
         let url = fileURL
         let backupURL = backupFileURL
+        let key = EncryptionVault.shared.keyMaterial
         Task.detached(priority: .utility) {
-            guard let data = try? JSONEncoder().encode(snapshot) else {
-                Log.shared.error("Failed to encode notes for save")
-                return
+            let sealed: JoplinNotesFile
+            do {
+                sealed = try NotesFileSealer.seal(snapshot, key: key)
+            } catch {
+                // Sealing failed (the vault locked between the edit and the
+                // write, say). Fall back to plain rather than dropping the
+                // edit: a lost note is worse than a momentarily-unencrypted
+                // one, and the next successful save re-seals.
+                Log.shared.error("Failed to seal notes for save: \(error) — writing plaintext")
+                guard let plain = try? JSONEncoder().encode(snapshot) else {
+                    Log.shared.error("Failed to encode notes for save")
+                    return
+                }
+                sealed = JoplinNotesFile.plain(plain)
             }
             await MainActor.run {
                 do {
-                    try data.write(to: url, options: .atomic)
+                    try sealed.encoded.write(to: url, options: .atomic)
+                    self.fileIsSealed = sealed.isSealed
                     self.savesSinceBackup += 1
                     if self.savesSinceBackup >= 10 {
                         self.savesSinceBackup = 0
-                        try? data.write(to: backupURL, options: .atomic)
+                        try? sealed.encoded.write(to: backupURL, options: .atomic)
                     }
                 } catch {
                     Log.shared.error("Failed to save notes: \(error)")
@@ -296,24 +325,131 @@ final class NotesStore: ObservableObject {
 
     private func load() {
         guard FileManager.default.fileExists(atPath: fileURL.path) else { return }
+        let data: Data
         do {
-            allNotes = try JSONDecoder().decode([Note].self, from: try Data(contentsOf: fileURL))
-            bumpVersion()  // list views memoize on `version`
+            data = try Data(contentsOf: fileURL)
         } catch {
-            // A notes.json that fails to decode must never be silently
-            // replaced by the next save — that turns one bad write into
-            // total data loss. Quarantine the bad file, recover from the
-            // rolling backup, and carry on from what survives.
-            Log.shared.error("Failed to load notes: \(error) — quarantining notes.json")
-            let quarantine = fileURL.appendingPathExtension("corrupt-\(Int(Date().timeIntervalSince1970))")
-            try? FileManager.default.moveItem(at: fileURL, to: quarantine)
-            if let backup = try? Data(contentsOf: backupFileURL),
-               let recovered = try? JSONDecoder().decode([Note].self, from: backup),
-               !recovered.isEmpty {
-                allNotes = recovered
+            Log.shared.error("Failed to read notes.json: \(error)")
+            return
+        }
+        let file = JoplinNotesFile.read(data)
+        fileIsSealed = file.isSealed
+        let key = EncryptionVault.shared.keyMaterial
+        guard case .sealed = file, key == nil else {
+            // Plain file, or a sealed file we can open right now.
+            do {
+                allNotes = try NotesFileSealer.notes(from: file, key: key)
+                isLocked = false
                 bumpVersion()  // list views memoize on `version`
-                Log.shared.error("NotesStore: recovered \(recovered.count) note(s) from notes.backup.json")
+            } catch {
+                Log.shared.error("Failed to load notes: \(error) — quarantining notes.json")
+                quarantineAndRecover()
             }
+            return
+        }
+        // Sealed file, no key: the library is intact but unreadable until
+        // the passphrase arrives. Loading nothing here is correct — the
+        // unlock path re-reads from disk.
+        isLocked = true
+        Log.shared.error("NotesStore: notes.json is encrypted and the vault is locked")
+    }
+
+    /// Re-reads the notes file after an unlock. Returns the note count that
+    /// came back, or nil when the file could not be opened with the new key
+    /// (wrong passphrase, corrupt file) — the caller then leaves the store
+    /// empty rather than half-loaded.
+    @discardableResult
+    func reloadAfterUnlock() -> Int? {
+        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            isLocked = false
+            return allNotes.count
+        }
+        guard let data = try? Data(contentsOf: fileURL) else { return nil }
+        let file = JoplinNotesFile.read(data)
+        do {
+            let notes = try NotesFileSealer.notes(from: file, key: EncryptionVault.shared.keyMaterial)
+            allNotes = notes
+            isLocked = false
+            fileIsSealed = file.isSealed
+            bumpVersion()  // list views memoize on `version`
+            rowMetadata.removeAll()
+            pruneExpiredDeleted()
+            Log.shared.info("NotesStore unlocked: \(notes.count) note(s)")
+            return notes.count
+        } catch {
+            Log.shared.error("NotesStore unlock failed: \(error)")
+            return nil
+        }
+    }
+
+    /// Rewrites the whole file with the vault's CURRENT state: reads the
+    /// notes on disk (with whatever key opens them), writes them back in
+    /// the new shape. Used when encryption is turned on (plain → sealed)
+    /// and when it is turned off (sealed → plain). Returns the note count
+    /// now on disk.
+    ///
+    /// `forcePlain` is the turn-off path: the notes are written back
+    /// unencrypted while the real key is still in memory. The caller
+    /// deletes the key only after this returns — a failure here must leave
+    /// the sealed file and its key untouched, never the other way round.
+    @discardableResult
+    func resealWithCurrentVault(forcePlain: Bool = false) throws -> Int {
+        let file: JoplinNotesFile
+        if FileManager.default.fileExists(atPath: fileURL.path),
+           let data = try? Data(contentsOf: fileURL) {
+            file = JoplinNotesFile.read(data)
+        } else {
+            file = .plain(Data())
+        }
+        let notes: [Note]
+        do {
+            notes = try NotesFileSealer.notes(from: file, key: EncryptionVault.shared.keyMaterial)
+        } catch {
+            // The file we just read must not be stranded: if the current
+            // vault cannot open it, leave it exactly as it is.
+            Log.shared.error("resealWithCurrentVault: cannot read current file: \(error)")
+            throw error
+        }
+        let written: JoplinNotesFile
+        if forcePlain {
+            written = try NotesFileSealer.seal(notes, key: nil)
+        } else {
+            written = try NotesFileSealer.seal(notes, key: EncryptionVault.shared.keyMaterial)
+        }
+        do {
+            try written.encoded.write(to: fileURL, options: .atomic)
+            fileIsSealed = written.isSealed
+            allNotes = notes
+            isLocked = false
+            bumpVersion()  // list views memoize on `version`
+            rowMetadata.removeAll()
+            return notes.count
+        } catch {
+            Log.shared.error("resealWithCurrentVault: write failed: \(error)")
+            throw error
+        }
+    }
+
+    /// Wrong passphrase consequences, kept apart from a corrupt-file
+    /// recovery path: a corrupt plaintext under a valid key means the
+    /// quarantine is safe; a wrong key means leave the sealed file alone
+    /// and wait for the right passphrase.
+    private func quarantineAndRecover() {
+        let file = JoplinNotesFile.read((try? Data(contentsOf: fileURL)) ?? Data())
+        guard !file.isSealed else {
+            // A sealed file that will not open is a key problem, not a
+            // corruption problem — never quarantine an encrypted file.
+            isLocked = true
+            return
+        }
+        let quarantine = fileURL.appendingPathExtension("corrupt-\(Int(Date().timeIntervalSince1970))")
+        try? FileManager.default.moveItem(at: fileURL, to: quarantine)
+        if let backup = try? Data(contentsOf: backupFileURL),
+           let recovered = try? JSONDecoder().decode([Note].self, from: backup),
+           !recovered.isEmpty {
+            allNotes = recovered
+            bumpVersion()  // list views memoize on `version`
+            Log.shared.error("NotesStore: recovered \(recovered.count) note(s) from notes.backup.json")
         }
     }
 }
