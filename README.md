@@ -102,7 +102,8 @@ Feature tour:
 - **Storage** (Settings → Storage) — browsable gallery of every cached image
   (attached AND web-downloaded, tap to zoom, share/delete), exported audio
   list, and a usage breakdown.
-- **Onboarding** — a three-page first-launch tour.
+- **Onboarding** — a five-page first-launch tour (notes → scanned-PDF OCR →
+  audiobooks → voices → get started).
 - **Logs** (Settings → About) — crash-persistent on-device logs, shareable
   for debugging.
 

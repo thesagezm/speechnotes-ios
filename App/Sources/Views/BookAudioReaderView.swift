@@ -48,6 +48,19 @@ struct BookAudioReaderView: View {
         }
         return stored
     }
+    /// What TRANSPORT actions run against: the filtered marker list, or —
+    /// when the only stored entry is the "Full audiobook" placeholder (no
+    /// markers found) — that placeholder. The filtered list exists for the
+    /// CHAPTERS SHEET's honesty (an empty list beats one fake row); it must
+    /// not gate playback: Dune's 16 MB moov sat past the 8 MB import slice,
+    /// the manifest fell back to the placeholder, and
+    /// `guard chapters.indices.contains(0)` against the filtered `[]` made
+    /// the Play button a silent no-op — "doesn't play", no error banner,
+    /// because play() was never called. AVPlayer itself reads the same
+    /// placeholder via `book.audioChapters` and plays the whole file fine.
+    private var playableChapters: [AudioChapter] {
+        chapters.isEmpty ? (book.audioChapters ?? []) : chapters
+    }
     /// True when the app-level player is currently loaded with THIS book.
     private var isActive: Bool { audioBook.activeBookID == book.id }
     private var isPlaying: Bool { isActive && audioBook.isPlaying }
@@ -780,7 +793,7 @@ struct BookAudioReaderView: View {
     }
 
     private func playChapter(_ index: Int) {
-        guard chapters.indices.contains(index) else { return }
+        guard playableChapters.indices.contains(index) else { return }
         chapterIndex = index
         // Paused mid-chapter on the LIVE session: resume exactly — the
         // backend's own clock is the playhead, and re-deriving seconds from
@@ -863,13 +876,18 @@ struct BookAudioReaderView: View {
     }
 
     private func stepChapter(_ delta: Int) {
-        let target = max(0, min(chapters.count - 1, chapterIndex + delta))
+        // playableChapters, not chapters: a placeholder-only book (chapters
+        // == []) must still let the chevrons land on its single unit —
+        // min(..., -1) would disable next forever against the filtered list.
+        let target = max(0, min(playableChapters.count - 1, chapterIndex + delta))
         guard target != chapterIndex else { return }
         playChapter(target)
     }
 
     private func seekToProgress(_ value: Double) {
-        guard chapters.indices.contains(chapterIndex) else { return }
+        // Same rule as playChapter: the marker-less placeholder book must
+        // still scrub (one chapter = the whole file).
+        guard playableChapters.indices.contains(chapterIndex) else { return }
         audioBook.seek(toFraction: value)
     }
 }

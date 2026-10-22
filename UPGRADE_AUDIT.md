@@ -77,4 +77,4 @@ quality or the chunker.
 - Audio UX: 1.10 / 2.4 playback queue + continuous note play; 3.1 lock-screen ±15 s; 3.7 sleep timer; 3.2 artwork/chapter subtitle.
 - Reader: M20 CFI restore; 4.7 reader-follows-narration; 4.21/7.6 highlights; 4.12/4.19 search.
 - Notes/export: 2.13 share-as-PDF/md/txt; Joplin/JEX export (new in this cycle).
-- A11y: 5.6 audit, V2 labels, V7 onboarding.
+- A11y: 5.6 audit, V2 labels; ~~V7 onboarding~~ FIXED 2026-10-22 (DType-capped icons, labeled dots, five-page flow).

@@ -130,6 +130,40 @@ final class BooksStore: ObservableObject {
     nonisolated static let audioParseHeadBytes = 8 * 1024 * 1024
     nonisolated static let audioParseTailBytes = 8 * 1024 * 1024
 
+    /// Chapter-reader REVISION — stamped into every manifest the backfill
+    /// writes (Book.audioReaderRev). Bump when the chapter parse changes
+    /// shape; manifests below the current rev get ONE repair pass even if
+    /// their `-verified` terminal stamp says otherwise. Rev 1 = the adaptive
+    /// moov slice (Dune's 16.3 MB faststart moov sat past the old 8 MB cut).
+    nonisolated static let audioReaderRev = 1
+
+    /// Hard ceiling on the ADAPTIVE MP4 head read (`audioChapterHeadSlice`):
+    /// a faststart file whose moov exceeds the 8 MB default gets re-read to
+    /// fit its declared moov end, never past this. Metadata can be
+    /// pathological (ilst artwork, ffmpeg's per-sample stsz — Dune's moov is
+    /// 16.3 MB), and the head read stays a BOUNDED slice, never a whole-file
+    /// map (the documented device freeze).
+    nonisolated static let audioChapterHeadCeilingBytes = 64 * 1024 * 1024
+
+    /// The head slice for MP4/ID3 chapter parsing: the 8 MB default, grown
+    /// when the probe shows `moov` at the head whose declared end runs past
+    /// the default — slice to fit moov exactly (capped by the ceiling).
+    ///
+    /// Without this a faststart book with a big moov parses to ZERO
+    /// chapters: `chaptersFromMP4` refuses the overrunning box, the tail
+    /// slice is pure mdat (no chpl signature), and the manifest degrades to
+    /// the "single" placeholder — no TOC on the shelf or in the reader
+    /// (the user's Dune, 55 chapters, all missed: moov 16,269,487 bytes vs
+    /// an 8,388,608-byte cut, chpl at +15.5 MB).
+    nonisolated static func audioChapterHeadSlice(of url: URL) -> Data? {
+        guard let probe = slice(of: url, from: 0, length: 4096) else { return nil }
+        if let moovEnd = AudiobookChapters.moovEndOffset(inHead: probe),
+           moovEnd > audioParseHeadBytes {
+            return slice(of: url, from: 0, length: min(moovEnd, audioChapterHeadCeilingBytes))
+        }
+        return slice(of: url, from: 0, length: audioParseHeadBytes)
+    }
+
     /// `length` bytes starting at `from`, clamped to the file's size.
     nonisolated static func slice(of url: URL, from offset: Int64, length: Int) -> Data? {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
@@ -270,7 +304,13 @@ final class BooksStore: ObservableObject {
                 // a file with no embedded art will never grow one, and
                 // re-walking 300 MB to confirm that is the hang, not a fix.
                 || (book.format == .audio
-                    && book.audioChapterSource?.hasSuffix("-verified") != true
+                    && (book.audioChapterSource?.hasSuffix("-verified") != true
+                        // Rev counter beats the terminal stamp: a book whose
+                        // manifest was built by a pre-rev-1 reader (the 8 MB
+                        // moov cut) may be fully stamped yet chapter-less —
+                        // ONE re-read with the current reader, then the stamp
+                        // below retires it for good.
+                        || (book.audioReaderRev ?? 0) < BooksStore.audioReaderRev)
                     && (!book.hasCover
                         || book.audioChapterSource == nil
                         || book.audioChapterSource == "single"
@@ -283,7 +323,10 @@ final class BooksStore: ObservableObject {
                         // even when the file carried real marks. One
                         // bounded re-read either upgrades them to the real
                         // table or re-stamps them verified.
-                        || book.audioChapterSource == "ogg-uniform"))
+                        || book.audioChapterSource == "ogg-uniform"
+                        // Pre-rev-1 manifests match via the rev clause above
+                        // regardless of which source they froze with.
+                        || (book.audioReaderRev ?? 0) < BooksStore.audioReaderRev))
         }
         guard !pending.isEmpty else { return }
         didBackfillLegacyBooks = true
@@ -366,6 +409,20 @@ final class BooksStore: ObservableObject {
                         book.audioChapters = nil
                         book.audioChapterSource = nil
                     }
+                    // Pre-rev-1 manifests may hold the "single" placeholder
+                    // (or a cover-only re-read's stale table) from the 8 MB
+                    // moov cut — buildAudioManifest only fills chapters when
+                    // `audioChapters == nil`, so drop the suspect table the
+                    // same way the ogg-uniform branch does and let the
+                    // adaptive slice parse it for real.
+                    if (book.audioReaderRev ?? 0) < BooksStore.audioReaderRev,
+                       book.audioChapters?.count ?? 0 <= 1 {
+                        book.audioChapters = nil
+                        if book.audioChapterSource == "single"
+                            || book.audioChapterSource?.hasPrefix("single") == true {
+                            book.audioChapterSource = nil
+                        }
+                    }
                     let refreshed = Self.buildAudioManifest(book: book, directory: dir)
                     book = refreshed
                     // TERMINAL STAMP. One verified re-read is the contract:
@@ -373,6 +430,7 @@ final class BooksStore: ObservableObject {
                     // matches this book again — whatever was missing (a
                     // chapter track, embedded art) is what the file has.
                     book.audioChapterSource = (book.audioChapterSource ?? "single") + "-verified"
+                    book.audioReaderRev = BooksStore.audioReaderRev
                     // The re-import loop the device logs kept showing can
                     // only mean this stamp never landed; make the write (or
                     // its failure) visible in the next device log.
@@ -686,6 +744,12 @@ final class BooksStore: ObservableObject {
     /// from AVURLAsset, which reads the header rather than the samples.
     nonisolated private static func buildAudioManifest(book: Book, directory: URL) -> Book {
         var book = book
+        // Stamped HERE, not only by the backfill: this function IS the
+        // reader, so a manifest it writes was built by the current rev. The
+        // backfill's rev clause then only ever matches legacy manifests
+        // (rev nil), instead of re-reading every freshly imported book once
+        // just to acquire the stamp.
+        book.audioReaderRev = Self.audioReaderRev
         let original = resolveAudioOriginalURL(book: book)
 
         // Ogg first: AVFoundation cannot parse the container at all, so every
@@ -787,7 +851,7 @@ final class BooksStore: ObservableObject {
 
         if book.audioChapters == nil {
             let chapters: [AudioChapter]
-            if book.format == .audio, let head = Self.slice(of: original, from: 0, length: Self.audioParseHeadBytes) {
+            if book.format == .audio, let head = Self.audioChapterHeadSlice(of: original) {
                 if head.starts(with: [0x49, 0x44, 0x33]) {
                     // MP3: ID3v2 lives at the head, full stop.
                     chapters = AudiobookChapters.chaptersFromID3(head)
@@ -1069,7 +1133,13 @@ final class BooksStore: ObservableObject {
     /// Periodic position writes (AudioBookPlayer's 10 s ticker, the reader's
     /// scroll) call this often; save() re-derives nothing beyond the one
     /// book it's handed.
-    func save(_ book: Book) {
+    ///
+    /// `sync` is the scenePhase contract (same as NotesStore.flushNow): the
+    /// process may be frozen the moment the caller returns, so a detached
+    /// encode+write can never be trusted with it — the audiobook position
+    /// was lost on background/kill exactly because every save, including the
+    /// suspension flush, rode the detached path.
+    func save(_ book: Book, sync: Bool = false) {
         guard let idx = allBooks.firstIndex(where: { $0.id == book.id }) else { return }
         allBooks[idx] = book
         if !book.isDeleted,
@@ -1081,20 +1151,34 @@ final class BooksStore: ObservableObject {
         Self.writeSeq[book.id] = seq
         Self.seqLock.unlock()
         let snapshot = book
-        Task.detached(priority: .utility) {
-            // Persist ONLY this book's manifest — the old path encoded the
-            // whole shelf (books are structs carried in memory here, so a
-            // position write paid for every other book's JSON on every 10 s
-            // tick). One small atomic write per call instead.
-            guard let data = try? JSONEncoder().encode(snapshot) else { return }
-            // A NEWER save() was already issued while this encode was in
-            // flight — drop the stale write rather than overwrite with it.
-            Self.seqLock.lock()
-            let latest = Self.writeSeq[snapshot.id]
-            Self.seqLock.unlock()
-            guard latest == seq else { return }
-            try? data.write(to: Self.manifestURL(snapshot.id), options: .atomic)
+        if sync {
+            // A few KB of ONE book's JSON on the caller's thread — a write,
+            // not a shelf re-encode. The seq bump above also retires any
+            // in-flight detached save: its flush-time check sees a newer
+            // sequence and drops the stale bytes.
+            Self.writeManifest(snapshot: snapshot, seq: seq)
+        } else {
+            Task.detached(priority: .utility) {
+                // Persist ONLY this book's manifest — the old path encoded the
+                // whole shelf (books are structs carried in memory here, so a
+                // position write paid for every other book's JSON on every 10 s
+                // tick). One small atomic write per call instead.
+                Self.writeManifest(snapshot: snapshot, seq: seq)
+            }
         }
+    }
+
+    /// Encode + atomic write of ONE book's manifest, with the last-writer-
+    /// wins check (M18) at flush time, not at issue time.
+    nonisolated private static func writeManifest(snapshot: Book, seq: Int) {
+        guard let data = try? JSONEncoder().encode(snapshot) else { return }
+        // A NEWER save() was already issued while this encode was in
+        // flight — drop the stale write rather than overwrite with it.
+        seqLock.lock()
+        let latest = writeSeq[snapshot.id]
+        seqLock.unlock()
+        guard latest == seq else { return }
+        try? data.write(to: manifestURL(snapshot.id), options: .atomic)
     }
 
     func markOpened(_ book: Book) {
@@ -1104,7 +1188,7 @@ final class BooksStore: ObservableObject {
         save(updated)
     }
 
-    func updatePosition(_ book: Book, chapterIndex: Int, chapterFraction: Double, cfi: String? = nil, audioSeconds: Double? = nil) {
+    func updatePosition(_ book: Book, chapterIndex: Int, chapterFraction: Double, cfi: String? = nil, audioSeconds: Double? = nil, sync: Bool = false) {
         var updated = book
         updated.position = BookPosition(
             chapterIndex: chapterIndex,
@@ -1112,6 +1196,6 @@ final class BooksStore: ObservableObject {
             cfi: cfi,
             audioSeconds: audioSeconds
         )
-        save(updated)
+        save(updated, sync: sync)
     }
 }

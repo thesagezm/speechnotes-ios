@@ -69,6 +69,49 @@ public enum AudiobookChapters {
         return chapters
     }
 
+    /// Where a head slice must END for it to contain `moov` in full — or nil
+    /// when the probe cannot say (no `moov` at the head, malformed bytes).
+    ///
+    /// The slice exists because `forEachBox` correctly refuses a box whose
+    /// declared length runs past the slice — correct for a truncated read,
+    /// fatal for a faststart file whose `moov` is BIGGER than the caller's
+    /// cap. ffmpeg writes a per-sample `stsz` (uniform size 0), so a long
+    /// book's moov is megabytes of sample-size table: the user's Dune m4b
+    /// declares moov = 16,269,487 bytes, its chpl (55 chapters) sits at
+    /// +15.5 MB, and an 8 MB head cut parsed ZERO of them — no TOC, and the
+    /// reader's marker-less play guard turned the Play button into a no-op.
+    /// Only the box HEADER answers this: ftyp ends, the next box says
+    /// `moov` and its length — the payload never has to be present.
+    public static func moovEndOffset(inHead head: Data) -> Int? {
+        var cursor = 0
+        while cursor + 8 <= head.count {
+            let length = Int(be32(head, cursor))
+            let type = fourCC(head, cursor + 4)
+            var headerSize = 8
+            var boxLength = length
+            if length == 1 {
+                guard cursor + 16 <= head.count else { return nil }
+                boxLength = Int(be64(head, cursor + 8))
+                headerSize = 16
+            } else if length == 0 {
+                // "to end of file" — needs the file's size, which a probe
+                // does not have.
+                return nil
+            }
+            guard boxLength >= headerSize, boxLength >= 8 else { return nil }
+            if type == "moov" { return cursor + boxLength }
+            let next = cursor + boxLength
+            guard next > cursor, next + 8 <= head.count else {
+                // The box in front of moov (an mdat-first layout) already
+                // overruns the probe — moov lives at the tail; the caller
+                // keeps its default slice + tail signature scan.
+                return nil
+            }
+            cursor = next
+        }
+        return nil
+    }
+
     /// `chaptersFromMP4` over a slice that does NOT start on a box boundary
     /// (the tail slice of a container, whose first bytes are mid-mdat).
     ///
