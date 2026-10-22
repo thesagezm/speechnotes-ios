@@ -125,7 +125,15 @@ final class SupertonicEngine: NSObject, SpeechEngine {
             // Round 6 device log: a 155-char first chunk rendered 15.3 s
             // (TTFA 15.4 s) while an 11-char opener was 1.7 s. Cap the first
             // chunk so speech starts fast; the rest stay full-size.
+            //
+            // The SCHEDULE owns the opener (2026-10-22): Supertonic is the
+            // engine the ladder exists FOR — its RTF is the highest, so its
+            // 60-char opener is the one most likely to come back short.
+            // A late second buffer climbs the ladder for the next session;
+            // `clamped(to: 200)` caps every rung at this engine's own
+            // batch ceiling.
             firstMaxChars: 60,
+            schedule: ChunkSchedule.State(),
             exportInterChunkSilence: 0.05,
             logPrefix: "SupertonicEngine",
             tier: "supertonic"

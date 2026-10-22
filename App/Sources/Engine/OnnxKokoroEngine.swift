@@ -3,6 +3,7 @@ import MisakiSwift
 import MLX
 import MLXUtilsLibrary
 import OnnxRuntimeBindings
+import SpeechLogic
 
 /// Kokoro via ONNX Runtime on the CPU — fp32 `model.onnx` (~326 MB) or the
 /// small quantized tier `model_quantized.onnx` (~92 MB — same graph), plus
@@ -119,16 +120,15 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
             // exposing it. SentenceChunker keeps the 510-token ceiling via
             // `batchMaxChars`; this only re-opens the v0.4 fast-start.
             //
-            // Batch B3: this is `RTF · c1` with RTF assumed at 0.53
-            // (TTS_BASELINE §2). Batch A3 now prints the real RTF per tier on
-            // every session, so the first device session settles this number
-            // and the constant gets retuned from a measurement. If measured
-            // RTF ≥ 1.0 the fast-start premise is dead — no legal
-            // `firstMaxChars` reaches break-even against a 160-char
-            // `chunkMaxChars` — and the bounded prebuffer gate becomes the
-            // primary fix instead. The two exist side by side for now, and
-            // the constant is left at its measured-reasonable value.
+            // The SCHEDULE owns the opener from here on (2026-10-22): a
+            // session whose second buffer arrives after the first one
+            // finished playing climbs the 100→125→150→175→200 ladder for
+            // its next session, and an on-time session drops back to the
+            // fast opener. 100 is the starting rung — the old fixed
+            // value, kept as the fast path. The ladder's top rung equals
+            // the batch ceiling, so the worst case is "no fast-start".
             firstMaxChars: 100,
+            schedule: ChunkSchedule.State(),
             exportInterChunkSilence: 0,
             logPrefix: "OnnxKokoroEngine",
             tier: tier ?? Self.tierName(for: modelFileURL)

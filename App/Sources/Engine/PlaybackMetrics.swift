@@ -124,6 +124,15 @@ final class PlaybackMetrics {
     private var firstAudioAt: ContinuousClock.Instant?
     private var secondBufferAt: ContinuousClock.Instant?
     private var scheduledBuffers = 0
+    /// Whether the second buffer arrived LATE — after the first buffer's
+    /// audio had already finished playing. That is the audible gap the
+    /// chunk schedule exists to close, so the schedule needs the answer,
+    /// not just the log line.
+    ///
+    /// Set on the second buffer; read by the core when the session ends.
+    /// nil = the second buffer never arrived (the session ended or was
+    /// stopped first), which is NOT a late buffer.
+    private(set) var secondBufferWasLate: Bool? = nil
 
     private var generatedChunks = 0
     private var skippedChunks = 0
@@ -163,6 +172,7 @@ final class PlaybackMetrics {
         firstAudioAt = nil
         secondBufferAt = nil
         scheduledBuffers = 0
+        secondBufferWasLate = nil
         generatedChunks = 0
         skippedChunks = 0
         totalGenerationSeconds = 0
@@ -353,6 +363,11 @@ final class PlaybackMetrics {
         guard scheduledBuffers == 2, let first = firstAudioAt else { return }
         secondBufferAt = now
         let wait = Self.seconds(from: first, to: now)
+        // The first buffer's audio has to cover the wait, or the listener
+        // hears silence between the two. This is the fact the chunk
+        // schedule needs: "the opener was too small" is exactly
+        // "the first buffer's audio did not cover the wait".
+        secondBufferWasLate = wait > firstScheduledAudioSeconds
         emit("T2B \(milliseconds(from: start, to: now))ms — second buffer \(milliseconds(from: first, to: now))ms after the first; "
             + "the first was \(firstScheduledChars) chars / \(twoDP(firstScheduledAudioSeconds))s of audio → "
             + Self.marginText(audioSeconds: firstScheduledAudioSeconds, waitSeconds: wait))
