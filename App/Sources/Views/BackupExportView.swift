@@ -208,7 +208,7 @@ struct BackupExportView: View {
 
     private func notebookRow(_ notebook: Notebook) -> some View {
         let isSelected = selectedNotebookIDs.contains(notebook.id)
-        let noteCount = notes.filter { $0.notebookId == notebook.id }.count
+        let noteCount = notes.notes.filter { $0.notebookId == notebook.id }.count
         return Button {
             Haptics.tap()
             if isSelected {

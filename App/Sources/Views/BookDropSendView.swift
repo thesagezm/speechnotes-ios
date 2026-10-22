@@ -260,7 +260,7 @@ struct BookDropSendView: View {
                             toggle(&selectedNoteIDs, note.id)
                         }
                     }
-                    if notes.notes.count > selectableNotePreview {
+                    if notes.notes.count > selectableNotePreviewLimit {
                         Button {
                             Haptics.tap()
                             showingAllNotes.toggle()
