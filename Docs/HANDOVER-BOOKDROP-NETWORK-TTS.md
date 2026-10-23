@@ -150,6 +150,83 @@ this lands, the next lever is **pre-warming the render before `firstAudioAt`**
 
 ---
 
+## 2b. Background persistence — the never-run-dry silence bridge (commit 241888e)
+
+User report 2026-10-23: "supertonic was doing fine but now it cuts after some
+time; kokoro has never managed to [persist in background]; make every engine —
+supertonic, kokoro, audiobook — persist like the apple system voice does."
+
+### What was wrong (the mechanism, from this repo's own device logs)
+
+Both Kokoro deaths in the 2026-10-06 log landed **15–25 s after backgrounding —
+exactly when the already-scheduled audio ran out**, while the deep-banked
+Supertonic session survived. A drained `AVAudioPlayerNode` takes the process's
+audio I/O idle with it; a session with no live I/O loses the
+`UIBackgroundModes: audio` assertion no matter how deep the render-ahead bank
+target is. Session activation (Batch F), the 45 s background bank boost
+(8dc6104) and the 10 s heal timer all reduce how OFTEN the queue runs dry —
+none of them survive it actually running dry, because by then synthesis
+(thermal-throttled in the background, RTF > 1) cannot refill before iOS
+suspends the process. That is why Supertonic "cuts after some time" (it
+survives exactly as long as its bank) and Kokoro "never managed to".
+
+### What landed
+
+**`StreamingTTSPlaybackCore` (covers Supertonic AND Kokoro):**
+- **Silence bridge.** When the last queued real buffer completes and the next
+  chunk is still rendering, 0.5 s silent buffers are scheduled on the player
+  node, re-armed from their own completions until real audio is scheduled
+  again. The render chain never idles → the audio I/O never goes quiet → the
+  process keeps its background assertion → **speech resumes** when the
+  producer catches up, instead of dying mid-book. The listener hears the same
+  silence they would have heard anyway.
+- Read-along: bridge markers carry the last real end-char, so the highlight
+  freezes at the sentence boundary through bridged silence. Bank ledger:
+  bridge frames are mirrored into `generatedFrames` at completion so `banked`
+  stays a measure of real unplayed audio.
+- **`.generating` while backgrounded** now has I/O: the background-transition
+  handler arms the bridge at the lock instant (tap-play-then-lock), and the
+  10 s health tick covers `.generating` entries that happen while ALREADY
+  backgrounded (chapter advance under the lock screen fires no transition
+  event).
+- New log lines: `keepalive bridge — node queue ran dry at chunk N of M,
+  banked X (thermal)` opens an incident (carries the same data the
+  `nodeRestarted`/`bankExhausted` GAP events used to — those triggers no
+  longer fire because the node no longer stops); `keepalive bridge ended —
+  real audio resumed after Xs` closes it. The `backgrounded — state …` line
+  now ends with `bridge armed|off`.
+
+**`BookPlaybackController` (the book/audiobook chain):**
+- The chapter-gap grace used to end AT `togglePlay` — which only OPENS the
+  vulnerable window (state goes `.generating`; the engine starts on first
+  schedule). It now ends when `player.state == .speaking` (polled ≤ 25 s).
+- The grace chains up to 3 bounded ~30 s tasks on expiry while the book is
+  still mid-transition (uncached epub parse, PDF Vision OCR, throttled first
+  render) instead of dropping the book at the first expiry. Logged as
+  `chapter-gap grace expired mid-transition — chaining task N of 3`.
+
+Untouched on purpose: **SystemEngine** (persists per the user's own report),
+**AudioBookPlayer/AVPlayer M4B** (AVPlayer manages its own session), and
+**OpusAudioBackend** (decode-bound, queue kept fed by `pump`; if background
+deaths are ever reported on `.opus` books, the bridge pattern ports to it).
+
+### Device check to run (the user's three cases)
+
+1. **Supertonic, backgrounded mid-note:** lock the screen mid-session, wait
+   past the point where it used to cut. Expect: either uninterrupted speech,
+   or `keepalive bridge` lines followed by `keepalive bridge ended — real
+   audio resumed` (speech comes back after the bridged silence). NOT
+   acceptable: a cut with no resume and a `foreground reconcile — state …
+   no live session` line on return.
+2. **Kokoro, backgrounded:** same. Kokoro may bridge OFTEN (its RTF is the
+   worst) — persistence is the fix's promise, gaplessness is not.
+3. **Book/audiobook chain:** play a book, lock the screen, let it cross ≥ 2
+   chapter boundaries. Expect `chapter-gap grace expired mid-transition`
+   lines only when text extraction was cold; the next chapter starts
+   sounding either way.
+
+---
+
 ## 3. CI facts (unchanged, still true)
 
 - `build.yml` auto-builds `main` + `sage-upgrades` ONLY. This branch needs
