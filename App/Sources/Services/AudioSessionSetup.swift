@@ -135,6 +135,19 @@ enum AudioSessionSetup {
             configuredBy = source
             return true
         }
+        // Rung 2.5 (2026-10-23 device log): rungs 1 AND 2 failed with -50
+        // while the bare rung 3 succeeded, on every cold start — the one
+        // variable left between them is the OPTIONS, i.e. that route
+        // rejects `.allowBluetooth` (HFP) itself with paramErr. Losing the
+        // MODE for an option's sake was never the right trade: keep
+        // `.spokenAudio`, drop every option. Bluetooth is already gone at
+        // this point in the ladder either way.
+        if apply(.playback, mode: .spokenAudio, options: [], prefix: prefix) {
+            configured = true
+            configuredBy = source
+            Log.shared.info("\(prefix): held spoken-audio mode without options — Bluetooth rejected by the route")
+            return true
+        }
         // Last resort: the plainest category that any route accepts.
         if apply(.playback, mode: .default, options: [], prefix: prefix) {
             configured = true
@@ -156,7 +169,12 @@ enum AudioSessionSetup {
             try AVAudioSession.sharedInstance().setCategory(category, mode: mode, options: options)
             return true
         } catch {
-            Log.shared.error("\(prefix): setCategory(\(category.rawValue), \(mode.rawValue)) failed: \(error)")
+            // Options ARE the diagnosis: the 2026-10-23 log showed rungs 1+2
+            // failing while the bare call succeeded, and the old line hid
+            // the one variable that explained it. Option bits for reading:
+            // 1 mixWithOthers, 2 duckOthers, 4 allowBluetooth (HFP),
+            // 8 defaultToSpeaker, 32 allowBluetoothA2DP.
+            Log.shared.error("\(prefix): setCategory(\(category.rawValue), \(mode.rawValue), opts \(options.rawValue)) failed: \(error)")
             return false
         }
     }

@@ -280,7 +280,14 @@ final class StreamingTTSPlaybackCore: NSObject {
         let target = bankTargetSecondsSnapshot
         bankLock.unlock()
         let session = AVAudioSession.sharedInstance()
-        Log.shared.info("\(config.logPrefix) \(leftBackground ? "backgrounded" : "foregrounded") — state \(state), banked \(String(format: "%.1f", banked))s / target \(String(format: "%.1f", target))s, scheduled through chunk \(scheduledUpTo + 1), engine \(audioEngineRunning ? "running" : "STOPPED"), session \(session.category)/\(session.mode) (category \(session.categoryOptions.rawValue)), bridge \(bridgeArmed ? "armed" : "off")")
+        // Memory + task window join the snapshot (2026-10-23 round): the
+        // deaths in that device log landed with live audio I/O and
+        // mid-generation — no audio-layer theory explains those.
+        // Footprint-vs-ceiling at the backgrounding instant (and on every
+        // 10 s vitals line in backgroundHealthCheck) is the jetsam
+        // evidence; the task window separates "grace still held" from
+        // "audio assertion alone" at any later cut-off point.
+        Log.shared.info("\(config.logPrefix) \(leftBackground ? "backgrounded" : "foregrounded") — state \(state), banked \(String(format: "%.1f", banked))s / target \(String(format: "%.1f", target))s, scheduled through chunk \(scheduledUpTo + 1), engine \(audioEngineRunning ? "running" : "STOPPED"), session \(session.category)/\(session.mode) (category \(session.categoryOptions.rawValue)), bridge \(bridgeArmed ? "armed" : "off"), \(ProcessMemory.summary()), task window \(Self.taskWindowDescription())")
         // Re-size the bank for the new target now; recomputeBank's heartbeat
         // would get there within ~0.3 s, but the backgrounding instant is
         // the one moment the main thread is guaranteed responsive.
@@ -296,6 +303,14 @@ final class StreamingTTSPlaybackCore: NSObject {
         if leftBackground, state == .generating {
             scheduleBridgeSilenceIfNeeded()
         }
+    }
+
+    /// `backgroundTimeRemaining` for the snapshot/vitals lines: `inf` when
+    /// the system considers this app's background time unbounded (the audio
+    /// assertion holding), a countdown otherwise. Main thread only.
+    private static func taskWindowDescription() -> String {
+        let remaining = UIApplication.shared.backgroundTimeRemaining
+        return remaining.isFinite ? String(format: "%.0fs", remaining) : "inf (assertion held)"
     }
 
     // MARK: - Rate-change buffer drain
@@ -471,6 +486,15 @@ final class StreamingTTSPlaybackCore: NSObject {
             lastHealthPlayedFrames = playedFrames
             return
         }
+        // Ten-second vitals while a backgrounded session is live (one line,
+        // bounded): the 2026-10-23 deaths cut the log mid-generation with
+        // live audio I/O, so the last few lines BEFORE a cut are the only
+        // place a trend can show. A footprint climbing toward the ceiling
+        // across consecutive vitals lines ending in a fresh relaunch IS
+        // the jetsam verdict; a flat footprint exonerates memory.
+        if state == .speaking || state == .generating {
+            Log.shared.info("\(config.logPrefix) background vitals — \(ProcessMemory.summary()), task window \(Self.taskWindowDescription())")
+        }
         guard state == .speaking else {
             // A backgrounded .generating session is the chapter-advance /
             // tap-then-lock case: the first chunk is still rendering, no
@@ -560,10 +584,18 @@ final class StreamingTTSPlaybackCore: NSObject {
     private func handleInterruption(_ notification: Notification) {
         let typeRaw = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
         let optionsRaw = notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
-                if typeRaw == AVAudioSession.InterruptionType.began.rawValue {
+        // Both transitions are logged (2026-10-23 round): the device log
+        // showed "state: speaking → paused" lines in the background with no
+        // cause named — an interruption .began was indistinguishable from a
+        // Control Centre pause, and an interruption .ended we could not
+        // resume from was invisible entirely.
+        if typeRaw == AVAudioSession.InterruptionType.began.rawValue {
+            Log.shared.info("\(config.logPrefix) interruption BEGAN — state \(state); pausing if speaking")
             if state == .speaking { pause() }
-        } else if typeRaw == AVAudioSession.InterruptionType.ended.rawValue,
-                  optionsRaw & AVAudioSession.InterruptionOptions.shouldResume.rawValue != 0 {
+        } else if typeRaw == AVAudioSession.InterruptionType.ended.rawValue {
+            let shouldResume = optionsRaw & AVAudioSession.InterruptionOptions.shouldResume.rawValue != 0
+            Log.shared.info("\(config.logPrefix) interruption ENDED (shouldResume \(shouldResume)) — state \(state)")
+            guard shouldResume else { return }
             // iOS leaves the session INACTIVE after an interruption. Without
             // re-activating, `playerNode.play()` succeeds and no sound comes
             // out — and in the background the process is suspended seconds

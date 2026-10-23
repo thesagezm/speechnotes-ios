@@ -227,6 +227,79 @@ deaths are ever reported on `.opus` books, the bridge pattern ports to it).
 
 ---
 
+## 2c. Background persistence round 3 — name the killer (2026-10-23 evening)
+
+The §2b device check RAN and the bridge itself PASSED — and the app still
+dies. The evening log (19:16–19:56) shows the bridge firing and ending
+cleanly on BOTH engines (`real audio resumed` repeatedly), generation
+continuing in the background… and **seven fresh launches** in 40 minutes.
+The cut-off lands 9–110 s after backgrounding, several times with the
+engine running, the producer mid-chunk and banked audio unplayed
+(backgrounded 19:32:10 → fresh launch 19:32:18, nine seconds; 19:20:45 →
+bridge at :51 → dead ≤13 s later). Every audio-layer theory is now
+falsified by the app's own log:
+
+- no `background health check — playhead frozen` line ever fired (the
+  silent-deactivation wedge did not happen),
+- no `setActive(true) failed` line (activation held),
+- the queue did not run dry un-bridged (the §2b mechanism worked),
+- the deaths do not cluster at grace expiry (~30 s after arming; one died
+  at 9 s).
+
+What is left needs DIFFERENT fixes, so this round ships the instrumentation
+that names it, plus three small real fixes found on the way:
+
+**Shipped:**
+1. **Crash marker** (`CrashMarker.swift`, installed first thing in
+   `SpeechnotesApp.init`): fatal-signal handlers (SIGSEGV/SIGABRT/SIGBUS/
+   SIGILL/SIGFPE/SIGTRAP, async-signal-safe: pre-built path+message bytes,
+   `open`/`write`/`close` only, then default-disposition re-raise so the
+   system crash report still generates) plus an uncaught-NSException
+   handler. Writes `Documents/crash-marker.txt`; the NEXT launch replays it
+   as `PREVIOUS LAUNCH CRASHED — <cause>` into LogStore and deletes it.
+2. **Memory vitals**: the `backgrounded/foregrounded — …` snapshot line and
+   a new `background vitals` line (10 s cadence, only while backgrounded
+   and a session is live) now carry `mem XMB footprint / YMB to ceiling`
+   (`task_vm_info.phys_footprint` + `os_proc_available_memory`) and
+   `task window Zs` (`backgroundTimeRemaining`; `inf (assertion held)` when
+   the system treats the app's background time as unbounded).
+3. **Grace-task hygiene**: the expiration handler now LOGS
+   (`background grace EXPIRED — …`), and the task is ended on foreground
+   so every backgrounding arms a FRESH ~30 s window (bg → 6 s peek → bg
+   used to leave the second backgrounding with the first task's expiry
+   clock and then no grace at all).
+4. **Interruption logging**: `interruption BEGAN/ENDED (shouldResume …)`
+   — the log's unexplained background `speaking → paused` lines (19:18:20,
+   19:34:30) were indistinguishable from Control Centre pauses until now.
+5. **Kokoro fp32 eviction on switch-away**: `rebuildEngine` now nils
+   `onnxEngine` when another engine takes over, mirroring the Supertonic
+   release. An fp32 ORT session is ~326 MB; Supertonic (~399 MB) + Kokoro
+   resident together is exactly the §4 jetsam arithmetic. (The 5-minute
+   idle unload only ever covered the STAYING-on-Kokoro case.)
+6. **-50 ladder**: the `setCategory` error line now prints the OPTIONS
+   bitmask (the 19:xx log proved options are the variable: rungs with
+   `.allowBluetooth` failed, the bare call succeeded, and the old line hid
+   it), and a new rung keeps `.spokenAudio` with no options before falling
+   to plain playback — the mode was being lost for an option's sake.
+
+**How to read the NEXT device log (this is the point of the round):**
+- `PREVIOUS LAUNCH CRASHED — <signal/exception>` at the top → it's a
+  crash. The last line before the cut names the code path; the marker's
+  mtime is the death time; Settings → Privacy → Analytics has the corpse.
+- Fresh launch, NO crash line → system kill. Read the last `background
+  vitals` before the cut: footprint climbing toward the ceiling = jetsam
+  (next lever is footprint reduction — compact tier, bank cap, evictions);
+  flat footprint = suspend-then-purge (an app with no live I/O was
+  suspended and later recycled — look for what stopped audio: an
+  `interruption BEGAN` or a pause).
+- `background grace EXPIRED` immediately before a cut → the audio
+  assertion was not holding (would contradict everything above; now at
+  least visible).
+- `task window inf (assertion held)` at backgrounding + a death anyway →
+  suspension is conclusively off the table; crash or jetsam only.
+
+---
+
 ## 3. CI facts (unchanged, still true)
 
 - `build.yml` auto-builds `main` + `sage-upgrades` ONLY. This branch needs

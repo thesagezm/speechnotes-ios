@@ -948,9 +948,19 @@ final class SpeechPlayer: ObservableObject {
         // The Supertonic set is ~399 MB of resident sessions — release it as
         // soon as another engine takes over (single-slot rule, PocketPal
         // lesson). The other engines' sessions are an order of magnitude
-        // smaller and stay warm for instant switching.
+        // smaller and stay warm for instant switching — EXCEPT Kokoro's:
+        // an fp32 ORT session is ~326 MB, and Supertonic + Kokoro resident
+        // together is exactly the PLAN-BACKGROUND-PERSISTENCE §4 jetsam kill
+        // arithmetic. The mirror of the Supertonic release, for the same
+        // reason: the system engine is the only one cheap enough to keep.
+        // (scheduleKokoroIdleUnload above only handles the STILL-on-Kokoro
+        // case; its guard returns early on a switch-away, which is how the
+        // session used to stay resident here.)
         if engineKind != .supertonic {
             supertonicEngine = nil
+        }
+        if engineKind != .kokoro {
+            onnxEngine = nil
         }
         if engineKind == .supertonic, ModelManager.shared.supertonicIsReady {
             if supertonicEngine == nil {
@@ -1169,6 +1179,12 @@ final class SpeechPlayer: ObservableObject {
         guard state == .speaking || state == .generating else { return }
         guard playbackGraceTask == .invalid else { return }
         playbackGraceTask = UIApplication.shared.beginBackgroundTask(withName: "SpeechPlaybackGrace") { [weak self] in
+            // Expiry is a DIAGNOSTIC event, not an error: with live audio
+            // I/O the background-audio assertion keeps the process running
+            // past it. But a death that follows an EXPIRY line within
+            // seconds on a device log means the assertion was NOT holding —
+            // exactly the correlation this line exists to expose.
+            Log.shared.info("SpeechPlayer: background grace EXPIRED — from here only live audio I/O keeps the process running")
             self?.endPlaybackGraceIfNeeded()
         }
         Log.shared.info("SpeechPlayer: background grace armed for live speech")

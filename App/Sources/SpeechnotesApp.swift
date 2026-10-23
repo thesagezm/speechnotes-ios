@@ -31,6 +31,15 @@ struct SpeechnotesApp: App {
     /// posts `.bookDropSendRequest` (a BookDropRequest) to open it prefilled.
     @State private var bookDropRequest: BookDropRequest?
 
+    init() {
+        // First thing the process does after the stores come up: install
+        // the crash marker and replay the previous launch's verdict. The
+        // 2026-10-23 device log cut off mid-generation with live audio I/O
+        // — the next one must be able to say which of "crashed" vs
+        // "system-killed (jetsam/purge)" that was.
+        CrashMarker.installAndReplay()
+    }
+
     private enum Tab: Hashable, CaseIterable, Identifiable {
         case notes, books, stats, settings
 
@@ -324,6 +333,13 @@ struct SpeechnotesApp: App {
                             wasBackgrounded = false
                             player.reconcileOnForeground()
                         }
+                        // Release the playback grace task in the FOREGROUND
+                        // so the NEXT backgrounding arms a FRESH ~30 s
+                        // window. Held-over tasks were the 2026-10-23 log's
+                        // trap: bg → 6 s foreground peek → bg again got the
+                        // FIRST task's expiry clock, not a new one, leaving
+                        // the second backgrounding with no grace at all.
+                        player.endPlaybackGraceIfNeeded()
                     }
                 }
                 // Environment injection is attached LAST (outermost) so
