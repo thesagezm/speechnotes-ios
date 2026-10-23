@@ -242,6 +242,33 @@ final class StreamingTTSPlaybackCore: NSObject {
     /// backgrounded.
     private static let backgroundBankTargetSeconds: Double = 45
 
+    // MARK: - Never-run-dry keepalive (the silence bridge)
+
+    /// The device log's own arithmetic: both Kokoro deaths landed 15–25 s
+    /// after backgrounding — exactly when the already-scheduled audio ran
+    /// out — while the deep-banked Supertonic session survived. An
+    /// `AVAudioPlayerNode` that has drained its queue takes the process's
+    /// audio I/O idle with it, and a session with no live I/O loses the
+    /// background-audio assertion no matter what the bank target says. The
+    /// bank boost makes starvation rarer; this bridge makes it survivable:
+    /// whenever the real queue runs dry mid-session (or a backgrounded
+    /// session is still rendering its first chunk), short silent buffers
+    /// keep the render chain live until the producer catches up. The
+    /// listener hears the same silence they would have heard anyway — but
+    /// speech RESUMES when synthesis lands instead of the process being
+    /// suspended mid-book. Main thread only.
+    private static let bridgeSilenceSeconds: Double = 0.5
+    /// True while a bridge buffer is queued on the node (at most one at a
+    /// time; its completion re-arms while the producer is still behind).
+    private var bridgeArmed = false
+    /// Total bridged silence this starvation incident — logging ledger, and
+    /// the "did real audio ever resume" marker that closes an incident.
+    private var bridgeIncidentSeconds: Double = 0
+    /// Index of the last REAL chunk whose buffer completed playing. Equal to
+    /// `scheduledUpTo` exactly when nothing real is queued on the node —
+    /// the dryness test the bridge arms on. Reset by `speak()` and teardown.
+    private var lastCompletedRealIndex = -1
+
     /// Main thread, from the background-transition observers.
     private func handleBackgroundTransition(leftBackground: Bool) {
         isBackgrounded = leftBackground
@@ -253,11 +280,22 @@ final class StreamingTTSPlaybackCore: NSObject {
         let target = bankTargetSecondsSnapshot
         bankLock.unlock()
         let session = AVAudioSession.sharedInstance()
-        Log.shared.info("\(config.logPrefix) \(leftBackground ? "backgrounded" : "foregrounded") — state \(state), banked \(String(format: "%.1f", banked))s / target \(String(format: "%.1f", target))s, scheduled through chunk \(scheduledUpTo + 1), engine \(audioEngineRunning ? "running" : "STOPPED"), session \(session.category)/\(session.mode) (category \(session.categoryOptions.rawValue))")
+        Log.shared.info("\(config.logPrefix) \(leftBackground ? "backgrounded" : "foregrounded") — state \(state), banked \(String(format: "%.1f", banked))s / target \(String(format: "%.1f", target))s, scheduled through chunk \(scheduledUpTo + 1), engine \(audioEngineRunning ? "running" : "STOPPED"), session \(session.category)/\(session.mode) (category \(session.categoryOptions.rawValue)), bridge \(bridgeArmed ? "armed" : "off")")
         // Re-size the bank for the new target now; recomputeBank's heartbeat
         // would get there within ~0.3 s, but the backgrounding instant is
         // the one moment the main thread is guaranteed responsive.
         recomputeBank()
+        // A session still rendering its first chunk (.generating) has NO
+        // audio I/O at all — the engine starts on the first schedule, which
+        // is exactly what never comes quickly under background CPU
+        // throttling. The transition instant is the one guaranteed-responsive
+        // moment, so start the engine and bridge silence here instead of
+        // waiting for the 10 s health tick (a chapter that just advanced
+        // under the lock screen gets no transition event at all — that case
+        // is the health tick's).
+        if leftBackground, state == .generating {
+            scheduleBridgeSilenceIfNeeded()
+        }
     }
 
     // MARK: - Rate-change buffer drain
@@ -434,6 +472,16 @@ final class StreamingTTSPlaybackCore: NSObject {
             return
         }
         guard state == .speaking else {
+            // A backgrounded .generating session is the chapter-advance /
+            // tap-then-lock case: the first chunk is still rendering, no
+            // buffer has ever scheduled, so the engine never started and
+            // nothing holds the audio assertion. The transition handler
+            // covers the lock instant; this tick covers every later entry
+            // into .generating while already backgrounded (a chapter that
+            // advanced under the lock screen fires no transition event).
+            if state == .generating {
+                scheduleBridgeSilenceIfNeeded()
+            }
             lastHealthPlayedFrames = playedFrames
             return
         }
@@ -835,6 +883,13 @@ final class StreamingTTSPlaybackCore: NSObject {
         bufferSlots = [Int](repeating: Self.slotPending, count: allChunks.count)
         bufferPool = [:]
         scheduledUpTo = -1
+        // Fresh session, fresh keepalive ledger. A superseded session's
+        // bridge buffer may still sit on the node — its completion is
+        // generation-guarded into a no-op, and at most one extra half-second
+        // of silence carries over.
+        lastCompletedRealIndex = -1
+        bridgeArmed = false
+        bridgeIncidentSeconds = 0
         totalChars = max(1, clean.utf16.count)
         playTracker.reset()
         rateDrainArmed = false
@@ -1056,11 +1111,17 @@ final class StreamingTTSPlaybackCore: NSObject {
                 guard let self, self.playbackGeneration == generation else { return }
                 self.metrics.bufferEnded()
                 self.bufferPool[self.bufferSlots[index]] = nil
+                self.lastCompletedRealIndex = index
                 if isLast {
                     self.finishLastChunk(generation: generation)
                     return
                 }
                 self.scheduleReadyChunks(generation: generation)
+                // scheduleReadyChunks scheduled nothing exactly when the
+                // next chunk is still rendering — the node queue just ran
+                // dry. Bridge silence so the render chain never idles (see
+                // the silence-bridge block at the top of the file).
+                self.scheduleBridgeSilenceIfNeeded()
             }
         }
 
@@ -1100,6 +1161,98 @@ final class StreamingTTSPlaybackCore: NSObject {
             chars: chunks[index].length,
             audioSeconds: Double(buffer.frameLength) / buffer.format.sampleRate
         )
+    }
+
+    /// Main thread. Arm the silence bridge if — and only if — the node's
+    /// real queue just ran dry: the newest scheduled real chunk has
+    /// completed (nothing real is queued) and the next chunk exists but is
+    /// still being rendered. Also armed for a `.generating` session, where
+    /// nothing has ever scheduled and the wait is the first chunk itself.
+    /// Every other state is inert: real audio queued (not dry), paused
+    /// (user asked for silence), or idle (no session to keep alive).
+    private func scheduleBridgeSilenceIfNeeded() {
+        guard state == .speaking || state == .generating else { return }
+        guard !bridgeArmed else { return }
+        if state == .speaking {
+            guard scheduledUpTo >= 0, scheduledUpTo == lastCompletedRealIndex else { return }
+            guard scheduledUpTo + 1 < chunks.count else { return }
+            guard bufferSlots[scheduledUpTo + 1] == Self.slotPending else { return }
+        } else {
+            guard !chunks.isEmpty else { return }
+        }
+        armBridge()
+    }
+
+    /// Main thread. Schedules one short silent buffer on the player node.
+    /// The tracker gets a marker whose end-char EQUALS the last real
+    /// chunk's, so the read-along cursor freezes at the sentence boundary
+    /// through the silence instead of drifting; the bank ledger is balanced
+    /// in the buffer's completion (see there). Re-arms from its own
+    /// completion while the producer is still behind, and closes the
+    /// incident log the first time real audio is scheduled instead.
+    private func armBridge() {
+        let rate = sampleRate
+        guard rate > 0 else { return }
+        let frameCount = max(1, AVAudioFrameCount(rate * Self.bridgeSilenceSeconds))
+        let buffer = Self.makeMonoBuffer(
+            samples: [Float](repeating: 0, count: Int(frameCount)),
+            sampleRate: rate
+        )
+        ensureAudioEngineRunning(format: buffer.format)
+        guard audioEngineRunning else { return }
+
+        let generation = playbackGeneration
+        let scheduledUpToAtArm = scheduledUpTo
+        // Chars do not advance through silence: the marker re-states the
+        // last real chunk's end-char (0 during .generating — nothing spoken).
+        let charsDone = scheduledUpTo >= 0
+            ? chunks[...scheduledUpTo].reduce(0) { $0 + $1.length }
+            : 0
+        playTracker.willSchedule(buffer: buffer, endChar: charsDone, totalChars: totalChars)
+        bridgeArmed = true
+        if bridgeIncidentSeconds == 0 {
+            let thermal = ThermalPressure(
+                thermalStateRawValue: ProcessInfo.processInfo.thermalState.rawValue)
+            Log.shared.info(
+                "\(config.logPrefix) keepalive bridge — node queue ran dry at chunk \(scheduledUpTo + 2) of \(chunks.count), banked \(String(format: "%.1f", bankedSeconds()))s (\(thermal)); scheduling silence so the render chain never idles"
+            )
+        }
+        playerNode.scheduleBuffer(buffer, at: nil, options: []) { [weak self] in
+            DispatchQueue.main.async {
+                guard let self, self.playbackGeneration == generation else { return }
+                self.bridgeArmed = false
+                // Ledger: these frames reach `played` through the node clock
+                // the moment they render; mirroring them in `generated` here
+                // keeps `banked` a measure of REAL unplayed audio (neutral
+                // per bridge, instead of draining the bank figure by every
+                // bridged second). Across a tracker reset the entry can
+                // over-report banked by at most one bridge chunk — the safe
+                // direction (generate a beat early).
+                self.generatedFrames += Int64(buffer.frameLength)
+                self.recomputeBank()
+                guard self.state == .speaking || self.state == .generating else {
+                    self.bridgeIncidentSeconds = 0
+                    return
+                }
+                if self.scheduledUpTo == scheduledUpToAtArm {
+                    // No real buffer was scheduled while this bridge chunk
+                    // played — the producer is still behind. Keep the chain
+                    // alive.
+                    self.bridgeIncidentSeconds += Self.bridgeSilenceSeconds
+                    self.armBridge()
+                } else {
+                    if self.bridgeIncidentSeconds > 0 {
+                        Log.shared.info(
+                            "\(config.logPrefix) keepalive bridge ended — real audio resumed after \(String(format: "%.1f", self.bridgeIncidentSeconds))s of bridged silence"
+                        )
+                    }
+                    self.bridgeIncidentSeconds = 0
+                }
+            }
+        }
+        if !playerNode.isPlaying {
+            playerNode.play()
+        }
     }
 
     /// The natural-completion path — reached from the last chunk's buffer
@@ -1238,6 +1391,9 @@ final class StreamingTTSPlaybackCore: NSObject {
         bufferPool = [:]
         bufferSlots = []
         scheduledUpTo = -1
+        lastCompletedRealIndex = -1
+        bridgeArmed = false
+        bridgeIncidentSeconds = 0
         // Session dead — zero the bank counters so a stale snapshot can never
         // pace a session that no longer exists (a new session re-zeros again).
         resetBank()

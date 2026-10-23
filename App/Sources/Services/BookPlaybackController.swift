@@ -142,7 +142,9 @@ final class BookPlaybackController: ObservableObject {
                         chapterIndex: index
                     )
                 )
-                endChapterGapGrace()
+                // NOT endChapterGapGrace() here: the grace's whole job is
+                // the window this call just opened (first-chunk render).
+                endChapterGapGraceWhenSpeakingBegins()
                 return
             }
             Log.shared.info("BookPlayback: ch\(index) of \(book.title) has no speech text — skipping")
@@ -187,18 +189,82 @@ final class BookPlaybackController: ObservableObject {
     // MARK: - Chapter-gap background grace
 
     private var chapterGapTask: UIBackgroundTaskIdentifier = .invalid
+    /// How many ~30 s tasks this gap has chained. One task covers the
+    /// cached-text resolve; an UNCACHED chapter (epub zip parse, PDF Vision
+    /// OCR) or a thermally-throttled first render can outrun it, and the
+    /// gap is precisely when nothing else holds the audio assertion — the
+    /// old chapter's engine stopped, the new one starts on first schedule.
+    /// Bounded chaining keeps the book alive through those windows without
+    /// becoming a general keep-alive (the chain ends the moment speech is
+    /// audible again — see `endChapterGapGraceWhenSpeakingBegins`).
+    private var chapterGapArms = 0
+    private static let chapterGapMaxArms = 3
 
     private func beginChapterGapGrace() {
         endChapterGapGrace()
+        chapterGapArms = 1
+        armChapterGapGrace()
+    }
+
+    private func armChapterGapGrace() {
         chapterGapTask = UIApplication.shared.beginBackgroundTask(withName: "BookChapterGap") { [weak self] in
-            self?.endChapterGapGrace()
+            // The expiration handler runs off-main; hop to the actor before
+            // touching player state or UIKit.
+            Task { @MainActor in
+                self?.chapterGapGraceExpired()
+            }
         }
     }
 
-    private func endChapterGapGrace() {
+    /// The system reclaimed one task's worth of grace. If the book is still
+    /// mid-transition (chain armed, speech not yet sounding), chain another
+    /// bounded task; otherwise stand down.
+    private func chapterGapGraceExpired() {
+        endChapterGapGraceTask()
+        guard chapterGapArms < Self.chapterGapMaxArms,
+              let player,
+              activeBook != nil,
+              player.state == .idle || player.state == .generating else {
+            chapterGapArms = 0
+            return
+        }
+        chapterGapArms += 1
+        Log.shared.info("BookPlayback: chapter-gap grace expired mid-transition — chaining task \(chapterGapArms) of \(Self.chapterGapMaxArms)")
+        armChapterGapGrace()
+    }
+
+    /// Ends the TASK only; a chained expiration keeps the arm count.
+    private func endChapterGapGraceTask() {
         guard chapterGapTask != .invalid else { return }
         UIApplication.shared.endBackgroundTask(chapterGapTask)
         chapterGapTask = .invalid
+    }
+
+    private func endChapterGapGrace() {
+        endChapterGapGraceTask()
+        chapterGapArms = 0
+    }
+
+    /// The grace exists to bridge "nothing is sounding" — the old chapter
+    /// ended, the next chapter's first chunk is still rendering. `togglePlay`
+    /// only OPENS that window (state goes `.generating`), so ending the
+    /// task at the call itself covered none of it: the moment of maximum
+    /// vulnerability was exactly the one the grace was dropped in. End it
+    /// when audio is actually sounding, or after 25 s (by then the core's
+    /// background keepalive has the render chain bridging on its own).
+    private func endChapterGapGraceWhenSpeakingBegins() {
+        let deadline = Date().addingTimeInterval(25)
+        Task { [weak self] in
+            while Date() < deadline {
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                guard let self, self.chapterGapTask != .invalid else { return }
+                if self.player?.state == .speaking {
+                    self.endChapterGapGrace()
+                    return
+                }
+            }
+            self?.endChapterGapGrace()
+        }
     }
 
     /// Chapter speech text: disk cache first, then extract off-main and cache
