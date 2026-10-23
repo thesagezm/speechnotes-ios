@@ -1243,7 +1243,7 @@ final class StreamingTTSPlaybackCore: NSObject {
                 } else {
                     if self.bridgeIncidentSeconds > 0 {
                         Log.shared.info(
-                            "\(config.logPrefix) keepalive bridge ended — real audio resumed after \(String(format: "%.1f", self.bridgeIncidentSeconds))s of bridged silence"
+                            "\(self.config.logPrefix) keepalive bridge ended — real audio resumed after \(String(format: "%.1f", self.bridgeIncidentSeconds))s of bridged silence"
                         )
                     }
                     self.bridgeIncidentSeconds = 0
