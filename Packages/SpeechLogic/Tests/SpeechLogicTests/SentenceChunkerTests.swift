@@ -268,12 +268,16 @@ final class SentenceChunkerTests: XCTestCase {
     /// With a minimum, the opener grows by WHOLE following sentences until
     /// it reaches the budget — the fix for the short-first-sentence texts
     /// whose opener ran out of audio before the second buffer arrived.
+    ///
+    /// The budget is `minOpenerChars` ITSELF: `firstMaxChars` bounds the
+    /// FIRST SENTENCE, not the opener's total size.
     func testOpenerCompletionPacksWholeSentences() {
         let text = "Short. Another short one. And a third short sentence here."
         let all = SentenceChunker.chunks(for: text, firstMaxChars: 200, batchMaxChars: 400, minOpenerChars: 40)
         XCTAssertEqual(all[0].text, "Short. Another short one. ")
         XCTAssertEqual(all[0].length, 26)
-        XCTAssertGreaterThanOrEqual(all[0].length, 40 - 14, "the opener takes whole sentences, so it may undershoot")
+        XCTAssertLessThanOrEqual(all[0].length, 40, "the opener never exceeds the budget")
+        XCTAssertGreaterThanOrEqual(all[0].length, 40 - 19, "the opener takes whole sentences, so it may undershoot")
         assertReconstructs(text, minOpener: 40)
     }
 
@@ -296,12 +300,12 @@ final class SentenceChunkerTests: XCTestCase {
         assertReconstructs(text, minOpener: 30)
     }
 
-    /// The default-off path and the completion path agree on a text whose
-    /// FIRST sentence already fills the budget: nothing changes.
+    /// A text whose FIRST sentence already fills the budget is unchanged:
+    /// there is nothing to append.
     func testOpenerCompletionIsANoOpWhenTheFirstSentenceAlreadyFits() {
         let text = "A reasonably long opening sentence right here. Second sentence follows."
-        let plain = SentenceChunker.chunks(for: text, firstMaxChars: 80, batchMaxChars: 400)
-        let completed = SentenceChunker.chunks(for: text, firstMaxChars: 80, batchMaxChars: 400, minOpenerChars: 80)
+        let plain = SentenceChunker.chunks(for: text, firstMaxChars: 200, batchMaxChars: 400)
+        let completed = SentenceChunker.chunks(for: text, firstMaxChars: 200, batchMaxChars: 400, minOpenerChars: 60)
         XCTAssertEqual(plain.map(\.text), completed.map(\.text))
     }
 

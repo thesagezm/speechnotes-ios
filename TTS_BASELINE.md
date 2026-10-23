@@ -218,8 +218,9 @@ Two failures are visible in that table:
    session snapped the opener back to 100 chars, the next session was short
    again, and the device oscillated at the bottom of the ladder forever.
 
-The schedule now holds an **audio-seconds target** (6 s to start, 3–30 s
-band). A late second buffer grows the target to at least the measured wait
+The schedule now holds an **audio-seconds target** (8 s for Kokoro, 10 s for
+Supertonic — the measured waits in the log above; 3–30 s band). A late second
+buffer grows the target to at least the measured wait
 × 1.2; a covered session HOLDS the target; a comfortable cover (≥ 2 s of
 slack) settles it just above the wait it has to cover. The target becomes a
 character budget at speak time, from the engine's own measured

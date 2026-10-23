@@ -132,12 +132,19 @@ public enum SentenceChunker {
     ///     runs out of audio before the second buffer arrives (the audible
     ///     gap the chunk schedule exists to close). When this is > 0, whole
     ///     following sentences are appended to the opener until it reaches
-    ///     `max(firstMaxChars, minOpenerChars)` UTF-16 units, never past
-    ///     `batchMaxChars`.
+    ///     `minOpenerChars` UTF-16 units, never past `batchMaxChars`.
+    ///
+    ///     The cap is `minOpenerChars` ITSELF, not `max(firstMaxChars,
+    ///     minOpenerChars)`: `firstMaxChars` bounds the FIRST SENTENCE, and
+    ///     folding it into the opener cap would let a large `firstMaxChars`
+    ///     (the default 200) grow the opener far past what was asked for.
     ///
     ///     DEFAULT OFF (0): the opener is exactly `firstChunk(in:maxChars:)`,
     ///     so every existing behaviour — and the doc contract above — is
-    ///     unchanged. Production callers opt in.
+    ///     unchanged. Production callers opt in, and pass the same value
+    ///     for `firstMaxChars` and `minOpenerChars` — the opener's total
+    ///     size is the budget, and the first sentence is merely where it
+    ///     starts.
     /// - Returns: All chunks in order. The first element is `firstChunk(in:)`
     ///   (extended to `minOpenerChars` when that is asked for); substrings
     ///   taken at each chunk's offset/length reproduce `text` exactly. Empty
@@ -148,10 +155,20 @@ public enum SentenceChunker {
         batchMaxChars: Int = 400,
         minOpenerChars: Int = 0
     ) -> [Chunk] {
-        guard let first = firstChunk(in: text, maxChars: firstMaxChars) else { return [] }
+        let maxBatchLength = max(1, batchMaxChars)
+        let wantsCompletion = minOpenerChars > 0
+        // The opener's cap. `minOpenerChars` IS the opener's TOTAL size —
+        // the first sentence is merely where it starts. The batch ceiling
+        // is the hard cap on any chunk, so the opener never exceeds it.
+        let openerCap = wantsCompletion ? min(max(1, minOpenerChars), maxBatchLength) : 0
+        // The first sentence's own cap: the opener's cap when completion is
+        // on, so an inconsistent caller (a `firstMaxChars` above the
+        // engine's ceiling) cannot produce an oversized opener. Otherwise
+        // the caller's `firstMaxChars`, unchanged.
+        let firstCap = wantsCompletion ? min(max(1, firstMaxChars), openerCap) : firstMaxChars
+        guard let first = firstChunk(in: text, maxChars: firstCap) else { return [] }
 
         var result = [first]
-        let maxBatchLength = max(1, batchMaxChars)
         // A piece with NOTHING to say — no character at all, or only the
         // punctuation/whitespace residue a document leaves behind — is glued
         // onto the piece before it instead of being handed to the engine. That
@@ -168,8 +185,7 @@ public enum SentenceChunker {
         // Opener completion — opt-in (see the parameter docs). The opener
         // grows by WHOLE following sentences, never by a cut, so it still
         // ends at a sentence boundary the engine can speak cleanly.
-        if minOpenerChars > 0 {
-            let openerCap = min(max(max(1, firstMaxChars), max(0, minOpenerChars)), maxBatchLength)
+        if wantsCompletion {
             if let completed = completedOpenerEnd(
                 in: text,
                 after: first,

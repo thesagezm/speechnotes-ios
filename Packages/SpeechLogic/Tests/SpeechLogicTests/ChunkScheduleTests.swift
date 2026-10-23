@@ -240,6 +240,25 @@ final class ChunkScheduleTests: XCTestCase {
         XCTAssertEqual(state.openerCharacterBudget(rate: 1.0, batchCeiling: 10), 10)
     }
 
+    /// An engine's own fallback figure is used until it has measured its
+    /// own — Supertonic and Kokoro speak at very different rates.
+    func testPerEngineFallbackIsUsedBeforeAnyMeasurement() {
+        let kokoro = ChunkSchedule.State(
+            targetSeconds: ChunkSchedule.initialTargetSeconds,
+            fallbackCharactersPerAudioSecond: ChunkSchedule.kokoroCharactersPerAudioSecond
+        )
+        let supertonic = ChunkSchedule.State(
+            targetSeconds: ChunkSchedule.supertonicTargetSeconds,
+            fallbackCharactersPerAudioSecond: ChunkSchedule.supertonicCharactersPerAudioSecond
+        )
+        XCTAssertEqual(kokoro.fallbackCharactersPerAudioSecond, 16.0)
+        XCTAssertEqual(supertonic.fallbackCharactersPerAudioSecond, 10.0)
+        XCTAssertGreaterThan(
+            kokoro.openerCharacterBudget(rate: 1.0, batchCeiling: 400),
+            supertonic.openerCharacterBudget(rate: 1.0, batchCeiling: 400)
+        )
+    }
+
     // MARK: - The character budget
 
     /// The budget is the target converted to characters at the live rate.
@@ -292,7 +311,7 @@ final class ChunkScheduleTests: XCTestCase {
 
     func testSummaryMentionsTheTargetAndTheVerdict() {
         let state = ChunkSchedule.State()
-        XCTAssertTrue(state.summary.contains("6.00"))
+        XCTAssertTrue(state.summary.contains("8.00"))
         state.record(
             secondBufferWasLate: true,
             chunk0AudioSeconds: 2.0,
@@ -300,6 +319,6 @@ final class ChunkScheduleTests: XCTestCase {
             rate: 1.0
         )
         XCTAssertTrue(state.summary.contains("LATE"))
-        XCTAssertFalse(state.summary.contains("6.00"))
+        XCTAssertFalse(state.summary.contains("8.00"))
     }
 }

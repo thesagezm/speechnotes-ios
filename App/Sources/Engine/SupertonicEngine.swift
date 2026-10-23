@@ -136,7 +136,13 @@ final class SupertonicEngine: NSObject, SpeechEngine {
             // oscillated there forever). `firstMaxChars` is only the
             // pre-schedule fallback.
             firstMaxChars: 60,
-            schedule: ChunkSchedule.State(),
+            // Supertonic's own seeds, from the device logs: RTF ≈ 0.45 over
+            // a 200-char batch at ~10 chars/audio-second ≈ 9 s of audio to
+            // cover, and the opener must be ~90 chars to carry that.
+            schedule: ChunkSchedule.State(
+                targetSeconds: ChunkSchedule.supertonicTargetSeconds,
+                fallbackCharactersPerAudioSecond: ChunkSchedule.supertonicCharactersPerAudioSecond
+            ),
             exportInterChunkSilence: 0.05,
             logPrefix: "SupertonicEngine",
             tier: "supertonic"

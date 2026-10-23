@@ -130,7 +130,13 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
             // there forever). `firstMaxChars` is only the pre-schedule
             // fallback.
             firstMaxChars: 100,
-            schedule: ChunkSchedule.State(),
+            // Kokoro's own seeds, from the device logs: RTF ≈ 0.4 over a
+            // 160-char batch at ~16 chars/audio-second ≈ 4 s of audio to
+            // cover, and the opener must be ~64 chars to carry that.
+            schedule: ChunkSchedule.State(
+                targetSeconds: ChunkSchedule.initialTargetSeconds,
+                fallbackCharactersPerAudioSecond: ChunkSchedule.kokoroCharactersPerAudioSecond
+            ),
             exportInterChunkSilence: 0,
             logPrefix: "OnnxKokoroEngine",
             tier: tier ?? Self.tierName(for: modelFileURL)

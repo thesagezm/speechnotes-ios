@@ -14,7 +14,8 @@ import Foundation
 ///
 /// So there is no single right size: there is a schedule.
 ///
-/// * The opener starts at a target of 6 s of speech.
+/// * The opener starts at a target of 8 s of speech (per engine: 8 s for
+///   Kokoro, 10 s for Supertonic — the measured waits in the device log).
 /// * When a session's second buffer arrives LATE (the audible gap), the
 ///   target GROWS — the opener is made big enough to cover the wait next
 ///   time.
@@ -45,13 +46,16 @@ public enum ChunkSchedule {
 
     /// The opening target, in seconds of speech the opener should carry.
     ///
-    /// 6 s is roughly the old ladder's first rung expressed in seconds
-    /// (100 characters ≈ 6–11 s of audio depending on the engine), and it
-    /// is enough to cover a fast engine's first-buffer wait without a gap.
-    /// A smaller start guarantees the first session of every engine is
-    /// itself short — the device log shows waits of 6–25 s even on the
-    /// quick engines.
-    public static let initialTargetSeconds: Double = 6.0
+    /// The engine-specific seeds are what production uses, and they come
+    /// from the device logs' measured waits: Kokoro's second buffer
+    /// arrived 7.4 s after the first (opener 3.3 s of audio → 1.2 s
+    /// short), so 8 s is the smallest target that covers it.
+    public static let initialTargetSeconds: Double = 8.0
+
+    /// Supertonic's seed (device log): the second buffer arrived 8.5–13.2 s
+    /// after the first, so 10 s covers the typical case and the schedule
+    /// grows past it when the device is slower still.
+    public static let supertonicTargetSeconds: Double = 10.0
 
     /// The ceiling on the target. Past this, a bigger opener cannot be
     /// rendered in one go by either engine anyway, and the honest answer
@@ -83,11 +87,20 @@ public enum ChunkSchedule {
     /// The fallback chars-per-audio-second used before the engine has
     /// measured its own.
     ///
-    /// The shipped device logs span 7–17 chars per audio second (Supertonic
-    /// at ~8–11, Kokoro at ~16–17), so 15 is a mid-range guess that is
-    /// only used until the first session reports real numbers — and it is
-    /// then replaced by the measurement, not merely corrected by it.
+    /// The shipped device logs put Kokoro at ~16 chars per audio second
+    /// (54 chars → 3.30 s) and Supertonic at ~8–11 (54 chars → 7.64 s,
+    /// 157 chars → 13.6 s). 15 is the mid-range guess an engine uses when
+    /// it has no better figure — and it is replaced by the MEASUREMENT
+    /// after the first session, not merely corrected by it.
     public static let defaultCharactersPerAudioSecond: Double = 15.0
+
+    /// Kokoro's fallback chars-per-audio-second (device log: 54 chars →
+    /// 3.30 s).
+    public static let kokoroCharactersPerAudioSecond: Double = 16.0
+
+    /// Supertonic's fallback chars-per-audio-second (device log: 54 chars
+    /// → 7.64 s, 157 chars → 13.6 s).
+    public static let supertonicCharactersPerAudioSecond: Double = 10.0
 
     // MARK: - State
 
@@ -130,8 +143,19 @@ public enum ChunkSchedule {
         /// same audio.
         public private(set) var measuredAtRate: Double = 1.0
 
-        public init(targetSeconds: Double = ChunkSchedule.initialTargetSeconds) {
+        /// The chars-per-audio-second used BEFORE the engine has measured
+        /// its own. Seeded per engine from the device logs; replaced by the
+        /// measurement after the first session.
+        public private(set) var fallbackCharactersPerAudioSecond: Double
+
+        public init(
+            targetSeconds: Double = ChunkSchedule.initialTargetSeconds,
+            fallbackCharactersPerAudioSecond: Double = ChunkSchedule.defaultCharactersPerAudioSecond
+        ) {
             self.targetSeconds = Self.clampTarget(targetSeconds)
+            self.fallbackCharactersPerAudioSecond = fallbackCharactersPerAudioSecond > 0
+                ? fallbackCharactersPerAudioSecond
+                : ChunkSchedule.defaultCharactersPerAudioSecond
         }
 
         /// The target, clamped into the legal band.
@@ -233,7 +257,7 @@ public enum ChunkSchedule {
                 // is faster, so MORE characters fit into the same target.
                 charsPerAudioSecond = measured * (effectiveRate / measuredAtRate)
             } else {
-                charsPerAudioSecond = ChunkSchedule.defaultCharactersPerAudioSecond * effectiveRate
+                charsPerAudioSecond = fallbackCharactersPerAudioSecond * effectiveRate
             }
             let raw = currentTargetSeconds * charsPerAudioSecond
             let wanted = max(1, Int(raw.rounded(.up)))
