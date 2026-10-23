@@ -54,7 +54,7 @@ targets:
         # NSAllowsLocalNetworking (covers IP-address/local hosts; it does not
         # loosen anything off-LAN). The receive side needs no multicast
         # entitlement and no NSBonjourServices: we never multicast.
-        NSLocalNetworkUsageDescription: "BookDrop finds nearby devices on your Wi-Fi network to send and receive books and notes. Nothing leaves the network."
+        NSLocalNetworkUsageDescription: "BookDrop finds nearby devices on your local network to send and receive books and notes. Nothing leaves the network."
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
         # v1.6.1 probe (device-gated): landscape keys were re-added in v1.2.0

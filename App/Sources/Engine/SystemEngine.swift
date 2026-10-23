@@ -339,10 +339,14 @@ final class SystemEngine: NSObject, SpeechEngine {
         // The chunker packs to `batchMaxChars` per chunk. Apple's synthesizer
         // handles a few hundred characters per utterance without a
         // perceptible gap; going much wider is what brings the stall back.
+        // `minOpenerChars` completes the opener by whole sentences: the
+        // first sentence alone is often too short to carry the wait for
+        // the second utterance, and the gap that follows is audible.
         let chunks = SentenceChunker.chunks(
             for: clean,
             firstMaxChars: 120,   // fast start: the first sentence sounds now
-            batchMaxChars: 320
+            batchMaxChars: 320,
+            minOpenerChars: 120
         )
         guard !chunks.isEmpty else { return }
 

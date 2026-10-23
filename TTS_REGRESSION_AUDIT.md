@@ -384,6 +384,21 @@ original asymmetry deliberately: `firstMaxChars` becomes a pack *target*
 (~85 Kokoro / ~105 Supertonic, the break-even `RTF·c1` at RTF≈0.53), capped
 by the unchanged `batchMaxChars` token ceiling.
 
+**Superseded by the seconds-based chunk schedule (2026-10-23).** The pack
+target above is a CHARACTER count, and a character count cannot see the
+speech rate: the same 54 characters were 7.64 s of audio in one device
+session and 3.30 s in another, so a size that covered one session was far
+too short for the next. `ChunkSchedule` now measures in **audio seconds** —
+the unit the gap is actually in — and converts to characters at speak time
+from the engine's own measured chars-per-audio-second. It also HOLDS its
+target on a covered session instead of resetting to the bottom, which is
+what kept the first character ladder oscillating at its lowest rung
+forever. `SentenceChunker.minOpenerChars` completes the opener by whole
+sentences, so a short first sentence no longer yields a short opener no
+matter how large the budget is. The R16 analysis above stands as the
+history of the defect; the arithmetic is unchanged, only the unit of the
+dial moved from characters to seconds.
+
 ### R17 — Read-along fast path drops the generation bump; cancel is a no-op — **Batch B**
 
 Introduced in two halves: `readAlongPiecesTask` declared by `4d7b8a5` (09-07)

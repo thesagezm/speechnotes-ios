@@ -2,7 +2,7 @@ import SwiftUI
 import SpeechLogic
 import UniformTypeIdentifiers
 
-/// The send half of BookDrop: pick a peer on this Wi-Fi and push books
+/// The send half of BookDrop: pick a peer on this network and push books
 /// (incl. audiobooks), notes, exported audio or JEX archives to it — any
 /// mix, several at once. Speaks LocalSend v2.2, so the recipient can be a
 /// PC running LocalSend, another Speechnotes iPhone or any
@@ -129,7 +129,7 @@ struct BookDropSendView: View {
                 } header: {
                     Text("Send to")
                 } footer: {
-                    Text("BookDrop finds Nearby devices on this Wi-Fi. The recipient must have Nearby BookDrop switched on; if it asks for an access code, type the same code here.")
+                    Text("BookDrop finds Nearby devices on this network — Wi-Fi or a phone hotspot. The recipient must have Nearby BookDrop switched on; if it asks for an access code, type the same code here.")
                 }
 
                 if let buildError {
@@ -412,7 +412,7 @@ struct BookDropSendView: View {
                     Section {
                         HStack(spacing: 10) {
                             ProgressView()
-                            Text("Looking for devices on this Wi-Fi…")
+                            Text("Looking for devices on this network…")
                                 .foregroundStyle(.secondary)
                         }
                     }
@@ -442,7 +442,7 @@ struct BookDropSendView: View {
                 } header: {
                     Text("Nearby")
                 } footer: {
-                    Text("Tapping a device sends straight away. Both devices must be on the same Wi-Fi, and the recipient's Nearby BookDrop must be on.")
+                    Text("Tapping a device sends straight away. Both devices must be on the same network — the same Wi-Fi, or one phone's hotspot — and the recipient's Nearby BookDrop must be on.")
                 }
                 Section {
                     Button {

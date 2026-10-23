@@ -121,6 +121,31 @@ final class PlaybackMetrics {
     private var firstScheduledChars = 0
     private var firstScheduledAudioSeconds: Double = 0
 
+    /// The audio the FIRST buffer carried, in seconds. The chunk schedule
+    /// needs it: "the opener was too small" is exactly "the first buffer's
+    /// audio did not cover the wait", and the schedule measures in seconds
+    /// because a character count cannot see the speech rate.
+    var firstScheduledAudio: Double { firstScheduledAudioSeconds }
+
+    /// The characters the FIRST buffer carried. Paired with
+    /// `firstScheduledAudio` this measures how many characters this engine
+    /// actually speaks per second of audio — the bridge between the
+    /// schedule's seconds-based target and the character budget it hands
+    /// to the chunker.
+    var firstScheduledCharacterCount: Int { firstScheduledChars }
+
+    /// The wait from the first buffer to the second, in seconds — the
+    /// inter-buffer part of T2B. nil when no second buffer was scheduled
+    /// (a single-chunk text, or a session that ended first).
+    ///
+    /// This is the quantity the opener's audio is compared against: the
+    /// session-start-to-second-buffer figure in the log ALSO contains the
+    /// first chunk's render time, which is not what has to be covered.
+    var secondBufferDelay: Double? {
+        guard let first = firstAudioAt, let second = secondBufferAt else { return nil }
+        return Self.seconds(from: first, to: second)
+    }
+
     private var firstAudioAt: ContinuousClock.Instant?
     private var secondBufferAt: ContinuousClock.Instant?
     private var scheduledBuffers = 0

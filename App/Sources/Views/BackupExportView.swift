@@ -162,7 +162,7 @@ struct BackupExportView: View {
             } footer: {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(summaryLine)
-                    Text("Share opens the system share sheet (Files, AirDrop, Mail…); Save writes the .jex straight to a location you pick; BookDrop pushes it to a device on this Wi-Fi.")
+                    Text("Share opens the system share sheet (Files, AirDrop, Mail…); Save writes the .jex straight to a location you pick; BookDrop pushes it to a device on this network.")
                         .foregroundStyle(.secondary)
                     if let errorMessage {
                         Text(errorMessage).foregroundStyle(.red)

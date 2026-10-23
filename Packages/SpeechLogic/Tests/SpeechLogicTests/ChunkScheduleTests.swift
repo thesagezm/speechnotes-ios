@@ -1,120 +1,305 @@
 import XCTest
 @testable import SpeechLogic
 
-/// The chunk-token schedule: the 100→125→150→175→200 ladder that trades a
+/// The chunk-token schedule: the seconds-based target that trades a
 /// slightly slower first buffer for a second buffer that arrives on time.
 final class ChunkScheduleTests: XCTestCase {
 
-    // MARK: - The ladder
+    // MARK: - The starting point
 
-    /// The ladder is exactly the requested schedule, ascending.
-    func testLadderShape() {
-        XCTAssertEqual(ChunkSchedule.sizes, [100, 125, 150, 175, 200])
-        XCTAssertEqual(ChunkSchedule.first, 100)
-        XCTAssertEqual(ChunkSchedule.largest, 200)
-    }
-
-    /// A fresh state starts at the smallest rung.
-    func testFreshStateStartsAtFirst() {
+    /// A fresh state starts at the initial target.
+    func testFreshStateStartsAtInitialTarget() {
         let state = ChunkSchedule.State()
-        XCTAssertEqual(state.currentSize, 100)
-        XCTAssertEqual(state.nextSize(), 100)
+        XCTAssertEqual(state.currentTargetSeconds, ChunkSchedule.initialTargetSeconds)
         XCTAssertNil(state.lastWasLate)
+        XCTAssertNil(state.lastSecondBufferSeconds)
+        XCTAssertNil(state.measuredCharactersPerAudioSecond)
     }
 
-    // MARK: - Climbing
+    /// An out-of-range constructor value is clamped into the legal band.
+    func testOutOfRangeTargetIsClamped() {
+        XCTAssertEqual(ChunkSchedule.State(targetSeconds: 0.1).currentTargetSeconds, ChunkSchedule.minimumTargetSeconds)
+        XCTAssertEqual(ChunkSchedule.State(targetSeconds: 9999).currentTargetSeconds, ChunkSchedule.maximumTargetSeconds)
+    }
 
-    /// One late second buffer climbs exactly one rung.
-    func testLateSessionClimbsOneRung() {
+    // MARK: - Growing
+
+    /// A late second buffer grows the target — and the new target must be
+    /// ABOVE the wait that was not covered, or the next session is short
+    /// for exactly the same reason.
+    func testLateSessionGrowsAboveTheMeasuredWait() {
         let state = ChunkSchedule.State()
-        state.record(secondBufferWasLate: true)
-        XCTAssertEqual(state.currentSize, 125)
-        state.record(secondBufferWasLate: true)
-        XCTAssertEqual(state.currentSize, 150)
-        state.record(secondBufferWasLate: true)
-        XCTAssertEqual(state.currentSize, 175)
-        state.record(secondBufferWasLate: true)
-        XCTAssertEqual(state.currentSize, 200)
-    }
-
-    /// The ladder stops at 200 — there is no rung above it, and staying
-    /// there is the honest answer for an engine too slow for a fast-start.
-    func testTopRungStaysPut() {
-        let state = ChunkSchedule.State(size: 200)
-        state.record(secondBufferWasLate: true)
-        XCTAssertEqual(state.currentSize, 200)
-        state.record(secondBufferWasLate: true)
-        XCTAssertEqual(state.currentSize, 200)
-    }
-
-    // MARK: - Resetting
-
-    /// An on-time second buffer drops back to the smallest rung: the fast
-    /// opener is what the user feels, and it is re-tried the moment the
-    /// engine proves it can cover it. The schedule is a dial, not a ratchet.
-    func testOnTimeSessionResetsToFast() {
-        let state = ChunkSchedule.State()
-        state.record(secondBufferWasLate: true)
-        state.record(secondBufferWasLate: true)
-        XCTAssertEqual(state.currentSize, 150)
-        state.record(secondBufferWasLate: false)
-        XCTAssertEqual(state.currentSize, 100)
-    }
-
-    /// A success after a climb resets too — the ladder re-probes the fast
-    /// rung every session rather than trusting a stale failure.
-    func testResetAfterEachSuccess() {
-        let state = ChunkSchedule.State()
-        state.record(secondBufferWasLate: true)
-        XCTAssertEqual(state.currentSize, 125)
-        state.record(secondBufferWasLate: false)
-        XCTAssertEqual(state.currentSize, 100)
-        // The rung is probed again — a second late session climbs from the
-        // bottom again, not from where the first failure left off.
-        state.record(secondBufferWasLate: true)
-        XCTAssertEqual(state.currentSize, 125)
-    }
-
-    // MARK: - Reporting
-
-    /// The outcome is readable, so a log line can say what it decided.
-    func testLastOutcomeIsRecorded() {
-        let state = ChunkSchedule.State()
-        state.record(secondBufferWasLate: true)
+        state.record(
+            secondBufferWasLate: true,
+            chunk0AudioSeconds: 3.0,
+            secondBufferSeconds: 8.5,
+            rate: 1.0
+        )
         XCTAssertEqual(state.lastWasLate, true)
-        state.record(secondBufferWasLate: false)
+        XCTAssertGreaterThan(state.currentTargetSeconds, 8.5)
+        XCTAssertGreaterThanOrEqual(state.currentTargetSeconds, 8.5 * ChunkSchedule.growHeadroom)
+    }
+
+    /// Repeated failures keep growing, up to the ceiling — and the ceiling
+    /// is the honest answer for an engine too slow for a fast-start.
+    func testRepeatedFailuresGrowToTheCeilingAndStop() {
+        let state = ChunkSchedule.State()
+        for _ in 0..<10 {
+            state.record(
+                secondBufferWasLate: true,
+                chunk0AudioSeconds: 2.0,
+                secondBufferSeconds: 12.0,
+                rate: 1.0
+            )
+        }
+        XCTAssertEqual(state.currentTargetSeconds, ChunkSchedule.maximumTargetSeconds)
+    }
+
+    /// The growth is at least a doubling per failure: the gaps in the
+    /// device log span 0.08 s to 25 s, and a schedule that grew by a
+    /// fraction would need a dozen sessions to cross that.
+    func testGrowthIsAtLeastADoubling() {
+        let state = ChunkSchedule.State()
+        let before = state.currentTargetSeconds
+        state.record(
+            secondBufferWasLate: true,
+            chunk0AudioSeconds: 1.0,
+            secondBufferSeconds: 1.0,
+            rate: 1.0
+        )
+        XCTAssertGreaterThanOrEqual(state.currentTargetSeconds, before * 2)
+    }
+
+    // MARK: - Holding on success (the fix for the oscillating ladder)
+
+    /// A covered session does NOT snap the target back to the bottom. This
+    /// is the behaviour that kept the old ladder oscillating: one lucky
+    /// session reset the opener to 100 chars and the next session was
+    /// short again.
+    func testCoveredSessionHoldsTheTarget() {
+        let state = ChunkSchedule.State()
+        state.record(
+            secondBufferWasLate: true,
+            chunk0AudioSeconds: 2.0,
+            secondBufferSeconds: 6.0,
+            rate: 1.0
+        )
+        let grown = state.currentTargetSeconds
+        XCTAssertGreaterThan(grown, ChunkSchedule.initialTargetSeconds)
+
+        // A tight cover (under the slack threshold) holds the target.
+        state.record(
+            secondBufferWasLate: false,
+            chunk0AudioSeconds: grown,
+            secondBufferSeconds: grown - 0.5,
+            rate: 1.0
+        )
+        XCTAssertEqual(state.currentTargetSeconds, grown)
         XCTAssertEqual(state.lastWasLate, false)
     }
 
-    // MARK: - Clamping to an engine's ceiling
-
-    /// A schedule rung is never handed to an engine whose batch ceiling is
-    /// smaller: the chunker would split it, which is two renders, not one
-    /// fast one.
-    func testClampedToBatchCeiling() {
-        // Kokoro's 160 ceiling: rungs above it are pinned to 160.
-        XCTAssertEqual(ChunkSchedule.clamped(to: 160, from: 100), 100)
-        XCTAssertEqual(ChunkSchedule.clamped(to: 160, from: 150), 150)
-        XCTAssertEqual(ChunkSchedule.clamped(to: 160, from: 175), 160)
-        XCTAssertEqual(ChunkSchedule.clamped(to: 160, from: 200), 160)
-        // A ceiling at or above the ladder leaves every rung legal.
-        XCTAssertEqual(ChunkSchedule.clamped(to: 200, from: 175), 175)
-        XCTAssertEqual(ChunkSchedule.clamped(to: 400, from: 200), 200)
+    /// A COMFORTABLE cover gives some of the target back — but never below
+    /// the wait it has to cover, so the next session cannot be short.
+    func testComfortableCoverShrinksButStaysAboveTheWait() {
+        let state = ChunkSchedule.State(targetSeconds: 20.0)
+        state.record(
+            secondBufferWasLate: false,
+            chunk0AudioSeconds: 20.0,
+            secondBufferSeconds: 5.0,
+            rate: 1.0
+        )
+        XCTAssertLessThan(state.currentTargetSeconds, 20.0)
+        XCTAssertGreaterThanOrEqual(state.currentTargetSeconds, 5.0 + ChunkSchedule.shrinkSlackSeconds)
     }
 
-    /// An out-of-range constructor value is clamped into the ladder.
-    func testOutOfRangeSizeIsClamped() {
-        XCTAssertEqual(ChunkSchedule.State(size: 10).currentSize, 100)
-        XCTAssertEqual(ChunkSchedule.State(size: 9999).currentSize, 200)
+    /// A cover with less than the required slack holds the target — a
+    /// 10 ms near-miss must not shrink the opener.
+    func testTightCoverDoesNotShrink() {
+        let state = ChunkSchedule.State(targetSeconds: 20.0)
+        state.record(
+            secondBufferWasLate: false,
+            chunk0AudioSeconds: 20.0,
+            secondBufferSeconds: 19.5,
+            rate: 1.0
+        )
+        XCTAssertEqual(state.currentTargetSeconds, 20.0)
+    }
+
+    /// The target never falls below the floor, however many comfortable
+    /// covers arrive.
+    func testTargetNeverFallsBelowTheFloor() {
+        let state = ChunkSchedule.State(targetSeconds: 4.0)
+        for _ in 0..<10 {
+            state.record(
+                secondBufferWasLate: false,
+                chunk0AudioSeconds: 4.0,
+                secondBufferSeconds: 0.2,
+                rate: 1.0
+            )
+        }
+        XCTAssertGreaterThanOrEqual(state.currentTargetSeconds, ChunkSchedule.minimumTargetSeconds)
+    }
+
+    // MARK: - The no-second-buffer case
+
+    /// A session with no second buffer teaches NOTHING when the engine has
+    /// no remembered wait — and the target HOLDS. The old ladder reset to
+    /// the bottom here, which is how it kept ending up at the bottom.
+    func testNoSecondBufferHoldsTheTargetWhenNothingIsKnown() {
+        let state = ChunkSchedule.State()
+        state.record(
+            secondBufferWasLate: true,
+            chunk0AudioSeconds: 2.0,
+            secondBufferSeconds: 8.0,
+            rate: 1.0
+        )
+        let grown = state.currentTargetSeconds
+
+        state.record(
+            secondBufferWasLate: nil,
+            chunk0AudioSeconds: grown,
+            secondBufferSeconds: nil,
+            rate: 1.0
+        )
+        XCTAssertEqual(state.currentTargetSeconds, grown)
+    }
+
+    /// A session with no second buffer DOES teach something when the
+    /// engine has a remembered wait and the opener was shorter than it:
+    /// the opener was too small, so the target grows.
+    func testNoSecondBufferGrowsWhenTheOpenerWasShorterThanTheKnownWait() {
+        let state = ChunkSchedule.State()
+        state.record(
+            secondBufferWasLate: false,
+            chunk0AudioSeconds: 8.0,
+            secondBufferSeconds: 8.0,
+            rate: 1.0
+        )
+        let before = state.currentTargetSeconds
+
+        state.record(
+            secondBufferWasLate: nil,
+            chunk0AudioSeconds: 3.0,
+            secondBufferSeconds: nil,
+            rate: 1.0
+        )
+        XCTAssertGreaterThan(state.currentTargetSeconds, before)
+        XCTAssertGreaterThanOrEqual(state.currentTargetSeconds, 8.0 * ChunkSchedule.growHeadroom)
+    }
+
+    // MARK: - Learning the engine's speaking rate
+
+    /// The schedule MEASURES how many characters this engine speaks per
+    /// second of audio instead of assuming — Supertonic and Kokoro differ
+    /// by more than a factor of two on the device logs.
+    func testSpeakingRateIsMeasuredFromTheOpener() {
+        let state = ChunkSchedule.State()
+        // 54 characters of audio took 7.64 s.
+        state.record(
+            secondBufferWasLate: false,
+            chunk0AudioSeconds: 7.64,
+            chunk0Characters: 54,
+            secondBufferSeconds: 6.0,
+            rate: 1.0
+        )
+        XCTAssertEqual(state.measuredCharactersPerAudioSecond ?? 0, 54.0 / 7.64, accuracy: 0.0001)
+        XCTAssertEqual(state.measuredAtRate, 1.0)
+    }
+
+    /// A faster voice plays the same characters in LESS time, so the same
+    /// audio target needs MORE characters.
+    func testBudgetScalesWithTheSpeechRate() {
+        let state = ChunkSchedule.State(targetSeconds: 6.0)
+        state.record(
+            secondBufferWasLate: false,
+            chunk0AudioSeconds: 3.3,
+            chunk0Characters: 54,
+            secondBufferSeconds: 2.0,
+            rate: 1.0
+        )
+        let atNormal = state.openerCharacterBudget(rate: 1.0, batchCeiling: 400)
+        let atDouble = state.openerCharacterBudget(rate: 2.0, batchCeiling: 400)
+        let atHalf = state.openerCharacterBudget(rate: 0.5, batchCeiling: 400)
+        XCTAssertGreaterThan(atDouble, atNormal)
+        XCTAssertLessThan(atHalf, atNormal)
+        // Doubling the rate doubles the characters that fit in the same
+        // audio target (within one character of rounding).
+        XCTAssertEqual(Double(atDouble), Double(atNormal) * 2, accuracy: 2)
+        XCTAssertEqual(Double(atHalf), Double(atNormal) / 2, accuracy: 2)
+    }
+
+    /// Before any measurement, the fallback conversion is used — and it
+    /// still respects the engine's ceiling.
+    func testBudgetBeforeAnyMeasurementUsesTheFallback() {
+        let state = ChunkSchedule.State(targetSeconds: 6.0)
+        let budget = state.openerCharacterBudget(rate: 1.0, batchCeiling: 400)
+        XCTAssertEqual(
+            budget,
+            Int((6.0 * ChunkSchedule.defaultCharactersPerAudioSecond).rounded(.up))
+        )
+        XCTAssertEqual(state.openerCharacterBudget(rate: 1.0, batchCeiling: 10), 10)
+    }
+
+    // MARK: - The character budget
+
+    /// The budget is the target converted to characters at the live rate.
+    func testBudgetFollowsTargetAndRate() {
+        // 6 s at 15 chars/s = 90 chars.
+        XCTAssertEqual(
+            ChunkSchedule.openerCharacterBudget(targetSeconds: 6.0, rate: 1.0, batchCeiling: 400),
+            90
+        )
+        // A faster voice needs more characters for the same audio.
+        XCTAssertEqual(
+            ChunkSchedule.openerCharacterBudget(targetSeconds: 6.0, rate: 2.0, batchCeiling: 400),
+            180
+        )
+        // A slower voice needs fewer.
+        XCTAssertEqual(
+            ChunkSchedule.openerCharacterBudget(targetSeconds: 6.0, rate: 0.5, batchCeiling: 400),
+            45
+        )
+    }
+
+    /// The engine's own ceiling is a HARD cap: an opener above it would be
+    /// split by the chunker, which is two renders, not one fast one.
+    func testBudgetIsClampedToTheEngineCeiling() {
+        // Supertonic's 200 ceiling.
+        XCTAssertEqual(
+            ChunkSchedule.openerCharacterBudget(targetSeconds: 6.0, rate: 1.0, batchCeiling: 200),
+            90
+        )
+        // A 30 s target at 15 chars/s is 450 chars — pinned to Kokoro's 160.
+        XCTAssertEqual(
+            ChunkSchedule.openerCharacterBudget(targetSeconds: 30.0, rate: 1.0, batchCeiling: 160),
+            160
+        )
+    }
+
+    /// A zero or negative rate must not divide the budget by zero.
+    func testBudgetHandlesANonPositiveRate() {
+        XCTAssertEqual(
+            ChunkSchedule.openerCharacterBudget(targetSeconds: 6.0, rate: 0, batchCeiling: 400),
+            90
+        )
+        XCTAssertEqual(
+            ChunkSchedule.openerCharacterBudget(targetSeconds: 6.0, rate: -1, batchCeiling: 400),
+            90
+        )
     }
 
     // MARK: - Log line
 
-    func testSummaryMentionsTheRung() {
+    func testSummaryMentionsTheTargetAndTheVerdict() {
         let state = ChunkSchedule.State()
-        XCTAssertTrue(state.summary.contains("100"))
-        state.record(secondBufferWasLate: true)
-        XCTAssertTrue(state.summary.contains("125"))
+        XCTAssertTrue(state.summary.contains("6.00"))
+        state.record(
+            secondBufferWasLate: true,
+            chunk0AudioSeconds: 2.0,
+            secondBufferSeconds: 8.0,
+            rate: 1.0
+        )
         XCTAssertTrue(state.summary.contains("LATE"))
+        XCTAssertFalse(state.summary.contains("6.00"))
     }
 }

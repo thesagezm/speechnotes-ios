@@ -44,12 +44,12 @@ final class StreamingTTSPlaybackCore: NSObject {
         /// following-sentence wait (restores the v0.4 first/batch asymmetry —
         /// TTS_BASELINE §2). Nil = chunkMaxChars.
         var firstMaxChars: Int? = nil
-        /// The chunk-token SCHEDULE: the ladder of first-chunk sizes this
-        /// engine walks when a session's second buffer arrives too late.
+        /// The chunk-token SCHEDULE: the opening-size schedule this engine
+        /// walks when a session's second buffer arrives too late.
         ///
         /// Nil = the fixed `firstMaxChars` above (the pre-schedule
         /// behaviour). Non-nil = the schedule owns the opener, and the
-        /// engine's `firstMaxChars` is only its starting rung.
+        /// engine's `firstMaxChars` is only its starting hint.
         var schedule: ChunkSchedule.State? = nil
         /// Inter-chunk pause baked into WAV exports only (playback itself
         /// schedules back-to-back). Kept small so a skipped chunk reads as a
@@ -65,8 +65,9 @@ final class StreamingTTSPlaybackCore: NSObject {
 
     let config: Config
 
-    /// The opener size this session uses: the schedule's current rung
-    /// (clamped to the engine's batch ceiling) when a schedule is wired,
+    /// The opener size this session uses: the schedule's character budget
+    /// (derived from its audio-seconds target and the live rate, then
+    /// clamped to the engine's batch ceiling) when a schedule is wired,
     /// else the engine's fixed `firstMaxChars`.
     ///
     /// Read by `speak()` (main thread) and by `renderWAV` (which runs the
@@ -74,7 +75,7 @@ final class StreamingTTSPlaybackCore: NSObject {
     /// main thread — see `ChunkSchedule.State`.
     private var currentOpenerSize: Int {
         if let schedule = config.schedule {
-            return ChunkSchedule.clamped(to: config.chunkMaxChars, from: schedule.currentSize)
+            return schedule.openerCharacterBudget(rate: Double(speed), batchCeiling: config.chunkMaxChars)
         }
         return config.firstMaxChars ?? config.chunkMaxChars
     }
@@ -790,15 +791,17 @@ final class StreamingTTSPlaybackCore: NSObject {
 
         speed = Float(min(2.0, max(0.5, rateMultiplier)))
 
-        // The opener size. With a schedule, the schedule owns it: the rung
-        // is the size the LAST session settled on, clamped to this
-        // engine's own batch ceiling (a bigger opener would be split by
-        // the chunker, which is two renders, not one fast one). Without a
-        // schedule, the engine's fixed `firstMaxChars` is used.
+        // The opener size. With a schedule, the schedule owns it: the
+        // character budget is derived from the schedule's audio-seconds
+        // target and the live rate, then clamped to this engine's own batch
+        // ceiling (a bigger opener would be split by the chunker, which is
+        // two renders, not one fast one). Without a schedule, the engine's
+        // fixed `firstMaxChars` is used.
         let allChunks = SentenceChunker.chunks(
             for: clean,
             firstMaxChars: currentOpenerSize,
-            batchMaxChars: config.chunkMaxChars
+            batchMaxChars: config.chunkMaxChars,
+            minOpenerChars: currentOpenerSize
         )
         guard !allChunks.isEmpty else { return }
 
@@ -1127,18 +1130,44 @@ final class StreamingTTSPlaybackCore: NSObject {
     /// Feeds the session's outcome to the chunk schedule, so the NEXT
     /// session opens with a size that fits this engine's speed.
     ///
+    /// The schedule measures in SECONDS, because the gap is a timing fact:
+    /// the opener's audio has to outlast the wait for the second buffer.
+    /// A character count cannot see the speech rate, so the same 54
+    /// characters that covered a wait at one rate were far too short at
+    /// another.
+    ///
     /// A session with no second buffer (the text was one chunk, or the
-    /// session was stopped early) teaches the schedule nothing: `nil` is
-    /// not a late buffer, and treating it as one would climb the ladder
-    /// for no reason.
+    /// session was stopped early) still teaches the schedule something when
+    /// the engine has a remembered wait: if the opener's audio was shorter
+    /// than the wait this engine is known to take, the opener was too small
+    /// and grows. Otherwise it teaches nothing, and the target HOLDS —
+    /// the old ladder reset to the bottom there, and that reset is what
+    /// kept the schedule oscillating at the bottom forever.
     private func reportToSchedule() {
         guard !sessionReportedToSchedule else { return }
         guard let schedule = config.schedule else { return }
-        guard let late = metrics.secondBufferWasLate else { return }
+        let late = metrics.secondBufferWasLate
+        let openerAudio = metrics.firstScheduledAudio
+        let wait = metrics.secondBufferDelay
+        // Nothing was measured at all (the session produced no buffers) —
+        // there is no verdict to record.
+        guard late != nil || openerAudio > 0 else { return }
         sessionReportedToSchedule = true
-        schedule.record(secondBufferWasLate: late)
-        let next = schedule.nextSize()
-        Log.shared.info("\(config.logPrefix) chunk schedule — \(late ? "second buffer was LATE" : "second buffer covered the first"), next opener \(next) chars")
+        schedule.record(
+            secondBufferWasLate: late,
+            chunk0AudioSeconds: openerAudio > 0 ? openerAudio : nil,
+            chunk0Characters: metrics.firstScheduledCharacterCount > 0 ? metrics.firstScheduledCharacterCount : nil,
+            secondBufferSeconds: wait,
+            rate: Double(speed)
+        )
+        let nextBudget = schedule.openerCharacterBudget(rate: Double(speed), batchCeiling: config.chunkMaxChars)
+        let verdict: String
+        switch late {
+        case .some(true): verdict = "second buffer was LATE"
+        case .some(false): verdict = "second buffer covered the first"
+        case .none: verdict = "no second buffer"
+        }
+        Log.shared.info("\(config.logPrefix) chunk schedule — \(verdict), \(schedule.summary), next opener \(nextBudget) chars")
     }
 
     /// The core's own liveness — the player's self-heal checks this when its
@@ -1238,7 +1267,8 @@ final class StreamingTTSPlaybackCore: NSObject {
         let renderChunks = SentenceChunker.chunks(
             for: clean,
             firstMaxChars: currentOpenerSize,
-            batchMaxChars: config.chunkMaxChars
+            batchMaxChars: config.chunkMaxChars,
+            minOpenerChars: currentOpenerSize
         )
         let total = max(1, clean.utf16.count)
 

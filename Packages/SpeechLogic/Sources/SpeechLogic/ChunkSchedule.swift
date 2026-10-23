@@ -14,102 +14,261 @@ import Foundation
 ///
 /// So there is no single right size: there is a schedule.
 ///
-/// * The opener starts at the smallest rung.
+/// * The opener starts at a target of 6 s of speech.
 /// * When a session's second buffer arrives LATE (the audible gap), the
-///   next session climbs one rung.
-/// * When a session's second buffer arrives ON TIME, the schedule resets to
-///   the smallest rung — the fast opener is what the user feels, and it is
-///   re-tried as soon as the engine proves it can cover it.
+///   target GROWS — the opener is made big enough to cover the wait next
+///   time.
+/// * When a session's second buffer arrives ON TIME, the target HOLDS. It
+///   is only lowered when the cover was comfortable (≥ 2 s of slack), and
+///   then it settles just above the measured wait rather than halving.
 ///
-/// A rung is only ever abandoned after it has actually FAILED to cover the
-/// second buffer, never speculatively.
+/// WHY SECONDS AND NOT CHARACTERS
+///
+/// The earlier ladder counted characters, and it failed in two ways that
+/// the device log records verbatim:
+///
+/// 1. A character count cannot see the RATE of speech. The same 54
+///    characters were 7.64 s of audio in one session and 3.30 s in
+///    another — a rung that covered one session was far too small for the
+///    next. Seconds are the unit the gap is actually measured in.
+/// 2. Resetting to the bottom on any covered session made the schedule
+///    OSCILLATE: one lucky session snapped the opener back to 100 chars,
+///    and the next session was short again. A schedule that forgets its
+///    own success teaches nothing.
+///
+/// The target is therefore an audio-seconds budget, and the character count
+/// it turns into is computed at speak time from the live rate and the
+/// chars-per-audio-second this engine actually measured.
 public enum ChunkSchedule {
 
-    /// The ladder of first-chunk sizes, in UTF-16 characters. Ascending:
-    /// each rung is a bigger opener than the last.
+    // MARK: - The target
+
+    /// The opening target, in seconds of speech the opener should carry.
     ///
-    /// The unit is CHARACTERS of source text, not tokens — the same unit
-    /// `SentenceChunker`'s `firstMaxChars`/`batchMaxChars` take. The
-    /// engine's own token ceiling (Kokoro's 510) is enforced separately by
-    /// the engine; the ladder never asks for more than the engine's own
-    /// batch cap, because a bigger opener would just be split by the
-    /// chunker — two renders, not one fast one.
-    public static let sizes: [Int] = [100, 125, 150, 175, 200]
+    /// 6 s is roughly the old ladder's first rung expressed in seconds
+    /// (100 characters ≈ 6–11 s of audio depending on the engine), and it
+    /// is enough to cover a fast engine's first-buffer wait without a gap.
+    /// A smaller start guarantees the first session of every engine is
+    /// itself short — the device log shows waits of 6–25 s even on the
+    /// quick engines.
+    public static let initialTargetSeconds: Double = 6.0
 
-    /// The size the schedule starts at.
-    public static let first: Int = 100
+    /// The ceiling on the target. Past this, a bigger opener cannot be
+    /// rendered in one go by either engine anyway, and the honest answer
+    /// for an engine too slow to benefit from one is "no fast-start".
+    public static let maximumTargetSeconds: Double = 30.0
 
-    /// The size the schedule gives up at and stays on. The largest rung is
-    /// the engine's own batch ceiling for Kokoro, so a session that reaches
-    /// the top rung runs "no fast-start at all" — the honest answer for an
-    /// engine too slow to benefit from one.
-    public static let largest: Int = 200
+    /// The floor on the target. Below this the opener is too small to
+    /// cover anything, and shrinking further just guarantees another gap.
+    public static let minimumTargetSeconds: Double = 3.0
+
+    /// How much of the opener's audio must be LEFT OVER after the wait for
+    /// the second buffer before the schedule probes back down. Without a
+    /// slack requirement, one covered-by-10 ms session would shrink the
+    /// opener and the very next session would be short again — the
+    /// oscillation the slack exists to prevent.
+    public static let shrinkSlackSeconds: Double = 2.0
+
+    /// How much of the measured wait the next target must cover when the
+    /// schedule grows. 1.2 gives the new opener a margin over the wait
+    /// that actually happened, so one bad session does not need another.
+    public static let growHeadroom: Double = 1.2
+
+    /// The fraction of the current target a comfortable cover may give
+    /// back. This is a CEILING on the shrink, never the target itself —
+    /// the measured wait (plus the slack) is what the new target settles
+    /// on, so a shrink can never fall below the wait it must cover.
+    public static let shrinkFactor: Double = 0.75
+
+    /// The fallback chars-per-audio-second used before the engine has
+    /// measured its own.
+    ///
+    /// The shipped device logs span 7–17 chars per audio second (Supertonic
+    /// at ~8–11, Kokoro at ~16–17), so 15 is a mid-range guess that is
+    /// only used until the first session reports real numbers — and it is
+    /// then replaced by the measurement, not merely corrected by it.
+    public static let defaultCharactersPerAudioSecond: Double = 15.0
+
+    // MARK: - State
 
     /// The state of one session's schedule. The engine owns one of these
-    /// per core instance: it hands the current rung to the chunker, and
-    /// when a session ends it tells the schedule whether the second buffer
-    /// was late. The NEXT session then uses whatever the schedule decided.
+    /// per core instance: it hands the current target to the chunker, and
+    /// when a session ends it tells the schedule what happened. The NEXT
+    /// session then uses whatever the schedule decided.
     ///
-    /// Main-thread confined — `speak()` reads `currentSize`, the core
-    /// calls `record`/`nextSize` from its own (main-thread) pipeline.
+    /// Main-thread confined — `speak()` reads `targetSeconds`, the core
+    /// calls `record` from its own (main-thread) pipeline.
     public final class State {
-        /// The rung the next session should use.
-        public private(set) var size: Int
+        /// The audio-seconds target the next session's opener should meet.
+        public private(set) var targetSeconds: Double
 
         /// Whether the most recently RECORDED session had a late second
         /// buffer. nil = no session recorded yet.
         public private(set) var lastWasLate: Bool?
 
-        public init(size: Int = ChunkSchedule.first) {
-            self.size = size
+        /// The wait from the first buffer to the second, measured by the
+        /// most recent session that reported one. nil = never measured.
+        /// Used when a session ends without a second buffer (a single-chunk
+        /// text, or a user stop): the opener's own audio is then compared
+        /// against the wait the engine is known to take.
+        public private(set) var lastSecondBufferSeconds: Double?
+
+        /// How many characters this engine actually speaks per second of
+        /// AUDIO, measured from the last session's opener. nil until the
+        /// first session reports it.
+        ///
+        /// This is the bridge between the schedule's seconds-based target
+        /// and the character budget the chunker takes. It is measured, not
+        /// assumed: Supertonic and Kokoro differ by more than a factor of
+        /// two, and the same engine at a different speech rate differs
+        /// again.
+        public private(set) var measuredCharactersPerAudioSecond: Double?
+
+        /// The speech rate the measurement above was taken at. The
+        /// measurement is scaled by `rate / measuredAtRate` when the rate
+        /// changes, because a faster voice needs more characters for the
+        /// same audio.
+        public private(set) var measuredAtRate: Double = 1.0
+
+        public init(targetSeconds: Double = ChunkSchedule.initialTargetSeconds) {
+            self.targetSeconds = Self.clampTarget(targetSeconds)
         }
 
-        /// The current rung, clamped into the ladder.
-        public var currentSize: Int {
-            min(max(size, ChunkSchedule.first), ChunkSchedule.largest)
-        }
+        /// The target, clamped into the legal band.
+        public var currentTargetSeconds: Double { Self.clampTarget(targetSeconds) }
 
         /// Records the outcome of one session.
         ///
-        /// - Parameter secondBufferWasLate: true when the second buffer
-        ///   arrived after the first one had already finished playing —
-        ///   the audible gap. nil (never reported) is treated the same as
-        ///   false: a session that taught us nothing is not a failure.
-        public func record(secondBufferWasLate: Bool) {
+        /// - Parameters:
+        ///   - secondBufferWasLate: true when the second buffer arrived
+        ///     after the first one had already finished playing — the
+        ///     audible gap. nil means the session never produced a second
+        ///     buffer (single-chunk text, or an early stop).
+        ///   - chunk0AudioSeconds: the audio the FIRST buffer carried. This
+        ///     is the opener's actual reach, in the unit the gap is
+        ///     measured in.
+        ///   - chunk0Characters: the characters in that first buffer. Used
+        ///     to learn how many characters this engine speaks per second
+        ///     of audio.
+        ///   - secondBufferSeconds: the measured wait from the first
+        ///     buffer to the second. nil when no second buffer arrived.
+        ///   - rate: the speech rate the session ran at (1.0 = normal).
+        ///     Only used to convert the target into a character budget.
+        public func record(
+            secondBufferWasLate: Bool?,
+            chunk0AudioSeconds: Double?,
+            chunk0Characters: Int? = nil,
+            secondBufferSeconds: Double?,
+            rate: Double
+        ) {
             lastWasLate = secondBufferWasLate
-            if secondBufferWasLate {
-                size = climb(from: currentSize)
-            } else {
-                size = ChunkSchedule.first
+
+            if let secondBufferSeconds {
+                lastSecondBufferSeconds = secondBufferSeconds
+            }
+
+            // Learn this engine's characters-per-audio-second. A session
+            // that produced no audio teaches nothing.
+            if let audio = chunk0AudioSeconds, audio > 0, let chars = chunk0Characters, chars > 0 {
+                measuredCharactersPerAudioSecond = Double(chars) / audio
+                measuredAtRate = rate > 0 ? rate : 1.0
+            }
+
+            let openerAudio = chunk0AudioSeconds ?? 0
+            let wait = secondBufferSeconds
+
+            guard let wait else {
+                // No second buffer: the session taught us nothing about
+                // the wait. But the opener's own audio still tells us
+                // something — if it was smaller than the wait this engine
+                // is KNOWN to take, the opener is too small and grows.
+                if let remembered = lastSecondBufferSeconds, openerAudio > 0, openerAudio < remembered {
+                    targetSeconds = Self.clampTarget(max(targetSeconds * 2, remembered * growHeadroom))
+                }
+                return
+            }
+
+            if secondBufferWasLate == true {
+                // The gap happened: grow until the opener would have
+                // covered it. Doubling is the coarse step; the measured
+                // wait gives the floor. Both are ABOVE the wait, so the
+                // next session cannot be short for the same reason.
+                let needed = max(targetSeconds * 2, wait * growHeadroom)
+                targetSeconds = Self.clampTarget(needed)
+                return
+            }
+
+            // Covered. Hold the target unless the cover was comfortable —
+            // then settle it just above the wait that actually happened.
+            //
+            // The new target is `wait + slack`, NOT half the old one: a
+            // fractional shrink of a target that merely happened to cover
+            // can land BELOW the wait it has to cover, and the next
+            // session is short again — the oscillation the old ladder was
+            // built out of, one level up.
+            let slack = openerAudio - wait
+            if slack >= ChunkSchedule.shrinkSlackSeconds {
+                let settled = max(wait + ChunkSchedule.shrinkSlackSeconds, targetSeconds * shrinkFactor)
+                targetSeconds = Self.clampTarget(min(settled, targetSeconds))
             }
         }
 
-        /// The rung to use: the size the last record() settled on.
-        public func nextSize() -> Int { currentSize }
-
-        /// The next rung UP from `current`, or `current` at the top of
-        /// the ladder.
-        private func climb(from current: Int) -> Int {
-            for candidate in ChunkSchedule.sizes where candidate > current {
-                return candidate
+        /// The character budget for the opener, derived from the target,
+        /// the live rate and this engine's measured speaking rate.
+        ///
+        /// A faster voice plays the SAME characters in LESS time, so the
+        /// same audio target needs MORE characters at rate 2.0 and FEWER at
+        /// rate 0.5. (The rate multiplies the voice's duration, not its
+        /// character count.)
+        ///
+        /// - Parameter batchCeiling: the engine's own hard cap. An opener
+        ///   above it would be split by the chunker into two renders — the
+        ///   opposite of a fast opener.
+        public func openerCharacterBudget(rate: Double, batchCeiling: Int) -> Int {
+            let effectiveRate = rate > 0 ? rate : 1.0
+            let charsPerAudioSecond: Double
+            if let measured = measuredCharactersPerAudioSecond, measured > 0 {
+                // Scale the measurement to the current rate: the same
+                // characters take proportionally less audio when the voice
+                // is faster, so MORE characters fit into the same target.
+                charsPerAudioSecond = measured * (effectiveRate / measuredAtRate)
+            } else {
+                charsPerAudioSecond = ChunkSchedule.defaultCharactersPerAudioSecond * effectiveRate
             }
-            return current
+            let raw = currentTargetSeconds * charsPerAudioSecond
+            let wanted = max(1, Int(raw.rounded(.up)))
+            return min(wanted, max(1, batchCeiling))
         }
 
         /// A one-line summary for the device log.
         public var summary: String {
-            "chunk-schedule rung \(currentSize) chars" +
-            (lastWasLate == true ? " (last second buffer LATE)" : "")
+            "target \(twoDP(currentTargetSeconds))s of opener audio"
+                + (lastWasLate == true ? " (last second buffer LATE)" : "")
+                + (lastWasLate == false ? " (last second buffer covered)" : "")
+                + (measuredCharactersPerAudioSecond.map { ", \(twoDP($0)) chars/audio-s" } ?? "")
         }
+
+        private static func clampTarget(_ value: Double) -> Double {
+            min(max(value, ChunkSchedule.minimumTargetSeconds), ChunkSchedule.maximumTargetSeconds)
+        }
+
+        private func twoDP(_ value: Double) -> String { String(format: "%.2f", value) }
     }
 
-    /// The rung for a given engine's batch ceiling, so a small-ceiling
-    /// engine is never asked for a chunk it cannot take: the chunker's
-    /// `batchMaxChars` is a HARD cap, and an opener above it would be split
-    /// (defeating the point of a fast opener).
-    public static func clamped(to batchCeiling: Int, from size: Int) -> Int {
-        let floor = ChunkSchedule.first
-        let ceiling = max(floor, min(largest, batchCeiling))
-        return min(max(size, floor), ceiling)
+    /// The character budget for a given target, rate and engine ceiling,
+    /// using the FALLBACK chars-per-audio-second.
+    ///
+    /// The engine's own ceiling is a HARD cap: an opener above it would be
+    /// split by the chunker (defeating the point of a fast opener) and
+    /// would exceed the model's token budget.
+    public static func openerCharacterBudget(
+        targetSeconds: Double,
+        rate: Double,
+        batchCeiling: Int
+    ) -> Int {
+        let effectiveRate = rate > 0 ? rate : 1.0
+        let raw = (targetSeconds * defaultCharactersPerAudioSecond * effectiveRate)
+        let wanted = max(1, Int(raw.rounded(.up)))
+        return min(wanted, max(1, batchCeiling))
     }
 }

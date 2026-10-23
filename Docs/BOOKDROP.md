@@ -35,6 +35,29 @@ A receiver does NOT need to announce anything:
 - We respond to `/register` with our device DTO. The sender then talks to us
   directly.
 
+### Which subnet the SENDER scans
+
+The sender (`LocalSendSender.lanSubnets`) walks `getifaddrs` and takes every
+IPv4 address on a REAL local interface — it does **not** require `en0`.
+
+That distinction is load-bearing: an iPhone that CREATES a hotspot has no
+`en0` IPv4 at all (iOS turns the Wi-Fi radio into the soft AP), and the
+hotspot's own address rides a cellular/tether interface whose NAME varies by
+iOS version. Requiring `en0` disabled the Send button outright and made
+hotspot-to-hotspot transfers impossible.
+
+Ranking, highest first: `en0` → other `en*` → `ap*` (the soft AP) →
+`bridge*` (the hotspot's own address) → `rndis*` (USB tether). Loopback
+(127/8) and link-local (169.254/16) are dropped; VPN/tunnel interfaces
+(`utun*`, `ipsec*`) and AirDrop radios (`awdl*`, `llw*`) score zero. A
+cellular-data interface (`pdp_ip*`) is used only as a LAST resort, and only
+when a hotspot interface is present — a carrier /24 is nobody's peer set.
+Up to three subnets are probed in one scan, so a device on Wi-Fi while also
+running a hotspot finds peers on both.
+
+The protocol does not change: a /24 unicast scan plus an HTTP `/register`
+works the same on any IPv4 LAN.
+
 ### Endpoints
 
 | Method | Path | Meaning |

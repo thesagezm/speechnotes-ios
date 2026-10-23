@@ -120,13 +120,15 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
             // exposing it. SentenceChunker keeps the 510-token ceiling via
             // `batchMaxChars`; this only re-opens the v0.4 fast-start.
             //
-            // The SCHEDULE owns the opener from here on (2026-10-22): a
-            // session whose second buffer arrives after the first one
-            // finished playing climbs the 100→125→150→175→200 ladder for
-            // its next session, and an on-time session drops back to the
-            // fast opener. 100 is the starting rung — the old fixed
-            // value, kept as the fast path. The ladder's top rung equals
-            // the batch ceiling, so the worst case is "no fast-start".
+            // The SCHEDULE owns the opener from here on (2026-10-23): it
+            // measures in AUDIO SECONDS, not characters — a character count
+            // cannot see the speech rate, so the same 54 characters that
+            // covered a wait at one rate were far too short at another. A
+            // late second buffer grows the target above the wait that was
+            // not covered; a covered session HOLDS it (the old character
+            // ladder reset to the bottom on every success and oscillated
+            // there forever). `firstMaxChars` is only the pre-schedule
+            // fallback.
             firstMaxChars: 100,
             schedule: ChunkSchedule.State(),
             exportInterChunkSilence: 0,

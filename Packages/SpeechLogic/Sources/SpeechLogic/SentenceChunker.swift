@@ -125,10 +125,29 @@ public enum SentenceChunker {
     ///     and a single sentence longer than the limit is split at word
     ///     boundaries into pieces that each fit — downstream TTS engines
     ///     enforce per-call token limits, so no chunk may be oversized.
-    /// - Returns: All chunks in order. The first element is `firstChunk(in:)`;
-    ///   substrings taken at each chunk's offset/length reproduce `text`
-    ///   exactly. Empty for empty or whitespace-only input.
-    public static func chunks(for text: String, firstMaxChars: Int = 80, batchMaxChars: Int = 400) -> [Chunk] {
+    ///   - minOpenerChars: The opener's MINIMUM size, in UTF-16 units.
+    ///     `firstChunk` stops at the FIRST sentence that fits the cap, so a
+    ///     text whose first sentence is short produces a short opener no
+    ///     matter how large the cap is — and a short opener is exactly what
+    ///     runs out of audio before the second buffer arrives (the audible
+    ///     gap the chunk schedule exists to close). When this is > 0, whole
+    ///     following sentences are appended to the opener until it reaches
+    ///     `max(firstMaxChars, minOpenerChars)` UTF-16 units, never past
+    ///     `batchMaxChars`.
+    ///
+    ///     DEFAULT OFF (0): the opener is exactly `firstChunk(in:maxChars:)`,
+    ///     so every existing behaviour — and the doc contract above — is
+    ///     unchanged. Production callers opt in.
+    /// - Returns: All chunks in order. The first element is `firstChunk(in:)`
+    ///   (extended to `minOpenerChars` when that is asked for); substrings
+    ///   taken at each chunk's offset/length reproduce `text` exactly. Empty
+    ///   for empty or whitespace-only input.
+    public static func chunks(
+        for text: String,
+        firstMaxChars: Int = 80,
+        batchMaxChars: Int = 400,
+        minOpenerChars: Int = 0
+    ) -> [Chunk] {
         guard let first = firstChunk(in: text, maxChars: firstMaxChars) else { return [] }
 
         var result = [first]
@@ -146,36 +165,31 @@ public enum SentenceChunker {
 
         var cursor = utf16.index(utf16.startIndex, offsetBy: first.length, limitedBy: utf16.endIndex) ?? utf16.endIndex
 
-        // Pass 1 — scan sentence ranges; pass 2 — split any oversized
-        // sentence at word boundaries so every piece fits the batch limit.
-        var pieces: [(start: String.Index, end: String.Index)] = []
-        while cursor < text.endIndex {
-            let end = sentenceEnd(in: text, from: cursor, limit: text.endIndex) ?? text.endIndex
-            for piece in splitOversized(text, start: cursor, end: end, maxUtf16: maxBatchLength) {
-                // A trailing fragment too short to synthesize on its own is
-                // glued to the previous piece so the engines never see a stub
-                // (an empty or one-token tail is what makes Kokoro's style
-                // lookup non-finite). Nothing is ever dropped: chunks must
-                // still concatenate to the original text, which is what the
-                // read-along and the resume offset both rely on.
-                if let last = pieces.last {
-                    let lastLength = text[last.start..<last.end].utf16.count
-                    let pieceLength = text[piece.start..<piece.end].utf16.count
-                    if pieceLength < minPieceLength, lastLength + pieceLength <= maxBatchLength + minPieceLength {
-                        pieces[pieces.count - 1] = (last.start, piece.end)
-                        continue
-                    }
-                }
-                pieces.append(piece)
+        // Opener completion — opt-in (see the parameter docs). The opener
+        // grows by WHOLE following sentences, never by a cut, so it still
+        // ends at a sentence boundary the engine can speak cleanly.
+        if minOpenerChars > 0 {
+            let openerCap = min(max(max(1, firstMaxChars), max(0, minOpenerChars)), maxBatchLength)
+            if let completed = completedOpenerEnd(
+                in: text,
+                after: first,
+                cap: openerCap,
+                maxBatchLength: maxBatchLength
+            ) {
+                result[0] = chunk(in: text, from: text.startIndex, to: completed)
+                cursor = completed
             }
-            cursor = end
         }
+
+        // Pass 1 + 2 — scan sentence ranges and split any oversized sentence
+        // at word boundaries so every piece fits the batch limit.
+        let batchPieces = pieces(in: text, from: cursor, maxBatchLength: maxBatchLength, minPieceLength: minPieceLength)
 
         // Pass 3 — pack pieces greedily into batches up to the limit.
         var batchStart: String.Index?
         var batchEnd: String.Index?
         var batchLength = 0
-        for piece in pieces {
+        for piece in batchPieces {
             let pieceLength = text[piece.start..<piece.end].utf16.count
             if batchLength == 0 {
                 batchStart = piece.start
@@ -195,6 +209,74 @@ public enum SentenceChunker {
             result.append(chunk(in: text, from: batchStart!, to: batchEnd!))
         }
         return result
+    }
+
+    /// The sentence pieces of `text` from `start` onward, each no longer
+    /// than `maxBatchLength`, with the short-fragment glue applied.
+    ///
+    /// A trailing fragment too short to synthesize on its own is glued onto
+    /// the previous piece so the engines never see a stub (an empty or
+    /// one-token tail is what makes Kokoro's style lookup non-finite).
+    /// Nothing is ever dropped: the pieces must still concatenate to the
+    /// original text, which is what the read-along and the resume offset
+    /// both rely on.
+    private static func pieces(
+        in text: String,
+        from start: String.Index,
+        maxBatchLength: Int,
+        minPieceLength: Int
+    ) -> [(start: String.Index, end: String.Index)] {
+        var pieces: [(start: String.Index, end: String.Index)] = []
+        var cursor = start
+        while cursor < text.endIndex {
+            let end = sentenceEnd(in: text, from: cursor, limit: text.endIndex) ?? text.endIndex
+            for piece in splitOversized(text, start: cursor, end: end, maxUtf16: maxBatchLength) {
+                if let last = pieces.last {
+                    let lastLength = text[last.start..<last.end].utf16.count
+                    let pieceLength = text[piece.start..<piece.end].utf16.count
+                    if pieceLength < minPieceLength, lastLength + pieceLength <= maxBatchLength + minPieceLength {
+                        pieces[pieces.count - 1] = (last.start, piece.end)
+                        continue
+                    }
+                }
+                pieces.append(piece)
+            }
+            cursor = end
+        }
+        return pieces
+    }
+
+    /// Extends an opener with WHOLE following sentences, up to `cap`
+    /// UTF-16 units in total, and returns where the next chunk must start.
+    ///
+    /// Only complete pieces are appended: a sentence that does not fit in
+    /// the remaining budget is left whole for the next chunk, because a cut
+    /// opener would end on a clipped word.
+    ///
+    /// Returns nil when nothing could be appended — the opener stays as it
+    /// was.
+    private static func completedOpenerEnd(
+        in text: String,
+        after first: Chunk,
+        cap: Int,
+        maxBatchLength: Int
+    ) -> String.Index? {
+        guard cap > first.length else { return nil }
+        let utf16 = text.utf16
+        let start = utf16.index(utf16.startIndex, offsetBy: first.length, limitedBy: utf16.endIndex) ?? utf16.endIndex
+        guard start < text.endIndex else { return nil }
+        var cursor = start
+        var used = first.length
+        while cursor < text.endIndex {
+            let end = sentenceEnd(in: text, from: cursor, limit: text.endIndex) ?? text.endIndex
+            for piece in splitOversized(text, start: cursor, end: end, maxUtf16: maxBatchLength) {
+                let pieceLength = text[piece.start..<piece.end].utf16.count
+                guard used + pieceLength <= cap else { return cursor }
+                used += pieceLength
+                cursor = piece.end
+            }
+        }
+        return cursor
     }
 
     /// UTF-16 offset where speech should resume so it starts at a sentence

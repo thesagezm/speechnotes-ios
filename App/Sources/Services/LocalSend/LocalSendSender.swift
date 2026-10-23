@@ -75,9 +75,10 @@ final class LocalSendSender: ObservableObject {
     @Published private(set) var phase: Phase = .idle
     @Published private(set) var lastError: String?
 
-    /// Whether the scan can run at all: LocalSend is a LAN protocol, so
-    /// off Wi-Fi there is nothing to find and the send button disables.
-    var canSend: Bool { Self.wifiSubnet() != nil }
+    /// Whether the scan can run at all: LocalSend is a LAN protocol, so a
+    /// device with no local IPv4 at all has nothing to find and the send
+    /// button disables.
+    var canSend: Bool { Self.lanSubnet() != nil }
 
     /// Progress for the in-flight transfer: which file, and how much of the
     /// whole batch is through.
@@ -93,12 +94,13 @@ final class LocalSendSender: ObservableObject {
 
     // MARK: - Discovery
 
-    /// Scans this Wi-Fi's /24 for peers. Cheap: 254 short POSTs, capped at
-    /// 48 in flight, so a normal LAN answers in about a second.
+    /// Scans the local network's /24 for peers. Cheap: 254 short POSTs, capped
+    /// at 48 in flight, so a normal LAN answers in about a second.
     func scan() {
-        guard let subnet = Self.wifiSubnet() else {
-            lastError = "Not connected to Wi-Fi"
-            phase = .failed("Not connected to Wi-Fi")
+        let subnets = Self.lanSubnets()
+        guard !subnets.isEmpty else {
+            lastError = "No local network connection"
+            phase = .failed("No local network connection")
             return
         }
         scanTask?.cancel()
@@ -106,7 +108,7 @@ final class LocalSendSender: ObservableObject {
         lastError = nil
         phase = .scanning
         scanTask = Task { [weak self] in
-            let found = await Self.probeSubnet(subnet)
+            let found = await Self.probeSubnets(subnets)
             guard !Task.isCancelled, let self else { return }
             self.peers = found
             self.phase = .idle
@@ -119,8 +121,16 @@ final class LocalSendSender: ObservableObject {
         if case .scanning = phase { phase = .idle }
     }
 
-    /// POST /register at each address of the subnet; the 200 body is the
+    /// POST /register at each address of every subnet; the 200 body is the
     /// peer's DTO. Nonisolated so the probes run off the main actor.
+    private nonisolated static func probeSubnets(_ subnets: [String]) async -> [Peer] {
+        var found: [Peer] = []
+        for subnet in subnets {
+            found.append(contentsOf: await probeSubnet(subnet))
+        }
+        return found
+    }
+
     private nonisolated static func probeSubnet(_ subnet: String) async -> [Peer] {
         let concurrency = 48
         var found: [Peer] = []
@@ -309,7 +319,7 @@ final class LocalSendSender: ObservableObject {
         var request = URLRequest(url: base.appendingPathComponent("api/localsend/v2/upload"))
         request.httpMethod = "POST"
         request.httpBodyStream = stream
-        request.timeoutInterval = 3600 // a 700 MB book on slow Wi-Fi is minutes
+        request.timeoutInterval = 3600 // a 700 MB book on a slow LAN is minutes
         request.setValue(String(size), forHTTPHeaderField: "Content-Length")
         // The session/file/token ride on the query string, as the spec's
         // upload endpoint declares. The PIN rides along when set — the
@@ -383,18 +393,127 @@ final class LocalSendSender: ObservableObject {
 
     // MARK: - Network context
 
-    /// The Wi-Fi interface's first three octets ("192.168.1"), or nil off
-    /// Wi-Fi — LocalSend is a LAN protocol, so scanning elsewhere is noise.
-    private nonisolated static func wifiSubnet() -> String? {
+    /// One IPv4 address on one network interface.
+    private struct IPv4Interface {
+        let name: String
+        let octets: [UInt8]
+
+        /// 127.0.0.0/8 — the device talking to itself.
+        var isLoopback: Bool { octets[0] == 127 }
+        /// 169.254.0.0/16 — the self-assigned range AirDrop uses. No peer
+        /// ever answers there over HTTP.
+        var isLinkLocal: Bool { octets[0] == 169 && octets[1] == 254 }
+        /// The subnet string the probes use ("192.168.1").
+        var subnet: String { octets.dropLast().map { String($0) }.joined(separator: ".") }
+    }
+
+    /// The local subnet to scan for peers, best first.
+    ///
+    /// Why this is not "the Wi-Fi interface": a phone that CREATES a hotspot
+    /// has no `en0` IPv4 at all (iOS turns the Wi-Fi radio into the soft AP),
+    /// and the hotspot's own address rides a cellular/tether interface whose
+    /// NAME varies by iOS version — hardcoding one name is how the hotspot
+    /// case breaks. The peers on that hotspot are real LAN peers, so the
+    /// scan has to accept whatever interface carries the address.
+    ///
+    /// Every IPv4 interface is considered; loopback and link-local are
+    /// dropped. Wi-Fi (`en*`) and hotspot (`ap*`, `bridge*`) interfaces rank
+    /// above cellular data (`pdp_ip*`), which is used ONLY when a hotspot
+    /// interface is present — otherwise a phone on mobile data alone would
+    /// scan the carrier's /24, which reaches nothing and is nobody's
+    /// business.
+    ///
+    /// More than one subnet can be returned (Wi-Fi AND a running hotspot),
+    /// and the scan probes all of them.
+    private nonisolated static func lanSubnets() -> [String] {
+        let candidates = ipv4Interfaces().filter { !$0.isLoopback && !$0.isLinkLocal }
+        guard !candidates.isEmpty else { return [] }
+
+        let hasHotspotInterface = candidates.contains { $0.name.hasPrefix("ap") }
+        let ranked = candidates
+            .map { ($0, Self.rank($0)) }
+            .sorted { lhs, rhs in
+                if lhs.1 != rhs.1 { return lhs.1 > rhs.1 }
+                return lhs.0.subnet < rhs.0.subnet
+            }
+
+        var subnets: [String] = []
+        var seen = Set<String>()
+        for (candidate, score) in ranked {
+            guard score > 0 else { continue }
+            // Cellular data is a fallback for the hotspot case only: the
+            // hotspot's address sometimes rides the cellular interface, and
+            // a carrier /24 is never a peer set.
+            let cellular = candidate.name.hasPrefix("pdp_ip") || candidate.name.hasPrefix("ipsec")
+            if cellular {
+                guard hasHotspotInterface, subnets.isEmpty else { continue }
+            }
+            if seen.insert(candidate.subnet).inserted {
+                subnets.append(candidate.subnet)
+            }
+            // Three is plenty: Wi-Fi + hotspot + one more. More than that is
+            // a device with virtual interfaces, not three peer networks.
+            if subnets.count >= 3 { break }
+        }
+        return subnets
+    }
+
+    /// The single best subnet — the one `canSend` and the scan prefer.
+    private nonisolated static func lanSubnet() -> String? {
+        lanSubnets().first
+    }
+
+    /// Higher is better. Wi-Fi first, then the hotspot's own interfaces,
+    /// then a USB tether. Everything else (cellular data, tunnels) scores 0
+    /// and is skipped.
+    private nonisolated static func rank(_ candidate: IPv4Interface) -> Int {
+        var score = 0
+        let name = candidate.name
+        if name == "en0" {
+            score = 100
+        } else if name.hasPrefix("en") {
+            score = 90
+        } else if name.hasPrefix("ap") {
+            // The soft AP a phone creates when it runs a hotspot.
+            score = 80
+        } else if name.hasPrefix("bridge") {
+            // The bridge that carries the hotspot's own address.
+            score = 70
+        } else if name.hasPrefix("rndis") {
+            // USB tethering to a computer.
+            score = 60
+        }
+        // A VPN/tunnel or an AirDrop radio is not a peer network.
+        if name.hasPrefix("utun") || name.hasPrefix("ipsec") || name.hasPrefix("awdl") || name.hasPrefix("llw") {
+            score = 0
+        }
+        // The hotspot LAN iOS hands out. A client phone that joins a phone
+        // hotspot is on en0 with this address; the hotspot host itself may
+        // carry it on the cellular or bridge interface.
+        if candidate.octets[0] == 172, candidate.octets[1] == 20, candidate.octets[2] == 10 {
+            score += 50
+        } else if candidate.octets[0] == 192, candidate.octets[1] == 168 {
+            score += 20
+        } else if candidate.octets[0] == 10 {
+            score += 10
+        }
+        // A public address on a LAN-named interface is a tethering setup
+        // with a public address — still a LAN peer set, so keep it.
+        return score
+    }
+
+    /// Every non-loopback IPv4 address on this device, with its interface
+    /// name.
+    private nonisolated static func ipv4Interfaces() -> [IPv4Interface] {
         var ifaddr: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return nil }
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return [] }
         defer { freeifaddrs(ifaddr) }
+        var result: [IPv4Interface] = []
         var cursor: UnsafeMutablePointer<ifaddrs>? = first
         while let pointer = cursor {
             let interface = pointer.pointee
             defer { cursor = interface.ifa_next }
-            guard String(cString: interface.ifa_name) == "en0",
-                  let address = interface.ifa_addr,
+            guard let address = interface.ifa_addr,
                   address.pointee.sa_family == UInt8(AF_INET)
             else { continue }
             // sockaddr_in: sin_len, sin_family occupy struct bytes 0…2 and
@@ -405,11 +524,9 @@ final class LocalSendSender: ObservableObject {
                 let raw = UnsafeRawPointer(tuple)
                 return (2..<6).map { raw.load(fromByteOffset: $0, as: UInt8.self) }
             }
-            if octets[0] != 127 {
-                return octets.dropLast().map { String($0) }.joined(separator: ".")
-            }
+            result.append(IPv4Interface(name: String(cString: interface.ifa_name), octets: octets))
         }
-        return nil
+        return result
     }
 
     private func finishFailed(_ message: String) {

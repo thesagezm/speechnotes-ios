@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// BookDrop — move books and JEX archives over the local network, in either
-/// direction. SEND: pick a peer on this Wi-Fi and push a book, a note or a
+/// direction. SEND: pick a peer on this network and push a book, a note or a
 /// .jex archive (LocalSend v2.2, works with the desktop LocalSend app).
 /// RECEIVE: a PC running LocalSend sends to this iPhone; the receive side
 /// needs no special entitlements because the sender does the discovering.
@@ -72,7 +72,7 @@ struct BookDropView: View {
             } header: {
                 Text("Receive")
             } footer: {
-                Text("Devices on the same Wi-Fi can send files to this iPhone. Nothing leaves the network and no account is involved. An access code, when set, must be typed on the sending device before any transfer starts.")
+                Text("Devices on the same network can send files to this iPhone. Nothing leaves the network and no account is involved. An access code, when set, must be typed on the sending device before any transfer starts.")
             }
 
             Section {
@@ -167,7 +167,7 @@ struct BookDropView: View {
 
     private var statusText: String {
         if receiver.isRunning {
-            return "Visible on this Wi-Fi"
+            return "Visible on this network"
         }
         return receiver.lastError == nil ? "Starting…" : "Unavailable"
     }

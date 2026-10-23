@@ -25,8 +25,10 @@ final class SentenceChunkerTests: XCTestCase {
     /// chunk's `text` equals its offset/length slice, and that the chunks
     /// together reconstruct the original string exactly.
     private func assertReconstructs(_ text: String, firstMax: Int = 200, batchMax: Int = 400,
+                                    minOpener: Int = 0,
                                     file: StaticString = #filePath, line: UInt = #line) {
-        let chunks = SentenceChunker.chunks(for: text, firstMaxChars: firstMax, batchMaxChars: batchMax)
+        let chunks = SentenceChunker.chunks(for: text, firstMaxChars: firstMax, batchMaxChars: batchMax,
+                                             minOpenerChars: minOpener)
         var expectedOffset = 0
         for chunk in chunks {
             XCTAssertEqual(chunk.offset, expectedOffset, "chunk offsets must be contiguous",
@@ -251,6 +253,75 @@ final class SentenceChunkerTests: XCTestCase {
         XCTAssertEqual(pieces.count, 3)
         let midSecond = (pieces[1].offset + pieces[1].endOffset) / 2
         XCTAssertEqual(SentenceChunker.resumeOffset(in: english, charsDone: midSecond), pieces[1].offset)
+    }
+
+    // MARK: - Opener completion (minOpenerChars)
+
+    /// DEFAULT OFF: with no minimum, the opener is exactly the first
+    /// sentence — the behaviour every other assertion in this file pins.
+    func testOpenerCompletionIsOffByDefault() {
+        let text = "Short. Another short one. And a third short sentence here."
+        let all = SentenceChunker.chunks(for: text, firstMaxChars: 200, batchMaxChars: 400)
+        XCTAssertEqual(all[0].text, "Short. ")
+    }
+
+    /// With a minimum, the opener grows by WHOLE following sentences until
+    /// it reaches the budget — the fix for the short-first-sentence texts
+    /// whose opener ran out of audio before the second buffer arrived.
+    func testOpenerCompletionPacksWholeSentences() {
+        let text = "Short. Another short one. And a third short sentence here."
+        let all = SentenceChunker.chunks(for: text, firstMaxChars: 200, batchMaxChars: 400, minOpenerChars: 40)
+        XCTAssertEqual(all[0].text, "Short. Another short one. ")
+        XCTAssertEqual(all[0].length, 26)
+        XCTAssertGreaterThanOrEqual(all[0].length, 40 - 14, "the opener takes whole sentences, so it may undershoot")
+        assertReconstructs(text, minOpener: 40)
+    }
+
+    /// The opener never exceeds the batch ceiling — a chunk above it would
+    /// be split by the engine into two renders.
+    func testOpenerCompletionNeverExceedsTheBatchCeiling() {
+        let text = "One two three four five. Six seven eight nine ten. Eleven twelve."
+        let all = SentenceChunker.chunks(for: text, firstMaxChars: 200, batchMaxChars: 20, minOpenerChars: 200)
+        XCTAssertLessThanOrEqual(all[0].length, 20)
+        assertReconstructs(text, batchMax: 20, minOpener: 200)
+    }
+
+    /// The opener completes only on WHOLE sentences: it never ends on a
+    /// clipped word.
+    func testOpenerCompletionNeverCutsASentence() {
+        let text = "Alpha bravo charlie. Delta echo foxtrot. Golf hotel india."
+        let all = SentenceChunker.chunks(for: text, firstMaxChars: 200, batchMaxChars: 400, minOpenerChars: 30)
+        XCTAssertTrue(all[0].text.hasSuffix(". "), "the opener must end at a sentence boundary")
+        XCTAssertTrue(all[0].text.hasPrefix("Alpha bravo charlie. "))
+        assertReconstructs(text, minOpener: 30)
+    }
+
+    /// The default-off path and the completion path agree on a text whose
+    /// FIRST sentence already fills the budget: nothing changes.
+    func testOpenerCompletionIsANoOpWhenTheFirstSentenceAlreadyFits() {
+        let text = "A reasonably long opening sentence right here. Second sentence follows."
+        let plain = SentenceChunker.chunks(for: text, firstMaxChars: 80, batchMaxChars: 400)
+        let completed = SentenceChunker.chunks(for: text, firstMaxChars: 80, batchMaxChars: 400, minOpenerChars: 80)
+        XCTAssertEqual(plain.map(\.text), completed.map(\.text))
+    }
+
+    /// A single-sentence text is untouched by the completion: there is
+    /// nothing to append.
+    func testOpenerCompletionOnASingleSentence() {
+        let text = "Only one sentence here."
+        let all = SentenceChunker.chunks(for: text, firstMaxChars: 200, batchMaxChars: 400, minOpenerChars: 400)
+        XCTAssertEqual(all.count, 1)
+        XCTAssertEqual(all[0].text, text)
+        assertReconstructs(text, minOpener: 400)
+    }
+
+    /// The completion preserves the reconstruction contract: the chunks
+    /// still concatenate to the original text exactly.
+    func testOpenerCompletionPreservesReconstruction() {
+        let text = "One. Two. Three. Four. Five. Six. Seven. Eight."
+        assertReconstructs(text, firstMax: 10, batchMax: 12, minOpener: 12)
+        assertReconstructs(text, firstMax: 200, batchMax: 400, minOpener: 45)
+        assertReconstructs("これはペンです。それもペンです。行こう！", minOpener: 20)
     }
 
     // MARK: - Resume offsets

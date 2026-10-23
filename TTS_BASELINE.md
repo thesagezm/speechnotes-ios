@@ -197,6 +197,43 @@ play path depends on which extractor feeds `speak()` (notes go through
 session-start line logs `chunk 0 is N chars` for every play, so a device session
 yields the real distribution instead of a guess.
 
+### The chunk schedule measures in SECONDS, not characters — 2026-10-23
+
+`ChunkSchedule` replaced the character ladder (`100→125→150→175→200`). The
+device log records why a character count cannot be the unit:
+
+| session | chunk 0 | chunk 0 audio | T2B (2nd buffer after 1st) | verdict |
+| --- | --- | --- | --- | --- |
+| Supertonic 44 ch | 15 chars | 2.01 s | 8 474 ms | −4 069 ms SHORT |
+| Supertonic 752 ch | 54 chars | 7.64 s | 13 214 ms | −1 462 ms SHORT |
+| Kokoro 1029 ch | 54 chars | 3.30 s | 7 359 ms | −1 155 ms SHORT |
+| Kokoro 949 ch | 54 chars | 3.30 s | 25 198 ms | −14 111 ms SHORT |
+
+Two failures are visible in that table:
+
+1. **The same 54 characters were 7.64 s of audio in one session and 3.30 s in
+   another.** A rung is a character count; it cannot see the speech rate, so
+   a size that covered one session was far too short for the next.
+2. **The ladder reset to the bottom on every covered session.** One lucky
+   session snapped the opener back to 100 chars, the next session was short
+   again, and the device oscillated at the bottom of the ladder forever.
+
+The schedule now holds an **audio-seconds target** (6 s to start, 3–30 s
+band). A late second buffer grows the target to at least the measured wait
+× 1.2; a covered session HOLDS the target; a comfortable cover (≥ 2 s of
+slack) settles it just above the wait it has to cover. The target becomes a
+character budget at speak time, from the engine's own measured
+chars-per-audio-second (learned from the opener itself, so Supertonic and
+Kokoro each get their own figure instead of a shared guess).
+
+`SentenceChunker.minOpenerChars` completes the opener by WHOLE sentences up
+to the budget — without it, a text whose first sentence is short produced a
+short opener no matter how large the budget was, which is exactly the shape
+of the sessions in the table above.
+
+The log line to read in a device session:
+`chunk schedule — second buffer was LATE, target N.NNs of opener audio, next opener NNN chars`.
+
 ---
 
 ## 3. What TTFA does not include
