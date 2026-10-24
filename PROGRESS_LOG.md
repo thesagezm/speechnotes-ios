@@ -381,3 +381,36 @@ a `[Data]` (must concatenate); `OpusLib.gain` needed to be a stored
 property; the Kokoro quality Section had to leave the `body` Form (type-check
 timeout + `$binding` scope); the MP4 timescale-normalize map fed an
 optional payload to the eager Packet init.
+
+## 2026-10-24 — Pomodoro timer (1.8.0/45) + web-import diagnosis handoff
+
+**Pomodoro (commits 8cc4e4c, 49c8cce, d7bd9c7 — CI GREEN, run 40125347834).**
+A Stats-tab subsection directly under Goals: idle state mirrors the goals
+empty card; running it shows a phase ring + countdown + Pause/Skip/Claim/
+Stop. Config subpage (sheet) with three modes: **Structured** (time limit
+or finish time, N evenly-spread breaks, absolute window — skips never move
+the finish), **Flowmodoro** (5 min focus banks 1 min break, claimable at
+3 min, pot resets on claim), **classic Pomodoro** (per-block/per-break
+minute tuning — the only mode with it). Mandatory 2–5 min prep opens every
+mode. Engine (`SpeechLogic/PomodoroEngine.swift`) is pure wall-clock math:
+the Codable session reconciles kills/suspension from `Date()` alone
+(19 engine tests). App side: `PomodoroStore` (JSON state, day-folded focus
+log, one pending phase notification) and the **gentle top-of-app banner**
+(user ask: "not a punch in my face") — thin material card, tap-to-dismiss,
+fires on last minute / block done / break's over / session complete /
+flow-claim; `.pomodoroBanner()` at the app root also owns the 1 s tick.
+Version stayed **1.8.0, build 45 only** — the user groups features into
+releases; MARKETING_VERSION is theirs to bump.
+
+**Web-article import — user report: "shared a site, it never worked" (open).**
+Pipeline traced end-to-end (share sheet → `onOpenURL` in NotesListView →
+`importWebsite` → `ImportService.websiteText` → `WebArticleService`:
+direct fetch+Readability → BPC bypass pass → rendered fallback →
+legacy tag-strip → bare-URL note). Every stage logs with a "WebArticle:"
+prefix. Ranked suspects: (1) readability.js missing from the built bundle
+— would nil every pass and always fall back to the bare-link note;
+(2) `onOpenURL` never firing (no "Fetching article…" toast at all);
+(3) per-site failures only (403s, JS shells). Diagnosis needs the device:
+Settings → Logs, filter "WebArticle", plus which symptom the user sees
+(no toast / bare-link note / toast then nothing). Unresolved — next
+session picks it up from `memory/web-article-import-diagnosis.md`.
