@@ -624,17 +624,22 @@ struct NotesListView: View {
         addNote(text: text)
     }
 
-    /// A shared website: fetch the page and save its readable text as a note;
-    /// on any failure the bare URL lands as the note instead, so the share
-    /// never silently vanishes.
+    /// A shared website: fetch the page and save its readable text as a note
+    /// (Readability; paywalled pages route through the Bypass Paywalls Clean
+    /// pass — see WebArticleService). The bypass pass can take tens of
+    /// seconds, so the toast names the stage; on any failure the bare URL
+    /// lands as the note instead, so the share never silently vanishes.
     private func importWebsite(_ url: URL) {
+        ToastCenter.shared.show("Fetching article…", duration: 60)
         Task.detached(priority: .userInitiated) {
             let fetched = await ImportService.websiteText(from: url)
             await MainActor.run {
                 if let text = fetched {
                     Haptics.success()
+                    ToastCenter.shared.show("Article saved")
                     addNote(text: text)
                 } else {
+                    ToastCenter.shared.show("Couldn't read the page — saved the link")
                     addNote(text: url.absoluteString)
                 }
             }

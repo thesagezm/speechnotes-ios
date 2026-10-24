@@ -4,6 +4,42 @@ Format: newest first. Every critique round, merge, and escalation lands here.
 
 ---
 
+**Web article import + Bypass Paywalls Clean** (branch `batch-c-d-session`, 2026-10-24):
+- **Shared URLs are articles now, not tag soup.** `WebArticleService`
+  (new): fetch with a Safari UA → Mozilla Readability 0.5.0 (vendored,
+  Apache-2.0) on the fetched HTML inside a headless WKWebView → note with
+  title/byline/source footer. JS app shells get a plain rendered pass.
+- **Paywalls route through BPC.** `PaywallHeuristics` (SpeechLogic, new,
+  9 unit tests in the CI `swift test` job) gates it: high-precision wall
+  markers (soft-wall copy, `isAccessibleForFree:false` JSON-LD,
+  news-corp `gateway-partial`, og:description-vs-stub truncation). On a
+  hit — or an always-bypass domain, or a failed fetch — the page loads in
+  a fresh ephemeral webview with the userscript form of Bypass Paywalls
+  Clean by magnolia1234 vendored (`bpc.en.user.js` v4.4.7.4 + its
+  `@require` companion `bpc_func.js`, MIT). Its one privileged API,
+  `GM.xmlHttpRequest`, bridges to URLSession via
+  `webkit.messageHandlers.bpcFetch`; everything else (cookie/localStorage
+  surgery, archive fallbacks) runs in-page on the clone-at-extract DOM.
+  Settle window counts bridge traffic, so BPC's post-load archive fetches
+  finish before extraction.
+- **Script refresh without a rebuild:** drop updated
+  `bpc.en.user.js`/`bpc_func.js` into On My iPhone → Speechnotes →
+  BypassPaywalls (Files-app visible) — they override the bundled pair.
+  Settings → Web import carries the toggle, the always-bypass domain
+  list, and the loaded script's version/origin.
+- **Local .html files** import through the same Readability path (no
+  fetch), DocumentBook's flattener as fallback. The note Files picker now
+  offers every document format `canImport` accepts (docx/pptx/odt/rtf/
+  html/mobi/azw3/… — the picker previously greyed them out even though
+  Open-In delivered them).
+- Import UX: "Fetching article…" toast for the multi-second pipeline;
+  legacy regex stripper demoted to last-ditch fallback; bare-URL note
+  still never lets a share vanish.
+- Version 1.8.0/44. **Device test pending** (paywall sites + a couple of
+  JS-shell pages); CI green required before any sideload.
+
+---
+
 **Audiobooks + session robustness** (branch `batch-c-d-session`, 2026-09-21):
 - **No retry.** `generateWithRetry` is deleted from the streaming core. A chunk
   that throws is logged once (with its index out of the total), sounded with

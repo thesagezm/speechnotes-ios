@@ -11,6 +11,21 @@ struct SettingsTabView: View {
     /// player surface) programmatically.
     @State private var pushStorageForExport = false
 
+    /// Web import (shared URLs → article notes): the Bypass Paywalls Clean
+    /// toggle and always-bypass domain list. @AppStorage keys are the same
+    /// ones `PaywallBypass` reads, so no glue code.
+    @AppStorage(PaywallBypass.enabledKey) private var bypassEnabled = true
+    @AppStorage(PaywallBypass.alwaysDomainsKey) private var alwaysBypassDomains = ""
+
+    /// One-time script status for the footer — loading the BPC pair reads
+    /// ~300 KB off disk, so it must not run per body render.
+    private static let bpcVersionLabel: String = {
+        guard let scripts = PaywallBypass.loadScripts() else {
+            return "script missing"
+        }
+        return "v\(scripts.version), \(scripts.origin)"
+    }()
+
     private static let jexType = UTType(importedAs: "com.joplin.jex")
 
     var body: some View {
@@ -45,6 +60,21 @@ struct SettingsTabView: View {
                     NavigationLink("BookDrop") {
                         BookDropView()
                     }
+                }
+                Section {
+                    Toggle("Paywall bypass", isOn: $bypassEnabled)
+                    TextField(
+                        "Always bypass domains (comma-separated)",
+                        text: $alwaysBypassDomains,
+                        axis: .vertical
+                    )
+                    .lineLimit(1...3)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                } header: {
+                    Text("Web import")
+                } footer: {
+                    Text("Pages shared from Safari extract their article text via Readability; when a paywall is detected, the import retries through Bypass Paywalls Clean (\(Self.bpcVersionLabel)). Drop updated bpc.en.user.js and bpc_func.js into On My iPhone → Speechnotes → BypassPaywalls to refresh the script without a rebuild.")
                 }
                 Section("Storage") {
                     // Closure-based link (the value-based NavigationLink from

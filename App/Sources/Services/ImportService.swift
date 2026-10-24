@@ -4,7 +4,11 @@ import PDFKit
 import UIKit
 import UniformTypeIdentifiers
 
-/// Imports text from files shared into the app (.txt, .md, .pdf).
+/// Imports text from files and web pages shared into the app: the text
+/// family (.txt/.md/…), every document format DocumentBook normalizes
+/// (docx/pptx/odt/mobi/rtf/html/…), PDF (PDFKit + capped OCR), and shared
+/// websites (WebArticleService: Readability + the Bypass Paywalls Clean
+/// pass).
 ///
 /// LiveContainer can't host Share Extensions, so import flows through
 /// extension-free channels instead: the in-app Files picker, drag & drop
@@ -24,10 +28,46 @@ final class ImportService {
     /// Built on the broad `.text` base instead of dynamic `UTType(filenameExtension:)`
     /// lookups — dynamic types for md/markdown proved unreliable in the
     /// fileImporter on device (files greyed out or silently unselectable),
-    /// while `.text` covers txt/md/markdown and friends.
-    static var acceptedContentTypes: [UTType] {
-        [.pdf, .text]
-    }
+    /// while `.text` covers txt/md/markdown and friends. The office/reader
+    /// document set is named the same way BooksView names its book types
+    /// (UTI where a system type exists, imported type otherwise) so the
+    /// picker can actually offer docx/pptx/html/rtf/mobi and friends —
+    /// `canImport` has accepted them all along; this only makes them
+    /// PICKABLE. EPUB and audio stay off the notes picker — those belong
+    /// to the Books shelf.
+    static var acceptedContentTypes: [UTType] { pickerTypes }
+
+    private static let pickerTypes: [UTType] = {
+        var types: [UTType] = [.pdf, .text, .html, .rtf]
+        var seen = Set(types.map(\.identifier))
+        // System UTIs for the office/reader formats (same map BooksView
+        // builds its picker from — several of these have no filename-
+        // extension resolution).
+        let byUTI: [String: String] = [
+            "docx": "org.openxmlformats.wordprocessingml.document",
+            "doc": "com.microsoft.word.doc",
+            "odt": "org.oasis.opendocument.text",
+            "pptx": "org.openxmlformats.presentationml.presentation",
+            "odp": "org.oasis.opendocument.presentation",
+            "mobi": "com.apple.mobibook",
+            "azw": "com.amazon.azw",
+        ]
+        for (_, uti) in byUTI.sorted(by: { $0.value < $1.value }) {
+            let type = UTType(importedAs: uti)
+            guard seen.insert(type.identifier).inserted else { continue }
+            types.append(type)
+        }
+        // Everything else in the document set, by extension (html/htm/md
+        // dedupe against types already collected; azw3/prc/pdb/htmlz/fb2
+        // resolve to imported types when the system has none).
+        for ext in DocumentBook.supportedExtensions.sorted() {
+            let type = UTType(filenameExtension: ext)
+                ?? UTType(importedAs: "org.speechnotes.\(ext)")
+            guard seen.insert(type.identifier).inserted else { continue }
+            types.append(type)
+        }
+        return types
+    }()
 
     static func canImport(_ url: URL) -> Bool {
         guard url.isFileURL else { return false }
@@ -66,10 +106,24 @@ final class ImportService {
         let title = url.deletingPathExtension().lastPathComponent
         let kind = url.pathExtension.lowercased()
 
-        let raw: String?
+        var raw: String?
+        // A saved page's own title, when the Readability path ran and found
+        // one — beats the filename as the note's first line.
+        var articleTitle: String?
         switch kind {
         case "pdf":
             raw = await pdfText(from: url)
+        case "html", "htm":
+            // Saved pages are articles: the same Readability extraction a
+            // shared URL gets, on the local bytes (no fetch). The
+            // DocumentBook flattener stays the fallback for page-shaped
+            // files Readability can't parse as articles.
+            if let article = await WebArticleService.shared.article(fromLocalHTMLFile: url) {
+                raw = article.text
+                articleTitle = article.title
+            } else {
+                raw = documentText(from: url, kind: kind)
+            }
         case _ where DocumentBook.canNormalize(kind):
             // Every document format — the office set plus the mobipocket,
             // FictionBook, RTF, HTML and plain-text readers — flattens to the
@@ -98,7 +152,9 @@ final class ImportService {
             return nil
         }
         Log.shared.info("ImportService: imported \(url.lastPathComponent) (\(text.count) chars, \(kind.isEmpty ? "text" : kind))")
-        return (title.isEmpty ? "Imported note" : String(title.prefix(60)), text)
+        let noteTitle = articleTitle.flatMap { $0.isEmpty ? nil : String($0.prefix(60)) }
+            ?? (title.isEmpty ? "Imported note" : String(title.prefix(60)))
+        return (noteTitle, text)
     }
 
     /// Any document format → speakable note text: parse, join paragraphs with
@@ -251,19 +307,49 @@ final class ImportService {
 
     // MARK: - Web pages
 
-    /// Caps so a shared website stays a note: 3 MB of HTML (a page beyond
-    /// this is an app shell or a download link, not an article) and 200k
-    /// characters of extracted text.
+    /// Caps for the legacy tag-strip fallback below: 3 MB of HTML (a page
+    /// beyond this is an app shell or a download link, not an article) and
+    /// 200k characters of extracted text.
     private static let maxWebPageBytes = 3 * 1024 * 1024
     private static let maxWebPageTextChars = 200_000
 
-    /// Downloads a shared URL and extracts the page's readable text — what
-    /// "share a website into notes" means. Bounded fetch (size + timeout),
-    /// script/style bodies dropped, tags stripped, entities decoded. nil on
-    /// any failure — the caller then saves the bare URL so the share never
-    /// silently vanishes.
+    /// A shared website → article note. The real pipeline is
+    /// `WebArticleService` (fetch → Readability → Bypass Paywalls Clean pass
+    /// for walled pages → rendered fallback); this keeps the old plain
+    /// tag-strip as the final fallback so the share never silently
+    /// vanishes, and the caller saves the bare URL when even that fails.
     static func websiteText(from url: URL) async -> String? {
         guard url.scheme == "http" || url.scheme == "https" else { return nil }
+        if let article = await WebArticleService.shared.article(from: url) {
+            Log.shared.info("ImportService: article via \(article.route.rawValue) pass — \(url.absoluteString)")
+            return formattedWebNote(from: article)
+        }
+        return await legacyStrippedWebsiteText(from: url)
+    }
+
+    /// The note body a web article becomes: title as the first line (notes
+    /// derive their title from it), attribution, the article text, and the
+    /// source URL at the foot so the note can always get back to the page.
+    private static func formattedWebNote(from article: WebArticle) -> String {
+        var header = article.title.isEmpty ? article.sourceURL.host ?? "Web article" : article.title
+        var attribution: [String] = []
+        if let byline = article.byline, !byline.isEmpty { attribution.append(byline) }
+        if let site = article.siteName, !site.isEmpty, site != article.byline { attribution.append(site) }
+        if !attribution.isEmpty {
+            header += "\n" + attribution.joined(separator: " · ")
+        }
+        var lines = [header, "", article.text]
+        if let scheme = article.sourceURL.scheme, scheme == "http" || scheme == "https" {
+            lines.append(contentsOf: ["", "Source: \(article.sourceURL.absoluteString)"])
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// The pre-Readability website importer, verbatim in behavior: bounded
+    /// fetch, script/style bodies dropped, tags stripped, entities decoded.
+    /// Only reached when the article pipeline returned nothing — a
+    /// non-article page Readability rejects can still leave useful text.
+    private static func legacyStrippedWebsiteText(from url: URL) async -> String? {
         var request = URLRequest(url: url)
         request.timeoutInterval = 20
         request.cachePolicy = .reloadIgnoringLocalCacheData
@@ -312,7 +398,7 @@ final class ImportService {
             Log.shared.error("ImportService: web page had no extractable text — \(url.absoluteString)")
             return nil
         }
-        Log.shared.info("ImportService: web page imported (\(trimmed.utf16.count) chars) — \(url.absoluteString)")
+        Log.shared.info("ImportService: web page imported via legacy stripper (\(trimmed.utf16.count) chars) — \(url.absoluteString)")
         return trimmed
     }
 
