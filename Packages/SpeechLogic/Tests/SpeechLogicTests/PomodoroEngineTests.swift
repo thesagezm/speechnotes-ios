@@ -22,6 +22,11 @@ final class PomodoroEngineTests: XCTestCase {
 
     private func seconds(_ n: Double) -> Date { t0.addingTimeInterval(n) }
 
+    /// `secondsRemaining` is optional (open-ended flow focus / done return
+    /// nil); tests expect a real number, so nil degrades to -1 and fails
+    /// the assertion loudly instead of the type checker.
+    private func secs(_ remaining: TimeInterval?) -> TimeInterval { remaining ?? -1 }
+
     // MARK: Classic
 
     /// Blocks [25, 30] + breaks [5, 15] (breaks == blocks → trailing break)
@@ -43,25 +48,25 @@ final class PomodoroEngineTests: XCTestCase {
 
         // Mid first block, nothing due.
         XCTAssertTrue(session.advanceIfDue(now: seconds(600)).isEmpty)
-        XCTAssertEqual(session.secondsRemaining(now: seconds(600)), 1500 - 480, accuracy: 0.001)
+        XCTAssertEqual(secs(session.secondsRemaining(now: seconds(600))), 1500 - 480, accuracy: 0.001)
 
         // First block completes at 120 + 1500.
         events = session.advanceIfDue(now: seconds(1620))
         XCTAssertEqual(events.map(\.completedPhase), [.focus])
         XCTAssertEqual(events.first?.seconds ?? 0, 1500, accuracy: 0.001)
         XCTAssertEqual(session.phase, .rest)
-        XCTAssertEqual(session.secondsRemaining(now: seconds(1620)), 300, accuracy: 0.001)
+        XCTAssertEqual(secs(session.secondsRemaining(now: seconds(1620))), 300, accuracy: 0.001)
 
         // Break then second (longer) block.
         events = session.advanceIfDue(now: seconds(1920))
         XCTAssertEqual(events.map(\.completedPhase), [.rest])
-        XCTAssertEqual(session.secondsRemaining(now: seconds(1920)), 1800, accuracy: 0.001)
+        XCTAssertEqual(secs(session.secondsRemaining(now: seconds(1920))), 1800, accuracy: 0.001)
 
         events = session.advanceIfDue(now: seconds(1920 + 1800))
         XCTAssertEqual(events.map(\.completedPhase), [.focus])
         XCTAssertEqual(events.first?.seconds ?? 0, 1800, accuracy: 0.001)
         XCTAssertEqual(session.phase, .rest)
-        XCTAssertEqual(session.secondsRemaining(now: seconds(3720)), 900, accuracy: 0.001)
+        XCTAssertEqual(secs(session.secondsRemaining(now: seconds(3720))), 900, accuracy: 0.001)
 
         // Trailing break runs out → done.
         events = session.advanceIfDue(now: seconds(4620))
@@ -148,6 +153,8 @@ final class PomodoroEngineTests: XCTestCase {
     /// builds no timeline beyond prep and refuses to segment.
     func testStructuredTooSmallWindow() {
         var config = PomodoroConfig(mode: .structured, prepSeconds: 300)
+        config.structuredByDuration = true
+        config.structuredDurationSeconds = 1200
         config.structuredBreakCount = 5
         config.structuredBreakSeconds = 600
         XCTAssertNil(config.structuredSegmentSeconds(window: 1200))
@@ -188,10 +195,10 @@ final class PomodoroEngineTests: XCTestCase {
         XCTAssertTrue(session.pause(now: seconds(600)))
         XCTAssertTrue(session.isPaused)
         XCTAssertFalse(session.pause(now: seconds(610))) // double pause is a no-op
-        XCTAssertEqual(session.secondsRemaining(now: seconds(3600)), 900, accuracy: 0.001) // frozen
+        XCTAssertEqual(secs(session.secondsRemaining(now: seconds(3600))), 900, accuracy: 0.001) // frozen
 
         XCTAssertTrue(session.resume(now: seconds(900)))
-        XCTAssertEqual(session.secondsRemaining(now: seconds(900)), 900, accuracy: 0.001)
+        XCTAssertEqual(secs(session.secondsRemaining(now: seconds(900))), 900, accuracy: 0.001)
         // The following break slides by the paused span too.
         XCTAssertEqual(session.steps[1].end, t0.addingTimeInterval(1800 + 300))
     }
@@ -219,7 +226,7 @@ final class PomodoroEngineTests: XCTestCase {
         XCTAssertTrue(events.isEmpty) // focus never "completes" on its own
         XCTAssertTrue(session.claimBreak(now: seconds(120 + 600)))
         XCTAssertEqual(session.phase, .rest)
-        XCTAssertEqual(session.secondsRemaining(now: seconds(120 + 600)), 120, accuracy: 0.001)
+        XCTAssertEqual(secs(session.secondsRemaining(now: seconds(120 + 600))), 120, accuracy: 0.001)
         XCTAssertEqual(session.flowAccruedFocus(now: seconds(120 + 600)), 0, accuracy: 0.001)
         XCTAssertEqual(session.flowBreaksClaimed, 1)
 

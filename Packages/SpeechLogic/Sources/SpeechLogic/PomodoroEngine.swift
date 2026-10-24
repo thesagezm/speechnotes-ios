@@ -58,7 +58,7 @@ public struct PomodoroConfig: Codable, Equatable, Sendable {
     public var classicBreakMinutes: [Int]
 
     public init(
-        mode: PomodoroMode,
+        mode: PomodoroMode = .classic,
         prepSeconds: Int = 180,
         structuredByDuration: Bool = true,
         structuredDurationSeconds: Int = 3 * 3600,
