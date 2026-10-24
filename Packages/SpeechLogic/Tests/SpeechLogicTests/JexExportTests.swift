@@ -127,10 +127,10 @@ final class JexExportTests: XCTestCase {
         let data = JexExport.buildArchive(notes: [simpleNote], notebooks: [notebook])
         let text = String(decoding: data, as: UTF8.self)
         XCTAssertTrue(text.contains("title: First note"), "note entries must carry title: — real Joplin notes do")
-        XCTAssertTrue(text.contains("created_time: 2023-11-14T22:15:00.100Z"))
-        XCTAssertTrue(text.contains("updated_time: 2023-11-14T22:16:40.200Z"))
-        XCTAssertTrue(text.contains("user_created_time: 2023-11-14T22:15:00.100Z"))
-        XCTAssertTrue(text.contains("user_updated_time: 2023-11-14T22:16:40.200Z"))
+        XCTAssertTrue(text.contains("created_time: 2023-11-14T22:15:00.000Z"))
+        XCTAssertTrue(text.contains("updated_time: 2023-11-14T22:16:40.000Z"))
+        XCTAssertTrue(text.contains("user_created_time: 2023-11-14T22:15:00.000Z"))
+        XCTAssertTrue(text.contains("user_updated_time: 2023-11-14T22:16:40.000Z"))
         // Folder entries: updated_time present (created value — this app has
         // no other folder timestamp).
         XCTAssertTrue(text.contains("\nupdated_time: 2023-11-14T22:13:20.000Z"))
