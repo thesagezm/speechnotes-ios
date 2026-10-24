@@ -115,6 +115,27 @@ final class JexExportTests: XCTestCase {
         XCTAssertTrue(text.contains("type_: 4"))
     }
 
+    // MARK: - Joplin-visible entry shape
+
+    /// The 2026-10-24 device report was "Joplin (mobile AND linux) refuses
+    /// the export". Joplin's own entries carry the full metadata set below;
+    /// the first export revision omitted `title` on notes (and folder
+    /// `updated_time`, resource `file_extension`) — real Joplin entries have
+    /// them, so the exporter must too. If a field here ever changes, the
+    /// importing side of Joplin decides, not our own parser.
+    func testNoteEntryCarriesFullJoplinMetadataSet() {
+        let data = JexExport.buildArchive(notes: [simpleNote], notebooks: [notebook])
+        let text = String(decoding: data, as: UTF8.self)
+        XCTAssertTrue(text.contains("title: First note"), "note entries must carry title: — real Joplin notes do")
+        XCTAssertTrue(text.contains("created_time: 2023-11-14T22:15:00.100Z"))
+        XCTAssertTrue(text.contains("updated_time: 2023-11-14T22:16:40.200Z"))
+        XCTAssertTrue(text.contains("user_created_time: 2023-11-14T22:15:00.100Z"))
+        XCTAssertTrue(text.contains("user_updated_time: 2023-11-14T22:16:40.200Z"))
+        // Folder entries: updated_time present (created value — this app has
+        // no other folder timestamp).
+        XCTAssertTrue(text.contains("\nupdated_time: 2023-11-14T22:13:20.000Z"))
+    }
+
     func testUTCISOFormattingWithMilliseconds() {
         // Joplin's importer accepts plain ISO-8601 but the millisecond form
         // matches what its own exporter writes.

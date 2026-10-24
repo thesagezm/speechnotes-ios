@@ -129,14 +129,25 @@ public enum JexExport {
 
     // MARK: - Entry builders
 
+    /// Field set mirrors what Joplin's own exports carry — the 2026-10-24
+    /// report was exports Joplin would not import. `title` on notes is the
+    /// load-bearing one: real Joplin note entries carry it in the metadata
+    /// block (folder entries use the body-as-title convention instead), and
+    /// the user timestamps ride along because Joplin's importer populates
+    /// its database fields straight from these keys.
     private static func noteEntry(_ note: NotePayload) -> (name: String, data: Data) {
         var fields: [(String, String)] = [
             ("id", note.id)
         ]
         if let parent = note.notebookId { fields.append(("parent_id", parent)) }
-        fields.append(("created_time", iso(note.createdAt)))
-        fields.append(("updated_time", iso(note.updatedAt)))
-        fields.append(("markup_language", "1")) // 1 = markdown
+        fields.append(contentsOf: [
+            ("title", note.title),
+            ("created_time", iso(note.createdAt)),
+            ("updated_time", iso(note.updatedAt)),
+            ("user_created_time", iso(note.createdAt)),
+            ("user_updated_time", iso(note.updatedAt)),
+            ("markup_language", "1"), // 1 = markdown
+        ])
         let body = note.markdownBody + metadataBlock(fields: fields, type: 1)
         return ("\(note.id).md", Data(body.utf8))
     }
@@ -147,6 +158,10 @@ public enum JexExport {
         ]
         if let parent = nb.parentId { fields.append(("parent_id", parent)) }
         fields.append(("created_time", iso(nb.createdAt)))
+        // Folders in this app carry no updated timestamp of their own;
+        // Joplin's folder records want one, and created_time is the honest
+        // value we have.
+        fields.append(("updated_time", iso(nb.createdAt)))
         let body = nb.title + metadataBlock(fields: fields, type: 2)
         return ("\(nb.id).md", Data(body.utf8))
     }
@@ -156,6 +171,7 @@ public enum JexExport {
             ("id", image.id),
             ("title", image.id + "." + image.fileExtension),
             ("mime", image.mimeType),
+            ("file_extension", image.fileExtension),
             ("filename", ""),
             ("created_time", iso(Date()))
         ]

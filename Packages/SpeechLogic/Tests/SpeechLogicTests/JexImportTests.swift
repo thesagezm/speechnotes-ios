@@ -60,6 +60,7 @@ final class JexImportTests: XCTestCase {
 
         let note = archive.notes.first { $0.id == Self.hex("bb22") }
         XCTAssertNotNil(note)
+        XCTAssertEqual(note?.title, "First note")
         XCTAssertEqual(note?.notebookId, Self.hex("aa11"))
         XCTAssertTrue(note?.body.contains("Some body text.") ?? false)
         XCTAssertEqual(note?.createdAt.timeIntervalSince1970 ?? 0, 1_700_000_100, accuracy: 1.0)
