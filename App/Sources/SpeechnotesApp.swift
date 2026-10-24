@@ -252,6 +252,9 @@ struct SpeechnotesApp: App {
                 // Toast surface — no environment dependency (uses
                 // ToastCenter.shared), so it can sit beside the mini-player.
                 .appToasts()
+                // Pomodoro banner + the app-wide timer tick — same
+                // no-environment-dependency contract (PomodoroStore.shared).
+                .pomodoroBanner()
                 // BookDrop send sheet, app-level: BackupExport/Storage/note
                 // swipes/book context menus post .bookDropSendRequest with
                 // their selection instead of each hosting its own copy.

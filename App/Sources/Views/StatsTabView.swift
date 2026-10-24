@@ -84,6 +84,10 @@ struct StatsTabView: View {
             ScrollView {
                 VStack(spacing: 14) {
                     GoalsCard()
+                    // The Pomodoro section — directly under Goals, above the
+                    // streak/summary cards, visible whether or not any stats
+                    // exist yet (a fresh install can still run a timer).
+                    PomodoroCard()
                     if hasAnyData {
                         headerCards
                         Picker("Range", selection: $range) {
