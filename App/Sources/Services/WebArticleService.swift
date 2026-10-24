@@ -422,7 +422,7 @@ private final class HeadlessArticlePass: NSObject, WKNavigationDelegate, WKScrip
             .components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
-        return String(lines.joined(separator: "\n\n").prefix(maxTextChars))
+        return String(lines.joined(separator: "\n\n").prefix(WebArticleService.maxTextChars))
     }
 
     // MARK: WKNavigationDelegate (main thread, per WebKit)

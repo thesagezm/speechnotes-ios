@@ -45,7 +45,7 @@ public enum PaywallHeuristics {
         ("paywall", "marker: paywall naming"),
         ("isPaywalled\":true", "marker: isPaywalled state"),
         ("\"paywalled\":true", "marker: paywalled state"),
-        ("gateway-partial", "marker: news-corp gateway partial"),
+        ("gateway-partial", "marker: gateway-partial (news-corp)"),
         ("cmp-paywall", "marker: consent-manager paywall"),
     ]
 
