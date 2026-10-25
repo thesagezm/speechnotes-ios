@@ -1,8 +1,9 @@
 import Foundation
 
 /// Joplin-compatible JEX IMPORT — the mirror of `JexExport`. A `.jex` file
-/// is a plain (uncompressed) tar of `<id>.md` entries whose trailing
-/// metadata block carries the id/type/parent/timestamps, plus
+/// is a plain (uncompressed) tar of `<id>.md` entries laid out the way
+/// Joplin's `BaseItem.serialize` writes them — `title\n\nbody\n\nprops`,
+/// with `type_` as the last prop and no trailing newline — plus
 /// `resources/<resource-id>.<ext>` binaries. Independent reimplementation
 /// from the same public format docs the exporter follows; no AGPL code.
 ///
@@ -12,6 +13,9 @@ import Foundation
 ///     blocks; some Python `tarfile` builds use the old magic), and pax
 ///     style entries with a `%size`-only extension (the common
 ///     `path`-or-`size` subset — not the general pax format).
+///   * the canonical `title\n\nbody\n\nprops` layout AND this app's older
+///     exports (body verbatim, title as a `title:` prop, trailing newline)
+///     — a present `title:` prop marks the old layout.
 ///   * metadata blocks with `type_` anywhere in the trailing block and
 ///     `key: value` lines; unknown keys are ignored.
 ///   * type_ 1 (note), 2 (folder), 4 (resource metadata). Everything else
@@ -116,18 +120,13 @@ public enum JexImport {
                 } else if let metadata = MetadataBlock.parse(String(decoding: payload, as: UTF8.self)) {
                     switch metadata.type {
                     case 1:
-                        if let note = noteFrom(metadata: metadata, bodyText: String(decoding: payload, as: UTF8.self)) {
+                        if let note = noteFrom(metadata: metadata) {
                             archive.notes.append(note)
                         }
                     case 2:
-                        let bodyText = String(decoding: payload, as: UTF8.self)
-                        let title = bodyText
-                            .components(separatedBy: "\n")
-                            .first?
-                            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                         archive.notebooks.append(ImportedNotebook(
                             id: metadata.fields["id"] ?? "",
-                            title: title,
+                            title: metadata.title.isEmpty ? (metadata.fields["title"] ?? "") : metadata.title,
                             parentId: metadata.fields["parent_id"],
                             createdAt: metadata.date("created_time")
                         ))
@@ -168,22 +167,22 @@ public enum JexImport {
 
     // MARK: - Per-type extraction
 
-    /// A note's title in JEX is NOT in the metadata block (it is its own
-    /// `title` field in the database, not the file). Exporters that follow
-    /// Joplin's RAW format leave the first line of the body as the closest
-    /// thing to a title; THIS app's exporter writes no separate title either.
-    /// The body is everything before the metadata block, verbatim.
-    private static func noteFrom(metadata: MetadataBlock, bodyText: String) -> ImportedNote? {
+    /// A note's title/body come from the file's body part under Joplin
+    /// semantics: `title\n\nbody\n\nprops`, where the title is the FIRST
+    /// line and the note body starts after the blank separator. This app's
+    /// older exports (title as a `title:` prop, no title line) are detected
+    /// by the prop and read the old way.
+    private static func noteFrom(metadata: MetadataBlock) -> ImportedNote? {
         let id = metadata.fields["id"]
         guard let id, !id.isEmpty else { return nil }
         return ImportedNote(
             id: id,
-            title: metadata.fields["title"] ?? "",
-            body: metadata.bodyText ?? "",
+            title: metadata.title,
+            body: metadata.bodyText,
             notebookId: metadata.fields["parent_id"],
             createdAt: metadata.date("created_time"),
             updatedAt: metadata.date("updated_time"),
-            resources: resourceTargets(in: metadata.bodyText ?? "")
+            resources: resourceTargets(in: metadata.bodyText)
         )
     }
 
@@ -295,42 +294,70 @@ public enum JexImport {
     private struct MetadataBlock {
         let type: Int
         let fields: [String: String]
-        /// Body text = everything before the metadata block began.
-        let bodyText: String?
+        /// The entry's title — the first line of the body part under
+        /// Joplin semantics, or the `title:` prop in this app's old layout.
+        let title: String
+        /// The note body: the body part minus the title line and the blank
+        /// separator beneath it.
+        let bodyText: String
 
+        /// Mirrors Joplin's `BaseItem.unserialize`: scan lines from the END
+        /// collecting `key: value` props until the first blank line; the
+        /// lines above it are the body part whose FIRST line is the title
+        /// (a note's body starts two lines down — the parser splices title
+        /// + blank away). Tolerates trailing blank lines, which this app's
+        /// older exports (and nothing from Joplin itself) end files with.
         static func parse(_ entry: String) -> MetadataBlock? {
-            // The metadata block starts at the LAST occurrence of a line
-            // `key: value` sequence ending in `type_:` — search from the end.
-            guard let typeRange = entry.range(of: "\ntype_: ", options: .backwards) else { return nil }
-            let blockStart = entry[..<typeRange.lowerBound]
-            // Walk back to the blank line that begins the block. A resource
-            // metadata file has NO body — its block starts at the top, with
-            // no blank line to find; that is a valid block too.
-            let head = String(blockStart)
-            if let separator = head.range(of: "\n\n", options: .backwards) {
-                let body = String(head[..<separator.lowerBound])
-                let block = String(entry[separator.upperBound...])
-                return parseBlock(block, body: body)
+            var lines = entry.components(separatedBy: "\n")
+            while let last = lines.last, last.trimmingCharacters(in: .whitespaces).isEmpty {
+                lines.removeLast()
             }
-            return parseBlock(entry, body: "")
-        }
+            guard !lines.isEmpty else { return nil }
 
-        static func parseBlock(_ block: String, body: String) -> MetadataBlock? {
             var fields: [String: String] = [:]
             var type = 0
-            for line in block.components(separatedBy: "\n") {
-                guard let colon = line.firstIndex(of: ":") else { continue }
+            var bodyEnd: Int? = nil  // exclusive end of the body part
+            var index = lines.count - 1
+            while index >= 0 {
+                let line = lines[index].trimmingCharacters(in: .whitespaces)
+                if line.isEmpty {
+                    bodyEnd = index
+                    break
+                }
+                guard let colon = line.firstIndex(of: ":") else { return nil }
                 let key = String(line[..<colon]).trimmingCharacters(in: .whitespaces)
+                guard !key.isEmpty else { return nil }
                 let value = String(line[line.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
-                if key.isEmpty { continue }
                 if key == "type_" {
                     type = Int(value) ?? 0
                 } else {
                     fields[key] = value
                 }
+                index -= 1
             }
             guard type != 0 else { return nil }
-            return MetadataBlock(type: type, fields: fields, bodyText: body)
+
+            let bodyLines: [String] = bodyEnd.map { Array(lines[0..<$0]) } ?? []
+
+            // Joplin's own serializer never writes `title:` as a prop (the
+            // title rides the first body line), so a present prop marks
+            // this app's OLD export layout: body verbatim, title from the
+            // prop. Old folders/resources carry no prop and parse the
+            // Joplin way, which is what their layout already was.
+            if let legacyTitle = fields["title"], !legacyTitle.isEmpty {
+                return MetadataBlock(
+                    type: type,
+                    fields: fields,
+                    title: legacyTitle,
+                    bodyText: bodyLines.joined(separator: "\n")
+                )
+            }
+
+            let title = bodyLines.first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            // The splice removes the title line AND the blank separator;
+            // with neither left (title-only file) the body is empty.
+            let body = bodyLines.count > 2 ? bodyLines[2...].joined(separator: "\n") : ""
+            return MetadataBlock(type: type, fields: fields, title: title, bodyText: body)
         }
 
         func date(_ key: String) -> Date {

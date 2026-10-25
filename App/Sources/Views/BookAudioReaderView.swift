@@ -88,6 +88,9 @@ struct BookAudioReaderView: View {
     /// and shows its own title bar; the old app-wide key stranded hidden
     /// bars across surfaces.
     @AppStorage("immersiveBars.audio") private var immersiveBarsHidden = false
+    /// Portrait transport minimised — the SAME key BookPlayerBar uses, so
+    /// every reader opens the way it was left (the editor-bar pattern).
+    @AppStorage("bookBarMinimized") private var bookBarMinimized = false
 
     var body: some View {
         // Landscape: the cover/title/chapter block keeps the leading width
@@ -147,6 +150,12 @@ struct BookAudioReaderView: View {
 
                         if blockedReason != nil {
                             blockedBanner
+                                .padding(.bottom, 12)
+                        } else if bookBarMinimized {
+                            // 2026-10-25 device feedback: the portrait bottom
+                            // controls minimise like the note editor's — the
+                            // cover gets the space back while a book plays.
+                            minimizedTransport
                                 .padding(.bottom, 12)
                         } else {
                             audioTransport
@@ -279,10 +288,68 @@ struct BookAudioReaderView: View {
             HStack(spacing: 12) {
                 speedMenu
                 sleepMenu
+                Spacer(minLength: 0)
+                // Minimize — the note editor's chevron affordance (the
+                // portrait bottom controls collapse to a slim pill).
+                Button {
+                    Haptics.tap()
+                    bookBarMinimized = true
+                } label: {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 28, height: 28)
+                        .background(Circle().fill(Color.secondary.opacity(0.12)))
+                }
+                .accessibilityLabel("Minimize playback controls")
             }
 
             timeReadout
         }
+    }
+
+    /// The minimised portrait transport: one slim translucent pill — play
+    /// state, chapter progress, and the expand chevron (the editor bar's
+    /// minimizedPill, audiobook flavor).
+    private var minimizedTransport: some View {
+        HStack(spacing: 12) {
+            Button {
+                Haptics.tap()
+                togglePlayback()
+            } label: {
+                Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 28, height: 28)
+                    .background(Circle().fill(Color.accentColor))
+            }
+
+            Text("\(Int((displayProgress * 100).rounded()))%")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+
+            Spacer(minLength: 0)
+
+            Button {
+                Haptics.tap()
+                bookBarMinimized = false
+            } label: {
+                Image(systemName: "chevron.up")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 28, height: 28)
+                    .background(Circle().fill(Color.secondary.opacity(0.12)))
+            }
+            .accessibilityLabel("Expand playback controls")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .shadow(color: .black.opacity(0.12), radius: 8, y: 2)
+        )
+        .padding(.horizontal, 12)
     }
 
     /// One transport icon with the same affordance as the play button —

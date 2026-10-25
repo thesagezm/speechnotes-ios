@@ -20,12 +20,80 @@ struct BookPlayerBar: View {
     var onExport: (() -> Void)? = nil
 
     @AppStorage("readAlongEnabled") private var readAlongEnabled = true
+    /// Collapsed to the slim pill — the note editor's minimise pattern
+    /// (2026-10-25 device feedback: books want it too). One app-wide
+    /// preference shared with the audiobook transport, so the reader always
+    /// opens the way it was left.
+    @AppStorage("bookBarMinimized") private var bookBarMinimized = false
 
     private var chapterIsActive: Bool {
         player.nowPlayingBookId == book.id.uuidString
     }
 
     var body: some View {
+        if bookBarMinimized {
+            minimizedPill
+        } else {
+            expandedBar
+        }
+    }
+
+    /// Collapsed transport: one slim translucent pill — play state, progress,
+    /// and the expand chevron (the editor bar's minimizedPill, book flavor).
+    private var minimizedPill: some View {
+        HStack(spacing: 12) {
+            Button {
+                Haptics.tap()
+                onToggle()
+            } label: {
+                Group {
+                    if chapterIsActive && player.state == .generating {
+                        ProgressView()
+                    } else if player.state == .speaking && chapterIsActive {
+                        Image(systemName: "pause.fill")
+                    } else {
+                        Image(systemName: "play.fill")
+                    }
+                }
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(.white)
+                .frame(width: 28, height: 28)
+                .background(Circle().fill(Color.accentColor))
+            }
+            .buttonStyle(.plain)
+
+            Text(progressLabel)
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+
+            Spacer(minLength: 0)
+
+            Button {
+                Haptics.tap()
+                bookBarMinimized = false
+            } label: {
+                Image(systemName: "chevron.up")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 28, height: 28)
+                    .background(Circle().fill(Color.secondary.opacity(0.12)))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Expand playback controls")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .shadow(color: .black.opacity(0.12), radius: 8, y: 2)
+        )
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+    }
+
+    private var expandedBar: some View {
         HStack(spacing: 14) {
             Button {
                 Haptics.tap()
@@ -119,6 +187,19 @@ struct BookPlayerBar: View {
                     .foregroundStyle(.secondary)
             }
             .frame(width: 110)
+
+            Button {
+                Haptics.tap()
+                bookBarMinimized = true
+            } label: {
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 28, height: 28)
+                    .background(Circle().fill(Color.secondary.opacity(0.12)))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Minimize playback controls")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)

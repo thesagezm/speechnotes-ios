@@ -414,3 +414,41 @@ prefix. Ranked suspects: (1) readability.js missing from the built bundle
 Settings → Logs, filter "WebArticle", plus which symptom the user sees
 (no toast / bare-link note / toast then nothing). Unresolved — next
 session picks it up from `memory/web-article-import-diagnosis.md`.
+
+**Device-feedback batch (2026-10-25 — five reports, one pass).**
+1. **Pomodoro card** (PomodoroViews): running state rebuilt as a
+   full-width ROUNDED-RECTANGLE progress card (fill grows with the phase,
+   countdown + phase pill centered inside) — the circular ring read
+   "round" and off-center; the rectangle centers itself by construction.
+   No renames, version untouched.
+2. **Stale-UI trio**: delete/favourite didn't refresh the notes list (the
+   memoized sections key on `notes.version`, and `softDelete`,
+   `setFavorite`, `recover`, `move`, `clearNotebook` never bumped it —
+   pin did, which is why pin alone worked); the Kokoro High/Compact
+   checkmark never moved (picker read a non-publishing UserDefaults
+   computed prop — now `@AppStorage("kokoroTier")`); plus a real
+   swapped-args bug in the v1.7.4 Kokoro migration (`set("kokoroTier",
+   forKey: "compact")` — migrated compact users opened on High).
+3. **Books minimise**: `BookPlayerBar` (EPUB + PDF portrait) and the
+   audiobook portrait transport collapse to a slim pill via one shared
+   `bookBarMinimized` AppStorage — the editor bar's chevron pattern.
+4. **JEX root cause found — Joplin's own layout, verified against its
+   source (`BaseItem.serialize`/`unserialize`, node-tar)**: (a) our props
+   block ended with a trailing newline; Joplin scans lines from the END
+   and stops at the first blank line, so it parsed ZERO props →
+   "Missing required property: type_" → the WHOLE import aborts;
+   (b) the title must ride the FIRST BODY LINE (`title\n\nbody\n\nprops`)
+   — a metadata `title:` prop is ignored/overwritten and a note without
+   the title line loses its first two body lines; (c) node-tar matches
+   the exact magic+version bytes `ustar\0` + `00`, ours wrote version
+   zeros. Exporter now writes the canonical layout; importer parses it
+   (old app archives still import); new test simulates Joplin's
+   unserializer strictly over every entry.
+5. **BookDrop phone side verified against the Linux twin** (wire
+   compatible both directions — report in memory). One real bug fixed:
+   two same-named files in one session overwrote each other and the
+   survivor was routed twice (Linux fixed this with per-fileId names);
+   iOS now tracks landed names per fileId with readable -2 suffixes, and
+   cancel is restricted to the session's own sender IP.
+Version stays **1.8.0/45** per the release policy; device retest of the
+JEX import in real Joplin is the open check.

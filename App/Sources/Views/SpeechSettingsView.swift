@@ -11,6 +11,14 @@ struct SpeechSettingsView: View {
     /// next chunk with no restart.
     @AppStorage("supertonicRenderQuality") private var supertonicRenderQuality = "high"
 
+    /// Kokoro's tier dial, stored under the same `kokoroTier` key
+    /// `SpeechPlayer.kokoroWantsBigModel` reads. It MUST be @AppStorage, not
+    /// a Binding over the player's computed property: that property reads
+    /// UserDefaults without publishing anything, so the picker's checkmark
+    /// never moved until something else re-rendered the section (2026-10-25
+    /// device feedback). @AppStorage observes the defaults store directly.
+    @AppStorage("kokoroTier") private var kokoroTier = "high"
+
     /// Kokoro's quality dial (2026-10-08 device feedback: the Engine picker
     /// had TWO Kokoro rows AND a separate quality picker — three ways to say
     /// the same thing). Now the Engine picker has ONE Kokoro row and this
@@ -38,9 +46,9 @@ struct SpeechSettingsView: View {
 
     private var kokoroQuality: Binding<String> {
         Binding(
-            get: { player.kokoroWantsBigModel ? "high" : "compact" },
+            get: { kokoroTier == "compact" ? "compact" : "high" },
             set: { newValue in
-                UserDefaults.standard.set(newValue == "compact" ? "compact" : "high", forKey: "kokoroTier")
+                kokoroTier = newValue == "compact" ? "compact" : "high"
                 // Re-drive the engine through the same rebuild a kind switch
                 // uses, so the tier change applies NOW (a rebuild is
                 // idempotent when the tier did not actually change).

@@ -3,19 +3,23 @@ import UniformTypeIdentifiers
 
 /// Joplin-compatible JEX export. Independent reimplementation — a `.jex`
 /// file is a plain (uncompressed) tar containing `<id>.md` files whose
-/// trailing metadata block Joplin parses on import. Schema per the public
-/// Joplin export-format docs (Interops RAW/JEX exporter); no AGPL code read
-/// or repurposed.
+/// content is `title\n\nbody\n\nprops` — exactly Joplin's own
+/// `BaseItem.serialize` layout. No AGPL code read or repurposed.
 ///
 /// Entry catalog Joplin consumes:
-///   <note-id>.md     — note body + metadata + `type_: 1`
-///   <folder-id>.md   — notebook title line + metadata + `type_: 2`
-///   <resource-id>.md — empty body + metadata (id, title=filename, mime) + `type_: 4`
+///   <note-id>.md     — title line + body + trailing props + `type_: 1`
+///   <folder-id>.md   — title line + trailing props + `type_: 2`
+///   <resource-id>.md — filename title line + trailing props + `type_: 4`
 ///   resources/<resource-id>.<ext> — the binary blob
 ///
 /// Conventions: 32 lowercase hex ids (no dashes), ISO-8601 UTC timestamps
-/// with milliseconds (`2026-09-08T16:00:43.123Z`), UTF-8, metadata keys in
-/// a fixed order with `type_` LAST (the Joplin importer anchors on it).
+/// with milliseconds (`2026-09-08T16:00:43.123Z`), UTF-8, props joined by
+/// single newlines with `type_` LAST and NO trailing newline (Joplin's
+/// parser scans from the end of the file and stops at the first blank
+/// line — a trailing newline makes it read zero props and abort the
+/// import), and the title rides the FIRST BODY LINE (Joplin's parser
+/// overwrites any metadata `title` with it, and swallows the note's first
+/// two body lines if the title line is missing).
 public enum JexExport {
 
     public struct NotePayload {
@@ -91,7 +95,12 @@ public enum JexExport {
             writeOctal(Int(Date().timeIntervalSince1970), at: 136, width: 12)
             write("        ", at: 148, max: 8) // chksum placeholder: 8 spaces per POSIX
             header[156] = UInt8(ascii: "0")    // type: regular file
+            // "ustar\0" + "00" — the exact 8 bytes node-tar (Joplin's
+            // extractor) matches to treat a header as ustar. Version zeros
+            // left it a v7 header, tolerated by GNU tar but not guaranteed
+            // by node-tar's strict mode.
             write("ustar", at: 257, max: 6)
+            write("00", at: 263, max: 2)
             var checksum = 0
             for b in header { checksum += Int(b) }
             writeOctal(checksum, at: 148, width: 8)
@@ -119,64 +128,95 @@ public enum JexExport {
         isoFormatter.string(from: date)
     }
 
-    /// Trailing metadata block Joplin's importer anchors on. `type_` is
-    /// LAST on purpose — its parser looks for it to delimit the block.
+    /// Trailing metadata block, mirroring Joplin's serializer: props joined
+    /// by single newlines, `type_` last, and NO trailing newline. Joplin's
+    /// `unserialize` scans lines from the END and stops at the first blank
+    /// line — one trailing newline and it reads zero props, which throws
+    /// "Missing required property: type_" and aborts the entire import.
     private static func metadataBlock(fields: [(String, String)], type: Int) -> String {
         var lines = fields.map { "\($0.0): \($0.1)" }
         lines.append("type_: \(type)")
-        return "\n\n" + lines.joined(separator: "\n") + "\n"
+        return lines.joined(separator: "\n")
     }
 
     // MARK: - Entry builders
 
-    /// Field set mirrors what Joplin's own exports carry — the 2026-10-24
-    /// report was exports Joplin would not import. `title` on notes is the
-    /// load-bearing one: real Joplin note entries carry it in the metadata
-    /// block (folder entries use the body-as-title convention instead), and
-    /// the user timestamps ride along because Joplin's importer populates
-    /// its database fields straight from these keys.
+    /// File layout mirrors Joplin's `BaseItem.serialize`: `[title, body?,
+    /// props].join("\n\n")`. The 2026-10-25 device report ("Joplin still
+    /// refuses the export") traced to two divergences from that layout:
+    /// a props block with a trailing newline (fatal — see metadataBlock)
+    /// and no title line (Joplin's parser takes the title from the FIRST
+    /// body line and overwrites whatever `title:` prop is present; a note
+    /// without the line loses its first two body lines to the title splice).
+    /// `title`/`body` never appear as props — Joplin's own serializer skips
+    /// them there.
     private static func noteEntry(_ note: NotePayload) -> (name: String, data: Data) {
         var fields: [(String, String)] = [
             ("id", note.id)
         ]
         if let parent = note.notebookId { fields.append(("parent_id", parent)) }
         fields.append(contentsOf: [
-            ("title", note.title),
             ("created_time", iso(note.createdAt)),
             ("updated_time", iso(note.updatedAt)),
             ("user_created_time", iso(note.createdAt)),
             ("user_updated_time", iso(note.updatedAt)),
-            ("markup_language", "1"), // 1 = markdown
         ])
-        let body = note.markdownBody + metadataBlock(fields: fields, type: 1)
-        return ("\(note.id).md", Data(body.utf8))
+        let props = metadataBlock(fields: fields, type: 1)
+        var parts = [note.title.trimmingCharacters(in: .whitespacesAndNewlines)]
+        let body = trailingTrim(note.markdownBody)
+        if !body.isEmpty { parts.append(body) }
+        parts.append(props)
+        return ("\(note.id).md", Data(parts.joined(separator: "\n\n").utf8))
     }
 
+    /// Folders carry their title as the single body line, exactly like a
+    /// Joplin folder entry.
     private static func notebookEntry(_ nb: NotebookPayload) -> (name: String, data: Data) {
         var fields: [(String, String)] = [
             ("id", nb.id)
         ]
         if let parent = nb.parentId { fields.append(("parent_id", parent)) }
-        fields.append(("created_time", iso(nb.createdAt)))
-        // Folders in this app carry no updated timestamp of their own;
-        // Joplin's folder records want one, and created_time is the honest
-        // value we have.
-        fields.append(("updated_time", iso(nb.createdAt)))
-        let body = nb.title + metadataBlock(fields: fields, type: 2)
+        fields.append(contentsOf: [
+            ("created_time", iso(nb.createdAt)),
+            // Folders in this app carry no updated timestamp of their own;
+            // Joplin's folder records want one, and created_time is the honest
+            // value we have.
+            ("updated_time", iso(nb.createdAt)),
+        ])
+        let body = nb.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            + "\n\n"
+            + metadataBlock(fields: fields, type: 2)
         return ("\(nb.id).md", Data(body.utf8))
     }
 
+    /// A resource's title line is its `id.ext` filename — what Joplin's
+    /// `Resource.filename` resolves to and what the importer matches the
+    /// binary in `resources/` against.
     private static func resourceMetadataEntry(_ image: ImagePayload) -> (name: String, data: Data) {
+        let now = iso(Date())
         let fields: [(String, String)] = [
             ("id", image.id),
-            ("title", image.id + "." + image.fileExtension),
             ("mime", image.mimeType),
             ("file_extension", image.fileExtension),
             ("filename", ""),
-            ("created_time", iso(Date()))
+            ("created_time", now),
+            ("updated_time", now),
         ]
-        let body = metadataBlock(fields: fields, type: 4)
+        let body = "\(image.id).\(image.fileExtension)"
+            + "\n\n"
+            + metadataBlock(fields: fields, type: 4)
         return ("\(image.id).md", Data(body.utf8))
+    }
+
+    /// A body's trailing blank lines would sit between it and the props
+    /// block; Joplin keeps bodies as stored, but trimming the tail keeps
+    /// the `\n\n` seams exactly canonical.
+    private static func trailingTrim(_ text: String) -> String {
+        var trimmed = text
+        while let last = trimmed.last, last.isWhitespace || last.isNewline {
+            trimmed.removeLast()
+        }
+        return trimmed
     }
 
     // MARK: - Public API

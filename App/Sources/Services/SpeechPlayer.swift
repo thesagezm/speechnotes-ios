@@ -682,7 +682,9 @@ final class SpeechPlayer: ObservableObject {
             }
         } else if storedEngine == "kokoroSmall" || storedEngine == "kitten" {
             carriedKind = .kokoro
-            defaults.set("kokoroTier", forKey: "compact")
+            // Value first, key second — this line had them swapped, so the
+            // migrated tier never landed and compact users opened on High.
+            defaults.set("compact", forKey: "kokoroTier")
             defaults.removeObject(forKey: "kittenVoice")
             defaults.removeObject(forKey: "recentKittenVoices")
         } else {

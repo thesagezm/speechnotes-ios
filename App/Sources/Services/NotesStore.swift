@@ -99,6 +99,7 @@ final class NotesStore: ObservableObject {
     func setFavorite(_ favorite: Bool, noteId: UUID) {
         guard let index = allNotes.firstIndex(where: { $0.id == noteId }) else { return }
         allNotes[index].isFavorite = favorite
+        bumpVersion()  // list views memoize on `version`
         rowMetadata.removeValue(forKey: noteId)
         save()
     }
@@ -109,6 +110,7 @@ final class NotesStore: ObservableObject {
         guard allNotes[index].notebookId != notebookId else { return }
         allNotes[index].notebookId = notebookId
         allNotes[index].updatedAt = Date()
+        bumpVersion()  // scope membership changed — the memoized list is stale
         rowMetadata.removeValue(forKey: noteId)
         save()
     }
@@ -120,7 +122,10 @@ final class NotesStore: ObservableObject {
             allNotes[index].notebookId = nil
             changed = true
         }
-        if changed { save() }
+        if changed {
+            bumpVersion()  // scope membership changed — the memoized list is stale
+            save()
+        }
     }
 
     /// Active notes in a notebook scope (nil id = Unfiled).
@@ -149,6 +154,7 @@ final class NotesStore: ObservableObject {
         guard let index = allNotes.firstIndex(where: { $0.id == noteId }) else { return }
         guard allNotes[index].deletedAt == nil else { return }
         allNotes[index].deletedAt = Date()
+        bumpVersion()  // list views memoize on `version`
         // If that note is the one speaking, playback must not outlive it —
         // SpeechPlayer observes and stops.
         NotificationCenter.default.post(name: .noteDeleted, object: noteId)
@@ -160,6 +166,7 @@ final class NotesStore: ObservableObject {
               allNotes[index].deletedAt != nil else { return }
         allNotes[index].deletedAt = nil
         allNotes[index].updatedAt = Date()
+        bumpVersion()  // the bin's list memoizes on `version` too
         rowMetadata.removeValue(forKey: noteId)
         save()
     }

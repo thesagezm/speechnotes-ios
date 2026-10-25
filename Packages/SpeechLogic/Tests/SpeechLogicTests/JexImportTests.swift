@@ -88,12 +88,15 @@ final class JexImportTests: XCTestCase {
 
     // MARK: - Real Joplin shape
 
-    /// Joplin's own writer: body, blank line, metadata block, `type_` last —
-    /// with the note body carrying `../resources/<id>.png` links.
+    /// Joplin's own writer: `title\n\nbody\n\nprops`, `type_` last, NO
+    /// trailing newline — `BaseItem.serialize` joins [title, body, props]
+    /// with blank lines, and the parser splices the title line away.
     func testParsesJoplinWrittenEntry() throws {
         let id = Self.hex("ee55")
         let resourceId = Self.hex("ff66")
         let entry = """
+        The note title
+
         The note body.
 
         ![cover](../resources/\(resourceId).png)
@@ -113,10 +116,33 @@ final class JexImportTests: XCTestCase {
         XCTAssertEqual(archive.notes.count, 1)
         let note = archive.notes[0]
         XCTAssertEqual(note.id, id)
-        XCTAssertTrue(note.body.contains("The note body."))
+        XCTAssertEqual(note.title, "The note title")
+        XCTAssertEqual(note.body, "The note body.\n\n![cover](../resources/\(resourceId).png)")
         XCTAssertEqual(note.resources[resourceId], "../resources/\(resourceId).png")
         XCTAssertEqual(archive.resources.count, 1)
         XCTAssertEqual(archive.resources[0].fileExtension, "png")
+    }
+
+    /// This app's OLD export layout (title as a prop, body verbatim, trailing
+    /// newline) must keep importing — archives in the wild have it.
+    func testParsesLegacyAppEntry() throws {
+        let id = Self.hex("ee55")
+        let entry = """
+        The body, verbatim.
+        Second line.
+
+        id: \(id)
+        title: The old title
+        created_time: 2026-09-08T16:00:43.123Z
+        updated_time: 2026-09-08T16:00:43.123Z
+        type_: 1
+
+        """
+        let data = tarArchive(entries: [("\(id).md", Data(entry.utf8))])
+        let archive = try JexImport.parse(data)
+        XCTAssertEqual(archive.notes.count, 1)
+        XCTAssertEqual(archive.notes[0].title, "The old title")
+        XCTAssertEqual(archive.notes[0].body, "The body, verbatim.\nSecond line.")
     }
 
     /// A folder entry: FIRST LINE is the title (Joplin's RAW format has no

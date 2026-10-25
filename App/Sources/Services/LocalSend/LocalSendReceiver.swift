@@ -314,16 +314,31 @@ final class LocalSendReceiver: ObservableObject {
 
     /// Moves a verified body into the session dir (same volume → a rename)
     /// and routes when the last file lands.
+    ///
+    /// The on-disk name is tracked PER fileId: two files named `book.epub`
+    /// in one session must not overwrite each other (the Linux twin's
+    /// lesson — the old remove-then-move here silently dropped the first
+    /// file and routed the survivor twice). A collision gets a readable
+    /// `-2`/`-3` suffix rather than an id prefix, so names the router
+    /// surfaces (Exports, history) stay honest.
     private func land(url: URL, session: Session, fileId: String, meta: LocalSendFileMeta) -> LocalSendHTTPResponse {
-        let target = session.dir.appendingPathComponent(Self.safeFileName(meta.fileName, fallback: fileId))
+        let base = Self.safeFileName(meta.fileName, fallback: fileId)
+        var name = base
+        var counter = 2
+        while session.landedNames.values.contains(name)
+            || FileManager.default.fileExists(atPath: session.dir.appendingPathComponent(name).path) {
+            let ext = (base as NSString).pathExtension
+            let stem = (base as NSString).deletingPathExtension
+            name = ext.isEmpty ? "\(stem)-\(counter)" : "\(stem)-\(counter).\(ext)"
+            counter += 1
+        }
+        let target = session.dir.appendingPathComponent(name)
         do {
-            if FileManager.default.fileExists(atPath: target.path) {
-                try FileManager.default.removeItem(at: target)
-            }
             try FileManager.default.moveItem(at: url, to: target)
         } catch {
             return .status(500)
         }
+        session.landedNames[fileId] = name
         session.receivedIds.insert(fileId)
         if session.receivedIds.count >= session.files.count {
             complete(session)
@@ -334,6 +349,12 @@ final class LocalSendReceiver: ObservableObject {
     private func respondCancel(_ request: LocalSendHTTPRequest) -> LocalSendHTTPResponse {
         guard let sessionId = request.queryValue("sessionId"), let session = sessions[sessionId] else {
             return .badRequest()
+        }
+        // Only the session's own sender may cancel it — a LAN peer that
+        // guesses the id must not kill a live transfer (the upload
+        // admission's rule, applied here too).
+        guard session.senderHost == nil || session.senderHost == request.remoteHost else {
+            return .forbidden()
         }
         discardSession(session)
         return .status(200)
@@ -348,6 +369,9 @@ final class LocalSendReceiver: ObservableObject {
         var files: [String: LocalSendFileMeta]
         var tokens: [String: String]
         var receivedIds: Set<String> = []
+        /// fileId → the on-disk name it landed under (uniquified on
+        /// same-name collisions — see `land`).
+        var landedNames: [String: String] = [:]
 
         init(senderHost: String?, files: [String: LocalSendFileMeta]) {
             self.senderHost = senderHost
@@ -396,9 +420,10 @@ final class LocalSendReceiver: ObservableObject {
 
     /// All files landed — route each into the import pipeline, then clean.
     private func complete(_ session: Session) {
-        let landed = session.files.values
-            .filter { session.receivedIds.contains($0.id) }
-            .map { Self.safeFileName($0.fileName, fallback: $0.id) }
+        // Route by the name each file LANDED under, not a fresh
+        // safeFileName() pass — that would map two same-named files to one
+        // path (first file lost, survivor routed twice).
+        let landed = session.receivedIds.compactMap { session.landedNames[$0] }
         let dir = session.dir
         timeoutTasks[session.id]?.cancel()
         timeoutTasks.removeValue(forKey: session.id)

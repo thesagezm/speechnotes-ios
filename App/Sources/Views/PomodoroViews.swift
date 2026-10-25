@@ -117,37 +117,48 @@ private struct PomodoroRunView: View {
             let tint = PomodoroPalette.tint(for: session.phase)
 
             VStack(spacing: 12) {
-                ring(now: now, tint: tint)
+                timerCard(now: now, tint: tint)
                 caption
                 controls(now: now, tint: tint)
             }
+            .frame(maxWidth: .infinity)
         }
     }
 
-    // MARK: Ring
+    // MARK: Timer card
 
-    private func ring(now: Date, tint: Color) -> some View {
+    /// The running display — a full-width rounded rectangle whose fill grows
+    /// with the phase (2026-10-25 device feedback: the circular ring read
+    /// "round" and sat off-center in the card; a rectangle that spans the
+    /// card centers itself by construction).
+    private func timerCard(now: Date, tint: Color) -> some View {
         let progress = session.isPaused ? min(session.phaseProgress(now: now), 1) : session.phaseProgress(now: now)
         let paused = session.isPaused
 
         return ZStack {
-            Circle()
-                .stroke(Color(.systemFill), lineWidth: 10)
-            Circle()
-                .trim(from: 0, to: CGFloat(max(0.001, min(1, progress))))
-                .stroke(
-                    LinearGradient(colors: [tint.opacity(0.55), tint], startPoint: .top, endPoint: .bottom),
-                    style: StrokeStyle(lineWidth: 10, lineCap: .round)
-                )
-                .rotationEffect(.degrees(-90))
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color(.systemFill).opacity(0.45))
+            GeometryReader { proxy in
+                Rectangle()
+                    .fill(
+                        LinearGradient(colors: [tint.opacity(0.5), tint], startPoint: .top, endPoint: .bottom)
+                    )
+                    .frame(width: max(6, proxy.size.width * CGFloat(max(0.001, min(1, progress)))))
+            }
             VStack(spacing: 3) {
                 Text(centerTime(now: now))
-                    .font(.system(size: 26, weight: .heavy, design: .rounded).monospacedDigit())
+                    .font(.system(size: 28, weight: .heavy, design: .rounded).monospacedDigit())
                     .foregroundStyle(paused ? Color.secondary : Color.primary)
                 phasePill
             }
         }
-        .frame(width: 116, height: 116)
+        .frame(height: 84)
+        .frame(maxWidth: .infinity)
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(tint.opacity(0.25), lineWidth: 1)
+        )
     }
 
     /// Fixed phases count down; flowmodoro's open focus counts up (the pot).
@@ -263,6 +274,7 @@ private struct PomodoroRunView: View {
             .buttonStyle(.bordered)
         }
         .font(.footnote.weight(.semibold))
+        .frame(maxWidth: .infinity)
         .confirmationDialog("End this pomodoro?", isPresented: $confirmingStop, titleVisibility: .visible) {
             Button("End timer", role: .destructive) {
                 Haptics.press()
