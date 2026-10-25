@@ -25,6 +25,14 @@ struct BookPlayerBar: View {
     /// preference shared with the audiobook transport, so the reader always
     /// opens the way it was left.
     @AppStorage("bookBarMinimized") private var bookBarMinimized = false
+    /// Chapter steppers for the COLLAPSED pill — the reader's own chapter
+    /// bar disappears while minimised (2026-10-25: it used to stay on
+    /// screen above the pill), so the steppers move into the pill to keep
+    /// navigation one tap away. nil hides that side.
+    var onStepBack: (() -> Void)? = nil
+    var onStepForward: (() -> Void)? = nil
+    var stepBackEnabled: Bool = true
+    var stepForwardEnabled: Bool = true
 
     private var chapterIsActive: Bool {
         player.nowPlayingBookId == book.id.uuidString
@@ -38,59 +46,30 @@ struct BookPlayerBar: View {
         }
     }
 
-    /// Collapsed transport: one slim translucent pill — play state, progress,
-    /// and the expand chevron (the editor bar's minimizedPill, book flavor).
+    /// Collapsed transport: one slim translucent pill — play state, the
+    /// chapter steppers, progress, and the expand chevron. The SAME shape
+    /// as the note editor's minimised bar (ultraThinMaterial pill).
     private var minimizedPill: some View {
-        HStack(spacing: 12) {
-            Button {
-                Haptics.tap()
-                onToggle()
-            } label: {
-                Group {
-                    if chapterIsActive && player.state == .generating {
-                        ProgressView()
-                    } else if player.state == .speaking && chapterIsActive {
-                        Image(systemName: "pause.fill")
-                    } else {
-                        Image(systemName: "play.fill")
-                    }
-                }
-                .font(.system(size: 13, weight: .bold))
-                .foregroundStyle(.white)
-                .frame(width: 28, height: 28)
-                .background(Circle().fill(Color.accentColor))
-            }
-            .buttonStyle(.plain)
-
-            Text(progressLabel)
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-
-            Spacer(minLength: 0)
-
-            Button {
-                Haptics.tap()
-                bookBarMinimized = false
-            } label: {
-                Image(systemName: "chevron.up")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 28, height: 28)
-                    .background(Circle().fill(Color.secondary.opacity(0.12)))
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Expand playback controls")
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(.ultraThinMaterial)
-                .shadow(color: .black.opacity(0.12), radius: 8, y: 2)
+        MinimizedBookTransport(
+            playIcon: player.state == .speaking && chapterIsActive ? "pause.fill" : "play.fill",
+            isGenerating: chapterIsActive && player.state == .generating,
+            progressText: compactProgressLabel,
+            stepBackEnabled: stepBackEnabled,
+            stepForwardEnabled: stepForwardEnabled,
+            onToggle: { onToggle() },
+            onStepBack: onStepBack,
+            onStepForward: onStepForward,
+            onExpand: { bookBarMinimized = false }
         )
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
+    }
+
+    /// The pill's readout — the bare percentage (the Notes pill's shape);
+    /// the expanded bar keeps the longer "N% of chapter" phrasing.
+    private var compactProgressLabel: String {
+        if let progress = player.progress {
+            return "\(Int((progress * 100).rounded()))%"
+        }
+        return player.state == .generating ? "Preparing…" : "Paused"
     }
 
     private var expandedBar: some View {

@@ -452,3 +452,24 @@ session picks it up from `memory/web-article-import-diagnosis.md`.
    cancel is restricted to the session's own sender IP.
 Version stays **1.8.0/45** per the release policy; device retest of the
 JEX import in real Joplin is the open check.
+
+**Books minimised transport, round 2 (2026-10-25 device feedback).**
+User: "the bar showing controls for next and previous chapter as well the
+chapter number and pages persist above the minimised bar... i want this gone
+when i minimise... maybe just the next and previous controls can be folded
+into the minimised bar - allow it to have opacity like the one in notes...
+and use the extra gained space to display more of the book... basically make
+it exactly the same as in notes maybe with just the addition of next and
+previous control in minimised bar". Root cause of round 1's miss: the
+readers stack the chapter/page bar ABOVE the playback bar, so collapsing
+only the playback bar left the navigation bar standing. Now: a NEW shared
+`MinimizedBookTransport` pill (the Notes shape — ultraThinMaterial rounded
+rect, floating over the content) carries play/pause, PREV/NEXT chapter,
+the percentage and the expand chevron; the EPUB/PDF/audiobook chapter or
+page bars are GONE while minimised (a chapterless PDF keeps its page bar —
+it has no playback bar, hence no minimise button), and the freed space goes
+back to the reading surface. One `bookBarMinimized` key for all three
+readers. Handover: `Docs/HANDOVER-BOOKS-MINIMIZED-TRANSPORT.md`.
+Joplin import confirmed working by the user on device; the rest of the
+2026-10-25 batch (pomodoro rectangle, stale-UI trio, BookDrop fixes) also
+reported good. Version stays 1.8.0/45.

@@ -80,6 +80,9 @@ struct BookPDFReaderView: View {
     /// and shows its own title bar; the old app-wide key stranded hidden
     /// bars across surfaces.
     @AppStorage("immersiveBars.pdf") private var immersiveBarsHidden = false
+    /// Portrait bottom controls collapsed to the Notes-style pill (shared
+    /// with the EPUB + audiobook readers).
+    @AppStorage("bookBarMinimized") private var bookBarMinimized = false
 
     /// Reader + playback, arranged per orientation — same guided-rotation
     /// shape as the EPUB reader: one GeometryReader, one content identity, an
@@ -107,7 +110,21 @@ struct BookPDFReaderView: View {
                 } else {
                     VStack(spacing: 0) {
                         readerSurface
-                        pageBar
+                        // 2026-10-25 device feedback: the page/chapter bar
+                        // used to survive the minimise, leaving the
+                        // next/previous controls and the chapter number
+                        // stacked above the collapsed pill. While minimised
+                        // it is GONE (the steppers ride the pill) and the
+                        // page takes the space back.
+                        //
+                        // A PDF with NO chapters has no playback bar — and
+                        // therefore no minimise button of its own — so its
+                        // page bar must stay: the shared preference could
+                        // otherwise leave such a PDF with no navigation at
+                        // all.
+                        if !bookBarMinimized || !hasChapters {
+                            pageBar
+                        }
                         if hasChapters {
                             playerBar
                         }
@@ -400,7 +417,14 @@ struct BookPDFReaderView: View {
                         chapterIndex: chapterForCurrentPage ?? 0
                     )
                 }
-            }
+            },
+            // The steppers ride the MINIMISED pill (the page/chapter bar is
+            // gone while minimised) — same semantics as the bar's own
+            // chevrons.
+            onStepBack: { goChapter(currentChapterIndex - 1) },
+            onStepForward: { goChapter(currentChapterIndex + 1) },
+            stepBackEnabled: currentChapterIndex > 0,
+            stepForwardEnabled: totalChapters == 0 || currentChapterIndex < totalChapters - 1
         )
     }
 

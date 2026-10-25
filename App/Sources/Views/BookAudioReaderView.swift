@@ -162,8 +162,15 @@ struct BookAudioReaderView: View {
                                 .padding(.bottom, 12)
                         }
 
-                        chapterBar
-                            .padding(.bottom, 8)
+                        // The chapter label bar is GONE while minimised — it
+                        // used to stay on screen above the collapsed pill
+                        // (the "chapter number persists above the minimised
+                        // bar" complaint). Its navigation lives in the pill
+                        // now.
+                        if !bookBarMinimized {
+                            chapterBar
+                                .padding(.bottom, 8)
+                        }
                     }
                     .transition(.opacity)
                 }
@@ -309,45 +316,20 @@ struct BookAudioReaderView: View {
     }
 
     /// The minimised portrait transport: one slim translucent pill — play
-    /// state, chapter progress, and the expand chevron (the editor bar's
-    /// minimizedPill, audiobook flavor).
+    /// state, the chapter steppers, progress, and the expand chevron (the
+    /// note editor's minimised bar, audiobook flavor).
     private var minimizedTransport: some View {
-        HStack(spacing: 12) {
-            Button {
-                Haptics.tap()
-                togglePlayback()
-            } label: {
-                Image(systemName: isPlaying ? "pause.fill" : "play.fill")
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(.white)
-                    .frame(width: 28, height: 28)
-                    .background(Circle().fill(Color.accentColor))
-            }
-
-            Text("\(Int((displayProgress * 100).rounded()))%")
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
-
-            Spacer(minLength: 0)
-
-            Button {
-                Haptics.tap()
-                bookBarMinimized = false
-            } label: {
-                Image(systemName: "chevron.up")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 28, height: 28)
-                    .background(Circle().fill(Color.secondary.opacity(0.12)))
-            }
-            .accessibilityLabel("Expand playback controls")
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(.ultraThinMaterial)
-                .shadow(color: .black.opacity(0.12), radius: 8, y: 2)
+        MinimizedBookTransport(
+            playIcon: isPlaying ? "pause.fill" : "play.fill",
+            progressText: "\(Int((displayProgress * 100).rounded()))%",
+            // The SAME disable rules as the expanded transport's chapter
+            // chevrons, so the two never disagree.
+            stepBackEnabled: chapterIndex > 0,
+            stepForwardEnabled: totalChapters == 0 || chapterIndex < totalChapters - 1,
+            onToggle: { togglePlayback() },
+            onStepBack: { stepChapter(-1) },
+            onStepForward: { stepChapter(1) },
+            onExpand: { bookBarMinimized = false }
         )
         .padding(.horizontal, 12)
     }

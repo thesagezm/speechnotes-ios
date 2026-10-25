@@ -94,6 +94,9 @@ struct BookReaderView: View {
     /// The toggle now arrives from the webview's own JS (chromeTap) and this
     /// state belongs to this reader alone.
     @AppStorage("immersiveBars.epub") private var immersiveBarsHidden = false
+    /// Portrait bottom controls collapsed to the Notes-style pill (shared
+    /// with the PDF + audiobook readers).
+    @AppStorage("bookBarMinimized") private var bookBarMinimized = false
 
     /// Reader surface + playback controls, arranged per orientation.
     ///
@@ -130,7 +133,15 @@ struct BookReaderView: View {
                 } else {
                     VStack(spacing: 0) {
                         readerSurface
-                        chapterBar
+                        // 2026-10-25 device feedback: the chapter bar used
+                        // to survive the minimise, leaving the next/previous
+                        // controls and the chapter number stacked above the
+                        // collapsed pill. While minimised the bar is GONE
+                        // (the steppers ride the pill itself) and the reading
+                        // surface takes the space back.
+                        if !bookBarMinimized {
+                            chapterBar
+                        }
                         playerBar
                     }
                     .transition(.opacity)
@@ -398,7 +409,14 @@ struct BookReaderView: View {
                         chapterIndex: chapterIndex
                     )
                 }
-            }
+            },
+            // The steppers ride the MINIMISED pill (the chapter bar is gone
+            // while minimised) — same semantics as the chapter bar's own
+            // chevrons.
+            onStepBack: { goChapter(chapterIndex - 1) },
+            onStepForward: { goChapter(chapterIndex + 1) },
+            stepBackEnabled: chapterIndex > 0,
+            stepForwardEnabled: totalChapters == 0 || chapterIndex < totalChapters - 1
         )
     }
 
