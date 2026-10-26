@@ -233,6 +233,10 @@ final class LocalSendHTTPServer {
         guard self.listener === listener else { return }
         switch state {
         case .ready:
+            // The winning port is the candidate THIS listener was bound to —
+            // carried through as (candidates, index) because the state
+            // handler replaced tryBindLocked's inline closure.
+            let candidate = candidates[index]
             port = candidate
             preferredPort = candidate
             let ready = onReady
