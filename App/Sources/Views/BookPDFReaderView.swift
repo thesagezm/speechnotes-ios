@@ -195,14 +195,14 @@ struct BookPDFReaderView: View {
             progress: player.progress,
             isGenerating: chapterIsActive && player.state == .generating,
             isPlayEnabled: true,
+            sessionActive: chapterIsActive
+                && (player.state == .speaking || player.state == .paused || player.state == .generating),
             // The glyph follows the PLAYER's speaking state, not the book's
             // narrowed session: the rail used to need a non-nil progress as
             // well, and progress is nil until the engine's first chunk
             // reports in — so the button stayed "play" while the audio was
             // already running (the landscape play/pause bug).
             isSpeaking: chapterIsActive && player.state == .speaking,
-            sessionActive: chapterIsActive
-                && (player.state == .speaking || player.state == .paused || player.state == .generating),
             extraTrailing: AnyView(
                 Button {
                     Haptics.tap()
