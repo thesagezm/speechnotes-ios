@@ -66,7 +66,12 @@ final class LocalSendHTTPServer {
     /// Called on the server queue for every complete request.
     var handler: ((LocalSendHTTPRequest) -> LocalSendHTTPResponse)?
 
+    /// Connection work and the lifecycle state machine. The listener
+    /// itself lives on `listenerQueue` — its `.cancelled` state must be
+    /// deliverable while `queue` is blocked in the teardown wait, or a
+    /// stop would deadlock against its own confirmation.
     private let queue = DispatchQueue(label: "com.speechnotes.localsend.server")
+    private let listenerQueue = DispatchQueue(label: "com.speechnotes.localsend.listener")
     private var listener: NWListener?
     private(set) var port: UInt16 = 0
     /// Body bytes spill to disk past this threshold (uploads).
@@ -75,21 +80,179 @@ final class LocalSendHTTPServer {
     /// endless header block.
     private let maxHeadBytes = 64 << 10
 
+    /// What the owner asked for. Transitions are serialized against this:
+    /// a start or stop that lands mid-transition is honoured when the
+    /// running one finishes, instead of two listeners racing for sockets.
+    private var desiredRunning = false
+    private var transitioning = false
+    /// Set when every candidate port was refused; the next explicit
+    /// start retries, but nothing rebinds on its own — an automatic
+    /// retry loop is the other half of how the range got exhausted.
+    private var rangeExhausted = false
+    /// The port the last successful bind used. Tried first on the next
+    /// start, so a restart lands back on the port the user saw instead
+    /// of creeping one port up the range per toggle.
+    private var preferredPort: UInt16?
+    private var onReady: ((UInt16) -> Void)?
+    private var onFailed: ((String) -> Void)?
+
+    private static let portRange = Array(UInt16(53317)...UInt16(53327))
+
     // MARK: - Lifecycle
 
-    /// Starts on the first free port among 53317–53327 (the LocalSend
-    /// default first). `onReady(port)` / `onFailed(reason)` fire on main.
+    /// Starts on the first free port among 53317–53327 (the port this
+    /// server used last first). `onReady(port)` / `onFailed(reason)` fire
+    /// on main.
     func start(onReady: @escaping (UInt16) -> Void, onFailed: @escaping (String) -> Void) {
         queue.async { [weak self] in
-            self?.startLocked(candidates: Array(53317...53327), onReady: onReady, onFailed: onFailed)
+            guard let self else { return }
+            self.desiredRunning = true
+            self.rangeExhausted = false
+            self.onReady = onReady
+            self.onFailed = onFailed
+            self.applyLocked()
         }
     }
 
     func stop() {
         queue.async { [weak self] in
-            self?.listener?.cancel()
-            self?.listener = nil
-            self?.port = 0
+            guard let self else { return }
+            self.desiredRunning = false
+            self.applyLocked()
+        }
+    }
+
+    /// Bring the listener in line with `desiredRunning`. One transition at
+    /// a time: a start that arrives while a stop is still releasing the
+    /// socket must wait for the release instead of binding into a port
+    /// that is about to be taken away — that bind is refused, the refusal
+    /// moves the bind to the next port, and repeated on every toggle that
+    /// is how the bind walked 53317…53327 and the receiver ended up
+    /// "unavailable".
+    private func applyLocked() {
+        guard !transitioning else { return }
+        if desiredRunning {
+            guard listener == nil, !rangeExhausted else { return }
+            transitioning = true
+            teardownLocked { self.bindLocked() }
+        } else {
+            guard listener != nil else { return }
+            transitioning = true
+            teardownLocked { self.finishTransitionLocked() }
+        }
+    }
+
+    /// Cancel the current listener and return only once its socket is
+    /// really released. `done` runs on the server queue.
+    private func teardownLocked(_ done: @escaping () -> Void) {
+        guard let listener = self.listener else {
+            done()
+            return
+        }
+        self.listener = nil
+        self.port = 0
+        let released = DispatchSemaphore(value: 0)
+        listener.stateUpdateHandler = { state in
+            if case .cancelled = state { released.signal() }
+        }
+        listener.cancel()
+        // The state arrives on listenerQueue, so this wait cannot deadlock
+        // against the callback it waits for. Bounded: a listener that was
+        // already cancelled never reports `.cancelled` again, and the next
+        // start must not hang on a callback that cannot come.
+        _ = released.wait(timeout: .now() + 1.0)
+        done()
+    }
+
+    private func finishTransitionLocked() {
+        transitioning = false
+        // The owner may have flipped the switch while the transition ran.
+        if desiredRunning != (listener != nil) {
+            applyLocked()
+        }
+    }
+
+    private func bindLocked() {
+        guard desiredRunning else {
+            finishTransitionLocked()
+            return
+        }
+        let range = Self.portRange
+        let candidates: [UInt16]
+        if let preferred = preferredPort {
+            candidates = [preferred] + range.filter { $0 != preferred }
+        } else {
+            candidates = range
+        }
+        tryBindLocked(candidates, index: 0)
+    }
+
+    private func tryBindLocked(_ candidates: [UInt16], index: Int) {
+        guard index < candidates.count else {
+            rangeExhausted = true
+            let failed = onFailed
+            DispatchQueue.main.async { failed?("Ports 53317–53327 are all in use") }
+            finishTransitionLocked()
+            return
+        }
+        let candidate = candidates[index]
+        let params = NWParameters.tcp
+        params.allowLocalEndpointReuse = true
+        guard let listener = try? NWListener(using: params, on: NWEndpoint.Port(rawValue: candidate)!) else {
+            tryBindLocked(candidates, index: index + 1)
+            return
+        }
+        self.listener = listener
+        listener.newConnectionHandler = { [weak self] connection in
+            self?.accept(connection)
+        }
+        // States arrive on listenerQueue and hop to the server queue,
+        // where the whole state machine lives.
+        listener.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
+            switch state {
+            case .ready, .failed:
+                self.queue.async {
+                    self.handleListenerState(state, listener: listener, candidates: candidates, index: index)
+                }
+            default:
+                break
+            }
+        }
+        listener.start(queue: listenerQueue)
+    }
+
+    /// Only the CURRENT listener may act on its state: a callback from one
+    /// that was replaced must not tear down (or restart) its replacement.
+    private func handleListenerState(
+        _ state: NWListener.State,
+        listener: NWListener,
+        candidates: [UInt16],
+        index: Int
+    ) {
+        guard self.listener === listener else { return }
+        switch state {
+        case .ready:
+            port = candidate
+            preferredPort = candidate
+            let ready = onReady
+            DispatchQueue.main.async { ready?(candidate) }
+            finishTransitionLocked()
+        case .failed:
+            // The port is taken (or unusable): release this listener and
+            // WAIT for the socket before knocking on the next door —
+            // binding the next candidate while this socket is still open
+            // is the other way the port ran out of range.
+            teardownLocked { [weak self] in
+                guard let self else { return }
+                if self.desiredRunning {
+                    self.tryBindLocked(candidates, index: index + 1)
+                } else {
+                    self.finishTransitionLocked()
+                }
+            }
+        default:
+            break
         }
     }
 
@@ -113,40 +276,6 @@ final class LocalSendHTTPServer {
     /// meaningful after .ready).
     private func livePortLocked() -> UInt16? {
         port > 0 ? port : nil
-    }
-
-    private func startLocked(candidates: [UInt16], onReady: @escaping (UInt16) -> Void, onFailed: @escaping (String) -> Void) {
-        listener?.cancel()
-        guard let candidate = candidates.first else {
-            DispatchQueue.main.async { onFailed("Ports 53317–53327 are all in use") }
-            return
-        }
-        let params = NWParameters.tcp
-        params.allowLocalEndpointReuse = true
-        guard let listener = try? NWListener(using: params, on: NWEndpoint.Port(rawValue: candidate)!) else {
-            startLocked(candidates: Array(candidates.dropFirst()), onReady: onReady, onFailed: onFailed)
-            return
-        }
-        self.listener = listener
-        listener.stateUpdateHandler = { [weak self] state in
-            guard let self else { return }
-            switch state {
-            case .ready:
-                self.port = candidate
-                DispatchQueue.main.async { onReady(candidate) }
-            case .failed:
-                self.listener?.cancel()
-                self.listener = nil
-                self.port = 0
-                self.startLocked(candidates: Array(candidates.dropFirst()), onReady: onReady, onFailed: onFailed)
-            default:
-                break
-            }
-        }
-        listener.newConnectionHandler = { [weak self] connection in
-            self?.accept(connection)
-        }
-        listener.start(queue: queue)
     }
 
     /// 500 ms loopback connect — probe, don't trust the flag.

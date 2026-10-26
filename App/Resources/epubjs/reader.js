@@ -105,8 +105,20 @@
     var v = document.getElementById("viewer");
     if (!v) return;
     // Paginated column widths are measured off the container — padding
-    // there breaks the column math, so margins are scrolled-only.
-    v.style.padding = STATE.flow === "paginated" ? "0" : STATE.padding + "px";
+    // there breaks the column math, so margins are scrolled-only. In
+    // paginated flow the container instead stops ABOVE the bottom
+    // safe-area inset: the shell now runs edge-to-edge behind the floating
+    // transport and the tab bar, and without this the page's last lines
+    // would park under them. env() reflects the webview's own safe-area
+    // insets (viewport-fit=cover), which include the chrome it runs
+    // behind; scrolled flow insets itself through native scrolling.
+    if (STATE.flow === "paginated") {
+      v.style.padding = "0";
+      v.style.height = "calc(100% - env(safe-area-inset-bottom))";
+    } else {
+      v.style.padding = STATE.padding + "px";
+      v.style.height = "100%";
+    }
   }
 
   // --- auto-scroll (scrolled flow) ---------------------------------------
@@ -211,6 +223,7 @@
       // below the destroy() wiring).
       rendition.on("rendered", function (section, view) {
         attachGestures(view);
+        injectTablePanning(view);
       });
 
       rendition.on("relocated", function (location) {
@@ -367,6 +380,41 @@
   // the shell forwards to the native message channel. Taps on links and
   // text selections stay out of the toggle; swipes only fire in paginated
   // flow (scrolled swiping is native scrolling).
+
+  // Converted books (Calibre & friends) carry WIDE tables — many columns,
+  // no width discipline — that clip at the page edge with no way to reach
+  // the lateral end. Each rendered section gets the responsive-table
+  // treatment: the table becomes a block that pans horizontally inside the
+  // page. !important because converted books' own CSS out-specifies a bare
+  // selector, and this is a usability fix, not typography — a table that
+  // fits is rendered exactly as the book styled it (fit-content keeps a
+  // narrow table shrink-wrapped instead of stretched full-width). Nested
+  // tables are reset back to native table display: the block treatment
+  // would stack their cells vertically and destroy cell layouts.
+  function injectTablePanning(view) {
+    var doc = view && view.document;
+    if (!doc || !doc.head) return;
+    var style = doc.createElement("style");
+    style.textContent =
+      "table { display: block !important; width: fit-content !important; " +
+      "max-width: 100% !important; overflow-x: auto !important; " +
+      "-webkit-overflow-scrolling: touch; }" +
+      "table table { display: table !important; width: auto !important; " +
+      "max-width: none !important; overflow: visible !important; }";
+    doc.head.appendChild(style);
+  }
+
+  // A swipe that starts on a pannable table pans the TABLE — the page must
+  // not also turn. Checked once per touchstart (the swipe's owning target),
+  // not on touchend where the target can differ.
+  function touchStartsOnTable(node, doc) {
+    while (node && node !== doc) {
+      if (node.tagName === "TABLE") return true;
+      node = node.parentElement;
+    }
+    return false;
+  }
+
   function attachGestures(view) {
     var doc = view && view.document;
     if (!doc) return;
@@ -398,13 +446,17 @@
       try { window.parent.postMessage({ speechnotes: "chromeTap" }, "*"); } catch (e) { /* blocked */ }
     }, false);
 
-    var touch = { x: 0, y: 0, t: 0 };
+    var touch = { x: 0, y: 0, t: 0, onTable: false };
     doc.addEventListener("touchstart", function (event) {
       var t = event.changedTouches[0];
-      if (t) { touch.x = t.clientX; touch.y = t.clientY; touch.t = Date.now(); }
+      if (t) {
+        touch.x = t.clientX; touch.y = t.clientY; touch.t = Date.now();
+        touch.onTable = touchStartsOnTable(t.target, doc);
+      }
     }, { passive: true });
     doc.addEventListener("touchend", function (event) {
       if (STATE.flow !== "paginated") return;
+      if (touch.onTable) return;
       if (!STATE.swipeTurn) return;
       var t = event.changedTouches[0];
       if (!t) return;

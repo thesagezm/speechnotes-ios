@@ -139,23 +139,45 @@ struct BookReaderView: View {
                     }
                     .transition(.opacity.combined(with: .move(edge: .trailing)))
                 } else {
-                    VStack(spacing: 0) {
-                        readerSurface
-                        // 2026-10-25 device feedback: the chapter bar used
-                        // to survive the minimise, leaving the next/previous
-                        // controls and the chapter number stacked above the
-                        // collapsed pill. While minimised the bar is GONE
-                        // (the steppers ride the pill itself) and the reading
-                        // surface takes the space back.
-                        if !bookBarMinimized {
-                            chapterBar
+                    // Books-UI round (2026-10-26): the note editor's exact
+                    // mechanism — the controls FLOAT over the book via
+                    // safeAreaInset instead of reserving a VStack row, so
+                    // the chapter text runs behind the minimised pill. The
+                    // webview's own scroll insets still park the chapter's
+                    // last lines above the chrome: the surface shows
+                    // through the bars while scrolling, and content rests
+                    // readable above them at the end of the chapter.
+                    readerSurface
+                        .safeAreaInset(edge: .bottom, spacing: 0) {
+                            VStack(spacing: 0) {
+                                // 2026-10-25 device feedback: the chapter
+                                // bar used to survive the minimise, leaving
+                                // the next/previous controls and the chapter
+                                // number stacked above the collapsed pill.
+                                // While minimised the bar is GONE (the
+                                // steppers ride the pill itself).
+                                if !bookBarMinimized {
+                                    chapterBar
+                                }
+                                playerBar
+                            }
                         }
-                        playerBar
-                    }
-                    .transition(.opacity)
+                        .transition(.opacity)
                 }
             }
             .animation(.easeInOut(duration: 0.22), value: landscape)
+            // The fill behind the tab bar (and behind the status bar while
+            // the chrome is hidden) is the BOOK's page colour, not a system
+            // slab — the user's "that solid background behind the tabs bar
+            // should show the ebook". The colour bleeds to the physical
+            // bottom of the screen; the CONTENT does not follow (the
+            // webview's frame and its scroll insets are untouched, so a
+            // chapter never ends trapped behind the bars). In paginated flow
+            // reader.js shrinks the column container by the same inset so
+            // the page's last lines stay clear of the floating transport.
+            .background(
+                pageColor.ignoresSafeArea(edges: immersiveBarsHidden ? .all : .bottom)
+            )
         }
     }
 
@@ -448,6 +470,20 @@ struct BookReaderView: View {
         case "dark", "trueBlack": return .black
         case "sepia": return Color(red: 0.96, green: 0.94, blue: 0.89)
         default: return Color(.systemBackground)
+        }
+    }
+
+    /// The page colour the epub shell paints (reader.js THEMES — the exact
+    /// palette, so the bleed behind the tab bar / status bar reads as one
+    /// continuous page rather than a near-match). veilColor is deliberately
+    /// NOT reused: its dark case is .black while the shell's dark page is
+    /// #121212, and the bleed sits directly against the rendered page.
+    private var pageColor: Color {
+        switch theme {
+        case "sepia": return Color(red: 246 / 255, green: 239 / 255, blue: 226 / 255)
+        case "dark": return Color(red: 18 / 255, green: 18 / 255, blue: 18 / 255)
+        case "trueBlack": return .black
+        default: return .white
         }
     }
 

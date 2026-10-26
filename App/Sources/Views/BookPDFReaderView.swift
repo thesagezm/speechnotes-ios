@@ -158,8 +158,24 @@ struct BookPDFReaderView: View {
                 }
             }
             .animation(.easeInOut(duration: 0.22), value: landscape)
+            // Books-UI round (2026-10-26): the fill behind the tab bar (and
+            // behind the status bar while the chrome is hidden) is the PDF
+            // canvas colour, not a system slab — the user's "the fill behind
+            // the tab bar should show the book up to the very bottom". Only
+            // the COLOUR bleeds: PDF pages are fixed geometry, so the chrome
+            // keeps reserving its window and the page's bottom edge stays
+            // readable — the margin the user asked for at the end of a page.
+            // The landscape rail column and its visuals are untouched.
+            .background(
+                pdfCanvasColor.ignoresSafeArea(edges: immersiveBarsHidden ? .all : .bottom)
+            )
         }
     }
+
+    /// The PDF canvas colour — pinned to `.systemBackground` on the PDFView
+    /// itself (BookPDFView.makeUIView) so pages float on one deterministic
+    /// tone; the bleed behind the tab bar / status bar uses the same value.
+    private var pdfCanvasColor: Color { Color(.systemBackground) }
 
     /// Trailing rail for landscape — PDF twin of the editor's rail, plus the
     /// per-chapter export button the portrait bar carries. The stepper rides
@@ -959,6 +975,10 @@ private struct BookPDFView: UIViewRepresentable {
         let pdfView = PDFView()
         pdfView.autoScales = true
         pdfView.displayMode = .singlePageContinuous
+        // Pinned (not PDFKit's default near-white): the reader bleeds this
+        // exact colour behind the tab bar / status bar, so the canvas and
+        // the bleed must be one tone, not two near-matches.
+        pdfView.backgroundColor = .systemBackground
         context.coordinator.fitWidth = fitWidth
         context.coordinator.attach(pdfView)
         context.coordinator.load(

@@ -66,6 +66,12 @@ final class LocalSendReceiver: ObservableObject {
     private let server = LocalSendHTTPServer()
     private var sessions: [String: Session] = [:]
     private var timeoutTasks: [String: Task<Void, Never>] = [:]
+    /// What the toggle currently wants. The server's `onReady` can arrive
+    /// after a stop that raced the start; without this guard the late
+    /// callback would mark a listener that is being torn down as running,
+    /// and the next start would be skipped as "already running" while
+    /// nothing actually listens.
+    private var desiredOn = false
 
     /// Set by the app at launch: routes a landed file into the import
     /// pipeline (books store / JEX importer). Receives a file COPY in our
@@ -115,31 +121,35 @@ final class LocalSendReceiver: ObservableObject {
         }
     }
 
-    /// Called at app launch: starts the server when the persisted toggle is
-    /// on (deferred past the first frame by the caller).
+    /// Called at app launch. Nearby BookDrop always comes up OFF: the
+    /// listener never resumes itself across launches, and the persisted
+    /// toggle is reset so the BookDrop screen agrees with reality. The
+    /// user switches it on when they want to receive — a listener that
+    /// restarts itself on every launch is the churn that walked the port
+    /// up its whole range and then reported the receiver unavailable.
     func applyPersistedEnabledState() {
-        if isEnabledInDefaults {
-            start()
-        }
+        UserDefaults.standard.set(false, forKey: "bookDropEnabled")
     }
 
     // MARK: - Lifecycle
 
     func start() {
+        desiredOn = true
         guard !isRunning else { return }
         lastError = nil
         server.start { [weak self] port in
-            guard let self else { return }
+            guard let self, self.desiredOn else { return }
             self.isRunning = true
             self.port = port
         } onFailed: { [weak self] message in
-            guard let self else { return }
+            guard let self, self.desiredOn else { return }
             self.isRunning = false
             self.lastError = message
         }
     }
 
     func stop() {
+        desiredOn = false
         server.stop()
         isRunning = false
         port = 0

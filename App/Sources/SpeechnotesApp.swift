@@ -122,9 +122,12 @@ struct SpeechnotesApp: App {
                     // published state — zero hooks inside the engines.
                     StatsCenter.shared.attach(player: player, audioBooks: audioBooks)
                     // BookDrop: route landed files into the import
-                    // pipelines; start the receiver if the toggle was left on.
-                    // (`books` was declared beside `notes` above — the
-                    // foreground reconcile's bookResumeHandler shares it.)
+                    // pipelines. Nearby BookDrop itself always comes up
+                    // OFF — applyPersistedEnabledState resets the toggle
+                    // and the user switches it on when they want to
+                    // receive. (`books` was declared beside `notes`
+                    // above — the foreground reconcile's
+                    // bookResumeHandler shares it.)
                     LocalSendReceiver.shared.router = { @MainActor url in
                         let ext = url.pathExtension.lowercased()
                         if ext == "jex" {

@@ -74,6 +74,13 @@ final class LocalSendSender: ObservableObject {
     @Published private(set) var peers: [Peer] = []
     @Published private(set) var phase: Phase = .idle
     @Published private(set) var lastError: String?
+    /// Set when the destination answered 401: it demands an access code
+    /// (or the one offered was wrong). The send sheet turns this into a
+    /// prompt with a retry, instead of a dead-end error — the sheet sends
+    /// the moment a peer is tapped, so the code field is easily still
+    /// empty at that point even when the user has set the same code
+    /// everywhere else.
+    @Published private(set) var needsAccessCode = false
 
     /// Whether the scan can run at all: LocalSend is a LAN protocol, so a
     /// device with no local IPv4 at all has nothing to find and the send
@@ -197,6 +204,7 @@ final class LocalSendSender: ObservableObject {
     func reset() {
         phase = .idle
         lastError = nil
+        needsAccessCode = false
     }
 
     /// Sends every file in one session: prepare-upload, then one POST /upload
@@ -208,6 +216,7 @@ final class LocalSendSender: ObservableObject {
             return
         }
         cancelled = false
+        needsAccessCode = false
         progress = Progress(totalUnitCount: Int64(files.count))
         phase = .sending
         sendTask = Task { @MainActor in
@@ -264,6 +273,7 @@ final class LocalSendSender: ObservableObject {
             case 200:
                 prepared = try JSONDecoder().decode(LocalSendPrepareResponse.self, from: data)
             case 401:
+                needsAccessCode = true
                 finishFailed("Access code needed or wrong for \(peer.alias)")
                 return
             case 403:
@@ -347,6 +357,7 @@ final class LocalSendSender: ObservableObject {
             case 200:
                 return
             case 401:
+                needsAccessCode = true
                 finishFailed("Access code needed or wrong for \(peer.alias)")
             case 403, 409:
                 finishFailed("\(peer.alias) rejected \(item.fileName) (HTTP \(http.statusCode))")

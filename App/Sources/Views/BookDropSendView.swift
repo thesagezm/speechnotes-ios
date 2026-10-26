@@ -148,6 +148,34 @@ struct BookDropSendView: View {
                     }
                 }
 
+                // The destination demanded a code (or a wrong one): turn the
+                // dead end into a recovery — the field, prefilled with THIS
+                // device's own receive code when the user runs the same code
+                // everywhere, and a Send again that goes to the same peer.
+                if sender.needsAccessCode, sender.phase != .sending {
+                    Section {
+                        SecureField("Access code", text: $pinText)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                        Button {
+                            Haptics.tap()
+                            guard let peer else {
+                                showPeerPicker = true
+                                return
+                            }
+                            Task { await send(to: peer) }
+                        } label: {
+                            Label("Send again", systemImage: "arrow.clockwise")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                    } header: {
+                        Text("Access code required")
+                    } footer: {
+                        Text("The receiving device has an access code set. Type the code that device shows under Nearby BookDrop → Receive, then send again.")
+                    }
+                }
+
                 if isBuilding {
                     Section {
                         HStack(spacing: 10) {
@@ -207,6 +235,14 @@ struct BookDropSendView: View {
                 default:
                     break
                 }
+            }
+            // The destination wants a code and the send field is empty:
+            // prefill it with THIS device's own receive code. The user who
+            // runs the same code everywhere gets a one-tap retry; anyone
+            // with a per-device code can still retype over the prefill.
+            .onChange(of: sender.needsAccessCode) { needed in
+                guard needed, pinText.isEmpty else { return }
+                pinText = UserDefaults.standard.string(forKey: "bookDropPin") ?? ""
             }
             .onDisappear {
                 sender.stopScan()
