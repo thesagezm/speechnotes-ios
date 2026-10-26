@@ -1155,6 +1155,15 @@ final class SpeechPlayer: ObservableObject {
         let id: String
         let title: String
         let chapterIndex: Int
+        /// UTF-16 offset into the chapter's speech text where a FRESH play
+        /// should begin — the position the reader surface is showing. nil =
+        /// the surface offered no usable position, so the stored bookmark
+        /// decides (bookmark → chapter top, the historic behavior). 0 is
+        /// meaningful too: the reader-mode Contents jump's explicit "this
+        /// chapter from its start". BookPlaybackController fills it from the
+        /// readers' reported positions; every other call site keeps the old
+        /// priority by omitting it.
+        var startOffset: Int? = nil
     }
 
     /// Set while a BOOK is playing; fired once on natural completion of the
@@ -1324,6 +1333,18 @@ final class SpeechPlayer: ObservableObject {
                     beginReadAlong(fullText: text, pieces: plan.pieces)
                     Log.shared.info("SpeechPlayer: resuming book \(book.id) ch\(book.chapterIndex) at char \(plan.offset)/\(text.utf16.count)")
                     engine?.speak(plan.suffix, rateMultiplier: rateMultiplier)
+                    return
+                }
+                if let start = book.startOffset {
+                    // No meaningful bookmark for this chapter — start where
+                    // the reader IS (the page/scroll the surface reported),
+                    // snapped to a sentence. Offset 0 lands here too: that is
+                    // the Contents jump's explicit "this chapter from its
+                    // start", and playFrom's zero-offset path is a clean
+                    // restart that drops any stale slot. Without this, play
+                    // always began at the chapter top — the user's "not from
+                    // the page I'm viewing" report.
+                    playFrom(text, at: start, book: book)
                     return
                 }
                 primeBookBookmark(bookId: book.id, chapterIndex: book.chapterIndex, fullText: text)

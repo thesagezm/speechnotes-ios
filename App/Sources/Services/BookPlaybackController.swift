@@ -68,12 +68,32 @@ final class BookPlaybackController: ObservableObject {
         NowPlayingCenter.shared.setChapterSkipEnabled(false)
     }
 
+    /// Where a play should begin, expressed by the SURFACE that owns the
+    /// reading position. The readers pass what they are showing; the
+    /// controller turns it into a UTF-16 offset once the chapter's speech
+    /// text is known (the text length and the PDF page sidecar both need the
+    /// resolved text first).
+    enum BookStartPoint {
+        /// The chapter's first sentence — the reader-mode Contents jump.
+        case beginning
+        /// A PDF page the reader is showing.
+        case page(Int)
+        /// Fraction (0…1) through the chapter — the EPUB reader's scroll
+        /// position within the chapter.
+        case fraction(Double)
+    }
+
     /// The reader's play control. When this exact chapter is already the live
     /// speech, the underlying player handles pause/resume (text is not needed
     /// for those transitions); otherwise the chapter's text is resolved
     /// (disk cache → archive → XhtmlText) and spoken with a book bookmark
     /// primed for sentence-snapped resume.
-    func togglePlay(book: Book, chapterIndex: Int) async {
+    ///
+    /// `from` carries the reader's current position: a FRESH play (no
+    /// meaningful bookmark for this chapter) then starts at the page/spot the
+    /// user is viewing instead of the chapter top. The player keeps the
+    /// bookmark's priority — a real bookmark wins over the surface position.
+    func togglePlay(book: Book, chapterIndex: Int, from startPoint: BookStartPoint? = nil) async {
         guard let player else { return }
         let ref = SpeechPlayer.BookPlaybackRef(
             id: book.id.uuidString,
@@ -98,7 +118,24 @@ final class BookPlaybackController: ObservableObject {
             artworkPath: BooksStore.coverFileURL(book).path
         )
         activeBook = book
-        await speak(book: book, from: chapterIndex)
+        await speak(book: book, from: chapterIndex, startPoint: startPoint)
+    }
+
+    /// The reader-mode Contents jump: while THIS book is sounding, a TOC tap
+    /// moves the SPEECH to the chosen chapter — the read-along surface shows
+    /// `activeSpeechText`, so it follows the moment the new chapter starts.
+    /// Speaks the chapter from its start (an explicit "go to chapter N"), and
+    /// the auto-advance chain stays armed. When nothing of this book is
+    /// live it degrades to a plain play from that chapter.
+    func jumpToChapter(book: Book, chapterIndex: Int) async {
+        guard chapterIndex >= 0, chapterIndex < Self.chapterCount(of: book) else { return }
+        if activeBook?.id == book.id,
+           player?.nowPlayingBookId == book.id.uuidString,
+           player?.state != .idle {
+            await speak(book: book, from: chapterIndex, startPoint: .beginning)
+        } else {
+            await togglePlay(book: book, chapterIndex: chapterIndex)
+        }
     }
 
     /// Foreground reconcile: the system suspended a backgrounded listening
@@ -120,7 +157,13 @@ final class BookPlaybackController: ObservableObject {
     /// (cover-only epub files, image-only PDF pages). Re-arms onNaturalFinish
     /// after every start — explicit stop()s and note takeovers clear it on
     /// the player.
-    private func speak(book: Book, from startIndex: Int) async {
+    ///
+    /// `startPoint` carries the reader surface's position for a fresh play;
+    /// nil keeps the historic priority (a meaningful stored bookmark
+    /// resumes, else the chapter top). It resolves to a UTF-16 offset AFTER
+    /// the chapter text is known — the fraction needs the text's length and
+    /// the PDF page needs its offsets sidecar.
+    private func speak(book: Book, from startIndex: Int, startPoint: BookStartPoint? = nil) async {
         guard let player else { return }
         let chapterCount = Self.chapterCount(of: book)
         var index = max(0, startIndex)
@@ -133,15 +176,30 @@ final class BookPlaybackController: ObservableObject {
                 player.onNaturalFinish = { [weak self] in
                     self?.advanceToNextChapter()
                 }
-                player.togglePlay(
-                    text,
-                    note: nil,
-                    book: SpeechPlayer.BookPlaybackRef(
-                        id: book.id.uuidString,
-                        title: book.title,
-                        chapterIndex: index
-                    )
+                let startOffset = await speechStartOffset(
+                    for: startPoint,
+                    book: book,
+                    chapterIndex: index,
+                    textLength: text.utf16.count
                 )
+                let ref = SpeechPlayer.BookPlaybackRef(
+                    id: book.id.uuidString,
+                    title: book.title,
+                    chapterIndex: index,
+                    startOffset: startOffset
+                )
+                if player.nowPlayingBookId == book.id.uuidString, player.state != .idle {
+                    // The reader-mode Contents jump (jumpToChapter): THIS
+                    // book is already sounding and the user picked another
+                    // chapter. togglePlay would only pause it, and stop()
+                    // would flicker the read-along surface away and wipe the
+                    // lock screen — so supersede IN PLACE. playFrom keeps the
+                    // auto-advance chain armed and swaps the read-along text
+                    // to the new chapter the moment the engine starts it.
+                    player.playFrom(text, at: startOffset ?? 0, book: ref)
+                } else {
+                    player.togglePlay(text, note: nil, book: ref)
+                }
                 // NOT endChapterGapGrace() here: the grace's whole job is
                 // the window this call just opened (first-chunk render).
                 endChapterGapGraceWhenSpeakingBegins()
@@ -153,6 +211,47 @@ final class BookPlaybackController: ObservableObject {
         Log.shared.info("BookPlayback: no speakable chapters from \(startIndex) in \(book.title)")
         endChapterGapGrace()
         clearActiveBook()
+    }
+
+    /// Turns a reader surface's position into a UTF-16 offset into the
+    /// chapter's speech text. nil means "no usable position" — SpeechPlayer
+    /// then keeps its own priority (a meaningful bookmark wins, else the
+    /// chapter top). A position at the very start of the text reports nil
+    /// too: the user is looking at the chapter's first page, so a bookmark
+    /// for this chapter must still win ("page 1 is not really a bookmark" —
+    /// the user's words). Only the explicit .beginning jump forces 0.
+    private func speechStartOffset(for point: BookStartPoint?, book: Book, chapterIndex: Int, textLength: Int) async -> Int? {
+        switch point {
+        case .beginning:
+            return 0
+        case .fraction(let fraction):
+            let clamped = min(max(fraction, 0), 1)
+            guard clamped > 0.001 else { return nil }
+            return min(Int(clamped * Double(textLength)), textLength - 1)
+        case .page(let page):
+            return await pdfPageStartOffset(page: page, book: book, chapterIndex: chapterIndex, textLength: textLength)
+        case nil:
+            return nil
+        }
+    }
+
+    /// Where `page`'s text starts in the chapter's speech text — the
+    /// per-page offsets sidecar written at extraction time (the same file
+    /// read-along page tracking uses). nil when the sidecar is missing (a
+    /// cache from before it existed), the page precedes any text, or the
+    /// entry sits at/off the text's ends: SpeechPlayer then falls back to
+    /// bookmark-or-chapter-top. A page whose neighbors were image-only
+    /// resolves to the nearest preceding page that HAS text — the honest
+    /// best for a scan with blank pages.
+    private func pdfPageStartOffset(page: Int, book: Book, chapterIndex: Int, textLength: Int) async -> Int? {
+        let url = BooksStore.speechTextOffsetsURL(book, chapterIndex: chapterIndex)
+        let offsets: [PdfPageOffset] = await Task.detached(priority: .utility) {
+            guard let data = try? Data(contentsOf: url) else { return [] }
+            return (try? JSONDecoder().decode([PdfPageOffset].self, from: data)) ?? []
+        }.value
+        guard let entry = offsets.last(where: { $0.page <= page }) else { return nil }
+        guard entry.utf16Offset > 0, entry.utf16Offset < textLength else { return nil }
+        return entry.utf16Offset
     }
 
     /// Format-neutral speech units: epub = spine items, pdf = manifest

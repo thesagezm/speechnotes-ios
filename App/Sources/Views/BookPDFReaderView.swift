@@ -175,7 +175,13 @@ struct BookPDFReaderView: View {
                     Task {
                         await BookPlaybackController.shared.togglePlay(
                             book: book,
-                            chapterIndex: chapterForCurrentPage ?? 0
+                            chapterIndex: chapterForCurrentPage ?? 0,
+                            // THE fix for "play starts at page 1": a fresh
+                            // play begins at the page on screen (mapped
+                            // through the chapter's page-offset sidecar);
+                            // a meaningful stored bookmark still wins —
+                            // the player decides between the two.
+                            from: .page(currentPage)
                         )
                     }
                 },
@@ -462,7 +468,11 @@ struct BookPDFReaderView: View {
                 Task {
                     await BookPlaybackController.shared.togglePlay(
                         book: book,
-                        chapterIndex: chapterForCurrentPage ?? 0
+                        chapterIndex: chapterForCurrentPage ?? 0,
+                        // Same rule as the landscape rail: fresh play starts
+                        // at the page on screen, a stored bookmark wins when
+                        // one exists.
+                        from: .page(currentPage)
                     )
                 }
             },
@@ -629,7 +639,7 @@ struct BookPDFReaderView: View {
                                 Button {
                                     Haptics.tap()
                                     showingOutline = false
-                                    goToPage(row.pageIndex)
+                                    jumpOutlineRow(pageIndex: row.pageIndex)
                                 } label: {
                                     HStack {
                                         Text(row.label)
@@ -673,7 +683,7 @@ struct BookPDFReaderView: View {
                             Button {
                                 Haptics.tap()
                                 showingOutline = false
-                                goToPage(chapter.startPage)
+                                jumpOutlineRow(pageIndex: chapter.startPage, chapterIndex: index)
                             } label: {
                                 HStack {
                                     Text(chapter.label)
@@ -783,6 +793,34 @@ struct BookPDFReaderView: View {
             guard let pdfView, pdfView.window != nil, pdfView.currentPage != page else { return }
             pdfView.go(to: page)
         }
+    }
+
+    /// A Contents tap. While the read-along surface is up the jump must move
+    /// the SPEECH — the reader is looking at the read-along text, not the
+    /// hidden PDFView, so only moving the pages changed nothing the user
+    /// could see (the "can't jump in reader mode" report). goToPage still
+    /// runs: the hidden viewer (and the persisted position) follow, so
+    /// returning from read-along lands where the jump went. Without
+    /// playback it is the plain viewer jump as before.
+    private func jumpOutlineRow(pageIndex: Int, chapterIndex: Int? = nil) {
+        goToPage(pageIndex)
+        guard showsReadAlong else { return }
+        let target = chapterIndex ?? chapterContaining(pageIndex)
+        guard let target else { return }
+        Task {
+            await BookPlaybackController.shared.jumpToChapter(book: book, chapterIndex: target)
+        }
+    }
+
+    /// The manifest chapter containing `page` — the read-along jump target
+    /// for an outline row (whose page may sit mid-chapter). Falls back to
+    /// the chapter starting at-or-before the page, mirroring
+    /// `currentChapterIndex`'s gap handling.
+    private func chapterContaining(_ page: Int) -> Int? {
+        if let index = chapters.firstIndex(where: { page >= $0.startPage && page <= $0.endPage }) {
+            return index
+        }
+        return chapters.lastIndex(where: { $0.startPage <= page })
     }
 
     /// Applies a jump that was requested before the document was ready.

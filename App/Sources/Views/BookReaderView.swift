@@ -171,7 +171,12 @@ struct BookReaderView: View {
                     Task {
                         await BookPlaybackController.shared.togglePlay(
                             book: book,
-                            chapterIndex: chapterIndex
+                            chapterIndex: chapterIndex,
+                            // A fresh play starts where the webview is (its
+                            // scroll fraction within the chapter); a stored
+                            // bookmark for the chapter still wins — the
+                            // player decides between the two.
+                            from: .fraction(chapterFraction)
                         )
                     }
                 },
@@ -455,7 +460,11 @@ struct BookReaderView: View {
                 Task {
                     await BookPlaybackController.shared.togglePlay(
                         book: book,
-                        chapterIndex: chapterIndex
+                        chapterIndex: chapterIndex,
+                        // Same rule as the landscape rail: a fresh play
+                        // starts at the viewed position, a stored bookmark
+                        // wins when one exists.
+                        from: .fraction(chapterFraction)
                     )
                 }
             },
@@ -551,8 +560,26 @@ struct BookReaderView: View {
                         // prefix, percent-encoding or case — which is why
                         // "the TOC is there but tapping a chapter does
                         // nothing" was true for plenty of books.
-                        if let spineIndex = row.entry.spineIndex {
-                            jumpToSpineIndex(spineIndex)
+                        if let spineIndex = tocJumpTarget(for: row.entry) {
+                            if showsReadAlong {
+                                // Reader-mode Contents jump: the read-along
+                                // surface renders the SPEECH, so the tap must
+                                // move what is SOUNDING, not just the hidden
+                                // webview. jumpToSpineIndex keeps the webview
+                                // (and the persisted position) in agreement
+                                // for when read-along ends; jumpToChapter
+                                // starts the chosen chapter from its top and
+                                // the read-along text follows it.
+                                jumpToSpineIndex(spineIndex)
+                                Task {
+                                    await BookPlaybackController.shared.jumpToChapter(
+                                        book: book,
+                                        chapterIndex: spineIndex
+                                    )
+                                }
+                            } else {
+                                jumpToSpineIndex(spineIndex)
+                            }
                         } else {
                             goToHref(row.entry.href)
                         }
@@ -891,6 +918,18 @@ struct BookReaderView: View {
         lastKnownCFI = nil
         persistPosition()
         webView?.evaluateJavaScript("readerGoChapter(\(clamped))", completionHandler: nil)
+    }
+
+    /// The spine index a TOC row jumps to. Manifest rows carry one; rows
+    /// from the webview fallback toc (and old manifests) resolve by matching
+    /// the href against the spine's zip paths — path-component exact, so
+    /// "1.xhtml" can never match "11.xhtml". nil = unresolvable; the caller
+    /// falls back to display(href), the pre-spineIndex behavior.
+    private func tocJumpTarget(for entry: BookTocEntry) -> Int? {
+        if let spineIndex = entry.spineIndex { return spineIndex }
+        guard let spine = book.spine else { return nil }
+        let href = entry.href
+        return spine.firstIndex { $0 == href || $0.hasSuffix("/" + href) }
     }
 
     /// Runs a jump that was held because the book was still opening.
