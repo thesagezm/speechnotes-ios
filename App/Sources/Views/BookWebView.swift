@@ -32,6 +32,11 @@ struct BookWebView: UIViewRepresentable {
     /// Paginated-flow page-turn swipe, detected in the section iframe
     /// (reader.js) and relayed here. Payload is "next" | "prev".
     var onSwipe: ((String) -> Void)? = nil
+    /// A chapter jump the webview could not carry out (the book was still
+    /// opening, or the spine index does not exist). The reader corrects its
+    /// own position instead of leaving the bar on a chapter the reader is
+    /// not actually on.
+    var onGoChapterFailed: ((Int, String) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -348,6 +353,9 @@ struct BookWebView: UIViewRepresentable {
                 parent.onSwipe?(body["dir"] as? String ?? "next")
             case "swipe":
                 parent.onSwipe?(body["dir"] as? String ?? "next")
+            case "goChapterFailed":
+                let index = (body["index"] as? NSNumber)?.intValue ?? 0
+                parent.onGoChapterFailed?(index, body["reason"] as? String ?? "unknown")
             default:
                 break
             }

@@ -76,6 +76,13 @@ struct BookReaderView: View {
     /// Last CFI the webview reported — persisted alongside the chapter
     /// index so reopening lands mid-chapter (M20 fix).
     @State private var lastKnownCFI: String?
+    /// A chapter jump the webview could not run yet because the book was
+    /// still opening. Retried once the rendition is up — dropping it was
+    /// the "the next/previous buttons do nothing" report.
+    @State private var pendingJump: Int?
+    /// The chapter the reader was on BEFORE a jump that has not landed —
+    /// the position to fall back to if the jump fails for good.
+    @State private var pendingJumpFrom: Int?
 
     init(book: Book, store: BooksStore) {
         self.book = book
@@ -357,6 +364,9 @@ struct BookReaderView: View {
                 if (book.toc ?? []).isEmpty { toc = entries }
             },
             onError: { errorMessage = $0 },
+            // The pending jump is retried from `handleRelocated` — the webview
+            // being READY is not the same as the rendition being up, and
+            // `readerGoChapter` needs the book.
             onWebViewReady: { webView = $0; resumeAutoScrollIfNeeded() },
             onChromeTap: {
                 Haptics.tap()
@@ -365,6 +375,32 @@ struct BookReaderView: View {
             onSwipe: { dir in
                 Haptics.tap()
                 webView?.evaluateJavaScript(dir == "prev" ? "readerPrev()" : "readerNext()", completionHandler: nil)
+            },
+            onGoChapterFailed: { index, reason in
+                // The webview could not carry out the jump (the book was
+                // still opening, or the spine index does not exist). The
+                // bar was moved optimistically, so it must go BACK to the
+                // chapter the reader is actually on — otherwise the bar and
+                // the book disagree, and the next press computes a target
+                // relative to a chapter the reader never reached.
+                Log.shared.info("BookReader: chapter jump to \(index) failed (\(reason))")
+                if reason == "book-not-ready" {
+                    // The book was still opening: HOLD the jump and run it
+                    // as soon as the rendition is up. Dropping it was the
+                    // "the chevrons do nothing" report. The bar stays
+                    // where it was moved — the jump is still coming.
+                    pendingJump = index
+                    return
+                }
+                // The jump cannot happen at all: fall back to the chapter
+                // the reader was on before it.
+                if let from = pendingJumpFrom {
+                    chapterIndex = from
+                    chapterFraction = 0
+                    lastKnownCFI = nil
+                    persistPosition()
+                }
+                pendingJumpFrom = nil
             }
         )
         .id(reloadToken)
@@ -500,7 +536,7 @@ struct BookReaderView: View {
                         // "the TOC is there but tapping a chapter does
                         // nothing" was true for plenty of books.
                         if let spineIndex = row.entry.spineIndex {
-                            goChapter(spineIndex)
+                            jumpToSpineIndex(spineIndex)
                         } else {
                             goToHref(row.entry.href)
                         }
@@ -714,11 +750,17 @@ struct BookReaderView: View {
     private func handleRelocated(index: Int, fraction: Double, total: Int, cfi: String?) {
         let chapterChanged = index != chapterIndex
         let cfiChanged = cfi != nil && cfi != lastKnownCFI
+        let firstRelocation = !bookLoaded
         chapterIndex = max(0, index)
         chapterFraction = fraction
         if let cfi { lastKnownCFI = cfi }
         if total > 0 { totalChapters = total }
         if !bookLoaded { bookLoaded = true }
+        // The book is up: a jump that was held because the rendition was
+        // not ready can run now.
+        if firstRelocation {
+            applyPendingJump()
+        }
         if chapterChanged || index != persistedChapter {
             // A chapter change is worth a write on its own — it is the
             // unit the resume lands on.
@@ -732,6 +774,8 @@ struct BookReaderView: View {
             // per tick is a write per frame.
             scheduleCFIPersist()
         }
+        // The jump landed — the fallback position is no longer needed.
+        if chapterChanged { pendingJumpFrom = nil }
     }
 
     /// Throttled mid-chapter persistence. Writes at most once every few
@@ -787,6 +831,7 @@ struct BookReaderView: View {
     /// `spineIndex`) and by the steppers.
     private func jumpToSpineIndex(_ index: Int) {
         let clamped = clampedSpineIndex(index)
+        pendingJumpFrom = chapterIndex
         chapterIndex = clamped
         chapterFraction = 0
         // A CFI from another chapter is meaningless here — it would send
@@ -794,6 +839,13 @@ struct BookReaderView: View {
         lastKnownCFI = nil
         persistPosition()
         webView?.evaluateJavaScript("readerGoChapter(\(clamped))", completionHandler: nil)
+    }
+
+    /// Runs a jump that was held because the book was still opening.
+    private func applyPendingJump() {
+        guard let pendingJump else { return }
+        self.pendingJump = nil
+        webView?.evaluateJavaScript("readerGoChapter(\(pendingJump))", completionHandler: nil)
     }
 
     /// The spine index, clamped into the book's range. An unknown chapter

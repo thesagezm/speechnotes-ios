@@ -270,10 +270,32 @@
     if (window.RENDITION && href) window.RENDITION.display(href);
   };
 
+  // Steps to a spine index. The native side moves its bar immediately and
+  // waits for the relocation event to confirm; a command that could not
+  // run (the book is still opening, RENDITION is not up yet) used to fail
+  // SILENTLY, leaving the bar on a chapter the reader was not actually on —
+  // and the next press computed the same target again, so the chevrons
+  // looked dead. The failure is reported back so the native side can
+  // correct itself.
   window.readerGoChapter = function (index) {
-    if (!window.BOOK || !window.RENDITION) return;
+    if (!window.BOOK || !window.RENDITION) {
+      post({ type: "goChapterFailed", index: index, reason: "book-not-ready" });
+      return;
+    }
     var item = window.BOOK.spine.get(index);
-    if (item) window.RENDITION.display(item.href);
+    if (!item) {
+      post({ type: "goChapterFailed", index: index, reason: "no-such-spine-item" });
+      return;
+    }
+    // Display by the item's href (epub.js resolves it against its own
+    // spine map). The promise is watched so a rejected display is visible
+    // instead of silently leaving the reader where it was.
+    var done = window.RENDITION.display(item.href);
+    if (done && typeof done.catch === "function") {
+      done.catch(function () {
+        post({ type: "goChapterFailed", index: index, reason: "display-rejected" });
+      });
+    }
   };
 
   // Paginated page turns (swipe gesture relay). epub.js crosses spine
