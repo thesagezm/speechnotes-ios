@@ -455,17 +455,15 @@ struct StatsTabView: View {
     }
 
     private func bookProgress(_ book: Book) -> Double? {
-        guard let position = book.position else { return nil }
-        switch book.format {
-        case .epub:
-            guard let count = book.spineCount, count > 0 else { return nil }
-            return (Double(position.chapterIndex) + position.chapterFraction) / Double(count)
-        case .pdf:
-            guard let count = book.pageCount, count > 0 else { return nil }
-            return (Double(position.chapterIndex) + position.chapterFraction) / Double(count)
-        case .audio:
-            return nil
-        }
+        // The SAME arithmetic the reading goals use — the two views showed
+        // different numbers for the same book (the stats one capped out at
+        // 99% on the last page), which is not a thing a reader should have
+        // to reconcile.
+        //
+        // Audio stays nil here, as it was: an audiobook's progress is a
+        // time, not a fraction of a spine, and this row is a bar.
+        if book.format == .audio { return nil }
+        return GoalMath.fraction(of: book)
     }
 
     // MARK: - Heatmap plumbing

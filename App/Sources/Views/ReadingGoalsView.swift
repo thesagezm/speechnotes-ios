@@ -132,10 +132,29 @@ enum GoalMath {
         switch book.format {
         case .epub:
             guard let count = book.spineCount, count > 0 else { return nil }
+            // The position's chapterIndex is the SPINE index (0-based) and
+            // the fraction is the position WITHIN that chapter.
+            //
+            // On the LAST chapter the book is done: epub.js reports the
+            // within-chapter fraction as 0 for a chapter shorter than one
+            // viewport (it has no page to divide), so the old arithmetic
+            // said "97% done" while the reader sat in the final chapter.
+            // The reader's own report — "I am at the end of my book and it
+            // says I have not finished" — is the contract here.
+            if position.chapterIndex >= count - 1 { return 1 }
             return min(1, max(0, (Double(position.chapterIndex) + position.chapterFraction) / Double(count)))
         case .pdf:
             guard let count = book.pageCount, count > 0 else { return nil }
-            return min(1, max(0, (Double(position.chapterIndex) + position.chapterFraction) / Double(count)))
+            // The position's chapterIndex is the PAGE index (0-based) and
+            // the fraction is always 0 — the reader is on a page, not
+            // inside one.
+            //
+            // So the old `(index + fraction) / count` could NEVER reach
+            // 1.0: on the last page of a 100-page book it is 99/100, and
+            // the goal said "99% done" while the reader was on the final
+            // page. The fraction of the book READ is `(index + 1) / count`
+            // — the page the reader is on counts.
+            return min(1, max(0, (Double(position.chapterIndex) + 1) / Double(count)))
         case .audio:
             // Elapsed file seconds via the chapter table's starts — the
             // same arithmetic the audio reader's counter uses.

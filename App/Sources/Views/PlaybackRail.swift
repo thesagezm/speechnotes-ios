@@ -93,6 +93,12 @@ struct PlaybackRail: View {
     var isPlayEnabled: Bool = true
     /// Stop/read-along show only while a session is live.
     var sessionActive: Bool = false
+    /// True while the player is SPEAKING (not paused, not generating).
+    ///
+    /// This is what the play glyph is derived from. It is a separate input
+    /// from `sessionActive` because that one counts paused and generating
+    /// as live — and the glyph for those is "play", not "pause".
+    var isSpeaking: Bool = false
     /// Surface-specific extra button (PDF per-chapter export).
     var extraTrailing: AnyView? = nil
     /// 2026-10-08 landscape-notes report: the play glyph stopped tracking
@@ -146,12 +152,27 @@ struct PlaybackRail: View {
     /// the same state reads the same in both orientations. Paused shows
     /// play.fill (tap to continue) — the old rail showed pause.fill for
     /// paused too, which read as "the button never changed".
+    ///
+    /// The host-passed form (`sessionActive && progress != nil`) was the
+    /// landscape play/pause bug: the glyph needed BOTH a live session AND a
+    /// non-nil progress, and progress is nil until the engine's FIRST chunk
+    /// reports in (and is cleared whenever the engine reports 0). So the
+    /// button stayed "play.fill" through the whole first chunk, and the
+    /// host's own re-render cadence decided the rest — the user tapped and
+    /// the clicks registered, but the glyph never changed.
+    ///
+    /// The glyph is now a function of the PLAYER'S STATE alone: speaking →
+    /// pause.fill, everything else → play.fill. That is the portrait bar's
+    /// rule, and it cannot depend on a progress value that arrives late.
     private var playIcon: String {
         if effectiveIsGenerating { return "hourglass" }
         if observesPlayer {
             return livePlayer.state == .speaking ? "pause.fill" : "play.fill"
         }
-        return sessionActive && progress != nil ? "pause.fill" : "play.fill"
+        // The host-passed form: the host tells us whether it is SPEAKING.
+        // `sessionActive` alone is not enough (it counts paused and
+        // generating too), so the host passes the speaking state itself.
+        return isSpeaking ? "pause.fill" : "play.fill"
     }
 
     var body: some View {
