@@ -292,8 +292,9 @@ public enum MarkdownText {
         }
         switch block {
         case .heading, .paragraph:
-            // The block's own `text` is the DISPLAY text (glyphs); the
-            // spans carry the spoken form.
+            // The SPANS carry both forms (the maths span has the glyphs in
+            // `text` and the words in `math.spoken`), so the block's own
+            // `text` field is not used here.
             return plain(blockSpans(block))
         case .bulletList(let items), .orderedList(let items):
             return items.map { item -> String in

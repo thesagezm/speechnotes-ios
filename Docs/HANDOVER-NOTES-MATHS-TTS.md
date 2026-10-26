@@ -1,5 +1,9 @@
 # Handover — notes maths rendering + TTS word forms (branch `batch-c-d-session`)
 
+**SUPERSEDED 2026-10-26 by commit `e1b290a` — the red test is fixed, the
+open items are built, and CI is green. Kept for the record; read
+`PROGRESS_LOG.md` for the current state.**
+
 State as of 2026-10-26, commit `ca068b2`. **One test failing, 480 passing.
 The unsigned IPA job BUILDS GREEN.** No device testing yet.
 
@@ -124,7 +128,10 @@ not just this operator.
 
 ## Ordered next steps
 
-1. **Fix the red test** (above), then re-run CI. Expect green.
+1. ~~**Fix the red test**~~ — DONE in `e1b290a`. Option 1 was taken:
+   `speakList` joins the nodes with a separator, so no operator word can
+   weld onto its neighbour. `normalizeSpeech` collapses the runs it
+   leaves.
 2. **Device round** — the real acceptance test:
    - A note with `$...$`, `$$...$$`, `\beta`, `\sum_{i=1}^{n}`, `\frac{a}{b}`.
      Check the preview renders glyphs, not LaTeX source.
@@ -138,13 +145,17 @@ not just this operator.
    - A bare `\beta` in a sentence renders (no delimiters needed).
    - A Windows path (`C:\Users\max`) must stay literal — `bareAllowed` excludes
      function names for this reason.
-3. **Insert affordance (not done).** There is no way to insert math without
-   typing `$` by hand. Add a toolbar button to `MarkdownFormattingBar`
-   (clone `button(symbol:a11y:action:)` + a `wrap(prefix:"$", suffix:"$")`)
-   and a `/math` command to `MarkdownSlashMenu.commands`.
-4. **PDF export** (`NoteEditorView.htmlBody`) uses `MarkdownText.plainText`, so
-   maths now exports as its spoken words. Confirm that is what you want; if you
-   want glyphs in the PDF, the HTML body would need the display form instead.
+   - The new formula button and `/math` insert a delimited formula with the
+     body selected.
+3. ~~**Insert affordance**~~ — DONE in `e1b290a`. The formatting bar has a
+   formula button; the slash menu has `/math` and `/mathblock`. Both insert
+   the DELIMITED form (the delimiters are what tell the parser the run is a
+   formula, so prices keep their own dollar signs) and leave the body
+   selected to type over.
+4. ~~**PDF export**~~ — DECIDED and DONE in `e1b290a`. The export carries the
+   DISPLAY form (the glyphs), because a shared PDF or text file is a document
+   the recipient READS, not a performance of the note. `MarkdownText` gained
+   a `displayText(_:)` path; `plainText(_:)` (the speech path) is untouched.
 
 ## Notes for the next session
 

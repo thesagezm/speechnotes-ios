@@ -189,6 +189,20 @@ final class MathNotationTests: XCTestCase {
         }
     }
 
+    /// A percent sign is prose, not maths — and the device checklist named
+    /// it explicitly ("50% of the time must keep its percent sign").
+    func testPercentSignIsNotMaths() {
+        for text in ["50% of the time", "a 20% increase", "100%"] {
+            let line = MathNotation.segments(in: text)
+            let maths = line.parts.compactMap { part -> MathNotation.Segment? in
+                if case .math(let segment) = part { return segment }
+                return nil
+            }
+            XCTAssertEqual(maths.count, 0, "\(text) was read as maths")
+            XCTAssertEqual(MarkdownText.plainText(text), text)
+        }
+    }
+
     func testUnclosedDollarIsLiteralText() {
         let line = MathNotation.segments(in: "the price is $5 and rising")
         XCTAssertEqual(line.parts.count, 1)

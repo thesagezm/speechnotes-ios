@@ -1,5 +1,10 @@
 # HANDOVER — 2026-10-26: books chapter navigation + resume/start discordance
 
+**SUPERSEDED 2026-10-26 by commit `e1b290a` — CI is green and the EPUB
+mid-chapter write (the item flagged as likeliest to fail) is fixed. The
+device check is still the open gate. Kept for the record; read
+`PROGRESS_LOG.md` for the current state.**
+
 **Status: FIXED IN CODE, NOT YET CI-VERIFIED, NOT YET DEVICE-VERIFIED.**
 **DO NOT PUSH THE RELEASE YET — see "Release gate" at the bottom.**
 **Version untouched (1.8.0 / build 45) — the user groups features into releases.**
@@ -258,20 +263,31 @@ These were investigated and DISPROVED. Re-reading them costs an hour each.
 
 # RELEASE GATE (issue 4 — "if you are certain youve solved this you can push")
 
-**NOT satisfied yet. Do not push.** Two things are missing:
+**CI: SATISFIED** (run on `batch-c-d-session`, commit `e1b290a`). The
+unsigned IPA job builds — so the books/EPUB/PDF code compiles for the
+first time — and the SpeechLogic suite is green.
 
-1. **CI.** There is no local Swift toolchain, so none of this has been
-   compiled. Run:
-   ```
-   gh workflow run build.yml --ref batch-c-d-session
-   ```
-   and watch the run. `build.yml` auto-runs only on `main` / `sage-upgrades`,
-   so a branch push starts nothing — it must be dispatched manually. Expect
-   1-3 CI fix rounds (past rounds needed 3-6); the riskiest edits are the
-   new `BooksStore.mutate` / `liveEntry` API and the `BookWebView`
-   `onGoChapterFailed` closure.
-2. **A device check on the user's actual book** (the compiled OBGYN notes
-   PDF). The device checklist:
+**The device check is STILL OPEN.** That is the remaining gate, and it is
+the user's own book (the compiled OBGYN notes PDF).
+
+Two more fixes landed with the CI run, both aimed at the EPUB half:
+
+1. **The mid-chapter write was a DEBOUNCE, not a throttle.**
+   `scheduleCFIPersist` cancelled the pending write and started a new one
+   on EVERY relocation. `relocated` fires on every scroll tick, so a
+   reader who kept scrolling never reached the write at all — the exact
+   spot was lost precisely when the reader was moving through the book,
+   which is when they are most likely to be interrupted. It is now a
+   throttle with a trailing write: one write every 3 s while scrolling,
+   plus a final one shortly after they stop.
+2. **The position is flushed on `scenePhase == .background`.**
+   `onDisappear` does not fire when the app is backgrounded, and that is
+   the exit the reader makes when they put the phone down. The handover
+   below named this as the fallback if the reopen landed at the chapter
+   top; it is now in place.
+
+## The device checklist (STILL TO DO)
+
    - Open the book; the Contents sheet lists the sections; the bottom
      next/prev chevrons move ONE section at a time (not to the last).
    - Jump to a page from Contents; close the book; reopen → lands on that
@@ -283,11 +299,24 @@ These were investigated and DISPROVED. Re-reading them costs an hour each.
      one chapter, the bar tracks it, and a reopen lands where you stopped.
    - EPUB: scroll WITHIN a chapter, close the book, reopen → lands at the
      exact spot, not the chapter top.
+   - EPUB: scroll within a chapter and put the phone DOWN (background the
+     app) → reopen lands at the exact spot.
 
-   **The EPUB "reopen lands at the exact spot" item is the one most likely
-   to still fail** — it depends on the CFI throttle firing before the
-   reader closes. If it fails, flush the CFI write on
-   `scenePhase == .background` as well as `onDisappear`.
+   **The last item is the one that exercises the throttle fix** — scroll
+   continuously for a while, then background the app rather than closing
+   the reader.
+
+## What CI was run against
+
+   ```
+   gh workflow run build.yml --ref batch-c-d-session
+   Scripts/watch_ci.sh e1b290a
+   ```
+
+   `build.yml` auto-runs only on `main` / `sage-upgrades`, so a branch
+   push starts nothing — it must be dispatched manually. The `logic-tests`
+   job is the fast signal (it fails in ~50 s when SpeechLogic does not
+   compile); `Build unsigned IPA` catches app-target errors.
 
 # Notes for the next session
 

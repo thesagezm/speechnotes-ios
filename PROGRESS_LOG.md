@@ -473,3 +473,42 @@ readers. Handover: `Docs/HANDOVER-BOOKS-MINIMIZED-TRANSPORT.md`.
 Joplin import confirmed working by the user on device; the rest of the
 2026-10-25 batch (pomodoro rectangle, stale-UI trio, BookDrop fixes) also
 reported good. Version stays 1.8.0/45.
+
+**Maths + books chapter-nav, finished (2026-10-26).** Two handovers
+landed on this branch with code written but unverified — one for the
+books chapter navigation + resume/start discordance, one for the notes
+maths rendering + TTS word forms. This round verified both, fixed what
+the handovers left open, and got CI green.
+
+*Maths (the one red test):* `speakList` joined node outputs with NO
+separator, so the big operator's separate limit nodes welded together —
+"i" + "=" + "1" came out as "iequals1" instead of "i equals 1". Every
+node boundary now gets a separator and the whitespace pass collapses the
+runs it leaves. That fixes the whole class of bug (any node boundary),
+not just this operator.
+
+*Maths (the open items):* (a) the insert affordance — there was no way
+to insert maths without typing "$" by hand, so the formatting bar gets a
+formula button and the slash menu gets `/math` and `/mathblock`; both
+insert the DELIMITED form and leave the body selected to type over.
+(b) the export form — a shared PDF or text file is a document the
+recipient READS, so it now carries the glyphs ("E = mc²"), not the
+engine's words ("E equals mc to the power of 2"). The speech path is
+untouched: the engine still hears words.
+
+*Books (the EPUB resume fix the handover called likeliest to fail):* the
+mid-chapter position write was a DEBOUNCE, not a throttle — every
+relocation cancelled the pending write and started a new one. `relocated`
+fires on every scroll tick, so a reader who kept scrolling never reached
+the write at all: the exact spot was lost precisely when the reader was
+moving through the book. It is now a throttle with a trailing write, and
+the position is also flushed on `scenePhase == .background` (onDisappear
+does not fire when the app is backgrounded — that is the exit the reader
+makes when they put the phone down).
+
+*Verification:* CI on `batch-c-d-session` — the app archive builds (so
+the books/EPUB/PDF code compiles for the first time), and the
+SpeechLogic suite runs. The earlier red run was exactly one failure, the
+maths test above. Version stays **1.8.0/45** per the release policy; the
+device round on the user's own book (the compiled OBGYN notes PDF) is
+still the open check.
