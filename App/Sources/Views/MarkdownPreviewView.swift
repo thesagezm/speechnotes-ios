@@ -162,8 +162,8 @@ struct MarkdownPreviewView: View {
     @ViewBuilder
     private func blockView(_ block: MarkdownText.MarkdownBlock) -> some View {
         switch block {
-        case .heading(let level, let text, _):
-            styledText(text)
+        case .heading(let level, _, let spans):
+            styledSpans(spans)
                 .font(headingFont(level))
                 .padding(.top, level <= 2 ? ReaderSpacing.headingTopLevel1 * theme.readerBlockSpacing
                                          : ReaderSpacing.headingTopLevel3Plus * theme.readerBlockSpacing)
@@ -180,13 +180,13 @@ struct MarkdownPreviewView: View {
             listRows(items, markerBuilder: { _, _ in "•" })
         case .orderedList(let items):
             listRows(items, markerBuilder: { index, _ in "\(index + 1)." })
-        case .quote(let text, _):
+        case .quote(_, let spans):
             HStack(alignment: .top, spacing: 10) {
                 RoundedRectangle(cornerRadius: 2)
                     .fill(Color.secondary.opacity(0.4))
                     .frame(width: 3)
                     .padding(.top, 2)
-                styledText(text)
+                styledSpans(spans)
                     .foregroundStyle(.secondary)
                     .lineSpacing(quoteLineSpacing)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -218,6 +218,18 @@ struct MarkdownPreviewView: View {
         case .table(let headers, let rows):
             tableView(headers: headers, rows: rows)
                 .padding(.bottom, blockGap)
+        case .math(let display, _):
+            // A standalone formula gets its own centred line, set a little
+            // larger than the prose around it. Centred is the convention
+            // every maths reader uses, and it is what tells the reader
+            // "this line is a formula", not a sentence.
+            Text(display)
+                .font(.system(size: bodyFontSize * 1.15, design: .serif))
+                .foregroundStyle(Color.accentColor)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 6)
+                .padding(.bottom, blockGap)
         }
     }
 
@@ -238,7 +250,7 @@ struct MarkdownPreviewView: View {
                         Text(markerBuilder(index, item))
                             .foregroundStyle(.secondary)
                     }
-                    styledText(item.text)
+                    styledSpans(item.spans.isEmpty ? [.plain(item.text)] : item.spans)
                         .strikethrough(item.isDone)
                         .foregroundStyle(item.isDone ? .secondary : .primary)
                 }
@@ -440,7 +452,7 @@ struct MarkdownPreviewView: View {
     /// the extra text spilling out of the cell.
     @ViewBuilder
     private func cell(_ spans: [MarkdownText.StyledSpan], width: CGFloat, numeric: Bool, bold: Bool) -> some View {
-        var content = styledText(cellText(spans))
+        var content = styledSpans(spans)
         if bold {
             content = content.bold()
         }
@@ -658,6 +670,14 @@ struct MarkdownPreviewView: View {
                 attrs.underlineStyle = .single
                 if let url = URL(string: urlString) { attrs.link = url }
                 piece = Text(attrs)
+            case .math(let display, _):
+                // A formula rides INSIDE the paragraph's Text, so the words
+                // around it still wrap naturally. It is set in the
+                // serif-ish maths face and tinted, which is what tells the
+                // reader "this is a formula", not a stray Greek letter.
+                piece = Text(display)
+                    .font(.system(size: bodyFontSize * 1.02, design: .serif))
+                    .foregroundStyle(Color.accentColor)
             case .image:
                 continue
             }
@@ -667,6 +687,36 @@ struct MarkdownPreviewView: View {
     }
 
     // MARK: - Emphasis styling
+
+    /// Text built from the block's own AST spans.
+    ///
+    /// The prose spans keep the EXISTING emphasis styling (the regex
+    /// tokenizer below), so bold and italic behave exactly as they did
+    /// before this change. The MATHS spans are the difference: they are
+    /// typeset in the maths face and tinted, which is what tells the reader
+    /// "this is a formula" rather than a stray Greek letter in the prose.
+    ///
+    /// The blocks that render through this path (headings, quotes, list
+    /// items, table cells) previously joined their spans into one string,
+    /// which dropped the maths distinction on the floor.
+    private func styledSpans(_ spans: [MarkdownText.StyledSpan]) -> Text {
+        var composed = Text("")
+        for span in spans {
+            if let formula = span.math {
+                composed = composed + mathText(formula.display)
+            } else {
+                composed = composed + styledText(span.text)
+            }
+        }
+        return composed
+    }
+
+    /// A formula in the preview's maths face.
+    private func mathText(_ display: String) -> Text {
+        Text(display)
+            .font(.system(size: bodyFontSize * 1.02, design: .serif))
+            .foregroundStyle(Color.accentColor)
+    }
 
     /// Styles **bold**, *italic*, `code` and ~~strike~~ spans within a text
     /// run, returning one composed Text. (Links are lifted out earlier as

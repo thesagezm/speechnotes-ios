@@ -292,12 +292,37 @@ struct BookAudioReaderView: View {
             }
             .foregroundStyle(Color.accentColor)
 
-            HStack(spacing: 12) {
+            // Speed + sleep: CENTERED as a pair under the transport row.
+            //
+            // They used to sit at the LEADING edge with the minimise
+            // chevron alone at the trailing edge — two chips on one side
+            // and a lone button on the other. That row read as unbalanced
+            // (the "playback speed and the sleep timer are not centered"
+            // report) while the transport row above and the time readout
+            // below were both centred on the screen.
+            //
+            // The pair now centres between two EQUAL spacers, which is what
+            // actually centres it — a centred HStack inside a wider row
+            // would still drift, because the row's own content decides the
+            // width. The chevron rides as a trailing OVERLAY rather than a
+            // row member, so it cannot push the pair off-centre.
+            HStack(spacing: 10) {
+                Spacer(minLength: 0)
                 speedMenu
                 sleepMenu
                 Spacer(minLength: 0)
+            }
+            .overlay(alignment: .trailing) {
                 // Minimize — the note editor's chevron affordance (the
                 // portrait bottom controls collapse to a slim pill).
+                //
+                // `.buttonStyle(.plain)` is REQUIRED here and was missing:
+                // without it the button picked up the accent tint and the
+                // default button chrome, which is why the icon read as
+                // "out of place" next to the two neutral chips. The other
+                // minimise buttons in the app (BookPlayerBar, the note
+                // editor's PlayerControlsBar, MinimizedBookTransport) all
+                // use `.plain` — this one was the odd one out.
                 Button {
                     Haptics.tap()
                     bookBarMinimized = true
@@ -307,9 +332,16 @@ struct BookAudioReaderView: View {
                         .foregroundStyle(.secondary)
                         .frame(width: 28, height: 28)
                         .background(Circle().fill(Color.secondary.opacity(0.12)))
+                        .contentShape(Circle())
                 }
+                .buttonStyle(.plain)
                 .accessibilityLabel("Minimize playback controls")
             }
+            // The overlay sits OUTSIDE the centred pair, so the pair needs
+            // room to breathe on both sides — symmetric padding keeps the
+            // pair centred while stopping it from running under the
+            // chevron on a narrow phone.
+            .padding(.horizontal, 34)
 
             timeReadout
         }

@@ -36,6 +36,8 @@ public enum MarkdownText {
         case divider
         case image(alt: String, url: String)
         case table(headers: [[StyledSpan]], rows: [[[StyledSpan]]])
+        /// A standalone formula (`$$…$$`) — its own centred line.
+        case math(display: String, spoken: String)
     }
 
     /// A list item. `level` is the nesting depth (0 = top level), straight
@@ -59,8 +61,14 @@ public enum MarkdownText {
     /// Flags compose: a nested **_both_** arrives with `bold` AND `italic`.
     /// `linkURL`/`image…` carry the runs the display layer turns into real
     /// links and images.
+    ///
+    /// A maths span carries the DISPLAY text in `text` (what the reader
+    /// sees — `β`, `∑`) and the SPOKEN text in `math.spoken` (what the
+    /// engine says — "beta", "sum"). The two are different strings on
+    /// purpose: the glyphs are outside the engines' phoneme vocabulary, so
+    /// the engine gets words while the screen gets symbols.
     public struct StyledSpan: Equatable, Hashable, Sendable {
-        public let text: String
+        public var text: String
         public var bold: Bool
         public var italic: Bool
         public var code: Bool
@@ -68,6 +76,8 @@ public enum MarkdownText {
         public var linkURL: String?
         public var imageAlt: String?
         public var imageURL: String?
+        /// The maths region this span came from. nil for everything else.
+        public var math: MathNotation.Segment?
 
         public init(
             text: String,
@@ -77,7 +87,8 @@ public enum MarkdownText {
             strike: Bool = false,
             linkURL: String? = nil,
             imageAlt: String? = nil,
-            imageURL: String? = nil
+            imageURL: String? = nil,
+            math: MathNotation.Segment? = nil
         ) {
             self.text = text
             self.bold = bold
@@ -87,6 +98,7 @@ public enum MarkdownText {
             self.linkURL = linkURL
             self.imageAlt = imageAlt
             self.imageURL = imageURL
+            self.math = math
         }
 
         /// A plain, unstyled span — the fallback every consumer uses when a
@@ -96,6 +108,11 @@ public enum MarkdownText {
         }
 
         public var isImage: Bool { imageURL != nil }
+        /// True for a maths span (inline formula or symbol).
+        public var isMath: Bool { math != nil }
+        /// The spoken form of this span — the maths words for a formula, its
+        /// own text for everything else.
+        public var spoken: String { math?.spoken ?? text }
     }
 
     /// Inline run for the preview: text, native images, tappable links.
@@ -103,6 +120,9 @@ public enum MarkdownText {
         case text(String)
         case image(alt: String, url: String)
         case link(label: String, url: String)
+        /// A formula — the display text and the spoken text travel together,
+        /// because the preview needs one and the engine needs the other.
+        case math(display: String, spoken: String)
     }
 
     /// `[label]: url "title"` definition, used to resolve reference links.
@@ -180,19 +200,21 @@ public enum MarkdownText {
         // the v1.5 report — speak the label instead. Resolved links are
         // already clean (the AST carries their text).
         let refs = Set(linkReferences(in: markdown).keys)
-        var spokenBlocks = blocks(markdown)
-        spokenBlocks = spokenBlocks.map { block in
-            guard case .paragraph(let text, let spans) = block else { return block }
-            let stripped = unresolvedReferences(text, defined: refs)
-            return stripped == text ? block : .paragraph(text: stripped, spans: spans)
-        }
+        let spokenBlocks = blocks(markdown)
         let spoken = spokenBlocks
             .compactMap { block -> String? in
                 let text = speechText(for: block)
                 return text.isEmpty ? nil : text
             }
             .joined(separator: "\n\n")
-        return SpeechSanitizer.clean(spoken)
+        // The rewrite runs on the FINAL spoken string, not on the spans one
+        // by one: the raw `[label][missing]` can straddle two AST spans, and
+        // a per-span rewrite would miss it. (Rewriting the paragraph's
+        // `text` field alone was not enough either — the SPEECH path reads
+        // the spans, and a maths span speaks its words rather than its
+        // glyphs.)
+        let readable = unresolvedReferences(spoken, defined: refs)
+        return SpeechSanitizer.clean(readable)
     }
 
     /// `[label][key]` → `label` for every reference whose key is not
@@ -214,32 +236,53 @@ public enum MarkdownText {
         // emphasis) — the span text is what a reader sees, so it is what the
         // engine says. No re-stripping: speechInline on resolved text would
         // eat the LITERAL markers GFM deliberately kept (an escaped `\*`).
+        //
+        // MATHS is the one exception: the reader sees `β` and `∑`, but the
+        // engines have no phoneme for those glyphs — they skip them or
+        // pronounce a name nobody asked for. A maths span therefore speaks
+        // its WORD form ("beta", "sum"), while everything else speaks its
+        // text. This is the whole reason `StyledSpan` carries two strings.
         func plain(_ spans: [StyledSpan]) -> String {
-            spans.map(\.text).joined()
+            spans.map(\.spoken).joined()
         }
         switch block {
-        case .heading(_, let text, _), .paragraph(let text, _):
-            return text
+        case .heading, .paragraph:
+            // The block's own `text` is the DISPLAY text (glyphs); the
+            // spans carry the spoken form.
+            return plain(blockSpans(block))
         case .bulletList(let items), .orderedList(let items):
             return items.map { item -> String in
-                if item.isTask { return (item.isDone ? "Done: " : "To do: ") + item.text }
-                return item.text
+                let body = item.spans.isEmpty ? item.text : plain(item.spans)
+                if item.isTask { return (item.isDone ? "Done: " : "To do: ") + body }
+                return body
             }.joined(separator: "\n")
-        case .quote(let text, _):
-            return text
+        case .quote:
+            return plain(blockSpans(block))
         case .code(_, let text):
             return text
         case .divider:
             return ""
         case .image(let alt, _):
             return alt
+        case .math(_, let spoken):
+            return spoken
         case .table(let headers, let rows):
-            func cell(_ spans: [StyledSpan]) -> String { spans.map(\.text).joined() }
+            func cell(_ spans: [StyledSpan]) -> String { plain(spans) }
             var lines = [headers.map(cell).joined(separator: ", ")]
             for row in rows {
                 lines.append(row.map(cell).joined(separator: ", "))
             }
             return lines.joined(separator: "\n")
+        }
+    }
+
+    /// The spans of a block, for the speech path.
+    private static func blockSpans(_ block: MarkdownBlock) -> [StyledSpan] {
+        switch block {
+        case .heading(_, _, let spans): return spans
+        case .paragraph(_, let spans): return spans
+        case .quote(_, let spans): return spans
+        default: return []
         }
     }
 
@@ -275,6 +318,14 @@ public enum MarkdownText {
 
         // 6. Code spans → content.
         line = replacePatterns(line, pattern: #"`([^`]+)`"#, with: "$1")
+
+        // 6b. Maths → its SPOKEN form. This path runs on RAW text (the
+        // editing path), so the formula is still wrapped in `$…$` and the
+        // source still holds LaTeX. Speaking the raw source would give the
+        // listener "backslash beta dollar" — the same complaint the
+        // preview had. The spoken words are substituted HERE so the engine
+        // hears "beta" while the reader still sees the source they typed.
+        line = MathNotation.spokenText(in: line)
 
         // 7. Emphasis markers (loop until stable, bounded).
         for _ in 0..<6 {
@@ -371,6 +422,21 @@ public enum MarkdownText {
         return result
     }
 
+    /// The formula of a paragraph that holds NOTHING but a display formula.
+    ///
+    /// `$$…$$` on its own line is a formula, not prose — it gets its own
+    /// centred block. A paragraph that mixes prose and a formula stays a
+    /// paragraph, because the reader wrote it that way.
+    private static func standaloneMath(_ spans: [StyledSpan]) -> (display: String, spoken: String)? {
+        let maths = spans.filter(\.isMath)
+        guard maths.count == 1, maths[0].math?.isDisplay == true else { return nil }
+        // Only prose whitespace may surround it.
+        let prose = spans.filter { !$0.isMath }.map(\.text).joined()
+        guard prose.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        guard let formula = maths[0].math else { return nil }
+        return (formula.display, formula.spoken)
+    }
+
     private static func appendBlock(_ node: any Markup, to result: inout [MarkdownBlock]) {
         switch node {
         case let heading as Heading:
@@ -389,6 +455,11 @@ public enum MarkdownText {
             if images.count == 1, spans.count == 1,
                let alt = images[0].imageAlt, let url = images[0].imageURL {
                 result.append(.image(alt: alt, url: url))
+            } else if let formula = standaloneMath(spans) {
+                // A paragraph holding ONE `$$…$$` formula and nothing else
+                // is a display formula — its own centred line, not prose
+                // with a formula in it.
+                result.append(.math(display: formula.display, spoken: formula.spoken))
             } else if !spans.isEmpty {
                 result.append(.paragraph(text: spans.map(\.text).joined(), spans: spans))
             }
@@ -555,13 +626,93 @@ public enum MarkdownText {
     /// The inline children of one block, as styled spans. Containers recurse
     /// with their flags set; breaks become newlines; an image becomes an
     /// image span the display layer lifts out.
+    ///
+    /// Text runs are SPLIT on maths: a paragraph reading "the rate is $r$"
+    /// arrives as three spans — "the rate is ", the formula, and "" — so the
+    /// display layer can typeset the formula differently from the prose
+    /// around it, and the speech layer can say "the rate is r" instead of
+    /// "the rate is dollar r dollar".
     private static func spans<S: Sequence>(of children: S) -> [StyledSpan] where S.Element == any Markup {
         var out: [StyledSpan] = []
         collectSpans(children, bold: false, italic: false, strike: false, into: &out)
-        return out.compactMap { span in
+        let kept = out.compactMap { span in
             // Drop empty text spans except images (an empty alt is legal).
             span.isImage || !span.text.isEmpty ? span : nil
         }
+        return mergeAdjacent(kept)
+    }
+
+    /// Merge neighbouring text spans that carry the same styling.
+    ///
+    /// Two adjacent plain spans are ONE piece of prose to every consumer —
+    /// the preview composes them into one Text, the speech path joins them.
+    /// Merging them means a construct that lives inside a span (an
+    /// unresolved reference link) can be rewritten later without the
+    /// rewrite being cut in half by a span boundary.
+    ///
+    /// Maths and image spans are never merged: a formula is its own unit,
+    /// and an image is its own block.
+    private static func mergeAdjacent(_ spans: [StyledSpan]) -> [StyledSpan] {
+        var out: [StyledSpan] = []
+        for span in spans {
+            if var last = out.last,
+               last.imageAlt == nil, last.imageURL == nil, last.math == nil,
+               span.imageAlt == nil, span.imageURL == nil, span.math == nil,
+               last.bold == span.bold, last.italic == span.italic,
+               last.code == span.code, last.strike == span.strike,
+               last.linkURL == span.linkURL {
+                last.text += span.text
+                out[out.count - 1] = last
+                continue
+            }
+            out.append(span)
+        }
+        return out
+    }
+
+    /// A text run split into prose and maths spans.
+    ///
+    /// The split happens HERE rather than in the display layer because the
+    /// SPOKEN text has to be built from the same split: a maths span knows
+    /// both its glyphs and its words, so the speech path never has to guess
+    /// what `β` should be called.
+    ///
+    /// A run inside inline code or a link keeps its literal text — code
+    /// spans are verbatim by definition, and a formula inside a link label
+    /// is a link label.
+    private static func splitMath(
+        _ text: String,
+        bold: Bool,
+        italic: Bool,
+        strike: Bool
+    ) -> [StyledSpan] {
+        let line = MathNotation.segments(in: text)
+        guard line.parts.contains(where: { if case .math = $0 { return true } else { return false } })
+        else {
+            return [StyledSpan(text: text, bold: bold, italic: italic, code: false, strike: strike)]
+        }
+        var out: [StyledSpan] = []
+        for part in line.parts {
+            switch part {
+            case .text(let plain):
+                if !plain.isEmpty {
+                    out.append(StyledSpan(
+                        text: plain, bold: bold, italic: italic,
+                        code: false, strike: strike
+                    ))
+                }
+            case .math(let segment):
+                // A DISPLAY formula (`$$…$$`) inside a paragraph is still a
+                // paragraph here — the block splitter promotes it to its own
+                // line when it is the only thing in the paragraph.
+                out.append(StyledSpan(
+                    text: segment.display, bold: bold, italic: italic,
+                    code: false, strike: strike,
+                    math: segment
+                ))
+            }
+        }
+        return out
     }
 
     private static func collectSpans<S: Sequence>(
@@ -574,9 +725,8 @@ public enum MarkdownText {
         for child in children {
             switch child {
             case let text as Text:
-                out.append(StyledSpan(
-                    text: text.string, bold: bold, italic: italic,
-                    code: false, strike: strike
+                out.append(contentsOf: splitMath(
+                    text.string, bold: bold, italic: italic, strike: strike
                 ))
 
             case let strong as Strong:
@@ -600,6 +750,15 @@ public enum MarkdownText {
                     var span = inner[0]
                     span.linkURL = link.destination ?? ""
                     out.append(span)
+                } else if inner.contains(where: \.isMath) {
+                    // A link whose label holds a formula: each span keeps the
+                    // link, so the formula still renders (and still speaks)
+                    // instead of being flattened into one plain string.
+                    for span in inner {
+                        var linked = span
+                        linked.linkURL = link.destination ?? ""
+                        out.append(linked)
+                    }
                 } else {
                     out.append(StyledSpan(
                         text: inner.map(\.text).joined(),
@@ -665,6 +824,10 @@ public enum MarkdownText {
             if let alt = span.imageAlt, let url = span.imageURL {
                 if !url.isEmpty { runs.append(.image(alt: alt, url: url)) }
                 else if !span.text.isEmpty { runs.append(.text(span.text)) }
+            } else if let formula = span.math {
+                // A formula is its own run — the preview typesets it apart
+                // from the prose around it.
+                runs.append(.math(display: formula.display, spoken: formula.spoken))
             } else if let url = span.linkURL, !url.isEmpty {
                 runs.append(.link(label: span.text, url: url))
             } else if !span.text.isEmpty {
