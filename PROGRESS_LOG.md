@@ -545,3 +545,17 @@ as the app went to sleep). Nothing exists today — there is no
 the decisions to make and the traps (restore on disappear, one decision
 for all reading surfaces), is in
 `Docs/HANDOVER-SCREEN-ON-AND-FINAL.md`. Version stays 1.8.0/45.
+
+**Books TTS: play starts at the viewed page, and the Contents jump moves the
+speech in read-along (2026-10-26, `583acdb`).** The user's round decoded:
+(a) in reader mode (= the read-along surface) TOC taps only moved the hidden
+viewer, so nothing happened — they now move the SPEECH to the chosen chapter
+(`BookPlaybackController.jumpToChapter`, superseding in place so the
+read-along text follows and auto-advance stays armed), for PDF and EPUB;
+(b) a fresh play starts where the reader IS — the PDF page mapped through
+the chapter's page-offset sidecar, the EPUB webview's scroll fraction —
+while a meaningful stored bookmark still wins ("page 1 is not really a
+bookmark": a start-of-chapter position counts as no position). Bookmark
+stop/start semantics untouched per the user. Full mechanics, decisions and
+device checklist in `Docs/HANDOVER-BOOKS-TTS-POSITION-AND-READALONG-TOC.md`.
+CI dispatched manually for `583acdb` (run 40395811218); device round pending.
