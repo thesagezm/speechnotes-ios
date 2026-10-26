@@ -1,6 +1,6 @@
 # HANDOVER — 2026-10-26: screen-on setting (NOT STARTED) + final state of the release round
 
-**Branch `batch-c-d-session`, HEAD `49a34ea`.**
+**Branch `batch-c-d-session`, HEAD `4ad3cb3`.**
 **The screen-on setting is NOT IMPLEMENTED — it is the next agent's first job.**
 Everything else in this file is DONE and (for the maths/books round) CI-verified.
 
@@ -99,9 +99,12 @@ whether it is on or off by default.
 | Supertonic spike | success (informative) |
 
 The maths + books round (`e1b290a`) and the docs round (`5e1f510`) are both
-fully green. The two bug fixes (`49a34ea`) were pushed with CI dispatched
-against them; **check that run before assuming they compile** —
-`gh run list --workflow build.yml --branch batch-c-d-session --limit 2`.
+fully green. The two bug fixes (`49a34ea`) needed one CI round: Swift
+requires call-site arguments in DECLARATION ORDER, and `isSpeaking` was
+passed before `sessionActive` in both book readers —
+`error: argument 'sessionActive' must precede argument 'isSpeaking'`.
+Fixed in `4ad3cb3`; **check the run for `4ad3cb3` before assuming the
+fixes compile** — `gh run list --workflow build.yml --branch batch-c-d-session --limit 2`.
 
 ## What was fixed in this round (all pushed)
 
@@ -234,3 +237,9 @@ yet tested these on their own books. The checklist:
 - **Swift language mode is 5.0** (`project.yml`), so the strict-concurrency
   diagnostics are not on. `@MainActor` annotations are still worth adding
   where a `Task` touches `@State`.
+- **Adding a parameter to a SwiftUI view's memberwise init means every call
+  site must pass it in DECLARATION ORDER.** This bit the landscape
+  play/pause fix (`isSpeaking` before `sessionActive` → `error: argument
+  'sessionActive' must precede argument 'isSpeaking'`). The declaration
+  order is the property order in the struct, and the error names both
+  arguments — read it and swap them, do not go hunting.
