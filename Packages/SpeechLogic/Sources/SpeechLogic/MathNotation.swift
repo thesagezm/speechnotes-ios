@@ -859,14 +859,18 @@ public enum MathNotation {
         }
 
         /// The spoken form of a node list.
+        ///
+        /// Every node boundary gets a SEPARATOR. A node list is a sequence of
+        /// things the author wrote apart (`i`, `=`, `1` in `\sum_{i=1}`), and
+        /// an operator word welded onto its neighbour is not a pause, it is a
+        /// different word: "iequals1" instead of "i equals 1". The separator
+        /// is a space; the final whitespace pass collapses whatever runs of
+        /// spaces the source's own spacing leaves behind.
         static func speakList(_ nodes: [Node]) -> String {
             var out = ""
             for (offset, node) in nodes.enumerated() {
+                if offset > 0 { out += " " }
                 out += speakNode(node)
-                if case .function = node, offset + 1 < nodes.count,
-                   case .text(let next) = nodes[offset + 1], !next.hasPrefix(" ") {
-                    out += " "
-                }
             }
             return out
         }

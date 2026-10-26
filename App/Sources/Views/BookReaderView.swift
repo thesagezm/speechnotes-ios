@@ -283,8 +283,18 @@ struct BookReaderView: View {
             // Background = not reading (the recorder's Task freezes anyway);
             // return = resume the same book's fold stream.
             switch phase {
-            case .active: readingRecorder.begin(subjectId: book.id.uuidString)
-            default: readingRecorder.end()
+            case .active:
+                readingRecorder.begin(subjectId: book.id.uuidString)
+            case .background:
+                // Flush the mid-chapter write BEFORE the app is suspended.
+                // `onDisappear` does not fire when the app is backgrounded,
+                // and the throttle window can swallow the last scroll — so
+                // without this the exact spot is lost on exactly the exit
+                // the reader does when they put the phone down.
+                flushCFIPersist()
+                readingRecorder.end()
+            default:
+                readingRecorder.end()
             }
         }
         .onDisappear {
@@ -292,9 +302,7 @@ struct BookReaderView: View {
             // Flush the throttled mid-chapter write — the exact spot must
             // not be lost because the reader closed inside the throttle
             // window.
-            cfiPersistTask?.cancel()
-            cfiPersistTask = nil
-            persistPosition()
+            flushCFIPersist()
             readingRecorder.end()
             // Deliberately NO readerDestroy() here: onDisappear fires on every
             // TAB SWITCH, and destroying the rendition blanked the book the
@@ -781,15 +789,51 @@ struct BookReaderView: View {
     /// Throttled mid-chapter persistence. Writes at most once every few
     /// seconds while the reader scrolls, so the exact spot survives a
     /// crash or a kill without a manifest write per scroll event.
+    ///
+    /// The throttle is a WINDOW, not a delay: the timer is NOT restarted by
+    /// every relocation. Restarting it on each event means a reader who
+    /// keeps scrolling never reaches the write at all — the pending write
+    /// was always cancelled before it fired, so the mid-chapter spot was
+    /// lost exactly when the reader was moving through the book, which is
+    /// when they are most likely to be interrupted.
     @State private var cfiPersistTask: Task<Void, Never>?
 
     private func scheduleCFIPersist() {
-        cfiPersistTask?.cancel()
-        cfiPersistTask = Task {
-            try? await Task.sleep(nanoseconds: 3_000_000_000)
+        // A write is ALREADY pending — leave it alone. It fires shortly and
+        // writes the LATEST position, so the reader does not need another
+        // one.
+        //
+        // The old code cancelled the pending write and started a new one on
+        // EVERY relocation. That is a debounce, and it has a fatal flaw
+        // here: `relocated` fires on every scroll tick, so a reader who
+        // keeps scrolling never reaches the write at all — the pending
+        // write is always cancelled before it fires. The mid-chapter spot
+        // was therefore lost exactly when the reader was moving through
+        // the book, which is when they are most likely to be interrupted.
+        //
+        // This is a throttle with a TRAILING write: one write every few
+        // seconds while the reader scrolls, and a final one shortly after
+        // they stop.
+        guard cfiPersistTask == nil else { return }
+        cfiPersistTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: UInt64(cfiPersistInterval * 1_000_000_000))
             guard !Task.isCancelled else { return }
+            cfiPersistTask = nil
             persistPosition()
         }
+    }
+
+    /// How often the mid-chapter position may be written.
+    private let cfiPersistInterval: TimeInterval = 3
+
+    /// Writes the position NOW and drops any pending write.
+    ///
+    /// Used on the two exits where the pending write cannot be trusted to
+    /// fire: the reader being dismissed, and the app being backgrounded.
+    private func flushCFIPersist() {
+        cfiPersistTask?.cancel()
+        cfiPersistTask = nil
+        persistPosition()
     }
 
     private func persistPosition() {

@@ -172,4 +172,48 @@ final class MarkdownSlashMenuTests: XCTestCase {
         )
         XCTAssertEqual(result.draft, "before\n---\n")
     }
+
+    // MARK: - Maths commands
+
+    /// The formula command must produce the DELIMITED form — the dollar
+    /// signs are what tell the maths parser that the run is a formula, so a
+    /// bare `\beta` would stay prose.
+    func testMathCommandWrapsTheFormulaInDollarSigns() {
+        let draft = "/"
+        let command = MarkdownSlashMenu.commands.first { $0.id == "math" }!
+        let result = MarkdownSlashMenu.apply(
+            command, in: draft, trigger: makeTrigger(draft, slashUtf16: 0, cursorUtf16: 1), caret: 1, selection: nil
+        )
+        XCTAssertEqual(result.draft, "$\\beta$")
+        // The formula body is selected, so the user types straight over it.
+        XCTAssertEqual(result.selectionUtf16, 1..<6)
+    }
+
+    func testDisplayMathCommandWrapsInDoubleDollarSigns() {
+        let draft = "/"
+        let command = MarkdownSlashMenu.commands.first { $0.id == "mathblock" }!
+        let result = MarkdownSlashMenu.apply(
+            command, in: draft, trigger: makeTrigger(draft, slashUtf16: 0, cursorUtf16: 1), caret: 1, selection: nil
+        )
+        XCTAssertEqual(result.draft, "$$\\beta$$")
+        XCTAssertEqual(result.selectionUtf16, 2..<7)
+    }
+
+    func testMathCommandWrapsAnExistingSelection() {
+        let draft = "/x^2"
+        let command = MarkdownSlashMenu.commands.first { $0.id == "math" }!
+        let result = MarkdownSlashMenu.apply(
+            command, in: draft,
+            trigger: makeTrigger(draft, slashUtf16: 0, cursorUtf16: 1),
+            caret: 1, selection: 1..<4
+        )
+        XCTAssertEqual(result.draft, "$x^2$")
+        XCTAssertEqual(result.selectionUtf16, 1..<4)
+    }
+
+    func testMathCommandsAreFindableByName() {
+        let ids = MarkdownSlashMenu.filter(prefix: "math").map(\.id)
+        XCTAssertTrue(ids.contains("math"))
+        XCTAssertTrue(ids.contains("mathblock"))
+    }
 }

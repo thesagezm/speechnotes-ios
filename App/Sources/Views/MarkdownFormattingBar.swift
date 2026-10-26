@@ -47,6 +47,10 @@ struct MarkdownFormattingBar: View {
                 }
                 divider
                 group {
+                    button(symbol: "function", a11y: "Insert formula") { applyInlineMath() }
+                }
+                divider
+                group {
                     button(symbol: "link", a11y: "Insert link") { linkFlow() }
                     button(symbol: "photo", a11y: "Insert image") { insertImage() }
                 }
@@ -187,6 +191,35 @@ struct MarkdownFormattingBar: View {
 
     fileprivate func applyBlockquote() { applyList(marker: "> ") }
     fileprivate func applyInlineCode() { wrap(prefix: "`", suffix: "`", placeholder: "code") }
+    /// An inline formula — `$…$`.
+    ///
+    /// The dollar signs are what tell the reader (and the maths parser)
+    /// that this run is a FORMULA rather than prose — a note about prices
+    /// must keep its own dollar signs, so the delimiters are not optional.
+    ///
+    /// The formula body is SELECTED, not merely inserted: the user types
+    /// over it, so the button is one tap plus one type, not one tap plus a
+    /// hunt for the caret.
+    fileprivate func applyInlineMath() {
+        guard let range = currentRange
+                ?? Range(NSRange(location: draft.utf16.count, length: 0), in: draft)
+        else { return }
+        let ns = NSString(string: draft)
+        let selected = ns.substring(with: NSRange(range, in: draft))
+        let body = selected.isEmpty ? "\\beta" : selected
+        var updated = draft
+        updated.replaceSubrange(range, with: "$\(body)$")
+        let base = updated.utf16.distance(from: updated.startIndex, to: range.lowerBound)
+        let bodyStart = base + 1
+        let bodyEnd = bodyStart + body.utf16.count
+        draft = updated
+        if let start = updated.utf16.index(updated.utf16.startIndex, offsetBy: bodyStart, limitedBy: updated.utf16.endIndex)
+            .flatMap({ String.Index($0, within: updated) }),
+           let end = updated.utf16.index(updated.utf16.startIndex, offsetBy: bodyEnd, limitedBy: updated.utf16.endIndex)
+            .flatMap({ String.Index($0, within: updated) }) {
+            selection = start..<end
+        }
+    }
     fileprivate func applyFencedCode() {
         guard let range = currentRange
                 ?? Range(NSRange(location: draft.utf16.count, length: 0), in: draft)

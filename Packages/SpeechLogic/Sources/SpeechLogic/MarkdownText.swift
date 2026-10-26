@@ -208,7 +208,7 @@ public enum MarkdownText {
         let spokenBlocks = blocks(markdown)
         let spoken = spokenBlocks
             .compactMap { block -> String? in
-                let text = speechText(for: block)
+                let text = blockText(for: block, math: .spoken)
                 return text.isEmpty ? nil : text
             }
             .joined(separator: "\n\n")
@@ -220,6 +220,33 @@ public enum MarkdownText {
         // glyphs.)
         let readable = unresolvedReferences(spoken, defined: refs)
         return SpeechSanitizer.clean(readable)
+    }
+
+    /// Markdown → the text a READER sees: the same document, with every
+    /// maths region in its DISPLAY form (`E = mc²`, `β`, `∑`).
+    ///
+    /// This is the export path — a shared PDF or a plain-text file is a
+    /// DOCUMENT, not a performance of the note. Exporting the spoken form
+    /// ("E equals mc to the power of 2") puts the engine's words in the
+    /// reader's file; the glyphs are what the note actually says.
+    ///
+    /// The speech path (`plainText`) is unchanged: the engine still hears
+    /// words, because the engines have no phoneme for the glyphs.
+    public static func displayText(_ markdown: String) -> String {
+        let refs = Set(linkReferences(in: markdown).keys)
+        let rendered = blocks(markdown)
+            .compactMap { block -> String? in
+                let text = blockText(for: block, math: .display)
+                return text.isEmpty ? nil : text
+            }
+            .joined(separator: "\n\n")
+        // The same unresolved-reference rewrite the speech path applies: an
+        // exported document must not carry `[label][missing]` bracket soup.
+        let readable = unresolvedReferences(rendered, defined: refs)
+        // `displaySafe`, not `clean`: a shared file is a document, so emoji
+        // the user typed are CONTENT and must survive. The control bytes and
+        // zero-width junk are not.
+        return SpeechSanitizer.displaySafe(readable)
     }
 
     /// `[label][key]` → `label` for every reference whose key is not
@@ -236,19 +263,32 @@ public enum MarkdownText {
         }
     }
 
-    private static func speechText(for block: MarkdownBlock) -> String {
-        // The AST already resolved every inline construct (escapes, links,
-        // emphasis) — the span text is what a reader sees, so it is what the
-        // engine says. No re-stripping: speechInline on resolved text would
-        // eat the LITERAL markers GFM deliberately kept (an escaped `\*`).
-        //
-        // MATHS is the one exception: the reader sees `β` and `∑`, but the
-        // engines have no phoneme for those glyphs — they skip them or
-        // pronounce a name nobody asked for. A maths span therefore speaks
-        // its WORD form ("beta", "sum"), while everything else speaks its
-        // text. This is the whole reason `StyledSpan` carries two strings.
+    /// Which form of the maths a consumer gets.
+    private enum MathForm: Equatable {
+        /// The engine's form: words ("beta", "sum from i equals 1").
+        case spoken
+        /// The reader's form: glyphs ("β", "∑_i=1^n").
+        case display
+    }
+
+    /// The text of one block, in the requested maths form.
+    ///
+    /// The AST already resolved every inline construct (escapes, links,
+    /// emphasis) — the span text is what a reader sees, so it is what the
+    /// engine says. No re-stripping: speechInline on resolved text would
+    /// eat the LITERAL markers GFM deliberately kept (an escaped `\*`).
+    ///
+    /// MATHS is the one exception: the reader sees `β` and `∑`, but the
+    /// engines have no phoneme for those glyphs — they skip them or
+    /// pronounce a name nobody asked for. A maths span therefore speaks
+    /// its WORD form ("beta", "sum"), while everything else speaks its
+    /// text. This is the whole reason `StyledSpan` carries two strings.
+    private static func blockText(for block: MarkdownBlock, math: MathForm) -> String {
         func plain(_ spans: [StyledSpan]) -> String {
-            spans.map(\.spoken).joined()
+            switch math {
+            case .spoken: return spans.map(\.spoken).joined()
+            case .display: return spans.map(\.text).joined()
+            }
         }
         switch block {
         case .heading, .paragraph:
@@ -269,8 +309,8 @@ public enum MarkdownText {
             return ""
         case .image(let alt, _):
             return alt
-        case .math(_, let spoken):
-            return spoken
+        case .math(let display, let spoken):
+            return math == .spoken ? spoken : display
         case .table(let headers, let rows):
             func cell(_ spans: [StyledSpan]) -> String { plain(spans) }
             var lines = [headers.map(cell).joined(separator: ", ")]

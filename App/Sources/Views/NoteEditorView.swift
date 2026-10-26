@@ -636,10 +636,15 @@ struct NoteEditorView: View {
             sharedDocumentURL = url
         case .plainText:
             let url = tempDir.appendingPathComponent("\(title).txt")
-            try? MarkdownText.plainText(draft).write(to: url, atomically: true, encoding: .utf8)
+            // The DISPLAY form, not the spoken one: a shared text file is a
+            // document the recipient READS, so a formula must arrive as
+            // "E = mc²", not as the engine's "E equals mc to the power of 2".
+            try? MarkdownText.displayText(draft).write(to: url, atomically: true, encoding: .utf8)
             sharedDocumentURL = url
         case .pdf:
-            let text = MarkdownText.plainText(draft)
+            // Same reasoning: the PDF is a rendered page, so it carries the
+            // glyphs a reader expects to see.
+            let text = MarkdownText.displayText(draft)
             let renderer = UIPrintPageRenderer()
             let formatter = UIMarkupTextPrintFormatter(markupText: Self.htmlBody(for: text, title: note.title))
             renderer.addPrintFormatter(formatter, startingAtPageAt: 0)

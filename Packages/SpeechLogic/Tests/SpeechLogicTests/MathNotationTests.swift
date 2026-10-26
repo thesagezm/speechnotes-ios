@@ -311,4 +311,37 @@ final class MathNotationTests: XCTestCase {
             XCTAssertEqual(text, "bold")
         }
     }
+
+    // MARK: - The export form
+
+    /// A shared PDF or text file is a DOCUMENT the recipient READS, so it
+    /// must carry the glyphs — not the engine's words.
+    func testDisplayTextCarriesTheGlyphsNotTheWords() {
+        let markdown = "the rate is $\\beta$ today"
+        XCTAssertEqual(MarkdownText.displayText(markdown), "the rate is β today")
+    }
+
+    func testDisplayTextRendersADisplayFormula() {
+        let markdown = """
+        before
+
+        $$E = mc^2$$
+
+        after
+        """
+        XCTAssertEqual(MarkdownText.displayText(markdown), "before\n\nE = mc²\n\nafter")
+    }
+
+    /// The speech path must be UNAFFECTED by the export change — the engine
+    /// still hears words.
+    func testSpeechPathStillSpeaksWordsAfterTheExportChange() {
+        let markdown = "the rate is $\\beta$ today"
+        XCTAssertEqual(MarkdownText.plainText(markdown), "the rate is beta today")
+    }
+
+    /// Prices keep their dollar signs in the export too.
+    func testDisplayTextLeavesPricesAlone() {
+        let markdown = "it was $5 and $10"
+        XCTAssertEqual(MarkdownText.displayText(markdown), "it was $5 and $10")
+    }
 }

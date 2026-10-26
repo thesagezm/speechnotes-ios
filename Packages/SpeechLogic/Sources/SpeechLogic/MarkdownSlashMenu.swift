@@ -70,6 +70,14 @@ public enum MarkdownSlashMenu {
               keywords: ["grid", "columns", "cols", "row"], caretMarker: "| "),
         .init(id: "link",     label: "Link",          symbol: "link",       snippet: "[", placeholder: "label](https://)", keywords: ["url", "href"]),
         .init(id: "image",    label: "Image",         symbol: "photo",      snippet: "![", placeholder: "alt](https://)", keywords: ["picture", "pic", "img", "embed"]),
+        // Maths. The delimiters are NOT decoration: they are what tells the
+        // maths parser that the run is a FORMULA, so a note about prices
+        // ("costs $5") keeps its own dollar signs while `$x + y$` renders.
+        // The body is left SELECTED so the user types over the placeholder.
+        .init(id: "math",     label: "Formula",       symbol: "function",   snippet: "$\\beta$", placeholder: "\\beta",
+              keywords: ["equation", "latex", "symbol", "beta", "greek"], kind: .wrap(before: "$", after: "$")),
+        .init(id: "mathblock", label: "Display formula", symbol: "sum",     snippet: "$$\\beta$$", placeholder: "\\beta",
+              keywords: ["equation", "display", "latex", "block"], kind: .wrap(before: "$$", after: "$$")),
         .init(id: "bold",     label: "Bold",          symbol: "bold",       snippet: "**bold**", placeholder: "bold", keywords: ["strong"], kind: .wrap(before: "**", after: "**")),
         .init(id: "italic",   label: "Italic",        symbol: "italic",     snippet: "*italic*", placeholder: "italic", keywords: ["emphasis"], kind: .wrap(before: "*", after: "*")),
         .init(id: "strike",   label: "Strikethrough", symbol: "strikethrough", snippet: "~~strike~~", placeholder: "strike", keywords: ["cross", "delete"], kind: .wrap(before: "~~", after: "~~")),
