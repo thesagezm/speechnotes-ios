@@ -52,166 +52,88 @@ rendering in the notes preview). THIS session owns issues 2 + 3 only.
 **Symptom:** prev/next chevrons at the bottom of the EPUB reader jump to the
 last chapter instead of the adjacent one.
 
-**Root cause: the chapter bar's index and the TOC's index are DIFFERENT
-numbering spaces.**
+**Status: NOT YET DIAGNOSED. The exploratory reading below was inconclusive
+— the next session must settle it empirically before changing code.**
 
-- `BookReaderView.chapterIndex` (line 21) is the **SPINE index** — epub.js's
-  `location.start.index`, which is the index into the book's SPINE
-  (`book.spine`), i.e. the reading-order list of content documents.
-- `Book.toc` (the table of contents the user sees and taps) is built in
-  `BooksStore.buildManifest` (App/Sources/Services/BooksStore.swift:639-645)
-  from the EPUB's NAV/NCX document, and each entry carries `spineIndex` —
-  the index of the spine item its href points at.
+**What IS established (verified):**
 
-**The mismatch:** a book's TOC has MANY MORE entries than its spine. A
-typical compiled-notes EPUB has, say, 12 spine items but 60+ TOC entries
-(one per section/subsection, many of which live inside the SAME spine
-document). epub.js's `relocated` reports the SPINE index. The TOC sheet
-shows the TOC's own row order. So:
+1. `BookReaderView.chapterIndex` is the **SPINE index** — it comes from
+   epub.js's `relocated` event (`location.start.index`, which is the index
+   into the book's spine). `handleRelocated` (line 709-718) sets it.
+2. The bottom chevrons step it by ±1: `goChapter(chapterIndex - 1)` /
+   `goChapter(chapterIndex + 1)` (lines 443, 458). The rail and the
+   minimised pill do the same (lines 175-176, 416-417).
+3. The TOC sheet taps resolve to `row.entry.spineIndex` (line 497-499),
+   which is ALSO a spine index — `BooksStore.buildManifest` (line 639-645)
+   maps every TOC href to its spine index at import:
+   `indexByHref[entry.href]`. **So the chevrons and the TOC are in the SAME
+   index space.** The "TOC works, chevrons don't" asymmetry the user
+   describes is therefore NOT a spine-vs-TOC space mismatch.
 
-- The **TOC tap** path works, because `BookReaderView.tocSheet` (line 497)
-  resolves `row.entry.spineIndex` and calls `goChapter(spineIndex)` — a
-  SPINE index. Correct.
-- The **next/prev chevron** path computes `goChapter(chapterIndex + 1)`
-  (lines 443, 458) — also a SPINE index, which is *self-consistent*.
+**The remaining candidate explanations (test them in this order):**
 
-So on a spine-index basis the chevrons should be right... **unless the
-spine index the chevrons use and the spine index epub.js uses disagree.**
-And they do, because of the following.
+- **(A) The TOC has more entries than the spine, and the USER counts TOC
+  rows while the chevrons count spine items.** A compiled-notes EPUB often
+  has 12 spine documents but 60+ TOC rows (many sections share one
+  document). Tapping TOC row 20 lands on spine item 3; pressing "next"
+  then goes to spine item 4 — which the user may perceive as "it jumped to
+  the wrong place", and if the last TOC rows all map to the LAST spine
+  item, pressing next near the end repeatedly lands on the last spine
+  item — **"it only jumps to the last chapter"**. **THIS FITS THE REPORT
+  BEST.** Verify by printing `book.spine.count` vs `book.toc.count` and
+  the `spineIndex` of each TOC row.
+- **(B) `goChapter` never updates `chapterIndex` optimistically.** It only
+  calls JS (line 730-732); `chapterIndex` changes when the `relocated`
+  event comes back. If the JS command does not take effect (the book is
+  still opening, or `window.RENDITION` is nil — `readerGoChapter` returns
+  early in that case), the chevrons compute the SAME target again and
+  again. **This is a real defect worth fixing regardless** — the reader
+  should set `chapterIndex` immediately and let the relocation correct it.
+- **(C) `RENDITION.display(item.href)` vs `RENDITION.display(index)`.**
+  `reader.js` (App/Resources/epubjs/reader.js:273-277) passes the item's
+  HREF string; `Rendition._display` resolves it via
+  `book.spine.get(href)` → `spineByHref[t.href]`. `Spine.append` registers
+  each item under `t.href`, `encodeURI(t.href)` and `decodeURI(t.href)`,
+  and `Spine.unpack` overwrites `t.href` with the MANIFEST href — the
+  same string `reader.js` reads back off the item. **So the lookup
+  resolves.** This was explored and is NOT the bug. Passing the SPINE
+  INDEX instead (`RENDITION.display(index)`) would sidestep the
+  href-key question entirely and is a cheap robustness win.
 
-**The actual defect — `goChapter` does not update `chapterIndex`, and the
-relocation round-trip is what makes the chevrons land wrong.**
-
-`BookReaderView.goChapter` (line 730-732):
+**RECOMMENDED FIX for the EPUB reader, once (A)/(B) are confirmed:**
 
 ```swift
 private func goChapter(_ index: Int) {
-    webView?.evaluateJavaScript("readerGoChapter(\(index))", completionHandler: nil)
+    // Move the bar IMMEDIATELY: the chevrons used to wait for the
+    // webview's relocation event, so a command the webview had not
+    // picked up yet (still opening, or RENDITION not ready) left the
+    // bar on the old chapter and the next press computed the same
+    // target again.
+    let clamped = max(0, min(max(totalChapters - 1, 0), index))
+    chapterIndex = clamped
+    chapterFraction = 0
+    webView?.evaluateJavaScript("readerGoChapter(\(clamped))", completionHandler: nil)
 }
 ```
 
-and `reader.js` (App/Resources/epubjs/reader.js:273-277):
+and in `reader.js`, navigate by index rather than by href:
 
 ```javascript
 window.readerGoChapter = function (index) {
     if (!window.BOOK || !window.RENDITION) return;
     var item = window.BOOK.spine.get(index);
-    if (item) window.RENDITION.display(item.href);
+    if (!item) return;
+    if (window.RENDITION.display.length) { /* by index when supported */ }
+    window.RENDITION.display(item.href);
 };
 ```
 
-`RENDITION.display(item.href)` is called with a **STRING href**, not the
-spine index. Look at what epub.js does with that (vendored
-`App/Resources/epubjs/epub.min.js`):
-
-- `Rendition._display(t)` → `this.book.spine.get(t)` where `t` is the href
-  string → `Spine.get` resolves `spineByHref[t] || spineByHref[encodeURI(t)]`
-  → this is where the href must match a **spine item's exact href key**.
-- `manager.display(target)` → `this.views.find(t)` → `find` compares
-  `e.section.index == t.index`. With `t` a string, `t.index` is `undefined`,
-  so `find` NEVER matches and epub.js falls through to `this.clear()` +
-  `this.add(t)`.
-
-**`this.add(t)` renders the section — but the `section.index` that comes back
-in the next `relocated` event is the SPINE index of the rendered item.** That
-part is consistent.
-
-**So where does "last chapter" come from? The href key mismatch.**
-`Spine.append` registers each item under THREE keys:
-`spineByHref[decodeURI(t.href)]`, `spineByHref[encodeURI(t.href)]`, and
-`spineByHref[t.href]`. But `Spine.unpack` OVERWRITES `t.href` with the
-**manifest** href when the manifest entry exists:
-
-```javascript
-r = this.manifest[t.idref];
-if (r) { t.href = r.href; t.url = e(t.href, true); ... }
-```
-
-The manifest href is the OPF `<item href="...">` value — e.g. `text/chap3.xhtml`
-— which is **relative to the OPF directory**. `reader.js` calls
-`BOOK.spine.get(index)` and passes `item.href` to `RENDITION.display()`. That
-href string is the same string used as the `spineByHref` key, so
-`spine.get(href)` resolves correctly and it works... **when the href has no
-fragment and no encoding difference.**
-
-**The decisive detail — `readerGoChapter` passes a NUMBER to `spine.get`,
-but `RENDITION.display` then receives a HREF, and the href round-trip through
-`display()` is what breaks.** Concretely, `Rendition.display(t)` has this
-guard at its head:
-
-```javascript
-display(t, e) {
-    ...
-    (e === t.href || Object(r.isNumber)(e)) && (e = void 0);
-    var s = this.views.find(t);
-    if (s && t && "pre-paginated" !== this.layout.name) {
-        // scroll to the ALREADY-RENDERED view for this section
-        ...
-        return i.resolve(), n;
-    }
-    this.clear();
-    ...
-    this.add(t, o) ...
-}
-```
-
-`this.views.find(t)` looks for a view whose `section.index == t.index`. When
-`t` is a **string href**, `t.index` is undefined → no match → `this.clear()`
-and re-render. When `t` is a **number** (spine index), `t.index` is also
-undefined (numbers have no `.index`) → also no match. Either way it re-renders.
-That is not the bug by itself.
-
-**The bug is what `RENDITION.display(href)` renders vs. what the reader
-THINKS it rendered.** `Rendition.display(t)` → `this.add(t)` → `createView(t)`
-→ `new View(t, ...)`. The `View`'s `section` is the **spine item object**
-passed in. `Spine.get(index)` returns the spine item, whose `.index` was set
-in `unpack`: `this.items.forEach((t, n) => { t.index = n; ... })`.
-
-**BUT** `Rendition.display(t)` receives `item.href` — a STRING — and
-`manager.display(target)` → `this.add(t)` → `createView(t)` → `new View(t)`.
-`View`'s constructor takes the **section**; passing a string means
-`this.section` is a string, and `this.section.index` is `undefined`!
-`View.display(request)` then does `this.section.load(request)` — and a
-**string has no `.load`** → the view fails to render its content, OR epub.js's
-`Section` wrapper handles it.
-
-Wait — this needs checking against `Rendition.display` again: in
-`Rendition._display(t)`, `t` is FIRST resolved via `this.book.spine.get(t)`:
-`(e = this.book.spine.get(t)) ? this.manager.display(e, t)`. So the SECTION
-OBJECT is what reaches `manager.display`. **`t` is the section object, whose
-`.index` IS the spine index.** So `views.find(t)` compares `section.index ==
-t.index` → **matches** → and `this.scrollTo(...)` + `this.locationOf(e)` path
-runs, and `this.add(t)` is never reached.
-
-**THAT is the bug.** `Rendition.display(href)`:
-1. `spine.get(href)` → resolves to the spine item → `manager.display(section, href)`.
-2. `manager.display(t=section)` → `this.views.find(t)` → **matches the
-   already-rendered view for that section** (because epub.js renders
-   sections continuously in scroll flow, and the view for that section may
-   still be mounted) → it SCROLLS to it and resolves.
-
-So in **scrolled flow**, calling `display(href)` for a section that is
-already rendered scrolls to it — correct.
-
-**In PAGINATED flow**, `this.layout.name === "paginated"` so the
-"already rendered" shortcut is skipped (`"pre-paginated" !== this.layout.name`
-is TRUE for "paginated", so the shortcut IS taken). Hmm.
-
-OK — the cleanest statement of the defect, which the empirical device report
-confirms, is:
-
-**`readerGoChapter` navigates by SPINE INDEX, while the reader's chapter bar
-and the TOC are in TOC space.** Let me re-verify by reading the numbers
-rather than the internals, because the internals are ambiguous and the
-numbers are decisive.
-
-Let me do that verification in the NEXT session — it is the single most
-important open question, and it decides between two different fixes:
-
-- **(A)** the chevrons step the wrong index space (spine vs TOC), or
-- **(B)** the chevrons step the right space but `goChapter` fails to
-  round-trip (the JS command doesn't take effect and the reader stays where
-  it was, or epub.js renders the wrong section).
+**ALSO consider (A)'s UX fix:** the bottom bar should step the SAME list
+the user sees in the Contents sheet. If the TOC is finer than the spine,
+either (i) step TOC rows (and jump to their `spineIndex`) or (ii) label the
+bar honestly — "Chapter 3 of 12" (spine) vs. the TOC's 60 rows — so the
+two counts cannot be confused. Option (i) matches the user's expectation
+("jump to the previous/next chapter" = the chapters they see listed).
 
 ### 2b. PDF reader — `App/Sources/Views/BookPDFReaderView.swift`
 
