@@ -1,5 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import SpeechLogic
 
 struct SettingsTabView: View {
     @EnvironmentObject private var notes: NotesStore
@@ -16,6 +17,12 @@ struct SettingsTabView: View {
     /// ones `PaywallBypass` reads, so no glue code.
     @AppStorage(PaywallBypass.enabledKey) private var bypassEnabled = true
     @AppStorage(PaywallBypass.alwaysDomainsKey) private var alwaysBypassDomains = ""
+
+    /// Keep Screen On (Settings → Reading): the key/default live in
+    /// `ScreenAwakePolicy` (SpeechLogic) so the toggle and the controller
+    /// cannot drift apart. The controller re-applies on this change via
+    /// `.onChange` below.
+    @AppStorage(ScreenAwakePolicy.preferenceKey) private var keepScreenOn = ScreenAwakePolicy.defaultEnabled
 
     /// One-time script status for the footer — loading the BPC pair reads
     /// ~300 KB off disk, so it must not run per body render.
@@ -40,6 +47,13 @@ struct SettingsTabView: View {
                     NavigationLink("Appearance") {
                         AppearanceSettingsView()
                     }
+                }
+                Section {
+                    Toggle("Keep Screen On", isOn: $keepScreenOn)
+                } header: {
+                    Text("Reading")
+                } footer: {
+                    Text("Keeps the display awake while you read: in the book readers (EPUB, PDF, audiobooks) and in a note's reading mode. Editing a note is unaffected — the keyboard already keeps the screen on. Leaving a reading surface hands the screen back to the system timer.")
                 }
                 Section("Backup") {
                     NavigationLink("Export notes to Joplin (.jex)") {
@@ -97,6 +111,11 @@ struct SettingsTabView: View {
                 }
             }
             .navigationTitle("Settings")
+            .onChange(of: keepScreenOn) { _ in
+                // The controller reads the preference fresh, so one nudge
+                // re-applies it to whatever is on screen right now.
+                ScreenAwake.shared.refresh()
+            }
             .onReceive(NotificationCenter.default.publisher(for: .miniPlayerJumpToExports)) { _ in
                 // Mini-player tap on a playing export → its player surface.
                 pushStorageForExport = true

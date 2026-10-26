@@ -8,7 +8,7 @@ import Foundation
 ///   with N evenly-spaced breaks carved out of it. The window is absolute —
 ///   pauses shift it, but skips do not pull the finish earlier.
 /// - `flowmodoro`: open-ended focus; every 5 focus minutes bank 1 break
-///   minute, claimable from 3 focus minutes.
+///   minute, claimable once 3 BREAK minutes are banked (15 focus minutes).
 /// - `classic`: hand-tuned focus blocks and breaks, each with its own length
 ///   (block 1 = 25 min, block 2 = 30 min; break 1 = 5 min, break 2 = 15 min).
 public enum PomodoroMode: String, Codable, Sendable, CaseIterable {
@@ -182,7 +182,11 @@ public struct PomodoroSession: Codable, Equatable, Sendable {
 
     /// Focus seconds that earn one break minute.
     public static let flowUnitFocus: TimeInterval = 300
-    /// Focus seconds before a break may be claimed at all.
+    /// BANKED BREAK seconds before a break may be claimed at all. The gate
+    /// is on the POT, not on focus: 3 break minutes = 15 focus minutes.
+    /// (The first rule unlocked the claim at 3 focus minutes, which offered
+    /// a 36-second break nobody would take — the user asked for the claim
+    /// to wait until the break itself is worth taking.)
     public static let flowClaimThreshold: TimeInterval = 180
 
     // MARK: Start
@@ -295,7 +299,12 @@ public struct PomodoroSession: Codable, Equatable, Sendable {
         switch (phaseStart, phaseEnd) {
         case let (start?, end?):
             let total = end.timeIntervalSince(start)
-            guard total > 0 else { return 1 }
+            // A degenerate step (start >= end — a corrupted or raced
+            // boundary) must NOT paint the glass full: that is exactly the
+            // "stuck at 100% while the countdown still runs" report. An
+            // empty fill beside a live countdown reads as a cosmetic
+            // glitch; a full one reads as finished, which is a lie.
+            guard total > 0 else { return 0 }
             let elapsed = min(total, max(0, anchor(now).timeIntervalSince(start)))
             return elapsed / total
         case (_?, nil):
@@ -325,7 +334,7 @@ public struct PomodoroSession: Codable, Equatable, Sendable {
 
     public func flowCanClaim(now: Date) -> Bool {
         config.mode == .flowmodoro && phase == .focus && pausedAt == nil
-            && flowAccruedFocus(now: now) >= Self.flowClaimThreshold
+            && flowEarnedBreak(now: now) >= Self.flowClaimThreshold
     }
 
     // MARK: Transitions
@@ -380,11 +389,12 @@ public struct PomodoroSession: Codable, Equatable, Sendable {
 
     /// Flowmodoro: turn accrued focus into a break now. The break lasts the
     /// whole pot (1 min per 5 focus min) and the accumulator resets — focus
-    /// starts from zero after it.
+    /// starts from zero after it. The claim only unlocks once the pot holds
+    /// `flowClaimThreshold` (3 break minutes = 15 focus minutes).
     @discardableResult
     public mutating func claimBreak(now: Date) -> Bool {
         guard config.mode == .flowmodoro, phase == .focus, pausedAt == nil,
-              flowAccruedFocus(now: now) >= Self.flowClaimThreshold else { return false }
+              flowEarnedBreak(now: now) >= Self.flowClaimThreshold else { return false }
         let rest = flowEarnedBreak(now: now)
         flowBanked = 0
         flowStintStart = nil

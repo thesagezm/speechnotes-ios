@@ -215,27 +215,30 @@ final class PomodoroEngineTests: XCTestCase {
         XCTAssertEqual(session.phase, .focus)
         XCTAssertNil(session.phaseEnd)
 
-        // Below the 3-minute claim threshold: earned but not claimable.
-        XCTAssertFalse(session.flowCanClaim(now: seconds(120 + 179)))
-        XCTAssertFalse(session.claimBreak(now: seconds(120 + 179)))
-        XCTAssertTrue(session.flowCanClaim(now: seconds(120 + 180)))
+        // Below the claim threshold: the pot is earned but not claimable.
+        // The gate is on the POT — 3 break minutes = 15 focus minutes — so
+        // 3 focus minutes (a 36-second pot) is earned but far from claimable.
+        XCTAssertFalse(session.flowCanClaim(now: seconds(120 + 180)))
         XCTAssertEqual(session.flowEarnedBreak(now: seconds(120 + 180)), 36, accuracy: 0.001)
+        XCTAssertFalse(session.flowCanClaim(now: seconds(120 + 899)))
+        XCTAssertTrue(session.flowCanClaim(now: seconds(120 + 900)))
+        XCTAssertEqual(session.flowEarnedBreak(now: seconds(120 + 900)), 180, accuracy: 0.001)
 
-        // Ten focus minutes → a 2-minute pot; claiming banks it and restarts focus.
-        events = session.advanceIfDue(now: seconds(120 + 600))
+        // Fifteen focus minutes → a 3-minute pot; claiming banks it and restarts focus.
+        events = session.advanceIfDue(now: seconds(120 + 900))
         XCTAssertTrue(events.isEmpty) // focus never "completes" on its own
-        XCTAssertTrue(session.claimBreak(now: seconds(120 + 600)))
+        XCTAssertTrue(session.claimBreak(now: seconds(120 + 900)))
         XCTAssertEqual(session.phase, .rest)
-        XCTAssertEqual(secs(session.secondsRemaining(now: seconds(120 + 600))), 120, accuracy: 0.001)
-        XCTAssertEqual(session.flowAccruedFocus(now: seconds(120 + 600)), 0, accuracy: 0.001)
+        XCTAssertEqual(secs(session.secondsRemaining(now: seconds(120 + 900))), 180, accuracy: 0.001)
+        XCTAssertEqual(session.flowAccruedFocus(now: seconds(120 + 900)), 0, accuracy: 0.001)
         XCTAssertEqual(session.flowBreaksClaimed, 1)
 
         // Rest runs out → focus restarts from zero.
-        events = session.advanceIfDue(now: seconds(120 + 720))
+        events = session.advanceIfDue(now: seconds(120 + 1080))
         XCTAssertEqual(events.map(\.completedPhase), [.rest])
-        XCTAssertEqual(events.first?.seconds ?? 0, 120, accuracy: 0.001)
+        XCTAssertEqual(events.first?.seconds ?? 0, 180, accuracy: 0.001)
         XCTAssertEqual(session.phase, .focus)
-        XCTAssertEqual(session.flowEarnedBreak(now: seconds(120 + 720)), 0, accuracy: 0.001)
+        XCTAssertEqual(session.flowEarnedBreak(now: seconds(120 + 1080)), 0, accuracy: 0.001)
     }
 
     func testFlowmodoroPauseStopsAccrual() {
@@ -249,22 +252,33 @@ final class PomodoroEngineTests: XCTestCase {
         XCTAssertEqual(session.flowAccruedFocus(now: seconds(420)), 240, accuracy: 0.001)
         XCTAssertEqual(session.flowAccruedFocus(now: seconds(480)), 300, accuracy: 0.001)
 
-        // A paused focus cannot be claimed either.
-        session.pause(now: seconds(480))
-        XCTAssertFalse(session.claimBreak(now: seconds(600)))
+        // A paused focus cannot be claimed even once the pot is full:
+        // accrue to exactly 15 focus minutes ACROSS the earlier pause
+        // (240 s + 660 s of live focus), freeze, then try to claim
+        // mid-pause — false however long the pause runs.
+        session.pause(now: seconds(1080))
+        XCTAssertEqual(session.flowAccruedFocus(now: seconds(1200)), 900, accuracy: 0.001)
+        XCTAssertEqual(session.flowEarnedBreak(now: seconds(1200)), 180, accuracy: 0.001)
+        XCTAssertFalse(session.claimBreak(now: seconds(1200)))
+        // Resuming unlocks it: the pot is exactly at the threshold and the
+        // claim lands there.
+        session.resume(now: seconds(1200))
+        XCTAssertTrue(session.flowCanClaim(now: seconds(1200)))
+        XCTAssertTrue(session.claimBreak(now: seconds(1200)))
+        XCTAssertEqual(secs(session.secondsRemaining(now: seconds(1200))), 180, accuracy: 0.001)
     }
 
     func testFlowmodoroSkipRest() {
         var config = PomodoroConfig(mode: .flowmodoro, prepSeconds: 0)
         var session = PomodoroSession(config: config, start: t0, calendar: calendar)
 
-        session.advanceIfDue(now: seconds(600))
-        XCTAssertTrue(session.claimBreak(now: seconds(600))) // 2 min rest
-        XCTAssertTrue(session.skipPhase(now: seconds(630))) // 30 s into the rest
+        session.advanceIfDue(now: seconds(900))
+        XCTAssertTrue(session.claimBreak(now: seconds(900))) // 3 min rest
+        XCTAssertTrue(session.skipPhase(now: seconds(930))) // 30 s into the rest
         XCTAssertEqual(session.phase, .focus)
-        XCTAssertEqual(session.flowAccruedFocus(now: seconds(630)), 0, accuracy: 0.001)
+        XCTAssertEqual(session.flowAccruedFocus(now: seconds(930)), 0, accuracy: 0.001)
         // Focus in structured/classic has no "next" to skip to in flow mode.
-        XCTAssertFalse(session.skipPhase(now: seconds(660)))
+        XCTAssertFalse(session.skipPhase(now: seconds(960)))
     }
 
     // MARK: Skip

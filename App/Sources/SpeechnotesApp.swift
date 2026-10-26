@@ -336,6 +336,12 @@ struct SpeechnotesApp: App {
                             wasBackgrounded = false
                             player.reconcileOnForeground()
                         }
+                        // The idle-timer hold ("Keep Screen On") may be
+                        // reset across a suspension — iOS clears app state
+                        // on backgrounding paths it does not document. The
+                        // holder set survives, so one recompute restores the
+                        // truth for whatever surface is still on screen.
+                        ScreenAwake.shared.refresh()
                         // Release the playback grace task in the FOREGROUND
                         // so the NEXT backgrounding arms a FRESH ~30 s
                         // window. Held-over tasks were the 2026-10-23 log's

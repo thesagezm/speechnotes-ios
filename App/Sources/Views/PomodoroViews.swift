@@ -32,7 +32,7 @@ struct PomodoroCard: View {
             }
 
             if let session = store.session, session.isRunning {
-                PomodoroRunView(store: store, session: session)
+                PomodoroRunView(store: store, sessionSnapshot: session)
             } else {
                 PomodoroIdleView {
                     Haptics.tap()
@@ -107,7 +107,19 @@ private struct PomodoroTodayLine: View {
 
 private struct PomodoroRunView: View {
     @ObservedObject var store: PomodoroStore
-    let session: PomodoroSession
+    // Internal on purpose: a `private` here would make the synthesized
+    // memberwise init private and the call site in PomodoroCard (same
+    // file, other type) would not compile.
+    let sessionSnapshot: PomodoroSession
+
+    /// Always read the session THROUGH the store. The TimelineView below
+    /// ticks independently of the store's publishes, so a card rendering
+    /// its construction-time snapshot can go stale across a phase
+    /// transition — the "fill stuck at full until the tab was refreshed"
+    /// report. The store is the one live copy; the snapshot only covers
+    /// the instant between a completion and the parent swapping this card
+    /// for the idle view.
+    private var session: PomodoroSession { store.session ?? sessionSnapshot }
 
     @State private var confirmingStop = false
 
@@ -139,11 +151,21 @@ private struct PomodoroRunView: View {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .fill(Color(.systemFill).opacity(0.45))
             GeometryReader { proxy in
+                let fillWidth = max(6, proxy.size.width * CGFloat(max(0.001, min(1, progress))))
                 Rectangle()
                     .fill(
                         LinearGradient(colors: [tint.opacity(0.5), tint], startPoint: .top, endPoint: .bottom)
                     )
-                    .frame(width: max(6, proxy.size.width * CGFloat(max(0.001, min(1, progress)))))
+                    .frame(width: fillWidth)
+                // The juice: two bubbles rising through the fill — enough to
+                // read as liquid, not enough to become an aquarium (2026-10-26
+                // device feedback). Their own frame clock, so the card's 1 Hz
+                // tick never steps the motion; hidden while the glass is
+                // effectively empty.
+                if progress > 0.04 {
+                    JuiceBubbles(width: fillWidth, now: now)
+                        .allowsHitTesting(false)
+                }
             }
             VStack(spacing: 3) {
                 Text(centerTime(now: now))
@@ -167,6 +189,43 @@ private struct PomodoroRunView: View {
             return PomodoroFormat.countdown(session.flowAccruedFocus(now: now))
         }
         return PomodoroFormat.countdown(session.secondsRemaining(now: now) ?? 0)
+    }
+
+    /// Two bubbles rising through the juice. Fully deterministic off the
+    /// frame clock — no animation state to stutter when the card re-renders
+    /// each second, nothing to clean up. Each bubble rises bottom → surface
+    /// on its own period, fading in on departure and out at the surface
+    /// (`sin(lap·π)`), so it never pops in or out visibly.
+    private struct JuiceBubbles: View {
+        let width: CGFloat
+        let now: Date
+
+        var body: some View {
+            Canvas { context, size in
+                guard size.height > 24, size.width > 12 else { return }
+                let t = now.timeIntervalSinceReferenceDate
+                bubble(period: 5.4, phase: 0.0, radius: 3.4, xFrac: 0.35, t: t, in: context, size: size)
+                bubble(period: 7.3, phase: 0.5, radius: 2.3, xFrac: 0.68, t: t, in: context, size: size)
+            }
+            .frame(width: width)
+        }
+
+        private func bubble(
+            period: Double, phase: Double, radius: CGFloat, xFrac: CGFloat,
+            t: Double, in context: GraphicsContext, size: CGSize
+        ) {
+            let lap = ((t / period) + phase).truncatingRemainder(dividingBy: 1)
+            // Fade envelope: invisible at departure and arrival.
+            let alpha = sin(lap * .pi) * 0.45
+            guard alpha > 0.02 else { return }
+            let margin = radius * 3
+            let y = size.height - margin - lap * (size.height - margin * 2)
+            let x = size.width * xFrac
+            context.fill(
+                Path(ellipseIn: CGRect(x: x - radius, y: y - radius, width: radius * 2, height: radius * 2)),
+                with: .color(.white.opacity(alpha))
+            )
+        }
     }
 
     private var phasePill: some View {
@@ -240,7 +299,8 @@ private struct PomodoroRunView: View {
             .buttonStyle(.bordered)
             .tint(tint)
 
-            // Flowmodoro claim — appears once the pot crosses 3 focus min.
+            // Flowmodoro claim — appears once the pot crosses 3 banked
+            // break minutes (15 focus minutes); disabled until then.
             if session.config.mode == .flowmodoro && session.phase == .focus {
                 Button {
                     Haptics.tap()
@@ -351,7 +411,7 @@ struct PomodoroConfigView: View {
         case .structured:
             return "One window — a time limit or a finish time — with breaks spread evenly through it."
         case .flowmodoro:
-            return "Focus as long as you like. Every 5 focus minutes bank 1 break minute, claimable from 3 minutes."
+            return "Focus as long as you like. Every 5 focus minutes bank 1 break minute; the claim unlocks once 3 break minutes are banked (15 focus minutes)."
         case .classic:
             return "Your own blocks and breaks, each with its own length — 25 then 30, 5 then 15, whatever fits."
         }
@@ -503,7 +563,7 @@ struct PomodoroConfigView: View {
             flowRow(icon: "brain.head.profile", tint: .green,
                     title: "5 min of focus", subtitle: "earns 1 min of break")
             flowRow(icon: "cup.and.saucer", tint: .blue,
-                    title: "Claim from 3 min", subtitle: "the pot shows up as a button — take it whenever")
+                    title: "Claim at 3 break min", subtitle: "15 focused minutes — then the pot shows up as a button, take it whenever")
             flowRow(icon: "repeat", tint: .orange,
                     title: "It keeps growing", subtitle: "20 focused minutes banks a 4-minute break")
         }

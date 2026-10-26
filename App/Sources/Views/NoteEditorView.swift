@@ -79,6 +79,19 @@ struct NoteEditorView: View {
         guard immersiveBarsHidden else { return false }
         return showsReadAlong || (renderMarkdown && showPreview)
     }
+
+    /// The editor is a READING surface in preview and in read-along; while
+    /// editing it is a TYPING surface, and the keyboard already keeps the
+    /// screen awake. The Keep Screen On hold keys off this (the rule lives
+    /// in `ScreenAwakePolicy`, tested in SpeechLogic) so the hold follows
+    /// the surface as the user flips modes — no subtree rebuild.
+    private var isReadingSurface: Bool {
+        ScreenAwakePolicy.noteIsReadingSurface(
+            renderMarkdown: renderMarkdown,
+            showPreview: showPreview,
+            readAlongShowing: showsReadAlong
+        )
+    }
     /// Read-along: while THIS note is being spoken, replace the editor with
     /// the sentence-highlighted reader. Toggleable live from the player bar.
     @AppStorage("readAlongEnabled") private var readAlongEnabled = true
@@ -457,6 +470,7 @@ struct NoteEditorView: View {
         // While THIS editor is on top and the speaking note is this note,
         // the editor's own PlayerControlsBar is the player UI — suppress the
         // global mini-player so the two never stack at the bottom.
+        .keepScreenAwake(.noteReader, isActive: isReadingSurface)
         .onAppear {
             player.miniPlayerSuppressed = (player.nowPlayingNoteId == noteId)
             prefetchImagesIfAutomatic()

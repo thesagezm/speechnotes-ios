@@ -359,6 +359,7 @@ struct BookPDFReaderView: View {
         } message: {
             Text(exportErrorMessage ?? "")
         }
+        .keepScreenAwake(.pdfReader)
         .onAppear {
             store.markOpened(book)
             readingRecorder.begin(subjectId: book.id.uuidString)

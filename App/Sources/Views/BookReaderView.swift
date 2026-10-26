@@ -1,5 +1,6 @@
 import SwiftUI
 import WebKit
+import SpeechLogic
 
 /// The EPUB reader: vendored epub.js in a single WKWebView (BookWebView),
 /// chapter-paged scroll flow. TOC and appearance are native sheets; position
@@ -271,6 +272,7 @@ struct BookReaderView: View {
         } message: {
             Text(errorMessage ?? "Unknown error.")
         }
+        .keepScreenAwake(.epubReader)
         .onAppear {
             store.markOpened(book)
             readingRecorder.begin(subjectId: book.id.uuidString)

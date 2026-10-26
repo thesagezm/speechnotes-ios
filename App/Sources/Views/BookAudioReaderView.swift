@@ -199,6 +199,7 @@ struct BookAudioReaderView: View {
         .sheet(isPresented: $showingChapters) {
             chapterSheet
         }
+        .keepScreenAwake(.audiobookReader)
         .onAppear {
             store.markOpened(book)
             audioBook.store = store
