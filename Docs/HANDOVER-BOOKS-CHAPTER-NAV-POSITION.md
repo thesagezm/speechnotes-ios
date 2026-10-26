@@ -241,72 +241,72 @@ private var currentChapterIndex: Int {
 **That is exactly the reported symptom: "its only jumping to the last
 chapter".**
 
-**Why the page falls outside every chapter range:** `PdfText.chaptersFromOutline`
-(Packages/SpeechLogic/Sources/SpeechLogic/PdfText.swift:68-116) builds
-chapters from the PDF's OUTLINE top-level nodes. The outline's top-level
-nodes are typically **PART/TITLE-level** entries, while the fine-grained
-sections the TOC sheet shows are their CHILDREN. The reader's **Contents
-sheet** (`outlineSheet`, line 567) shows the FULL flattened outline tree
-(`outlineRows` — every level, walked depth-first by `BookPDFView.openWithOutline`),
-but `book.pdfChapters` (the manifest list the steppers use) contains only
-the TOP-LEVEL nodes (`chaptersFromOutline` → `walk` stops at a node WITH a
-destination and swallows its children).
+**Why the page falls outside every chapter range — the REAL cause
+(corrected 2026-10-26 after re-reading the builders):** it is **NOT** a gap
+in the chapter builder. Re-reading `PdfText.chaptersFromOutline`
+(PdfText.swift:68-116) and `chaptersFromHeadings` (line 124-162) with care:
+`kept` is strictly increasing, so `end = next.start - 1` is always
+`>= start.page` and the `guard end >= start.page else { continue }`
+**never fires**. The ranges TILE the document contiguously — outline path
+(chapters run to `pageCount - 1`), heading path (front matter + one range
+per candidate, last running to `pageCount - 1`), and `fallbackChapters`
+(page groups). **The builder is sound.** The earlier "heading gaps" reading
+in this handover was wrong; disregard it.
 
-**So the two lists are different lengths and different granularities.** The
-user sees ~30 sections in the TOC but the steppers walk ~8 chapters. Worse:
-`chaptersFromOutline` computes each chapter's `endPage` as
-`nextTopLevelStart - 1`, and the LAST chapter ends at `pageCount - 1` — but
-the page ranges only cover from the FIRST top-level outline node's page to
-the end. Any page **before** the first top-level node is covered by a
-"Front matter" chapter — but that insert only happens when
-`chapters.first?.startPage > 0`, and **if the first top-level outline node
-points at page 0, there is no front-matter chapter**, so pages between
-chapter 0's end and chapter 1's start... no, those are contiguous.
+**The page falls outside every range because THE READER IS LOOKING AT A
+STALE CHAPTER LIST.** See issue 3 root cause (a): `BooksStore.updatePosition`
+and `markOpened` replace the WHOLE shelf entry from the reader's STALE
+`book` snapshot. If the shelf backfill re-resolved `pdfChapters` after the
+reader captured its snapshot (import-time resolution failed and the
+backfill later produced the real list; or the source changed from "pages"
+to "headings"; or the book was imported from the Linux app and the
+backfilled list differs from the imported one), the reader keeps stepping
+through the OLD list while the document has a different page layout — the
+visible page then matches no range, and the fallback fires.
 
-**The real gap:** `chaptersFromOutline` computes `end = kept[position+1].page - 1`.
-If the outline has TWO top-level nodes pointing at the SAME page (e.g. "Part I"
-and "Chapter 1" both at page 5), the monotonic fix-up (`kept.last?.page ?? -1
-< start.page`) **drops** the second one — fine. But if the FIRST top-level
-node points at a LATE page (say page 40 — a book whose outline starts at the
-first real section, with 40 pages of front matter), the front-matter insert
-covers pages 0-39. OK.
+**That is why the symptom is "always the last chapter":** the fallback
+`chapters.count - 1` is reached on EVERY step, because the page is outside
+every range of the stale list. The next press computes `chapters.count - 1 + 1`
+→ `goChapter`'s clamp folds it back to `chapters.count - 1` → **the same
+last chapter, again and again.** It LOOKS like "next always goes to the
+end", and prev would step to `count - 2` — which the user may not have
+noticed because the first symptom they hit was next.
 
-**But `chaptersFromHeadings` (line 124-162) has the gap**: headings are
-detected per page, `end = candidates[position+1].page - 1`, `guard end >=
-candidate.page else { continue }` — a `continue` **SKIPS the chapter
-entirely**, leaving its pages **UNCOVERED by any chapter**. Then the page
-between the skipped chapter and the next one falls outside every range →
-`currentChapterIndex` → `chapters.count - 1` → **the last chapter**.
+**So the PDF fix has TWO parts — do BOTH:**
+1. Stop the stale-snapshot writes (issue 3 root cause (a)). That is what
+   actually puts the reader out of step with its own manifest.
+2. Make the fallback honest anyway — `chapters.count - 1` is never a
+   sensible answer for "which chapter am I in". It must be the chapter that
+   STARTS at-or-before the visible page.
 
-**And `fallbackChapters` (page ranges) always tiles the document, so it has
-no gaps.** The bug is therefore specific to books whose chapters came from
-`"headings"` (or an outline with gaps), which is exactly a "compiled OBGYN
-notes" PDF — a teaching-notes PDF with NO outline, so heading detection runs.
-
-**THE FIX (PDF):** `currentChapterIndex` must never fall back to
-`chapters.count - 1`. Instead, find the chapter whose range CONTAINS the page;
-if none does, find the chapter whose `startPage` is the **nearest at-or-before**
-the page (the chapter the page belongs to, extended forward); only if the
-page is before every chapter, use 0. And `goChapter` must not silently
-clamp to "last" — it should move to the adjacent chapter.
-
-**Concretely, replace the fallback with:**
+**THE FIX (PDF), part 2 — replace the fallback with:**
 
 ```swift
-// The page sits in a GAP between chapters (or before the first): the
-// chapter it belongs to is the one that STARTS at-or-before it. The old
-// fallback returned `chapters.count - 1` — the LAST chapter — so every
-// next/prev press from a gap landed on the end of the book.
+// The page sits outside every chapter's range (a stale list, or a page
+// the resolver skipped): it belongs to the chapter that STARTS at-or-before
+// it. The old fallback returned `chapters.count - 1` — the LAST chapter —
+// so every next/prev press landed on the end of the book.
 if let index = chapters.lastIndex(where: { $0.startPage <= currentPage }) {
     return index
 }
 return 0
 ```
 
-**Additionally**, `PdfText.chaptersFromHeadings` and `chaptersFromOutline`
-should not leave page gaps at all: every chapter's `endPage` should reach
-the page before the next chapter's `startPage`, and the `continue` that
-skips a chapter should extend the previous chapter's range instead.
+**NOTE the clamp in `goChapter` is what makes the symptom PERMANENT:**
+
+```swift
+let clamped = max(0, min(chapters.count - 1, index))
+```
+
+With `currentChapterIndex == chapters.count - 1`, "next" computes
+`chapters.count` → clamped to `chapters.count - 1` → **the same last
+chapter, no movement**. Exactly "it's only jumping to the last chapter".
+
+**Also worth fixing while here — the stepper should not be able to sit on a
+chapter it does not move from.** `goChapter` currently returns silently when
+`clamped == currentChapterIndex` and the page is already at the chapter
+start. With the fallback fixed the stepper moves properly, but a visible
+"no movement" is still worth a log line while diagnosing.
 
 ### 2c. The TOC/stepper granularity mismatch (PDF)
 
@@ -565,27 +565,35 @@ discordant paths.
 
 # WHAT TO DO NEXT (concrete order)
 
-1. **PDF `currentChapterIndex` fallback** (2b) — one-function fix in
-   `BookPDFReaderView.swift:210-217`. Fixes "always jumps to the last
-   chapter" for the reported book. HIGHEST VALUE, LOWEST RISK.
-2. **`PdfText` chapter gaps** — make `chaptersFromHeadings` /
-   `chaptersFromOutline` tile the document (extend the previous chapter's
-   `endPage` instead of `continue`-skipping) so no page is outside every
-   range. Add a test.
-3. **`BooksStore.updatePosition` / `markOpened` merge** (3a) — stop reverting
-   the backfilled fields.
-4. **PDF pending-jump queue** (3b) — `goToPage` before the document lands.
-5. **`BookPosition.pageIndex`** (3d) — the structural fix; needs a
+1. **`BooksStore.updatePosition` / `markOpened` merge** (3a) — stop
+   reverting the backfilled fields. **This is the ROOT fix for issue 2 as
+   well**: the stale chapter list is what pushes the PDF reader into the
+   "last chapter" fallback. HIGHEST VALUE, LOWEST RISK.
+2. **PDF `currentChapterIndex` fallback** (2b part 2) — one-function fix in
+   `BookPDFReaderView.swift:210-217`: never answer "last chapter"; answer
+   the chapter that starts at-or-before the visible page. Belt and braces
+   for the same symptom.
+3. **PDF pending-jump queue** (3b) — `goToPage` before the document lands.
+   This is the "start from any page I want" half of issue 3.
+4. **`BookPosition.pageIndex`** (3d) — the structural fix; needs a
    migration-aware decoder and updates in BookPDFReaderView,
    GoalMath, StatsTabView.
-6. **EPUB next/prev** (2a) — **VERIFY FIRST** which index space the
+5. **EPUB next/prev** (2a) — **VERIFY FIRST** which index space the
    chevrons are in (spine vs TOC) and whether `goChapter`'s JS round-trip
    works. The most likely fix is to make the chevrons and the TOC agree on
    one list and to have `goChapter` update `chapterIndex` optimistically so
    the bar does not show a stale value until the relocation arrives.
-7. **Stepper/TOC granularity for PDFs** (2c) — decide whether the steppers
+6. **Stepper/TOC granularity for PDFs** (2c) — decide whether the steppers
    walk the live outline tree or the manifest chapters. Recommend: the live
    outline tree for navigation; keep the manifest list as the SPEECH unit.
+
+**NOT needed (ruled out while diagnosing — do not "fix" these):**
+- `PdfText.chaptersFromOutline` / `chaptersFromHeadings` / `fallbackChapters`
+  page tiling — they already tile the document contiguously. The
+  `guard end >= start.page else { continue }` never fires.
+- The `front matter` insert — it works as intended.
+- epub.js's `Spine.get` / `spineByHref` triple-keying — the href the app
+  passes (`item.href`) IS the key epub.js registered, so the lookup resolves.
 
 ## Verification
 
