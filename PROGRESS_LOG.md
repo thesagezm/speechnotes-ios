@@ -512,3 +512,36 @@ SpeechLogic suite runs. The earlier red run was exactly one failure, the
 maths test above. Version stays **1.8.0/45** per the release policy; the
 device round on the user's own book (the compiled OBGYN notes PDF) is
 still the open check.
+
+**Two device bugs + the maths/books round closed (2026-10-26, `49a34ea`).**
+After the maths + books handovers were integrated and CI went green
+(488 SpeechLogic tests, 0 failures; the app archive builds), the user
+reported two more bugs.
+
+1. **Landscape play/pause glyph never changed.** The glyph was derived
+   from `sessionActive && progress != nil` — and progress is nil until
+   the engine's FIRST chunk reports in (and is cleared again whenever
+   the engine reports 0). So the button could read "play" while the
+   audio was already running; the clicks registered, the glyph did not
+   move. The glyph is now a function of the player's SPEAKING state
+   alone, which is the portrait PlayerControlsBar's rule. The rail takes
+   the speaking state as its own input, because `sessionActive` counts
+   paused and generating as live and those must show "play", not
+   "pause".
+2. **Goals never reached 100%.** The PDF progress was
+   `(pageIndex + fraction) / pageCount`, and the fraction is always 0
+   for a PDF (the reader is on a page, not inside one) — so the formula
+   could not reach 1.0: the last page of a 100-page book read as 99%,
+   which is the user's "97/96/98%" report. The page the reader is ON
+   counts now. The EPUB side had the same shape (epub.js reports the
+   within-chapter fraction as 0 for a chapter shorter than one
+   viewport, so the last chapter read as unfinished). StatsTabView now
+   uses the same `GoalMath.fraction` the goals use, so the two views
+   cannot show different numbers for one book.
+
+**Open, handed over:** a "keep screen on" setting (the user asked for it
+as the app went to sleep). Nothing exists today — there is no
+`isIdleTimerDisabled` anywhere in the app. The next agent's brief, with
+the decisions to make and the traps (restore on disappear, one decision
+for all reading surfaces), is in
+`Docs/HANDOVER-SCREEN-ON-AND-FINAL.md`. Version stays 1.8.0/45.
