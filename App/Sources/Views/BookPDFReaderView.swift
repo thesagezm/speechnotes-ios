@@ -47,6 +47,11 @@ struct BookPDFReaderView: View {
     /// Per-page UTF-16 offsets of the PLAYING chapter's speech text, loaded
     /// from the sidecar written at extraction time.
     @State private var playingPageOffsets: [PdfPageOffset] = []
+    /// A page jump requested before the document had finished opening. The
+    /// open runs off main and on a big scanned PDF it takes seconds — a
+    /// Contents tap in that window used to be dropped silently. Held here
+    /// and applied when the document lands.
+    @State private var pendingPage: Int?
     @AppStorage("readAlongEnabled") private var readAlongEnabled = true
 
     init(book: Book, store: BooksStore) {
@@ -64,16 +69,36 @@ struct BookPDFReaderView: View {
             && player.nowPlayingBookId == book.id.uuidString
     }
 
+    /// The book's CURRENT manifest entry.
+    ///
+    /// The reader is handed a `Book` snapshot at navigation time, and that
+    /// snapshot goes stale: the shelf backfill resolves the chapter list
+    /// (`pdfChapters`) and the scan flag AFTER the book is opened, and the
+    /// reader never sees them. A PDF whose chapters were resolved late
+    /// therefore had NO chapter list in the reader — the steppers had
+    /// nothing to walk, and the page bar showed a bare page count while
+    /// the Contents sheet showed a full outline. Reading the live entry
+    /// closes that gap.
+    private var liveBook: Book {
+        store.books.first(where: { $0.id == book.id })
+            ?? store.deletedBooks.first(where: { $0.id == book.id })
+            ?? book
+    }
+
+    /// The chapter list the reader navigates — the LIVE one, so a chapter
+    /// list resolved after the reader opened still applies.
+    private var chapters: [PdfChapter] {
+        liveBook.pdfChapters ?? book.pdfChapters ?? []
+    }
+
     private var hasChapters: Bool {
-        guard let chapters = book.pdfChapters else { return false }
-        return !chapters.isEmpty
+        !chapters.isEmpty
     }
 
     /// The manifest chapter containing the page on screen — where Listen
     /// starts (and what the player bar's controls act on).
     private var chapterForCurrentPage: Int? {
-        guard let chapters = book.pdfChapters else { return nil }
-        return chapters.firstIndex { currentPage >= $0.startPage && currentPage <= $0.endPage }
+        chapters.firstIndex { currentPage >= $0.startPage && currentPage <= $0.endPage }
     }
 
     /// Tap-to-hide chrome — PER-SURFACE storage (round 5): each reader hides
@@ -204,19 +229,36 @@ struct BookPDFReaderView: View {
         player.nowPlayingBookId == book.id.uuidString
     }
 
-    /// The manifest chapter the visible page sits in, CLAMPED to the shelf —
-    /// the stepper must always have a current value even when the page sits
-    /// before the first chapter or in a gap between two of them.
+    /// The manifest chapter the visible page sits in.
+    ///
+    /// The page normally falls inside one chapter's range. When it does
+    /// NOT — a page the chapter resolver skipped, a list that is out of
+    /// date with the document, a page in a gap — the old answer was
+    /// `chapters.count - 1`: THE LAST CHAPTER. That is the whole
+    /// "next chapter only jumps to the last chapter" report: the fallback
+    /// put the reader on the last chapter, and `goChapter`'s clamp
+    /// (`min(chapters.count - 1, index)`) folded the next press straight
+    /// back onto the same last chapter, so the chevrons never moved.
+    ///
+    /// The honest answer for a page outside every range is the chapter it
+    /// belongs to: the one that STARTS at-or-before it. Only a page
+    /// before the very first chapter belongs to chapter 0.
     private var currentChapterIndex: Int {
-        guard let chapters = book.pdfChapters, !chapters.isEmpty else { return 0 }
+        let chapters = self.chapters
+        guard !chapters.isEmpty else { return 0 }
         if let index = chapters.firstIndex(where: { currentPage >= $0.startPage && currentPage <= $0.endPage }) {
             return index
         }
+        // Outside every range: the chapter that starts at-or-before the
+        // page (the page is inside that chapter's territory).
+        if let index = chapters.lastIndex(where: { $0.startPage <= currentPage }) {
+            return index
+        }
         // Before the first chapter (cover/colophon): step from its start.
-        return currentPage < (chapters.first?.startPage ?? 0) ? 0 : chapters.count - 1
+        return 0
     }
 
-    private var totalChapters: Int { book.pdfChapters?.count ?? 0 }
+    private var totalChapters: Int { chapters.count }
 
     /// "Ch 3/9 · p 42" — the landscape rail's position readout.
     private var railStepLabel: String? {
@@ -231,7 +273,8 @@ struct BookPDFReaderView: View {
     /// "Chapter 3 of 9 — The Reunion" (portrait chapter bar), or the page
     /// count alone when the PDF resolved no chapters.
     private var chapterBarLabel: String {
-        guard let chapters = book.pdfChapters, !chapters.isEmpty else {
+        let chapters = self.chapters
+        guard !chapters.isEmpty else {
             return pageCount > 0 ? "Page \(currentPage + 1) of \(pageCount)" : "PDF"
         }
         let number = "Chapter \(currentChapterIndex + 1) of \(chapters.count)"
@@ -242,7 +285,8 @@ struct BookPDFReaderView: View {
     /// "pp. 42–51" under the chapter label — where the chapter starts and
     /// ends, so the bar doubles as the page readout the old bar carried.
     private var chapterRangeLabel: String? {
-        guard let chapters = book.pdfChapters, !chapters.isEmpty else { return nil }
+        let chapters = self.chapters
+        guard !chapters.isEmpty else { return nil }
         let chapter = chapters[currentChapterIndex]
         return chapter.endPage > chapter.startPage
             ? "Pages \(chapter.startPage + 1)–\(chapter.endPage + 1)"
@@ -386,7 +430,12 @@ struct BookPDFReaderView: View {
                             // read-along swap remakes this view on return).
                             pdfLoading = true
                         },
-                        onDocumentLoaded: { pdfLoading = false },
+                        onDocumentLoaded: {
+                            pdfLoading = false
+                            // A jump requested while the document was still
+                            // opening lands now.
+                            applyPendingPage()
+                        },
                         onOutlineLoaded: { outlineRows = $0 }
                     )
                     if pdfLoading {
@@ -554,8 +603,7 @@ struct BookPDFReaderView: View {
     /// The manifest chapter the visible page sits in — the fallback list's
     /// highlight (and the same data TTS speaks).
     private var currentChapterID: Int? {
-        guard let chapters = book.pdfChapters else { return nil }
-        return chapters.firstIndex { currentPage >= $0.startPage && currentPage <= $0.endPage }
+        chapters.firstIndex { currentPage >= $0.startPage && currentPage <= $0.endPage }
     }
 
     /// The Contents sheet: the PDF's own outline as a DROP-DOWN TREE —
@@ -613,7 +661,7 @@ struct BookPDFReaderView: View {
                                 }
                             }
                         }
-                    } else if let chapters = book.pdfChapters, !chapters.isEmpty {
+                    } else if !chapters.isEmpty {
                         List(Array(chapters.enumerated()), id: \.offset) { index, chapter in
                             Button {
                                 Haptics.tap()
@@ -679,22 +727,47 @@ struct BookPDFReaderView: View {
     /// chapter chevrons, on the PDF's page-range chapters. Clamped, and the
     /// position write follows the page jump so reopening stays put.
     private func goChapter(_ index: Int) {
-        guard let chapters = book.pdfChapters, !chapters.isEmpty else { return }
+        let chapters = self.chapters
+        guard !chapters.isEmpty else { return }
         let clamped = max(0, min(chapters.count - 1, index))
         guard clamped != currentChapterIndex || currentPage < chapters[clamped].startPage else { return }
         goToPage(chapters[clamped].startPage)
     }
 
+    /// Jumps to a page.
+    ///
+    /// The jump is QUEUED when the document has not landed yet. The open
+    /// runs off main and on a large scanned textbook it takes seconds; a
+    /// tap on a Contents row in that window used to be dropped on the floor
+    /// — `pdfView` was nil or carried no document — with no error and no
+    /// movement, which the user read as "tapping a chapter does nothing"
+    /// and "starting from a page I want does not work". The queued jump
+    /// runs as soon as the document is ready.
+    ///
+    /// The POSITION is written even when the jump is queued, so the
+    /// persisted place matches the intent — a book closed during the open
+    /// still resumes where the user asked to go.
     private func goToPage(_ index: Int) {
-        guard let pdfView, let document = pdfView.document,
-              index >= 0, index < document.pageCount,
-              let page = document.page(at: index) else {
-            Log.shared.info("PDFContents: cannot jump — page \(index + 1) of \(book.pageCount ?? 0) not resolvable")
+        guard index >= 0 else { return }
+        // Past the end of the document: refuse rather than persist a
+        // position that can never be restored.
+        if let document = pdfView?.document, index >= document.pageCount {
+            Log.shared.info("PDFContents: page \(index + 1) is past the document's \(document.pageCount) pages — ignored")
             return
         }
-        pdfView.go(to: page)
         currentPage = index
         store.updatePosition(book, chapterIndex: index, chapterFraction: 0)
+        guard let pdfView, let document = pdfView.document,
+              index < document.pageCount,
+              let page = document.page(at: index) else {
+            // The document is still opening — hold the jump and apply it
+            // when it lands.
+            pendingPage = index
+            Log.shared.info("PDFContents: page \(index + 1) queued — the document is still opening")
+            return
+        }
+        pendingPage = nil
+        pdfView.go(to: page)
         // A go(to:) issued while the Contents sheet is still animating away
         // can be dropped by PDFKit (the landscape half of the round-6
         // report). Re-issue once the transition has settled — a no-op if the
@@ -703,6 +776,13 @@ struct BookPDFReaderView: View {
             guard let pdfView, pdfView.window != nil, pdfView.currentPage != page else { return }
             pdfView.go(to: page)
         }
+    }
+
+    /// Applies a jump that was requested before the document was ready.
+    private func applyPendingPage() {
+        guard let pendingPage else { return }
+        self.pendingPage = nil
+        goToPage(pendingPage)
     }
 
     // MARK: - Force OCR
@@ -719,20 +799,25 @@ struct BookPDFReaderView: View {
     private func toggleForceOCR() {
         let newValue = !forceOCROn
         forceOCROn = newValue
-        var updated = book
-        updated.forceOCR = newValue
-        store.save(updated)
+        // Merge into the LIVE shelf entry: the reader's `book` snapshot can
+        // predate the shelf backfill's chapter list / scan flag, and saving
+        // the snapshot wholesale would revert them — and with the chapter
+        // list reverted, the visible page falls outside every chapter's
+        // range and the chapter stepper answers "the last chapter".
+        store.mutate(book) { updated in
+            updated.forceOCR = newValue
+        }
         for index in 0..<(book.pdfChapters?.count ?? 0) {
             try? FileManager.default.removeItem(
-                at: BooksStore.speechTextURL(updated, chapterIndex: index)
+                at: BooksStore.speechTextURL(book, chapterIndex: index)
             )
             try? FileManager.default.removeItem(
-                at: BooksStore.speechTextOffsetsURL(updated, chapterIndex: index)
+                at: BooksStore.speechTextOffsetsURL(book, chapterIndex: index)
             )
         }
         // Vision is not free — tell the user the cost in the log, where
         // device reports can see it.
-        Log.shared.info("PDFReader: forced OCR \(newValue ? "ON" : "OFF") for \(updated.title); chapter text caches dropped")
+        Log.shared.info("PDFReader: forced OCR \(newValue ? "ON" : "OFF") for \(book.title); chapter text caches dropped")
     }
 
     // MARK: - Read-along page tracking

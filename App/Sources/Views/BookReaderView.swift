@@ -282,6 +282,11 @@ struct BookReaderView: View {
         }
         .onDisappear {
             player.miniPlayerSuppressed = false
+            // Flush the throttled mid-chapter write — the exact spot must
+            // not be lost because the reader closed inside the throttle
+            // window.
+            cfiPersistTask?.cancel()
+            cfiPersistTask = nil
             persistPosition()
             readingRecorder.end()
             // Deliberately NO readerDestroy() here: onDisappear fires on every
@@ -707,12 +712,38 @@ struct BookReaderView: View {
     // MARK: - Actions & plumbing
 
     private func handleRelocated(index: Int, fraction: Double, total: Int, cfi: String?) {
+        let chapterChanged = index != chapterIndex
+        let cfiChanged = cfi != nil && cfi != lastKnownCFI
         chapterIndex = max(0, index)
         chapterFraction = fraction
         if let cfi { lastKnownCFI = cfi }
         if total > 0 { totalChapters = total }
         if !bookLoaded { bookLoaded = true }
-        if index != persistedChapter {
+        if chapterChanged || index != persistedChapter {
+            // A chapter change is worth a write on its own — it is the
+            // unit the resume lands on.
+            persistPosition()
+        } else if cfiChanged {
+            // A mid-chapter move: the CFI is the exact spot, and the old
+            // code only persisted on a chapter change, so a book closed
+            // WITHOUT leaving the chapter lost the mid-chapter position
+            // (the "resume lands at the chapter top" report). Throttled —
+            // `relocated` fires on every scroll tick, and a manifest write
+            // per tick is a write per frame.
+            scheduleCFIPersist()
+        }
+    }
+
+    /// Throttled mid-chapter persistence. Writes at most once every few
+    /// seconds while the reader scrolls, so the exact spot survives a
+    /// crash or a kill without a manifest write per scroll event.
+    @State private var cfiPersistTask: Task<Void, Never>?
+
+    private func scheduleCFIPersist() {
+        cfiPersistTask?.cancel()
+        cfiPersistTask = Task {
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            guard !Task.isCancelled else { return }
             persistPosition()
         }
     }
@@ -727,8 +758,52 @@ struct BookReaderView: View {
         )
     }
 
+    /// Steps to a chapter.
+    ///
+    /// The bar moves IMMEDIATELY, not when the webview's relocation event
+    /// comes back. It used to wait: `goChapter` only called into JS, so a
+    /// command the webview had not picked up yet (the book still opening,
+    /// `window.RENDITION` not ready — `readerGoChapter` returns early then)
+    /// left the bar on the old chapter. The next press computed the same
+    /// target from the same stale index, so the chevrons appeared dead.
+    ///
+    /// The CFI is cleared with it: a CFI points at a spot INSIDE a
+    /// chapter, and keeping chapter 2's CFI while the reader sat on
+    /// chapter 1 made a reopen land in the wrong place — the "resume vs
+    /// start where I want" discordance on the EPUB side.
+    ///
+    /// The stepper's no-op guard: pressing "next" while already on the
+    /// last chapter must not move. The TOC path uses
+    /// `jumpToSpineIndex` instead, which always navigates (a TOC row can
+    /// point at a different spot INSIDE the chapter the reader is already
+    /// on).
     private func goChapter(_ index: Int) {
-        webView?.evaluateJavaScript("readerGoChapter(\(index))", completionHandler: nil)
+        let clamped = clampedSpineIndex(index)
+        guard clamped != chapterIndex else { return }
+        jumpToSpineIndex(clamped)
+    }
+
+    /// Navigates to a spine index, always. Used by the TOC sheet (a row's
+    /// `spineIndex`) and by the steppers.
+    private func jumpToSpineIndex(_ index: Int) {
+        let clamped = clampedSpineIndex(index)
+        chapterIndex = clamped
+        chapterFraction = 0
+        // A CFI from another chapter is meaningless here — it would send
+        // the reopen to a spot in a chapter the reader has left.
+        lastKnownCFI = nil
+        persistPosition()
+        webView?.evaluateJavaScript("readerGoChapter(\(clamped))", completionHandler: nil)
+    }
+
+    /// The spine index, clamped into the book's range. An unknown chapter
+    /// count (the book has not reported its total yet) leaves the upper
+    /// bound open — the webview ignores an out-of-range index anyway, and
+    /// clamping to 0 would make the first press a no-op.
+    private func clampedSpineIndex(_ index: Int) -> Int {
+        let lower = max(0, index)
+        guard totalChapters > 0 else { return lower }
+        return max(0, min(totalChapters - 1, lower))
     }
 
     private func goToHref(_ href: String) {

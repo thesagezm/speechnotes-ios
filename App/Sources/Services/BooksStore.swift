@@ -1199,6 +1199,23 @@ final class BooksStore: ObservableObject {
         save(updated, sync: sync)
     }
 
+    /// Applies a field-level change to the book's CURRENT shelf entry.
+    ///
+    /// `save(_:)` REPLACES the whole entry, so a caller holding a stale
+    /// snapshot would revert every field written since that snapshot was
+    /// taken (the backfill's chapter list and scan flag, `lastOpenedAt`,
+    /// the position). `mutate` merges instead: it starts from the live
+    /// entry, applies the change, and writes that.
+    ///
+    /// Use `mutate` for every reader-side field change; use `save(_:)` only
+    /// when the caller genuinely means to replace the entry (delete,
+    /// recover, import).
+    func mutate(_ book: Book, _ change: (inout Book) -> Void) {
+        var updated = liveEntry(for: book)
+        change(&updated)
+        save(updated)
+    }
+
     /// The book's CURRENT shelf entry — not the caller's snapshot.
     ///
     /// The readers hold the `Book` value they were constructed with, and

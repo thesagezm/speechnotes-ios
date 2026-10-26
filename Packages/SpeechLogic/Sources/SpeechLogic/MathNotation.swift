@@ -112,8 +112,8 @@ public enum MathNotation {
         // the display form shows, so the nodes are parsed once and both
         // renderers read them.
         let nodes = parser.parse()
-        let display = render(nodes, mode: mode)
-        let spoken = normalizeSpeech(speak(nodes))
+        let display = Parser.renderList(nodes, mode: mode)
+        let spoken = normalizeSpeech(Parser.speakList(nodes))
         // A formula whose source survives COMPLETELY unrecognised renders
         // as its own source — no better than not supporting it, and
         // confusing next to the formulas that DO render. Refuse it, so the
@@ -128,7 +128,7 @@ public enum MathNotation {
     /// (`\beta`). A `$` that has no closing partner is literal text — a note
     /// about prices ("costs $5") must not lose its dollar sign.
     public static func segments(in line: String) -> SegmentLine {
-        var parts: [Part] = []
+        var parts: [SegmentLine.Part] = []
         var pending = ""
         var index = line.startIndex
 
@@ -627,8 +627,8 @@ public enum MathNotation {
             if index < source.endIndex, source[index] == "{" {
                 _ = parseBracedGroup()
             }
-            var rows: [[Node]] = []
-            var row: [Node] = []
+            var rows: [[[Node]]] = []
+            var row: [[Node]] = []
             var cell: [Node] = []
 
             while index < source.endIndex {
@@ -642,7 +642,7 @@ public enum MathNotation {
                     let after = source.index(after: index)
                     if after < source.endIndex, source[after] == "\\" {
                         index = source.index(after: after)
-                        row.append(.group(cell))
+                        row.append(cell)
                         cell = []
                         if !row.isEmpty { rows.append(row) }
                         row = []
@@ -651,7 +651,7 @@ public enum MathNotation {
                 }
                 // `&` ends a cell.
                 if source[index] == "&" {
-                    row.append(.group(cell))
+                    row.append(cell)
                     cell = []
                     index = source.index(after: index)
                     continue
@@ -661,7 +661,7 @@ public enum MathNotation {
                 cell.append(parseAtom())
             }
             if !cell.isEmpty || !row.isEmpty {
-                row.append(.group(cell))
+                row.append(cell)
                 if !row.isEmpty { rows.append(row) }
             }
             return .matrix(rows)
@@ -726,10 +726,21 @@ public enum MathNotation {
             }
         }
 
+        /// The spoken form of a LIST of nodes, with their operators left as
+        /// they are — the PROSE path (a matrix cell, `\text{…}`), where
+        /// "x > 5" is a sentence and not a formula.
+        private static func speakRawList(_ nodes: [Node]) -> String {
+            var out = ""
+            for node in nodes {
+                out += speakRawNode(node)
+            }
+            return out
+        }
+
         /// The spoken form of a node, with its operators left as they are —
         /// the PROSE path (`\text{…}`), where "x > 5" is a sentence and not
         /// a formula.
-        private static func speakRaw(_ node: Node) -> String {
+        private static func speakRawNode(_ node: Node) -> String {
             switch node {
             case .text(let text):
                 return text
@@ -743,45 +754,45 @@ public enum MathNotation {
                 return "and so on"
             case .group(let children):
                 var out = ""
-                for child in children { out += speakRaw(child) }
+                for child in children { out += speakRawNode(child) }
                 return out
             case .prose(let children):
                 var out = ""
-                for child in children { out += speakRaw(child) }
+                for child in children { out += speakRawNode(child) }
                 return out
             case .fraction(let numerator, let denominator):
-                return "\(speakRaw(numerator)) divided by \(speakRaw(denominator))"
+                return "\(speakRawList(numerator)) divided by \(speakRawList(denominator))"
             case .root(let rootIndex, let radicand):
-                let body = speakRaw(radicand)
+                let body = speakRawList(radicand)
                 if let rootIndex {
-                    return "the \(speakRaw(rootIndex))th root of \(body)"
+                    return "the \(speakRawList(rootIndex))th root of \(body)"
                 }
                 return "the square root of \(body)"
             case .superscript(let base, let exponent):
-                return "\(speakRaw(base)) to the power of \(speakRaw(exponent))"
+                return "\(speakRawList(base)) to the power of \(speakRawList(exponent))"
             case .sub(let base, let subIndex):
-                return "\(speakRaw(base)) sub \(speakRaw(subIndex))"
+                return "\(speakRawList(base)) sub \(speakRawList(subIndex))"
             case .bigOperator(_, let spoken, let lower, let upper):
                 var out = spoken
-                if let lower { out += " from \(speakRaw(lower))" }
-                if let upper { out += " to \(speakRaw(upper))" }
+                if let lower { out += " from \(speakRawList(lower))" }
+                if let upper { out += " to \(speakRawList(upper))" }
                 return out
             case .matrix(let rows):
                 return rows.map { row in
-                    row.map { cell in speakRaw(cell) }.joined(separator: ", ")
+                    row.map { cell in speakRawList(cell) }.joined(separator: ", ")
                 }.joined(separator: ", ")
             case .accent(_, let base):
-                return speakRaw(base)
+                return speakRawList(base)
             }
         }
 
         // MARK: Rendering
 
         /// The display form of a node list.
-        static func render(_ nodes: [Node], mode: Mode) -> String {
+        static func renderList(_ nodes: [Node], mode: Mode) -> String {
             var out = ""
             for (offset, node) in nodes.enumerated() {
-                out += render(node, mode: mode)
+                out += renderNode(node, mode: mode)
                 // A named function is followed by a space: "sin x", not
                 // "sinx".
                 if case .function = node, offset + 1 < nodes.count,
@@ -792,7 +803,7 @@ public enum MathNotation {
             return out
         }
 
-        private static func render(_ node: Node, mode: Mode) -> String {
+        private static func renderNode(_ node: Node, mode: Mode) -> String {
             switch node {
             case .text(let text):
                 return text
@@ -805,53 +816,53 @@ public enum MathNotation {
             case .dots(let display):
                 return display
             case .group(let children):
-                return render(children, mode: mode)
+                return renderList(children, mode: mode)
             case .prose(let children):
-                return render(children, mode: mode)
+                return renderList(children, mode: mode)
             case .fraction(let numerator, let denominator):
-                let top = render(numerator, mode: mode)
-                let bottom = render(denominator, mode: mode)
+                let top = renderList(numerator, mode: mode)
+                let bottom = renderList(denominator, mode: mode)
                 if mode == .display {
                     return "(\(top))/(\(bottom))"
                 }
                 return "\(top)/\(bottom)"
             case .root(let rootIndex, let radicand):
-                let body = render(radicand, mode: mode)
+                let body = renderList(radicand, mode: mode)
                 if let rootIndex {
-                    let degree = render(rootIndex, mode: mode)
+                    let degree = renderList(rootIndex, mode: mode)
                     return "√[\(degree)](\(body))"
                 }
                 return "√(\(body))"
             case .superscript(let base, let exponent):
-                let baseText = render(base, mode: mode)
-                let exponentText = render(exponent, mode: mode)
+                let baseText = renderList(base, mode: mode)
+                let exponentText = renderList(exponent, mode: mode)
                 return baseText + superscriptGlyphs(exponentText)
             case .sub(let base, let subIndex):
-                let baseText = render(base, mode: mode)
-                let subscriptText = render(subIndex, mode: mode)
+                let baseText = renderList(base, mode: mode)
+                let subscriptText = renderList(subIndex, mode: mode)
                 return baseText + subscriptGlyphs(subscriptText)
             case .bigOperator(let display, _, let lower, let upper):
                 var out = display
                 // The limits stay in plain text: `∑_i=1` reads better than
                 // a row of superscript glyphs nobody can parse.
-                if let lower { out += "_\(render(lower, mode: mode))" }
-                if let upper { out += "^\(render(upper, mode: mode))" }
+                if let lower { out += "_\(renderList(lower, mode: mode))" }
+                if let upper { out += "^\(renderList(upper, mode: mode))" }
                 return out
             case .matrix(let rows):
                 return rows.map { row in
-                    "(" + row.map { cell in render(cell, mode: mode) }.joined(separator: ", ") + ")"
+                    "(" + row.map { cell in renderList(cell, mode: mode) }.joined(separator: ", ") + ")"
                 }.joined(separator: ", ")
             case .accent(let glyph, let base):
-                let body = render(base, mode: mode)
+                let body = renderList(base, mode: mode)
                 return glyph.isEmpty ? body : "\(glyph)\(body)"
             }
         }
 
         /// The spoken form of a node list.
-        static func speak(_ nodes: [Node]) -> String {
+        static func speakList(_ nodes: [Node]) -> String {
             var out = ""
             for (offset, node) in nodes.enumerated() {
-                out += speak(node)
+                out += speakNode(node)
                 if case .function = node, offset + 1 < nodes.count,
                    case .text(let next) = nodes[offset + 1], !next.hasPrefix(" ") {
                     out += " "
@@ -860,7 +871,7 @@ public enum MathNotation {
             return out
         }
 
-        private static func speak(_ node: Node) -> String {
+        private static func speakNode(_ node: Node) -> String {
             switch node {
             case .text(let text):
                 // The operators in a formula become WORDS: an engine handed
@@ -876,51 +887,51 @@ public enum MathNotation {
             case .dots:
                 return "and so on"
             case .group(let children):
-                return speak(children)
+                return speakList(children)
             case .prose(let children):
                 // Prose keeps its punctuation: "if x > 5" reads as prose,
                 // not as "if x greater than 5".
                 var out = ""
                 for child in children {
-                    out += speakRaw(child)
+                    out += speakRawNode(child)
                 }
                 return out
             case .fraction(let numerator, let denominator):
-                let top = speak(numerator)
-                let bottom = speak(denominator)
+                let top = speakList(numerator)
+                let bottom = speakList(denominator)
                 return "\(top) divided by \(bottom)"
             case .root(let rootIndex, let radicand):
-                let body = speak(radicand)
+                let body = speakList(radicand)
                 if let rootIndex {
-                    let degree = speak(rootIndex)
+                    let degree = speakList(rootIndex)
                     return "the \(degree)th root of \(body)"
                 }
                 return "the square root of \(body)"
             case .superscript(let base, let exponent):
-                let baseText = speak(base)
-                let exponentText = speak(exponent)
+                let baseText = speakList(base)
+                let exponentText = speakList(exponent)
                 return "\(baseText) to the power of \(exponentText)"
             case .sub(let base, let subIndex):
-                let baseText = speak(base)
-                let subscriptText = speak(subIndex)
+                let baseText = speakList(base)
+                let subscriptText = speakList(subIndex)
                 return "\(baseText) sub \(subscriptText)"
             case .bigOperator(_, let spoken, let lower, let upper):
                 var out = spoken
                 if let lower {
-                    out += " from \(speak(lower))"
+                    out += " from \(speakList(lower))"
                 }
                 if let upper {
-                    out += " to \(speak(upper))"
+                    out += " to \(speakList(upper))"
                 }
                 return out
             case .matrix(let rows):
                 let spokenRows = rows.enumerated().map { offset, row -> String in
-                    let cells = row.map { cell in speak(cell) }.joined(separator: ", ")
+                    let cells = row.map { cell in speakList(cell) }.joined(separator: ", ")
                     return offset == 0 ? "the matrix \(cells)" : "and \(cells)"
                 }
                 return spokenRows.joined(separator: ", ")
             case .accent(_, let base):
-                return speak(base)
+                return speakList(base)
             }
         }
     }
