@@ -347,7 +347,7 @@ public enum MathNotation {
             /// A superscript — the BASE and the EXPONENT together.
             case superscript(base: [Node], exponent: [Node])
             /// A subscript — the BASE and the INDEX together.
-            case subscript(base: [Node], index: [Node])
+            case sub(base: [Node], index: [Node])
             /// A parenthesised group.
             case group([Node])
             /// Prose inside maths (`\text{…}`) — spoken as written, with
@@ -398,8 +398,8 @@ public enum MathNotation {
                     result = .superscript(base: [result], exponent: exponent)
                 } else if source[index] == "_" {
                     index = source.index(after: index)
-                    let subscript = parseArgument()
-                    result = .subscript(base: [result], index: subscript)
+                    let subIndex = parseArgument()
+                    result = .sub(base: [result], index: subIndex)
                 } else {
                     break
                 }
@@ -759,8 +759,8 @@ public enum MathNotation {
                 return "the square root of \(body)"
             case .superscript(let base, let exponent):
                 return "\(speakRaw(base)) to the power of \(speakRaw(exponent))"
-            case .subscript(let base, let subscript):
-                return "\(speakRaw(base)) sub \(speakRaw(subscript))"
+            case .sub(let base, let subIndex):
+                return "\(speakRaw(base)) sub \(speakRaw(subIndex))"
             case .bigOperator(_, let spoken, let lower, let upper):
                 var out = spoken
                 if let lower { out += " from \(speakRaw(lower))" }
@@ -826,9 +826,9 @@ public enum MathNotation {
                 let baseText = render(base, mode: mode)
                 let exponentText = render(exponent, mode: mode)
                 return baseText + superscriptGlyphs(exponentText)
-            case .subscript(let base, let subscript):
+            case .sub(let base, let subIndex):
                 let baseText = render(base, mode: mode)
-                let subscriptText = render(subscript, mode: mode)
+                let subscriptText = render(subIndex, mode: mode)
                 return baseText + subscriptGlyphs(subscriptText)
             case .bigOperator(let display, _, let lower, let upper):
                 var out = display
@@ -900,9 +900,9 @@ public enum MathNotation {
                 let baseText = speak(base)
                 let exponentText = speak(exponent)
                 return "\(baseText) to the power of \(exponentText)"
-            case .subscript(let base, let subscript):
+            case .sub(let base, let subIndex):
                 let baseText = speak(base)
-                let subscriptText = speak(subscript)
+                let subscriptText = speak(subIndex)
                 return "\(baseText) sub \(subscriptText)"
             case .bigOperator(_, let spoken, let lower, let upper):
                 var out = spoken

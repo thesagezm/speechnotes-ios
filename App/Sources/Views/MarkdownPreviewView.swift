@@ -662,8 +662,16 @@ struct MarkdownPreviewView: View {
         for run in runs {
             let piece: Text
             switch run {
-            case .text(let s):
-                piece = styledText(s)
+            case .text(let s, let bold, let italic, let code, let strike):
+                // The flags come from the AST — cmark strips the `**`/`*`
+                // markers and sets them on the span, so the styling is
+                // applied here rather than re-found by a regex.
+                var text = Text(s)
+                if bold { text = text.bold() }
+                if italic { text = text.italic() }
+                if strike { text = text.strikethrough() }
+                if code { text = text.font(.system(.callout, design: .monospaced)) }
+                piece = text
             case .link(let label, let urlString):
                 var attrs = AttributedString(label)
                 attrs.foregroundColor = .accentColor
@@ -672,12 +680,10 @@ struct MarkdownPreviewView: View {
                 piece = Text(attrs)
             case .math(let display, _):
                 // A formula rides INSIDE the paragraph's Text, so the words
-                // around it still wrap naturally. It is set in the
-                // serif-ish maths face and tinted, which is what tells the
-                // reader "this is a formula", not a stray Greek letter.
-                piece = Text(display)
-                    .font(.system(size: bodyFontSize * 1.02, design: .serif))
-                    .foregroundStyle(Color.accentColor)
+                // around it still wrap naturally. It is set in the maths
+                // face and tinted, which is what tells the reader "this is
+                // a formula", not a stray Greek letter.
+                piece = mathText(display)
             case .image:
                 continue
             }
@@ -690,23 +696,35 @@ struct MarkdownPreviewView: View {
 
     /// Text built from the block's own AST spans.
     ///
-    /// The prose spans keep the EXISTING emphasis styling (the regex
-    /// tokenizer below), so bold and italic behave exactly as they did
-    /// before this change. The MATHS spans are the difference: they are
-    /// typeset in the maths face and tinted, which is what tells the reader
-    /// "this is a formula" rather than a stray Greek letter in the prose.
+    /// The AST has ALREADY resolved emphasis — cmark strips the `**` and
+    /// `*` markers and sets the span's flags instead. So the styling comes
+    /// from those flags, not from a second regex pass over the text (the
+    /// old `styledText` path, which could only ever find markers that the
+    /// AST had already removed).
+    ///
+    /// Applying the FLAGS is also what lets a maths span keep its own
+    /// appearance: the formula is typeset in the maths face and tinted,
+    /// which tells the reader "this is a formula", not a stray Greek
+    /// letter in the prose.
     ///
     /// The blocks that render through this path (headings, quotes, list
     /// items, table cells) previously joined their spans into one string,
-    /// which dropped the maths distinction on the floor.
+    /// which dropped BOTH the emphasis flags and the maths distinction.
     private func styledSpans(_ spans: [MarkdownText.StyledSpan]) -> Text {
         var composed = Text("")
         for span in spans {
             if let formula = span.math {
                 composed = composed + mathText(formula.display)
-            } else {
-                composed = composed + styledText(span.text)
+                continue
             }
+            var piece = Text(span.text)
+            if span.bold { piece = piece.bold() }
+            if span.italic { piece = piece.italic() }
+            if span.strike { piece = piece.strikethrough() }
+            if span.code {
+                piece = piece.font(.system(.callout, design: .monospaced))
+            }
+            composed = composed + piece
         }
         return composed
     }
@@ -716,103 +734,6 @@ struct MarkdownPreviewView: View {
         Text(display)
             .font(.system(size: bodyFontSize * 1.02, design: .serif))
             .foregroundStyle(Color.accentColor)
-    }
-
-    /// Styles **bold**, *italic*, `code` and ~~strike~~ spans within a text
-    /// run, returning one composed Text. (Links are lifted out earlier as
-    /// separate runs, so no link handling is needed here.)
-    /// One-pass tokenizer over inline markers. Unmatched markers stay
-    /// literal, so stray asterisks in prose survive; underscore rules carry
-    /// word-boundary guards so snake_case identifiers are not styled.
-    private static let emphasisRegex: NSRegularExpression? = {
-        try? NSRegularExpression(
-            pattern: #"`([^`]+)`"#
-                + #"|\*\*\*([^*]+)\*\*\*"#
-                + #"|\*\*([^*]+)\*\*"#
-                + #"|__([^_]+)__"#
-                + #"|~~([^~]+)~~"#
-                + #"|(?<![*\w])\*([^*\s][^*]*)\*(?!\*)"#
-                + #"|(?<![\w_])_([^_\s][^_]*)_(?![\w_])"#
-        )
-    }()
-
-    private enum SpanStyle { case plain, bold, italic, boldItalic, code, strike }
-    private struct Span { let text: String; let style: SpanStyle }
-
-    /// Per-source-string span cache. The emphasis regex used to run once per
-    /// run per body evaluation, and body evaluations fire on every playback
-    /// progress tick (the player is a root environment object) — a table- or
-    /// paragraph-heavy note re-ran a full regex pass over its visible text
-    /// several times a second for output that never changed. Bounded to the
-    /// most recent 512 distinct strings so a long scroll can't grow it
-    /// without limit.
-    private static var spanCache: [String: [Span]] = [:]
-    private static let spanCacheLimit = 512
-
-    private static func cachedSpans(in string: String) -> [Span] {
-        if let hit = spanCache[string] { return hit }
-        let spans = emphasisSpans(in: string)
-        if spanCache.count >= spanCacheLimit {
-            // Cheap eviction — drop the whole map rather than track LRU
-            // order; rebuilding 512 short strings is microseconds.
-            spanCache.removeAll()
-        }
-        spanCache[string] = spans
-        return spans
-    }
-
-    private func styledText(_ string: String) -> Text {
-        let spans = Self.cachedSpans(in: string)
-        guard !spans.isEmpty else { return Text(string) }
-        var composed = Text("")
-        for span in spans {
-            let piece = Text(span.text)
-            switch span.style {
-            case .plain: composed = composed + piece
-            case .bold: composed = composed + piece.bold()
-            case .italic: composed = composed + piece.italic()
-            case .boldItalic: composed = composed + piece.bold().italic()
-            case .code: composed = composed + piece.font(.system(.callout, design: .monospaced))
-            case .strike: composed = composed + piece.strikethrough()
-            }
-        }
-        return composed
-    }
-
-    private static func emphasisSpans(in string: String) -> [Span] {
-        guard let regex = Self.emphasisRegex else { return [] }
-        let ns = string as NSString
-        var spans: [Span] = []
-        var cursor = 0
-        for match in regex.matches(in: string, range: NSRange(location: 0, length: ns.length)) {
-            if match.range.location > cursor {
-                spans.append(Span(text: ns.substring(with: NSRange(location: cursor, length: match.range.location - cursor)), style: .plain))
-            }
-            let content: (String, SpanStyle)
-            if match.range(at: 1).location != NSNotFound {
-                content = (ns.substring(with: match.range(at: 1)), .code)
-            } else if match.range(at: 2).location != NSNotFound {
-                content = (ns.substring(with: match.range(at: 2)), .boldItalic)
-            } else if match.range(at: 3).location != NSNotFound {
-                content = (ns.substring(with: match.range(at: 3)), .bold)
-            } else if match.range(at: 4).location != NSNotFound {
-                content = (ns.substring(with: match.range(at: 4)), .bold)
-            } else if match.range(at: 5).location != NSNotFound {
-                content = (ns.substring(with: match.range(at: 5)), .strike)
-            } else if match.range(at: 6).location != NSNotFound {
-                content = (ns.substring(with: match.range(at: 6)), .italic)
-            } else if match.range(at: 7).location != NSNotFound {
-                content = (ns.substring(with: match.range(at: 7)), .italic)
-            } else {
-                content = (ns.substring(with: match.range), .plain)
-            }
-            spans.append(Span(text: content.0, style: content.1))
-            cursor = match.range.location + match.range.length
-        }
-        if cursor < ns.length {
-            spans.append(Span(text: ns.substring(from: cursor), style: .plain))
-        }
-        return spans
     }
 
     // MARK: - Images

@@ -1182,14 +1182,14 @@ final class BooksStore: ObservableObject {
     }
 
     func markOpened(_ book: Book) {
-        var updated = book
+        var updated = liveEntry(for: book)
         updated.lastOpenedAt = Date()
         updated.deletedAt = nil      // opening a binned book un-bins it
         save(updated)
     }
 
     func updatePosition(_ book: Book, chapterIndex: Int, chapterFraction: Double, cfi: String? = nil, audioSeconds: Double? = nil, sync: Bool = false) {
-        var updated = book
+        var updated = liveEntry(for: book)
         updated.position = BookPosition(
             chapterIndex: chapterIndex,
             chapterFraction: chapterFraction,
@@ -1197,5 +1197,28 @@ final class BooksStore: ObservableObject {
             audioSeconds: audioSeconds
         )
         save(updated, sync: sync)
+    }
+
+    /// The book's CURRENT shelf entry — not the caller's snapshot.
+    ///
+    /// The readers hold the `Book` value they were constructed with, and
+    /// that snapshot goes stale the moment anything else writes the
+    /// manifest: the shelf backfill resolves `pdfChapters` / `pdfIsScanned`
+    /// / the cover, `markOpened` stamps `lastOpenedAt`, the audio backfill
+    /// rewrites the chapter table. A mutation built from the stale snapshot
+    /// and written back with `save()` REPLACED the whole entry — silently
+    /// reverting those newer fields.
+    ///
+    /// That is not a cosmetic loss. With the reader's `pdfChapters` reverted
+    /// to an older list, the visible page no longer falls inside any
+    /// chapter's page range, and the PDF reader's chapter lookup answered
+    /// "the last chapter" — the exact report behind "next chapter only
+    /// jumps to the last chapter". The same revert made the persisted
+    /// position disagree with the page the reader was actually showing.
+    ///
+    /// Merging into the live entry keeps every field except the one the
+    /// caller means to change.
+    private func liveEntry(for book: Book) -> Book {
+        allBooks.first(where: { $0.id == book.id }) ?? book
     }
 }

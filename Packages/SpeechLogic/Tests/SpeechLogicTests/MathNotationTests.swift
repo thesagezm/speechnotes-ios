@@ -295,4 +295,20 @@ final class MathNotationTests: XCTestCase {
             XCTAssertEqual(spoken, "beta")
         }
     }
+
+    /// The AST resolves emphasis into FLAGS — cmark strips the `**` markers
+    /// and sets `bold` on the span. The preview styles from those flags, so
+    /// this contract is what keeps bold text bold.
+    func testEmphasisArrivesAsFlagsOnTheRun() {
+        let runs = MarkdownText.inlineRuns("plain **bold** more")
+        guard let boldRun = runs.first(where: { run in
+            if case .text(_, let bold, _, _, _) = run { return bold } else { return false }
+        }) else {
+            XCTFail("expected a bold run, got \(runs)"); return
+        }
+        if case .text(let text, _, _, _, _) = boldRun {
+            // The MARKERS are gone — the flag is the styling.
+            XCTAssertEqual(text, "bold")
+        }
+    }
 }

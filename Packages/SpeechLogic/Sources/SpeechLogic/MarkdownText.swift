@@ -117,7 +117,12 @@ public enum MarkdownText {
 
     /// Inline run for the preview: text, native images, tappable links.
     public enum InlineRun: Equatable {
-        case text(String)
+        /// A styled piece of prose. The flags come from the AST — cmark
+        /// strips the `**`/`*` markers and sets them here, so the display
+        /// layer styles from the flags rather than re-tokenizing the text
+        /// with a regex (which could only find markers the AST had already
+        /// removed).
+        case text(String, bold: Bool, italic: Bool, code: Bool, strike: Bool)
         case image(alt: String, url: String)
         case link(label: String, url: String)
         /// A formula — the display text and the spoken text travel together,
@@ -810,7 +815,7 @@ public enum MarkdownText {
         guard !line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
         let spans = spans(of: Array(Document(parsing: line).children))
         let runs = runs(from: spans)
-        return runs.isEmpty ? [.text(line)] : runs
+        return runs.isEmpty ? [.text(line, bold: false, italic: false, code: false, strike: false)] : runs
     }
 
     /// Runs straight from spans the caller already holds — paragraph blocks
@@ -823,7 +828,10 @@ public enum MarkdownText {
         for span in spans {
             if let alt = span.imageAlt, let url = span.imageURL {
                 if !url.isEmpty { runs.append(.image(alt: alt, url: url)) }
-                else if !span.text.isEmpty { runs.append(.text(span.text)) }
+                else if !span.text.isEmpty {
+                    runs.append(.text(span.text, bold: span.bold, italic: span.italic,
+                                      code: span.code, strike: span.strike))
+                }
             } else if let formula = span.math {
                 // A formula is its own run — the preview typesets it apart
                 // from the prose around it.
@@ -831,7 +839,8 @@ public enum MarkdownText {
             } else if let url = span.linkURL, !url.isEmpty {
                 runs.append(.link(label: span.text, url: url))
             } else if !span.text.isEmpty {
-                runs.append(.text(span.text))
+                runs.append(.text(span.text, bold: span.bold, italic: span.italic,
+                                  code: span.code, strike: span.strike))
             }
         }
         return runs
