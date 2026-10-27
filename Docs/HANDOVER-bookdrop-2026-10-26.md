@@ -4,6 +4,13 @@ Round: the iPhone half of the six BookDrop reports. The Linux twin round is
 `speechnotes-linux-rust/docs/HANDOVER-bookdrop-2026-10-26.md` — read both
 before touching either side; the two ends must agree on the wire.
 
+**2026-10-27 status:** the addendum-2 upload fix (`upload(for:fromFile:)`),
+the addendum-1 hygiene (background task, 120 s inactivity bound) and new
+byte-progress bars BOTH ways (send sheet: file + percent via a delegated
+URLSession task delegate; BookDrop screen: "Receiving" bar fed by a
+throttled server body-progress hook) ship in **v1.8.1 build 47** via CI.
+Still NOT device-verified — the verify checklist below stands.
+
 ## State — READ FIRST
 
 - **The iOS changes are NOT compiled.** This machine is Linux; there is no
@@ -122,3 +129,168 @@ before touching either side; the two ends must agree on the wire.
 4. Desktop → iPhone (Linux round): with iPhone receive ON, the desktop scan
    must find the iPhone in seconds and the received book/note/jex must land
    in the shelf/notes.
+
+---
+
+## ADDENDUM — the "stuck on Sending…" transfer (same round, 2026-10-27)
+
+### Diagnosis (confirmed on the wire, both directions)
+
+PC→phone works. Phone→PC reaches "Sending…" and never finishes or fails.
+Evidence gathered:
+
+* `ss -tnp | grep 53317` during a stuck transfer: **ESTAB, Recv-Q 0** and
+  the receiver's session temp dir held **0 bytes** across repeated 8 s
+  samples → the desktop had drained everything received and was waiting for
+  bytes that never came. The phone's body write froze right after prepare.
+* The receiver itself passes the same flow from a local client in
+  0.04 s (5 MB), imports a real 1.1 GB `Ulysses.m4b` in 7.2 s and answers
+  200 — including the mp4 parse + ffmpeg cover that runs **before** the
+  upload's 200. So the receiver is NOT the bottleneck.
+* WARP's policy routing is irrelevant: `ip route get 172.20.10.1 from
+  172.20.10.3` leaves straight out `wlo1`.
+* The desktop drops the socket after its 30 s per-read timeout; the phone
+  never learns this and stays in `.sending` for up to its **1 hour**
+  upload request timeout. That hour is the "stuck forever".
+
+### Root cause (iOS half, fixed this round)
+
+A frozen sender. iOS suspends the app mid-transfer when the screen locks or
+the app is backgrounded over a hotpot; the socket stays open but nothing
+moves. The app had a background grace for TTS playback but **none for a
+BookDrop send** — so the transfer froze on the first suspension.
+
+### Fixes (iOS — NOT compiled here, no macOS)
+
+1. `App/Sources/Services/LocalSend/LocalSendSender.swift`:
+   * `sendBackgroundTask` — `UIApplication.shared.beginBackgroundTask`
+     around the whole `sendFiles` (expiry handler ends it), released in
+     `cancelSend()` and after the send completes. Mirrors
+     `SpeechPlayer.beginPlaybackGraceIfNeeded`, scoped to the transfer.
+   * The upload request's `timeoutInterval` 3600 → **120 s**, plus an
+     explicit `.timedOut` branch that reports
+     "The transfer stalled — <peer> stopped accepting data. Keep this
+     screen open and try again." 120 s is an *inactivity* bound
+     (URLSession restarts it on progress), so a slow-but-moving 700 MB
+     transfer still completes.
+2. No receiving-side iOS change: the phone receiving was already fine.
+
+### OPEN — desktop half (same defect, Linux, partially done)
+
+* `crates/sn-net/src/sender.rs:530` still sets the desktop's own
+  *outbound* send read/write timeouts to an hour; the same inactivity
+  bound + `.timedOut` reporting should be applied there for symmetry
+  (this did NOT cause the phone→PC hang — the Linux sender is not the
+  stalled one — but it has the identical blind-wait flaw).
+* The receiver already fails a silent upload after its 30 s socket read;
+  that is correct and left as is.
+
+### Verification state
+
+* Verified on this machine: full iOS-shaped transfer OK from a local
+  client (5 MB → 200 in 0.04 s), real 1.1 GB m4b → 200, real epub → 200,
+  PIN fix live on the release build.
+* NOT verified: any iOS build (no macOS here), any real phone→PC
+  transfer with the screen locked.
+* Next test when a device is available: lock the iPhone's screen halfway
+  through a large send and confirm the receiver stops waiting and the
+  phone reports the stall in ~2 minutes rather than hanging for an hour.
+
+---
+
+## ADDENDUM 2 — the REAL root cause of "stuck on Sending…" (2026-10-27, evening)
+
+The addendum above blamed a suspended sender. **That was wrong.** The user
+retested live, screen unlocked, watching the sheet the whole time — and the
+wire still showed the freeze. What `ss -tnie` actually captured during a
+stuck transfer (desktop 172.20.10.3, phone 172.20.10.1):
+
+* The phone opens the upload TCP connection and then sends **nothing — not
+  even the HTTP request head**. `segs_in:2` (handshake only), `lastrcv`
+  climbing, both queues 0, and the receiver's session temp dir stays empty.
+* The receiver's 20 s head deadline (`read_request_head`) drops each silent
+  connection, and the phone immediately opens a fresh one (observed peer
+  ports 51891 → 51893 → 51895), silent again, forever. "Sending…" is the
+  phone cycling dead, silent connections.
+
+So the upload's body pump never starts. Culprit, in `upload()`:
+
+```swift
+let stream = InputStream(url: item.url)!
+stream.open()                      // ← opened by hand
+request.httpBodyStream = stream    // ← URLSession never pumps it
+```
+
+URLSession does not adopt a stream that is already open (async `data(for:)`
+with an `httpBodyStream` wedges the same way): no head, no body, an idle
+connection. Prepare-upload works because its body is plain `Data` — which
+is why a session always exists and the sheet always reaches "Sending…".
+
+### The fix (iOS — still NOT compiled here, no macOS)
+
+`App/Sources/Services/LocalSend/LocalSendSender.swift`, `upload()` only:
+
+* The manual `InputStream` is gone. The upload rides
+  `URLSession.shared.upload(for: request, fromFile: item.url)` — the
+  supported file-upload path. It sets Content-Length itself, so the
+  hand-set header (computed from an attributesOfItem probe that could
+  silently read 0) is removed too.
+* Kept from addendum 1: `timeoutInterval` 120, the query-string
+  session/file/token/pin, the status handling, the `.timedOut` stall
+  message, and the background task around `sendFiles`. Those are still
+  correct hygiene — a backgrounded sender WOULD freeze mid-transfer —
+  they just were not this bug.
+
+### Desktop half, done the same evening (Linux twin round)
+
+`crates/sn-net/src/sender.rs`: outbound read/write timeouts 3600 s → 120 s
+(each bounds ONE stalled read/write; a slow-but-moving transfer still
+completes) plus a `request_error` helper so a stall reads "the transfer
+stalled — the peer stopped answering" instead of the OS's "Resource
+temporarily unavailable". Built; sn-net tests 35/35 (use
+`cargo test --release -p sn-net --lib` — the full run trips over a rustdoc
+libLLVM environment breakage unrelated to code).
+
+### Also seen today (context, not code)
+
+* The official LocalSend desktop app was running and held 53317, so the
+  Speechnotes receiver sat on 53318 — the phone then showed two
+  near-identical "pop-os" peers. After it was closed and BookDrop
+  re-toggled, speechnotes holds 53317 again. First check next time this
+  smells like ports: `ss -tlnp | grep 533`.
+* The receiver logs nothing per request (only "listener stopped"), and a
+  failed upload leaves an empty `/tmp/BookDrop-<uuid>` session dir behind
+  (six accumulated). Cheap future work: one debug line per prepare/upload,
+  and sweep stale session dirs.
+
+### Confirmed by the byte-level probe (same evening, 18:48–18:53)
+
+A logging receiver (`/tmp/pcprobe.py`, log preserved at
+`Docs/pcprobe-log-2026-10-27.txt`) took 53317 while the app's BookDrop was
+off, and the phone sent three different files at it — a 3.5 MB PDF, a
+5.5 KB note, and a 120 KB note. Every attempt, at byte level:
+
+* register: the full JSON arrives (Speechnotes/46 CFNetwork, iPhone13,4).
+* prepare-upload: the full JSON arrives, `pin: "1844"` in BOTH the body
+  and the query; the probe answers 200 with tokens every time.
+* upload: the connection opens and the phone sends NOTHING — not the head,
+  not one byte — for ~29 s, then closes the connection itself (clean EOF
+  at our side, not a receiver timeout; the probe would have held 120 s),
+  and immediately reconnects to repeat. Five silent connections in a row
+  for one send.
+
+The 5.5 KB note hanging identically to the 3.5 MB PDF kills both earlier
+alternative theories for good: not size-dependent, not app suspension
+(the screen was unlocked and watched throughout). The unpumped
+`httpBodyStream` is the only explanation left standing, and the fix above
+(`upload(for:fromFile:)`) is aimed exactly at it.
+
+### Verification state
+
+* NOT compiled (no macOS here), NOT device-verified. Next macOS session:
+  build, then run the phone→PC transfer that has never once completed —
+  while it runs, `ls /tmp/BookDrop-*/` on the desktop should show the
+  session dir filling for the first time.
+* Until that build reaches the phone, phone→PC from Speechnotes cannot
+  work against ANY receiver; the workaround is the official LocalSend iOS
+  app sending to the desktop.

@@ -194,7 +194,28 @@ struct BookDropSendView: View {
                             Text("Sending…")
                                 .font(.subheadline)
                             Spacer()
+                            if sender.progress.totalUnitCount > 1 {
+                                Text("File \(min(sender.progress.completedUnitCount + 1, sender.progress.totalUnitCount)) of \(sender.progress.totalUnitCount)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
                             Button("Cancel", role: .cancel) { sender.cancelSend() }
+                        }
+                        // How much of the file on the wire has gone out.
+                        if let transfer = sender.transferProgress {
+                            VStack(alignment: .leading, spacing: 4) {
+                                ProgressView(value: transfer.fraction)
+                                HStack {
+                                    Text(transfer.fileName)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                    Spacer()
+                                    Text("\(Int((transfer.fraction * 100).rounded()))%")
+                                        .font(.caption.monospacedDigit())
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
                         }
                     }
                 }

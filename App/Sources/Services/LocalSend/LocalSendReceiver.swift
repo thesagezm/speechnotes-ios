@@ -20,6 +20,18 @@ struct BookDropRecord: Identifiable, Equatable {
     }
 }
 
+/// The file currently streaming INTO this device. `total` is the
+/// sender-declared size; 0 means unknown (the bar shows indeterminate).
+struct IncomingTransfer: Equatable {
+    let fileName: String
+    let received: Int64
+    let total: Int64
+
+    var fraction: Double? {
+        total > 0 ? min(Double(received) / Double(total), 1) : nil
+    }
+}
+
 /// The BookDrop receiver: a LocalSend protocol v2.2 peer that ACCEPTS
 /// incoming transfers (Readest's "Nearby BookDrop" speaks the same protocol,
 /// and so does the user's existing LocalSend app on PC — no new PC software).
@@ -42,6 +54,9 @@ final class LocalSendReceiver: ObservableObject {
     @Published private(set) var port: UInt16 = 0
     @Published private(set) var lastError: String?
     @Published private(set) var history: [BookDropRecord] = []
+    /// The file currently being received (nil when nothing streams in) —
+    /// the BookDrop screen's "how much has arrived" bar.
+    @Published private(set) var incomingTransfer: IncomingTransfer?
 
     /// Extensions we accept, route and import today.
     static let acceptedExtensions: Set<String> = Set([
@@ -92,6 +107,15 @@ final class LocalSendReceiver: ObservableObject {
         server.handler = { [weak self] request in
             guard let self else { return .status(500) }
             return self.handle(request)
+        }
+        // Body-progress callbacks arrive on the server queue (throttled by
+        // the server's per-request reporter) and hop to the main actor to
+        // update the published transfer.
+        server.bodyProgress = { [weak self] path, query, received, expected in
+            guard path == "/api/localsend/v2/upload" else { return }
+            Task { @MainActor [weak self] in
+                self?.noteIncomingProgress(fileId: query["fileId"], received: received, expected: expected)
+            }
         }
         // The Readest zombie-listener lesson, wired from day one: on every
         // return to foreground, probe the listener with a loopback connect
@@ -153,6 +177,7 @@ final class LocalSendReceiver: ObservableObject {
         server.stop()
         isRunning = false
         port = 0
+        incomingTransfer = nil
         for session in sessions.values { discardSession(session) }
         sessions.removeAll()
     }
@@ -269,11 +294,15 @@ final class LocalSendReceiver: ObservableObject {
 
         let session = Session(senderHost: request.remoteHost, files: accepted)
         sessions[session.id] = session
+        incomingTransfer = nil // a fresh session starts with a clean bar
         armTimeout(session)
         return .json(LocalSendPrepareResponse(sessionId: session.id, files: session.tokens))
     }
 
     private func respondUpload(_ request: LocalSendHTTPRequest) -> LocalSendHTTPResponse {
+        // The body has fully arrived by the time this runs: whatever the
+        // validation finds, the streaming bar's job is done.
+        incomingTransfer = nil
         guard let sessionId = request.queryValue("sessionId"),
               let fileId = request.queryValue("fileId"),
               let token = request.queryValue("token"),
@@ -426,6 +455,23 @@ final class LocalSendReceiver: ObservableObject {
         timeoutTasks.removeValue(forKey: session.id)
         try? FileManager.default.removeItem(at: session.dir)
         sessions.removeValue(forKey: session.id)
+        incomingTransfer = nil
+    }
+
+    /// Body-progress callback from the server (hopped to main): the file
+    /// with `fileId` moved `received` of `expected` bytes. `received == -1`
+    /// is the server's "the peer hung up mid-body" marker. A fileId that no
+    /// live session knows is ignored — a bar must never name a file that is
+    /// not actually transferring.
+    private func noteIncomingProgress(fileId: String?, received: Int64, expected: Int64) {
+        guard received >= 0 else {
+            incomingTransfer = nil
+            return
+        }
+        guard let fileId,
+              let session = sessions.values.first(where: { $0.files[fileId] != nil }),
+              let meta = session.files[fileId] else { return }
+        incomingTransfer = IncomingTransfer(fileName: meta.fileName, received: received, total: expected)
     }
 
     /// All files landed — route each into the import pipeline, then clean.

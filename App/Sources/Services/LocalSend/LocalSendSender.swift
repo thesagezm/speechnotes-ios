@@ -57,6 +57,40 @@ struct SendItem {
     var fileType: String?
 }
 
+/// How much of the file currently on the wire has been sent. `bytesTotal`
+/// comes from URLSession itself (it sets Content-Length from the file);
+/// 0 means not known yet.
+struct SendTransferProgress: Equatable {
+    let fileName: String
+    let bytesDone: Int64
+    let bytesTotal: Int64
+
+    var fraction: Double {
+        bytesTotal > 0 ? min(Double(bytesDone) / Double(bytesTotal), 1) : 0
+    }
+}
+
+/// The body-progress half of the upload session's delegate. Top-level (not
+/// nested in the @MainActor sender) so URLSession's queue can call it
+/// without isolation trouble — the same reason `Peer` lives up here.
+/// Uploads run strictly one at a time (sendFiles is sequential), so the
+/// single callback slot is unambiguous.
+final class SendProgressDelegate: NSObject, URLSessionTaskDelegate {
+    static let shared = SendProgressDelegate()
+    /// Called on the session's delegate queue with (bytesSent, totalBytes).
+    var onBodyProgress: ((Int64, Int64) -> Void)?
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didSendBodyData bytesSent: Int64,
+        totalBytesSent: Int64,
+        totalBytesExpectedToSend: Int64
+    ) {
+        onBodyProgress?(totalBytesSent, totalBytesExpectedToSend)
+    }
+}
+
 @MainActor
 final class LocalSendSender: ObservableObject {
     static let shared = LocalSendSender()
@@ -91,13 +125,59 @@ final class LocalSendSender: ObservableObject {
     /// whole batch is through.
     @Published private(set) var progress = Progress()
 
+    /// Byte progress of the file currently on the wire (nil between files
+    /// and when idle) — the "how much of THIS file has gone out" bar.
+    @Published private(set) var transferProgress: SendTransferProgress?
+
+    /// A session of its own so the delegate can observe body progress:
+    /// URLSession.shared cannot report it. Request-level `timeoutInterval`
+    /// (set per upload) overrides the configuration's.
+    private nonisolated static let uploadSession: URLSession = {
+        let configuration = URLSessionConfiguration.default
+        return URLSession(configuration: configuration, delegate: SendProgressDelegate.shared, delegateQueue: nil)
+    }()
+
     private var scanTask: Task<Void, Never>?
     private var sendTask: Task<Void, Never>?
     /// Set true by the cancel path; a cancel mid-upload must not be reported
     /// as a failure, it must simply stop.
     private var cancelled = false
+    /// The system background task held while a transfer is in flight. A
+    /// phone that locks its screen or leaves the app mid-send would
+    /// otherwise be frozen by iOS within seconds — the socket stays open
+    /// but nothing moves, the receiver eventually drops the connection,
+    /// and the sheet sits on "Sending…" until the hour-long request
+    /// timeout. This is the same keep-alive the TTS playback grace uses,
+    /// scoped to exactly the length of the transfer.
+    private var sendBackgroundTask: UIBackgroundTaskIdentifier = .invalid
+    /// Throttle for the delegate's per-write progress callbacks: the UI
+    /// wants steps, not every socket write.
+    private var lastReportedUploadBytes: Int64 = 0
 
-    private init() {}
+    private init() {
+        SendProgressDelegate.shared.onBodyProgress = { [weak self] sent, total in
+            Task { @MainActor [weak self] in
+                self?.noteUploadProgress(sent: sent, total: total)
+            }
+        }
+    }
+
+    /// Hold the system's attention for the length of a transfer.
+    private func beginSendBackgroundTask() {
+        guard sendBackgroundTask == .invalid else { return }
+        sendBackgroundTask = UIApplication.shared.beginBackgroundTask(withName: "BookDrop send") { [weak self] in
+            // Expiry: iOS is reclaiming the time anyway; end the task so the
+            // process is not killed for holding it. The transfer itself is
+            // failed by the request timeout if the freeze outlasts it.
+            self?.endSendBackgroundTask()
+        }
+    }
+
+    private func endSendBackgroundTask() {
+        guard sendBackgroundTask != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(sendBackgroundTask)
+        sendBackgroundTask = .invalid
+    }
 
     // MARK: - Discovery
 
@@ -219,8 +299,12 @@ final class LocalSendSender: ObservableObject {
         needsAccessCode = false
         progress = Progress(totalUnitCount: Int64(files.count))
         phase = .sending
+        // The transfer must survive a locked screen / backgrounded app:
+        // a suspended sender is the "stuck on Sending…" report.
+        beginSendBackgroundTask()
         sendTask = Task { @MainActor in
             await sendFiles(files, to: peer, base: base, pin: pin)
+            endSendBackgroundTask()
         }
     }
 
@@ -232,7 +316,22 @@ final class LocalSendSender: ObservableObject {
         cancelled = true
         sendTask?.cancel()
         sendTask = nil
+        endSendBackgroundTask()
         if case .sending = phase { phase = .idle }
+    }
+
+    /// Delegate callback, hopped to the main actor: the current file moved
+    /// `sent` of `total` bytes. Throttled to ~128 KB steps (the final byte
+    /// always reports) so a 700 MB book does not hop to main per packet.
+    private func noteUploadProgress(sent: Int64, total: Int64) {
+        guard let current = transferProgress else { return }
+        guard sent == total || sent - lastReportedUploadBytes >= 1 << 17 else { return }
+        lastReportedUploadBytes = sent
+        transferProgress = SendTransferProgress(
+            fileName: current.fileName,
+            bytesDone: sent,
+            bytesTotal: total > 0 ? total : current.bytesTotal
+        )
     }
 
     private func sendFiles(_ items: [SendItem], to peer: Peer, base: URL, pin: String?) async {
@@ -307,7 +406,18 @@ final class LocalSendSender: ObservableObject {
             : "Sent \(items.count) files to \(peer.alias)")
     }
 
-    /// One POST /upload, body = the file's bytes, streamed off disk.
+    /// One POST /upload, body = the file's bytes, handed to URLSession as a
+    /// file-backed upload.
+    ///
+    /// This used to be `request.httpBodyStream = InputStream(url:)` with the
+    /// stream opened by hand — and it never sent a byte. The live-wire
+    /// capture (2026-10-27): the phone opens the TCP connection and then
+    /// stays silent — not even the request head — while the desktop drops
+    /// each silent connection at its head deadline and the sheet sits on
+    /// "Sending…". URLSession does not pump a pre-opened body stream (async
+    /// `data(for:)` with a body stream wedges the same way), so the upload
+    /// rides `upload(for:fromFile:)`, the supported file path, which sets
+    /// Content-Length itself from the file.
     private func upload(
         _ item: SendItem,
         id: String,
@@ -317,20 +427,23 @@ final class LocalSendSender: ObservableObject {
         peer: Peer,
         pin: String?
     ) async {
-        let attributes = (try? FileManager.default.attributesOfItem(atPath: item.url.path))
-        let size = (attributes?[.size] as? Int64) ?? 0
-        guard let stream = InputStream(url: item.url) else {
-            finishFailed("Could not read \(item.fileName)")
-            return
-        }
-        stream.open()
-        defer { stream.close() }
+        // Seed the bar from the file's size so it shows the file's name
+        // (and a 0% bar for big files) before the first delegate callback
+        // arrives; URLSession's own total takes over from there.
+        let size = (try? FileManager.default.attributesOfItem(atPath: item.url.path)[.size] as? Int64) ?? 0
+        transferProgress = SendTransferProgress(fileName: item.fileName, bytesDone: 0, bytesTotal: size)
+        lastReportedUploadBytes = 0
+        defer { transferProgress = nil }
 
         var request = URLRequest(url: base.appendingPathComponent("api/localsend/v2/upload"))
         request.httpMethod = "POST"
-        request.httpBodyStream = stream
-        request.timeoutInterval = 3600 // a 700 MB book on a slow LAN is minutes
-        request.setValue(String(size), forHTTPHeaderField: "Content-Length")
+        // NOT the total transfer time (a 700 MB book on a slow LAN is
+        // minutes — that is why this used to be a whole hour). It bounds
+        // one idle stretch: URLSession restarts this clock whenever any
+        // progress arrives, so a slow-but-moving transfer completes, while
+        // a frozen one fails here in two minutes with a message instead of
+        // hanging the sheet for an hour.
+        request.timeoutInterval = 120
         // The session/file/token ride on the query string, as the spec's
         // upload endpoint declares. The PIN rides along when set — the
         // receiver re-checks it per upload, not just at prepare.
@@ -348,7 +461,10 @@ final class LocalSendSender: ObservableObject {
         }
 
         do {
-            let (_, response) = try await URLSession.shared.data(for: request)
+            // The delegated session (not URLSession.shared) so the task
+            // delegate can report body progress — that is the whole reason
+            // this session exists.
+            let (_, response) = try await Self.uploadSession.upload(for: request, fromFile: item.url)
             guard let http = response as? HTTPURLResponse else {
                 finishFailed("\(peer.alias) did not accept \(item.fileName)")
                 return
@@ -364,6 +480,8 @@ final class LocalSendSender: ObservableObject {
             default:
                 finishFailed("\(item.fileName) failed (HTTP \(http.statusCode))")
             }
+        } catch let error as URLError where error.code == .timedOut {
+            finishFailed("The transfer stalled — \(peer.alias) stopped accepting data. Keep this screen open and try again.")
         } catch {
             finishFailed("\(item.fileName) failed: \(error.localizedDescription)")
         }

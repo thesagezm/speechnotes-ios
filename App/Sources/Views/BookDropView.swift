@@ -75,6 +75,35 @@ struct BookDropView: View {
                 Text("Devices on the same network can send files to this iPhone. Nothing leaves the network and no account is involved. An access code, when set, must be typed on the sending device before any transfer starts.")
             }
 
+            // A transfer streaming in right now: which file, and how much
+            // of it has arrived.
+            if let incoming = receiver.incomingTransfer {
+                Section {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "tray.and.arrow.down.fill")
+                                .foregroundStyle(Color.accentColor)
+                            Text(incoming.fileName)
+                                .font(.subheadline)
+                                .lineLimit(1)
+                            Spacer()
+                            if let fraction = incoming.fraction {
+                                Text("\(Int((fraction * 100).rounded()))%")
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        if let fraction = incoming.fraction {
+                            ProgressView(value: fraction)
+                        } else {
+                            ProgressView()
+                        }
+                    }
+                } header: {
+                    Text("Receiving")
+                }
+            }
+
             Section {
                 instructionRow(
                     step: "1",

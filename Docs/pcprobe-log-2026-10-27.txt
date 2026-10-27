@@ -1,0 +1,72 @@
+[18:46:17] LISTENING on 0.0.0.0:53317 — waiting for the phone
+[18:48:31] CONN OPEN 172.20.10.1:52199
+[18:48:31] REQUEST 172.20.10.1:52199 POST /api/localsend/v2/register
+[18:48:31]   headers: {'content-type': 'application/json', 'connection': 'keep-alive', 'accept': '*/*', 'user-agent': 'Speechnotes/46 CFNetwork/3896.100.1.2.1 Darwin/27.0.0', 'content-length': '216'}
+[18:48:31]   register body (216 B): {"alias":"iPhone","download":false,"fingerprint":"CD4244E9-0683-48AF-A69D-CCAEB21D0F8D65887DD2-B157-48D6-B3BC-5025AE971A7D","port":0,"version":"2.2","deviceModel":"iPhone13,4","protocol":"http","deviceType":"mobile"}
+[18:48:31] CONN CLOSE 172.20.10.1:52199 after 0.0s
+[18:48:41] CONN OPEN 172.20.10.1:52298
+[18:48:41] REQUEST 172.20.10.1:52298 POST /api/localsend/v2/register
+[18:48:41]   headers: {'content-type': 'application/json', 'connection': 'keep-alive', 'accept': '*/*', 'user-agent': 'Speechnotes/46 CFNetwork/3896.100.1.2.1 Darwin/27.0.0', 'content-length': '216'}
+[18:48:41]   register body (216 B): {"deviceModel":"iPhone13,4","deviceType":"mobile","download":false,"port":0,"version":"2.2","alias":"iPhone","fingerprint":"CD4244E9-0683-48AF-A69D-CCAEB21D0F8D65887DD2-B157-48D6-B3BC-5025AE971A7D","protocol":"http"}
+[18:48:41] CONN CLOSE 172.20.10.1:52298 after 0.0s
+[18:48:47] CONN OPEN 172.20.10.1:52397
+[18:48:47] REQUEST 172.20.10.1:52397 POST /api/localsend/v2/prepare-upload?pin=1844
+[18:48:47]   headers: {'content-type': 'application/json', 'connection': 'keep-alive', 'accept': '*/*', 'user-agent': 'Speechnotes/46 CFNetwork/3896.100.1.2.1 Darwin/27.0.0', 'content-length': '417'}
+[18:48:47]   PREPARE BODY (417 B): {"files":{"1A8A9D97-1A37-420D-92B0-930B7782D903":{"fileName":"Paediatric cardiology.pdf","fileType":"application\/pdf","id":"1A8A9D97-1A37-420D-92B0-930B7782D903","size":3584947}},"info":{"fingerprint":"CD4244E9-0683-48AF-A69D-CCAEB21D0F8D65887DD2-B157-48D6-B3BC-5025AE971A7D","deviceModel":"iPhone13,4","download":false,"protocol":"http","version":"2.2","alias":"iPhone","deviceType":"mobile","port":0},"pin":"1844"}
+[18:48:47]   prepare query: pin=1844
+[18:48:47]   answering prepare with 1 token(s): ['1A8A9D97-1A37-420D-92B0-930B7782D903']
+[18:48:47] CONN CLOSE 172.20.10.1:52397 after 0.0s
+[18:48:47] CONN OPEN 172.20.10.1:52398
+[18:49:16] CONN DEAD 172.20.10.1:52398 after 29.0s — the phone sent NOTHING (EOF before head)
+[18:49:16] CONN OPEN 172.20.10.1:52399
+[18:49:46] CONN DEAD 172.20.10.1:52399 after 29.0s — the phone sent NOTHING (EOF before head)
+[18:49:46] CONN OPEN 172.20.10.1:52400
+[18:49:58] REQUEST 172.20.10.1:52400 POST /api/localsend/v2/prepare-upload?pin=1844
+[18:49:58]   headers: {'content-type': 'application/json', 'connection': 'keep-alive', 'accept': '*/*', 'user-agent': 'Speechnotes/46 CFNetwork/3896.100.1.2.1 Darwin/27.0.0', 'content-length': '405'}
+[18:49:58]   PREPARE BODY (405 B): {"pin":"1844","info":{"alias":"iPhone","fingerprint":"CD4244E9-0683-48AF-A69D-CCAEB21D0F8D65887DD2-B157-48D6-B3BC-5025AE971A7D","version":"2.2","download":false,"deviceModel":"iPhone13,4","port":0,"deviceType":"mobile","protocol":"http"},"files":{"F7AE5B0F-1E96-407F-A22F-C01430775994":{"fileName":"Latent syphilis.md","id":"F7AE5B0F-1E96-407F-A22F-C01430775994","fileType":"text\/markdown","size":5580}}}
+[18:49:58]   prepare query: pin=1844
+[18:49:58]   answering prepare with 1 token(s): ['F7AE5B0F-1E96-407F-A22F-C01430775994']
+[18:49:58] CONN CLOSE 172.20.10.1:52400 after 12.2s
+[18:49:58] CONN OPEN 172.20.10.1:52401
+[18:50:27] CONN DEAD 172.20.10.1:52401 after 29.1s — the phone sent NOTHING (EOF before head)
+[18:50:27] CONN OPEN 172.20.10.1:52402
+[18:50:56] CONN DEAD 172.20.10.1:52402 after 29.1s — the phone sent NOTHING (EOF before head)
+[18:50:56] CONN OPEN 172.20.10.1:52403
+[18:51:25] CONN DEAD 172.20.10.1:52403 after 29.0s — the phone sent NOTHING (EOF before head)
+[18:51:25] CONN OPEN 172.20.10.1:52404
+[18:51:54] CONN DEAD 172.20.10.1:52404 after 29.0s — the phone sent NOTHING (EOF before head)
+[18:51:54] CONN OPEN 172.20.10.1:52405
+[18:52:18] REQUEST 172.20.10.1:52405 POST /api/localsend/v2/register
+[18:52:18]   headers: {'content-type': 'application/json', 'connection': 'keep-alive', 'accept': '*/*', 'user-agent': 'Speechnotes/46 CFNetwork/3896.100.1.2.1 Darwin/27.0.0', 'content-length': '216'}
+[18:52:18]   register body (216 B): {"deviceModel":"iPhone13,4","deviceType":"mobile","protocol":"http","version":"2.2","fingerprint":"CD4244E9-0683-48AF-A69D-CCAEB21D0F8D65887DD2-B157-48D6-B3BC-5025AE971A7D","port":0,"alias":"iPhone","download":false}
+[18:52:18] CONN CLOSE 172.20.10.1:52405 after 23.1s
+[18:52:25] CONN OPEN 172.20.10.1:52440
+[18:52:25] REQUEST 172.20.10.1:52440 POST /api/localsend/v2/prepare-upload?pin=1844
+[18:52:25]   headers: {'content-type': 'application/json', 'connection': 'keep-alive', 'accept': '*/*', 'user-agent': 'Speechnotes/46 CFNetwork/3896.100.1.2.1 Darwin/27.0.0', 'content-length': '441'}
+[18:52:25]   PREPARE BODY (441 B): {"pin":"1844","files":{"2B0AFA57-FAD7-4513-B524-5DA4EB930BF8":{"fileType":"text\/markdown","size":120581,"id":"2B0AFA57-FAD7-4513-B524-5DA4EB930BF8","fileName":"SECTION ONE SINGLE BEST ANSWER QUESTIONS 50 MARKS.md"}},"info":{"download":false,"fingerprint":"CD4244E9-0683-48AF-A69D-CCAEB21D0F8D65887DD2-B157-48D6-B3BC-5025AE971A7D","deviceType":"mobile","alias":"iPhone","port":0,"deviceModel":"iPhone13,4","version":"2.2","protocol":"http"}}
+[18:52:25]   prepare query: pin=1844
+[18:52:25]   answering prepare with 1 token(s): ['2B0AFA57-FAD7-4513-B524-5DA4EB930BF8']
+[18:52:25] CONN CLOSE 172.20.10.1:52440 after 0.0s
+[18:52:25] CONN OPEN 172.20.10.1:52441
+[18:52:54] CONN DEAD 172.20.10.1:52441 after 29.2s — the phone sent NOTHING (EOF before head)
+[18:52:54] CONN OPEN 172.20.10.1:52442
+[18:53:23] CONN DEAD 172.20.10.1:52442 after 29.0s — the phone sent NOTHING (EOF before head)
+[18:53:23] CONN OPEN 172.20.10.1:52443
+[18:53:52] CONN DEAD 172.20.10.1:52443 after 29.0s — the phone sent NOTHING (EOF before head)
+[18:53:52] CONN OPEN 172.20.10.1:52444
+[18:54:21] CONN DEAD 172.20.10.1:52444 after 29.0s — the phone sent NOTHING (EOF before head)
+[18:54:21] CONN OPEN 172.20.10.1:52445
+[18:54:37] REQUEST 172.20.10.1:52445 POST /api/localsend/v2/register
+[18:54:37]   headers: {'content-type': 'application/json', 'connection': 'keep-alive', 'accept': '*/*', 'user-agent': 'Speechnotes/46 CFNetwork/3896.100.1.2.1 Darwin/27.0.0', 'content-length': '216'}
+[18:54:37]   register body (216 B): {"version":"2.2","download":false,"protocol":"http","fingerprint":"CD4244E9-0683-48AF-A69D-CCAEB21D0F8D65887DD2-B157-48D6-B3BC-5025AE971A7D","alias":"iPhone","deviceType":"mobile","port":0,"deviceModel":"iPhone13,4"}
+[18:54:37] CONN CLOSE 172.20.10.1:52445 after 16.2s
+[18:54:44] CONN OPEN 172.20.10.1:52480
+[18:54:44] REQUEST 172.20.10.1:52480 POST /api/localsend/v2/prepare-upload?pin=1844
+[18:54:44]   headers: {'content-type': 'application/json', 'connection': 'keep-alive', 'accept': '*/*', 'user-agent': 'Speechnotes/46 CFNetwork/3896.100.1.2.1 Darwin/27.0.0', 'content-length': '445'}
+[18:54:44]   PREPARE BODY (445 B): {"info":{"fingerprint":"CD4244E9-0683-48AF-A69D-CCAEB21D0F8D65887DD2-B157-48D6-B3BC-5025AE971A7D","download":false,"port":0,"protocol":"http","deviceModel":"iPhone13,4","deviceType":"mobile","alias":"iPhone","version":"2.2"},"pin":"1844","files":{"CD03E34E-6ECD-4811-8A6B-8CC821AA7A0E":{"size":23320,"id":"CD03E34E-6ECD-4811-8A6B-8CC821AA7A0E","fileType":"text\/markdown","fileName":"SECTION TWO SHORT ANSWER QUESTIONS  CLINICAL SCENARIOS.md"}}}
+[18:54:44]   prepare query: pin=1844
+[18:54:44]   answering prepare with 1 token(s): ['CD03E34E-6ECD-4811-8A6B-8CC821AA7A0E']
+[18:54:44] CONN CLOSE 172.20.10.1:52480 after 0.0s
+[18:54:44] CONN OPEN 172.20.10.1:52481
+[18:55:13] CONN DEAD 172.20.10.1:52481 after 29.0s — the phone sent NOTHING (EOF before head)
+[18:55:13] CONN OPEN 172.20.10.1:52482

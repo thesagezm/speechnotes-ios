@@ -66,6 +66,13 @@ final class LocalSendHTTPServer {
     /// Called on the server queue for every complete request.
     var handler: ((LocalSendHTTPRequest) -> LocalSendHTTPResponse)?
 
+    /// Called on the server queue while a request body streams in:
+    /// (path, query, received bytes, expected bytes). Expected comes from
+    /// Content-Length and is 0 when the head declared none. `received`
+    /// == -1 means the peer hung up mid-body — clear any indicator built
+    /// on this stream. Throttled to ~1% steps by the per-request reporter.
+    var bodyProgress: ((_ path: String, _ query: [String: String], _ received: Int64, _ expected: Int64) -> Void)?
+
     /// Connection work and the lifecycle state machine. The listener
     /// itself lives on `listenerQueue` — its `.cancelled` state must be
     /// deliverable while `queue` is blocked in the teardown wait, or a
@@ -398,7 +405,11 @@ final class LocalSendHTTPServer {
         let contentLength = Int64(headers["content-length"] ?? "0") ?? 0
         let remoteHost = Self.host(of: connection)
         let accumulator = BodyAccumulator(spillThreshold: spillThreshold, initial: bodyStart)
-        readBody(connection, accumulator: accumulator, remaining: contentLength - Int64(bodyStart.count)) { [weak self] in
+        let progress = BodyProgressReporter(expected: contentLength, start: Int64(bodyStart.count))
+        progress.fire = { [weak self] received, expected in
+            self?.bodyProgress?(path, query, received, expected)
+        }
+        readBody(connection, accumulator: accumulator, remaining: contentLength - Int64(bodyStart.count), progress: progress) { [weak self] in
             guard let self else { return }
             let request = LocalSendHTTPRequest(
                 method: method,
@@ -417,6 +428,7 @@ final class LocalSendHTTPServer {
         _ connection: NWConnection,
         accumulator: BodyAccumulator,
         remaining: Int64,
+        progress: BodyProgressReporter,
         done: @escaping () -> Void
     ) {
         guard remaining > 0 else {
@@ -427,17 +439,20 @@ final class LocalSendHTTPServer {
             guard let self else { return }
             if let data {
                 accumulator.append(data)
+                progress.report(accumulator.totalBytes)
                 let next = remaining - Int64(data.count)
                 if next > 0 {
-                    self.readBody(connection, accumulator: accumulator, remaining: next, done: done)
+                    self.readBody(connection, accumulator: accumulator, remaining: next, progress: progress, done: done)
                     return
                 }
                 done()
             } else if error == nil, !isComplete {
-                self.readBody(connection, accumulator: accumulator, remaining: remaining, done: done)
+                self.readBody(connection, accumulator: accumulator, remaining: remaining, progress: progress, done: done)
             } else {
                 // Peer hung up mid-body — drop the connection; LocalSend
-                // senders retry on a fresh one.
+                // senders retry on a fresh one. Tell the progress observer
+                // the stream died so nothing shows a stale bar.
+                progress.connectionDied()
                 accumulator.abort()
                 connection.cancel()
             }
@@ -488,6 +503,37 @@ final class LocalSendHTTPServer {
         @unknown default:
             return nil
         }
+    }
+}
+
+/// Throttled byte-progress for ONE streaming request body. Lives on the
+/// server queue: fires at most once per ~1% of the body (or 256 KB,
+/// whichever is larger) plus the final byte, so observing a gigabyte
+/// upload costs the main actor a few dozen hops, not one per receive.
+final class BodyProgressReporter {
+    private let expected: Int64
+    private var lastReported: Int64
+    /// (received, expected) — expected is 0 when the head declared no
+    /// Content-Length.
+    var fire: ((_ received: Int64, _ expected: Int64) -> Void)?
+
+    init(expected: Int64, start: Int64) {
+        self.expected = expected
+        self.lastReported = start
+    }
+
+    func report(_ received: Int64) {
+        guard let fire else { return }
+        let step = max(expected / 100, 1 << 18)
+        guard received == expected || received - lastReported >= step else { return }
+        lastReported = received
+        fire(received, expected)
+    }
+
+    /// The peer hung up mid-body: one last report with received == -1 (the
+    /// documented "stream died" marker) so no stale bar survives.
+    func connectionDied() {
+        fire?(-1, expected)
     }
 }
 
