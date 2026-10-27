@@ -177,6 +177,8 @@ enum MathCommandTable {
         "Im": .init(kind: .symbol(display: "ℑ", spoken: "imaginary part")),
         "wp": .init(kind: .symbol(display: "℘", spoken: "Weierstrass p")),
         "angle": .init(kind: .symbol(display: "∠", spoken: "angle")),
+        "degree": .init(kind: .symbol(display: "°", spoken: "degrees")),
+        "textdegree": .init(kind: .symbol(display: "°", spoken: "degrees")),
         "triangle": .init(kind: .symbol(display: "△", spoken: "triangle")),
         "square": .init(kind: .symbol(display: "□", spoken: "square")),
         "neg": .init(kind: .symbol(display: "¬", spoken: "not")),

@@ -168,9 +168,10 @@ public enum MathNotation {
                 let afterOpen = line.index(after: index)
                 // The closing `$` must be on the SAME line: a `$` in the
                 // next line of a paragraph is prose, not a formula that
-                // happens to wrap.
+                // happens to wrap. An escaped `\$` inside the body closes
+                // nothing — the close search skips escape pairs.
                 let lineEnd = line[index...].firstIndex(of: "\n") ?? line.endIndex
-                if let close = line.range(of: "$", range: afterOpen..<lineEnd) {
+                if let close = unescapedDollar(in: line, from: afterOpen, before: lineEnd) {
                     let body = String(line[afterOpen..<close.lowerBound])
                     if looksLikeMath(body),
                        let parsed = formula(body, isDisplay: false) {
@@ -185,6 +186,14 @@ public enum MathNotation {
                 }
                 pending += "$"
                 index = line.index(after: index)
+                continue
+            }
+
+            // `\$` — an escaped dollar sign is PROSE: it must neither open
+            // nor close a formula ("the fee is \$5, once").
+            if character == "\\", line[index...].hasPrefix("\\$") {
+                pending += "$"
+                index = line.index(index, offsetBy: 2)
                 continue
             }
 
@@ -232,6 +241,31 @@ public enum MathNotation {
 
     // MARK: - What counts as maths
 
+    /// The first `$` at or after `from` (and before `before`) that is not
+    /// part of a `\X` escape pair — an escaped `\$` closes nothing.
+    /// Internal so the markdown parser's maths protection pairs regions
+    /// exactly the way `segments` does.
+    static func unescapedDollar(
+        in line: String,
+        from: String.Index,
+        before: String.Index
+    ) -> String.Index? {
+        var cursor = from
+        while cursor < before {
+            if line[cursor] == "$" { return cursor }
+            if line[cursor] == "\\" {
+                // `\X` (including `\\` and `\$`) is one unit, never a
+                // delimiter.
+                let after = line.index(after: cursor)
+                guard after < before else { return nil }
+                cursor = line.index(after: after)
+                continue
+            }
+            cursor = line.index(after: cursor)
+        }
+        return nil
+    }
+
     /// Whether the text between two `$` signs is a FORMULA rather than
     /// prose that happens to contain a dollar sign.
     ///
@@ -263,11 +297,14 @@ public enum MathNotation {
             return true
         }
         // A maths signal: a LaTeX command, a maths operator, a Greek letter,
-        // a caret/underscript, or a brace.
+        // a caret/underscript, a brace, a percent (often arriving bare —
+        // the markdown parser de-escapes `\%` before this gate runs), an
+        // asterisk (multiplication), or a degree mark.
         let signals = ["\\", "^", "_", "{", "}", "=", "<", ">", "+", "−", "±",
                        "×", "÷", "√", "∑", "∏", "∫", "∞", "≤", "≥", "≠",
                        "≈", "→", "←", "α", "β", "γ", "δ", "θ", "λ", "μ",
-                       "π", "σ", "φ", "ω", "Δ", "Ω", "Σ", "Π"]
+                       "π", "σ", "φ", "ω", "Δ", "Ω", "Σ", "Π",
+                       "%", "*", "°"]
         return signals.contains { body.contains($0) }
     }
 
@@ -361,6 +398,10 @@ public enum MathNotation {
             case dots(String)
             /// An accent applied to a symbol (`\hat{x}`).
             case accent(String, [Node])
+            /// A quantity in degrees — `45^\circ`, `45\degree`. Rendered as
+            /// the degree sign, spoken "degrees" (a superscript ring would
+            /// be function composition, not a temperature).
+            case degrees([Node])
             /// Anything the parser did not recognise — kept verbatim.
             case literal(String)
         }
@@ -395,6 +436,15 @@ public enum MathNotation {
                 if source[index] == "^" {
                     index = source.index(after: index)
                     let exponent = parseArgument()
+                    // `45^\circ` (or `^{\circ}`) — LaTeX's degree notation.
+                    // As an EXPONENT the ring is the degree sign ("45°",
+                    // spoken "45 degrees"), not function composition.
+                    if exponent.count == 1,
+                       case .symbol(let display, _) = exponent[0],
+                       display == "∘" {
+                        result = .degrees([result])
+                        continue
+                    }
                     result = .superscript(base: [result], exponent: exponent)
                 } else if source[index] == "_" {
                     index = source.index(after: index)
@@ -783,6 +833,8 @@ public enum MathNotation {
                 }.joined(separator: ", ")
             case .accent(_, let base):
                 return speakRawList(base)
+            case .degrees(let base):
+                return "\(speakRawList(base)) degrees"
             }
         }
 
@@ -855,6 +907,8 @@ public enum MathNotation {
             case .accent(let glyph, let base):
                 let body = renderList(base, mode: mode)
                 return glyph.isEmpty ? body : "\(glyph)\(body)"
+            case .degrees(let base):
+                return renderList(base, mode: mode) + "°"
             }
         }
 
@@ -936,6 +990,8 @@ public enum MathNotation {
                 return spokenRows.joined(separator: ", ")
             case .accent(_, let base):
                 return speakList(base)
+            case .degrees(let base):
+                return "\(speakList(base)) degrees"
             }
         }
     }
@@ -966,6 +1022,8 @@ public enum MathNotation {
         ")": "close bracket",
         "[": "open bracket",
         "]": "close bracket",
+        "%": "percent",
+        "°": "degrees",
     ]
 
     /// The spoken form of a plain-text run: the operators inside it become

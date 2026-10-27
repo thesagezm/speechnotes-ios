@@ -339,8 +339,15 @@ public enum MarkdownText {
     public static func speechInline(_ text: String, references: [String: LinkReference] = [:]) -> String {
         guard !text.isEmpty else { return text }
 
+        // 0. Maths FIRST, on the truly raw text: the maths reader pairs
+        // `$…$`, and the `\%` inside a body is the LaTeX it exists to
+        // read. After protectEscapes those backslashes are invisible
+        // sentinels and `$45\%$` stops looking like maths.
+        var line = MathNotation.spokenText(in: text)
+
         // 1. Protect backslash escapes so `\*` never looks like emphasis.
-        var (line, stash) = protectEscapes(text)
+        let (escaped, stash) = protectEscapes(line)
+        line = escaped
 
         // 2. Footnote markers are silent.
         line = replacePatterns(line, pattern: #"\[\^[^\]]+\]"#, with: "")
@@ -364,14 +371,6 @@ public enum MarkdownText {
 
         // 6. Code spans → content.
         line = replacePatterns(line, pattern: #"`([^`]+)`"#, with: "$1")
-
-        // 6b. Maths → its SPOKEN form. This path runs on RAW text (the
-        // editing path), so the formula is still wrapped in `$…$` and the
-        // source still holds LaTeX. Speaking the raw source would give the
-        // listener "backslash beta dollar" — the same complaint the
-        // preview had. The spoken words are substituted HERE so the engine
-        // hears "beta" while the reader still sees the source they typed.
-        line = MathNotation.spokenText(in: line)
 
         // 7. Emphasis markers (loop until stable, bounded).
         for _ in 0..<6 {
@@ -453,14 +452,137 @@ public enum MarkdownText {
         return out
     }
 
+    // MARK: - Maths protection (the AST path)
+
+    /// Sentinel pair wrapping a maths region while cmark parses. Private-use
+    /// characters: cmark treats them as plain text and has no syntax for
+    /// them, so what sits between them arrives at the span collector
+    /// byte-for-byte.
+    private static let mathGuardOpen = "\u{E000}"
+    private static let mathGuardClose = "\u{E001}"
+
+    /// Hides maths regions from the markdown parser.
+    ///
+    /// cmark is spec-correct and that is the problem: it de-escapes LaTeX
+    /// (`\$45\%$` arrives as `$45%$`, so the `\%` the maths reader needs is
+    /// gone before the gate runs), and an intraword `*` is an EMPHASIS
+    /// marker — `$2*3$` loses its multiplication to `<em>` — while a
+    /// formula beside or inside `**bold**`/`*italic*` can come apart at the
+    /// `$`s. Each region becomes one sentinel token that cmark cannot
+    /// restructure; `restoreMath` swaps the ORIGINAL source back at every
+    /// point the AST's raw text is read, so what counts as maths is still
+    /// decided in exactly one place (the gate that runs after the restore).
+    ///
+    /// Pairing mirrors `MathNotation.segments` (per line, `$$` before `$`,
+    /// `\$` never opens or closes), and regions whose shape the gate would
+    /// refuse anyway (edge whitespace, digits-only bodies) are left alone so
+    /// a note about prices reaches the parser byte-for-byte unchanged.
+    private static func protectMath(_ markdown: String) -> String {
+        guard markdown.contains("$") else { return markdown }
+        var fenceChar: Character? = nil
+        var protectedLines: [String] = []
+        for line in normalize(markdown).components(separatedBy: "\n") {
+            // Inside a fence everything is verbatim — but the tracker here
+            // is best-effort (an indented fence would slip past it), so
+            // CodeBlock reads restore too. Protection can only ever restore
+            // to exactly what the author typed.
+            if let info = fenceInfo(line) {
+                if fenceChar == nil {
+                    fenceChar = info.char
+                } else if info.char == fenceChar, info.canClose {
+                    fenceChar = nil
+                }
+                protectedLines.append(line)
+                continue
+            }
+            guard fenceChar == nil else {
+                protectedLines.append(line)
+                continue
+            }
+            protectedLines.append(protectMathLine(line))
+        }
+        return protectedLines.joined(separator: "\n")
+    }
+
+    /// One line: every maths region becomes one sentinel token carrying the
+    /// region VERBATIM (self-contained — the restore needs no side table).
+    private static func protectMathLine(_ line: String) -> String {
+        var out = ""
+        out.reserveCapacity(line.count)
+        var index = line.startIndex
+        while index < line.endIndex {
+            let rest = line[index...]
+            // `$$…$$` — display maths, no content gate (the gate after the
+            // restore trims and parses before accepting).
+            if rest.hasPrefix("$$"),
+               let close = line.range(of: "$$", range: line.index(index, offsetBy: 2)..<line.endIndex) {
+                out += guardToken(line[index..<close.upperBound])
+                index = close.upperBound
+                continue
+            }
+            // `$…$` — inline maths.
+            if line[index] == "$" {
+                let afterOpen = line.index(after: index)
+                if afterOpen < line.endIndex,
+                   let close = MathNotation.unescapedDollar(in: line, from: afterOpen, before: line.endIndex) {
+                    let body = line[afterOpen..<close.lowerBound]
+                    // The prose shapes: prices and numbers, or prose with
+                    // edge whitespace, stay unprotected.
+                    let isMoney = !body.isEmpty && body.allSatisfy { $0.isNumber || $0 == "," || $0 == "." }
+                    let isProse = body.isEmpty || body.hasPrefix(" ") || body.hasSuffix(" ")
+                    if !isMoney, !isProse, !body.contains(mathGuardOpen), !body.contains(mathGuardClose) {
+                        out += guardToken(line[index..<close.upperBound])
+                        index = close.upperBound
+                        continue
+                    }
+                }
+            }
+            out.append(line[index])
+            index = line.index(after: index)
+        }
+        return out
+    }
+
+    /// The sentinel token for one maths region. A region that itself
+    /// contains a sentinel (someone literally typed U+E000) is refused by
+    /// the caller — tokens must stay unambiguous.
+    private static func guardToken(_ region: Substring) -> String {
+        mathGuardOpen + region + mathGuardClose
+    }
+
+    /// Swaps every maths token back to the source it stood in for. Applied
+    /// at every point raw AST text becomes content — text nodes, code spans
+    /// and blocks, link/image targets — including the paths that should
+    /// never contain a token, so a token that leaked somewhere unexpected
+    /// can only ever restore to exactly what the author typed.
+    private static func restoreMath(_ text: String) -> String {
+        guard text.contains(mathGuardOpen) else { return text }
+        var out = ""
+        out.reserveCapacity(text.count)
+        var index = text.startIndex
+        while index < text.endIndex {
+            if text[index...].hasPrefix(mathGuardOpen),
+               let close = text.range(of: mathGuardClose, range: text.index(after: index)..<text.endIndex) {
+                out += text[text.index(after: index)..<close.lowerBound]
+                index = close.upperBound
+                continue
+            }
+            out.append(text[index])
+            index = text.index(after: index)
+        }
+        return out
+    }
+
     // MARK: - Blocks (reading view) — the GFM AST
 
     /// Parses `markdown` with cmark-gfm and maps the AST onto the reading
     /// view's block model.
     public static func blocks(_ markdown: String) -> [MarkdownBlock] {
         // The AST parser handles \r\n itself; normalize anyway so the
-        // plain-text joiners here never meet a stray \r.
-        let document = Document(parsing: normalize(markdown))
+        // plain-text joiners here never meet a stray \r. Maths goes in
+        // behind sentinel tokens (see protectMath) — cmark would otherwise
+        // eat the LaTeX escapes and the intraword `*`s the formulas need.
+        let document = Document(parsing: protectMath(normalize(markdown)))
         var result: [MarkdownBlock] = []
         for child in document.children {
             appendBlock(child, to: &result)
@@ -529,7 +651,9 @@ public enum MarkdownText {
 
         case let code as CodeBlock:
             // The fence's own trailing newline is structure, not content.
-            var body = code.code
+            // Restored like every other raw read: a token that slipped past
+            // the fence tracker must come back as the author's bytes.
+            var body = restoreMath(code.code)
             if body.hasSuffix("\n") { body.removeLast() }
             result.append(.code(language: code.language, text: body))
 
@@ -626,7 +750,7 @@ public enum MarkdownText {
                 flattenSubList(subList, level: level + 1, into: &items)
             case let code as CodeBlock:
                 if !textParts.isEmpty { textParts.append("\n") }
-                textParts.append(code.code)
+                textParts.append(restoreMath(code.code))
             default:
                 let text = plainInlineText(of: child.children)
                 if !text.isEmpty {
@@ -659,7 +783,7 @@ public enum MarkdownText {
             case let nested as BlockQuote:
                 flattenQuote(nested, into: &lines, spans: &out)
             case let code as CodeBlock:
-                lines.append(code.code)
+                lines.append(restoreMath(code.code))
             default:
                 let text = plainInlineText(of: child.children)
                 if !text.isEmpty { lines.append(text) }
@@ -771,8 +895,11 @@ public enum MarkdownText {
         for child in children {
             switch child {
             case let text as Text:
+                // A maths token restores BEFORE the maths gate runs: the
+                // gate must see the source the author typed, not cmark's
+                // de-escaped rewrite of it.
                 out.append(contentsOf: splitMath(
-                    text.string, bold: bold, italic: italic, strike: strike
+                    restoreMath(text.string), bold: bold, italic: italic, strike: strike
                 ))
 
             case let strong as Strong:
@@ -782,8 +909,10 @@ public enum MarkdownText {
                 collectSpans(emphasis.children, bold: bold, italic: true, strike: strike, into: &out)
 
             case let code as InlineCode:
+                // Code is verbatim by definition — the restore gives back
+                // exactly what was between the backticks.
                 out.append(StyledSpan(
-                    text: code.code, bold: bold, italic: italic,
+                    text: restoreMath(code.code), bold: bold, italic: italic,
                     code: true, strike: strike
                 ))
 
@@ -791,10 +920,14 @@ public enum MarkdownText {
                 collectSpans(strikeNode.children, bold: bold, italic: italic, strike: true, into: &out)
 
             case let link as Markdown.Link:
+                // The destination restored like any other raw AST text: a
+                // maths token that ended up inside a URL (rare, but a
+                // `$…$`-shaped path would do it) must become that URL back.
+                let destination = restoreMath(link.destination ?? "")
                 let inner = spans(of: link.children)
                 if inner.count == 1, !inner[0].isImage {
                     var span = inner[0]
-                    span.linkURL = link.destination ?? ""
+                    span.linkURL = destination
                     out.append(span)
                 } else if inner.contains(where: \.isMath) {
                     // A link whose label holds a formula: each span keeps the
@@ -802,14 +935,14 @@ public enum MarkdownText {
                     // instead of being flattened into one plain string.
                     for span in inner {
                         var linked = span
-                        linked.linkURL = link.destination ?? ""
+                        linked.linkURL = destination
                         out.append(linked)
                     }
                 } else {
                     out.append(StyledSpan(
                         text: inner.map(\.text).joined(),
                         bold: bold, italic: italic, code: false,
-                        strike: strike, linkURL: link.destination ?? ""
+                        strike: strike, linkURL: destination
                     ))
                 }
 
@@ -818,7 +951,7 @@ public enum MarkdownText {
                 out.append(StyledSpan(
                     text: alt,
                     bold: bold, italic: italic, code: false, strike: strike,
-                    imageAlt: alt, imageURL: image.source ?? ""
+                    imageAlt: alt, imageURL: restoreMath(image.source ?? "")
                 ))
 
             case let soft as SoftBreak:
@@ -854,7 +987,7 @@ public enum MarkdownText {
     /// text.
     public static func inlineRuns(_ line: String, references: [String: LinkReference] = [:]) -> [InlineRun] {
         guard !line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
-        let spans = spans(of: Array(Document(parsing: line).children))
+        let spans = spans(of: Array(Document(parsing: protectMath(normalize(line))).children))
         let runs = runs(from: spans)
         return runs.isEmpty ? [.text(line, bold: false, italic: false, code: false, strike: false)] : runs
     }
