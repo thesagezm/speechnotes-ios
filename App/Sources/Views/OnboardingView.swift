@@ -1,10 +1,14 @@
 import SwiftUI
 
 /// First-launch onboarding: five swipeable pages (welcome → PDFs/OCR →
-/// audiobooks → voices → get started), presented once via `hasOnboarded` in
-/// SpeechnotesApp. Deliberately dependency-free — no environment objects, no
-/// side effects at presentation (LiveContainer launch-crash hygiene): every
-/// fact below is copy, never a query of a live store/model.
+/// audiobooks → voices → pomodoro & stats), presented once via `hasOnboarded`
+/// in SpeechnotesApp. Deliberately dependency-free — no environment objects,
+/// no side effects at presentation (LiveContainer launch-crash hygiene):
+/// every fact below is copy, never a query of a live store/model.
+///
+/// The v1.8.0 round folded the old "Start with a note" page into the welcome
+/// page (its CTA was discoverable anyway) to make room for the Pomodoro &
+/// Stats page without growing the flow past five pages (user request).
 struct OnboardingView: View {
     /// Called when the user finishes (or skips) the flow.
     let onDone: () -> Void
@@ -29,7 +33,7 @@ struct OnboardingView: View {
                     pdfPage.tag(1)
                     audiobooksPage.tag(2)
                     voicesPage.tag(3)
-                    startPage.tag(4)
+                    pomodoroPage.tag(4)
                 }
                 .tabViewStyle(.page(indexDisplayMode: .always))
                 .indexViewStyle(.page(backgroundDisplayMode: .always))
@@ -71,7 +75,7 @@ struct OnboardingView: View {
             Text("Speechnotes")
                 .font(.largeTitle.bold())
                 .multilineTextAlignment(.center)
-            Text("Write it, then hear it read aloud — completely offline.")
+            Text("Write it, then hear it read aloud — completely offline. Tap + to write your first note, or import a book and read along.")
                 .font(.body)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -125,7 +129,7 @@ struct OnboardingView: View {
                 .multilineTextAlignment(.center)
             VStack(alignment: .leading, spacing: 14) {
                 featureRow("apple.logo", "Apple system voice — works instantly")
-                featureRow("cpu", "Kokoro — neural, 28 voices (small ~92 MB, full ~341 MB)")
+                featureRow("cpu", "Kokoro — neural, 28 voices (High ~341 MB or Compact ~92 MB)")
                 featureRow("globe", "Supertonic — best quality, 31 languages (~399 MB)")
             }
             .padding(.horizontal, 34)
@@ -139,18 +143,19 @@ struct OnboardingView: View {
         }
     }
 
-    private var startPage: some View {
+    private var pomodoroPage: some View {
         VStack(spacing: 18) {
             Spacer()
-            pageIcon("square.and.pencil")
-            Text("Start with a note")
+            pageIcon("timer")
+            Text("Focus, and see it add up")
                 .font(.title2.bold())
                 .multilineTextAlignment(.center)
-            Text("Tap + to write your first note, or import a text, markdown or PDF file from the ⋯ menu. Tap play and follow along.")
-                .font(.body)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 40)
+            VStack(alignment: .leading, spacing: 12) {
+                featureRow("timer", "Pomodoro on the Stats tab — Structured work/break cycles, Flowmodoro (bank break minutes as you focus), or a free timer")
+                featureRow("chart.bar.xaxis", "Every listening minute lands in Stats: streaks, goals and per-book time")
+                featureRow("bell", "A gentle banner keeps a running session present while you read or listen")
+            }
+            .padding(.horizontal, 34)
             Spacer()
             Spacer()
         }

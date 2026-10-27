@@ -559,3 +559,19 @@ bookmark": a start-of-chapter position counts as no position). Bookmark
 stop/start semantics untouched per the user. Full mechanics, decisions and
 device checklist in `Docs/HANDOVER-BOOKS-TTS-POSITION-AND-READALONG-TOC.md`.
 CI dispatched manually for `583acdb` (run 40395811218); device round pending.
+
+**v1.8.0 released (2026-10-27, build 46 — the user's go).** The whole release
+grouping shipped: books readers transparency + wide-table panning, TTS
+play-from-page + landing chapter jumps, the shared minimised pill, maths
+rendering + spoken words, Pomodoro on Stats (claim gate at 3 banked break
+minutes), Keep Screen On, BookDrop everywhere (hotspot scan, port-stability
+state machine, launch-OFF, 401 recovery), web article import + BPC, JEX
+exports real-Joplin-clean + Joplin E2E crypto, mobi/OCR/m4b from the 1.7.x
+line. Onboarding refreshed at release time: still five pages, the
+"Start with a note" page folded into welcome, a Pomodoro & Stats page added.
+The juice bubbles got their own per-frame clock (the card's 1 Hz tick was
+stepping them — the "not smooth" report), four slightly larger streams with
+sway, and the paused freeze preserved via the schedule's `paused:`.
+README brought to v1.8.0 reality (Kokoro Compact ~92 MB dynamic int8, not
+~177 MB; Soprano credit removed — no engine; epub.js credited; layout/CI
+sections match the tree). Release notes: `Docs/RELEASE-V1.8.0.md`.

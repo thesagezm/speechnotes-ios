@@ -157,13 +157,12 @@ private struct PomodoroRunView: View {
                         LinearGradient(colors: [tint.opacity(0.5), tint], startPoint: .top, endPoint: .bottom)
                     )
                     .frame(width: fillWidth)
-                // The juice: two bubbles rising through the fill — enough to
-                // read as liquid, not enough to become an aquarium (2026-10-26
-                // device feedback). Their own frame clock, so the card's 1 Hz
-                // tick never steps the motion; hidden while the glass is
-                // effectively empty.
+                // The juice: a few bubbles rising through the fill — enough
+                // to read as liquid, not enough to become an aquarium
+                // (2026-10-26 device feedback: more, slightly bigger,
+                // smoother). Hidden while the glass is effectively empty.
                 if progress > 0.04 {
-                    JuiceBubbles(width: fillWidth, now: now)
+                    JuiceBubbles(width: fillWidth, paused: paused)
                         .allowsHitTesting(false)
                 }
             }
@@ -191,36 +190,72 @@ private struct PomodoroRunView: View {
         return PomodoroFormat.countdown(session.secondsRemaining(now: now) ?? 0)
     }
 
-    /// Two bubbles rising through the juice. Fully deterministic off the
-    /// frame clock — no animation state to stutter when the card re-renders
-    /// each second, nothing to clean up. Each bubble rises bottom → surface
-    /// on its own period, fading in on departure and out at the surface
-    /// (`sin(lap·π)`), so it never pops in or out visibly.
+    /// The juice: bubbles rising through the fill. Four streams, slightly
+    /// larger than the first pair, each on its own period, column, sway and
+    /// phase so the surface never reads as a loop (2026-10-26 device
+    /// feedback: "too conservative… make them smoother").
+    ///
+    /// Frame-clock note: the card's TimelineView ticks at 1 Hz for the
+    /// countdown, and feeding that date here moved the bubbles in one-second
+    /// jumps — the actual "not smooth" report. The nested
+    /// `TimelineView(.animation)` below schedules per-frame (and only while
+    /// the canvas is on screen); everything else stays deterministic off the
+    /// frame date — no animation state to stutter when the card re-renders
+    /// each second, nothing to clean up. Each bubble fades in on departure
+    /// and out at the surface (`sin(lap·π)`), so it never pops in or out.
+    ///
+    /// `paused` stops the nested clock itself, so a paused session freezes
+    /// the bubbles exactly where they are (the device check from the first
+    /// round: paused freezes the fill AND the bubbles).
     private struct JuiceBubbles: View {
         let width: CGFloat
-        let now: Date
+        var paused: Bool = false
+
+        private static let streams: [(
+            period: Double, phase: Double, radius: CGFloat,
+            xFrac: CGFloat, sway: CGFloat, cycles: Double
+        )] = [
+            (period: 5.2, phase: 0.00, radius: 4.3, xFrac: 0.30, sway: 3.0, cycles: 1.6),
+            (period: 7.1, phase: 0.38, radius: 2.8, xFrac: 0.55, sway: 2.2, cycles: 2.2),
+            (period: 6.1, phase: 0.62, radius: 3.5, xFrac: 0.72, sway: 2.6, cycles: 1.3),
+            (period: 8.4, phase: 0.80, radius: 2.3, xFrac: 0.44, sway: 1.8, cycles: 2.6),
+        ]
 
         var body: some View {
-            Canvas { context, size in
-                guard size.height > 24, size.width > 12 else { return }
-                let t = now.timeIntervalSinceReferenceDate
-                bubble(period: 5.4, phase: 0.0, radius: 3.4, xFrac: 0.35, t: t, in: context, size: size)
-                bubble(period: 7.3, phase: 0.5, radius: 2.3, xFrac: 0.68, t: t, in: context, size: size)
+            TimelineView(.animation(minimumInterval: nil, paused: paused)) { timeline in
+                Canvas { context, size in
+                    guard size.height > 24, size.width > 12 else { return }
+                    let t = timeline.date.timeIntervalSinceReferenceDate
+                    for s in Self.streams {
+                        bubble(
+                            period: s.period, phase: s.phase, radius: s.radius,
+                            xFrac: s.xFrac, sway: s.sway, cycles: s.cycles,
+                            t: t, in: context, size: size
+                        )
+                    }
+                }
             }
             .frame(width: width)
         }
 
         private func bubble(
             period: Double, phase: Double, radius: CGFloat, xFrac: CGFloat,
+            sway: CGFloat, cycles: Double,
             t: Double, in context: GraphicsContext, size: CGSize
         ) {
             let lap = ((t / period) + phase).truncatingRemainder(dividingBy: 1)
             // Fade envelope: invisible at departure and arrival.
-            let alpha = sin(lap * .pi) * 0.45
+            let alpha = sin(lap * .pi) * 0.5
             guard alpha > 0.02 else { return }
             let margin = radius * 3
-            let y = size.height - margin - lap * (size.height - margin * 2)
-            let x = size.width * xFrac
+            // Smoothstep ease: the bubble eases out of the depth, glides
+            // through the middle and settles at the surface — a constant
+            // speed read mechanical next to the swaying column.
+            let eased = lap * lap * (3 - 2 * lap)
+            let y = size.height - margin - eased * (size.height - margin * 2)
+            // A slow sideways drift on its own sine (offset per stream) so
+            // no two passes trace the same line.
+            let x = size.width * xFrac + sin((lap + phase) * .pi * cycles) * sway
             context.fill(
                 Path(ellipseIn: CGRect(x: x - radius, y: y - radius, width: radius * 2, height: radius * 2)),
                 with: .color(.white.opacity(alpha))

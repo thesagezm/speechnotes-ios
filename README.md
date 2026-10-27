@@ -3,21 +3,32 @@
 An offline, Speech Note (Linux)-style app for iPhone — built entirely from Linux,
 compiled on GitHub Actions macOS runners, sideloaded via SideStore + LiveContainer.
 
-**Current status: v1.7.4 — mobi/azw3/azw/prc books import with their own chapter
-structure and real covers (Huff/CDIC decode, KF8 flow chapters, EXTH-declared
-cover); Opus audiobooks open at any size (lazy packet streams) and play with
-RFC-7845 gain, clip-free downmix and the full-cast ambience clearly audible;
-system-voice pauses are bounded everywhere; Supertonic gains a Balanced
-(6-step) quality setting; one Kokoro engine with a High/Compact quality dial;
-voice picks persist.** Pick an
+**Current status: v1.8.0 — a books release and a focus release.** The readers
+show the book behind the tab bar and the hidden chrome (EPUB and PDF; EPUB's
+portrait controls float like Notes; the landscape rail is untouched); wide
+converted tables pan to their lateral end; TTS starts at the page you're
+viewing and chapter jumps always land; the minimised transport is one shared
+Notes-style pill; maths renders AND speaks; Pomodoro (Structured / Flowmodoro /
+free timer) lives on the Stats tab; **Keep Screen On** holds any reading
+surface; BookDrop scans any LAN interface (hotspot transfers work), keeps its
+port stable across toggles, launches OFF, and recovers from access-code
+prompts; shared URLs become notes (Readability, with a Bypass-Paywalls-Clean
+pass for paywalled pages); JEX exports import into real Joplin (full metadata
+set) and Joplin's end-to-end encryption round-trips; .mobi/azw books, scanned
+PDF OCR and m4b chapter audiobooks all read and play. Pick an
 engine in Speech Settings, download
 its model once, and notes are spoken fully offline (airplane-mode tested):
 
 | Engine | Model size | Voices | Notes |
 |---|---|---|---|
 | Apple (system) | 0 | all system voices | Instant, no download |
-| **Kokoro** (ONNX, CPU) | ~341 MB High / ~177 MB Compact | 28 (US/UK, m/f) | One engine, a quality dial (fp32/uint8) |
+| **Kokoro** (ONNX, CPU) | ~341 MB High (fp32) / ~92 MB Compact (int8) | 28 (US/UK, m/f) | One engine, a quality dial |
 | **Supertonic** (ONNX, CPU) | ~399 MB | 10 styles × 31 languages | Multilingual — flow-matching TTS |
+
+Kokoro's Compact tier is the dynamic-int8 `model_quantized.onnx` (~92 MB) —
+the older weight-only uint8 build (~177 MB) was replaced after the device
+round asked for an 80–130 MB download. Soprano was removed as an engine; its
+preferences carry over to Kokoro.
 
 A sentence the model cannot synthesize is skipped on the first attempt — one
 soft tone, then the next sentence. There is no retry: a second attempt at the
@@ -25,29 +36,43 @@ same text fails the same way, and the wait for it is silence the listener pays
 for. Text is cleaned at import so the things that used to fail (soft hyphens,
 zero-width joiners, control bytes, embedded-font glyphs) never reach the model.
 
-Reader and reading surfaces (v1.6.1→v1.7.1, all from device reports):
+## What's new in v1.8.0
 
-- **Landscape, controls on the side.** Rotate the phone: the playback
-  controls become a vertical rail on the trailing edge — voice, play/stop,
-  read-along, a top-down progress strip and the speed slider — leaving the
-  reading surface its full height in both orientations.
-- **Tap to hide the chrome.** One tap on a reading surface hides the nav bar
-  and title; another brings them back. Typing brings them back too, because
-  editing needs the toolbar.
-- **The note stays where you put it.** Scrolling still works; the text stops
-  dead at the ends instead of drifting past them.
-- **Spacing you can tune.** Appearance → Spacing has three sliders — line
-  spacing, space between blocks, and table room (up to 2×) — with the
-  defaults already roomier than the old hardcoded values.
-- **Tables wrap.** Columns take a fair share of the width (weighted by
-  content) with a floor at their longest word, and long cells break across
-  lines — the table only scrolls sideways when even a fair share cannot fit.
-- **The image viewer is a real photo viewer.** Pinch-zoom decelerates and
-  anchors on the point under your fingers, double-tap zooms toward where you
-  tapped, and a tap while zoomed in zooms back out.
-- **Rotation is smooth.** The reading surfaces hold one layout across
-  orientations and cross-arrange their controls, so the text, caret and
-  scroll position survive the change instead of being rebuilt.
+- **Books readers, transparent.** The page colour runs behind the tab bar to
+  the bottom of the screen and behind the status bar when the chrome is
+  hidden (tap-to-immersive), in the EPUB and PDF readers. EPUB portrait
+  controls float over the book like Notes; a chapter always ends with its
+  last lines readable above the chrome. The landscape playback rail is
+  unchanged.
+- **Wide tables pan.** Many-column tables from converted books become
+  laterally pannable blocks in the EPUB reader; nested tables keep their
+  layout, and a swipe on a table pans the table instead of turning the page.
+- **TTS starts where you look.** Play begins at the viewed page/spot (a
+  stored bookmark still wins); in read-along, tapping a Contents row moves
+  the speech to that chapter. Chapter jumps land or report back — no more
+  silent dead chevrons — and the mid-chapter position survives scrolling.
+- **Maths, rendered and spoken.** LaTeX in notes renders as display glyphs in
+  the preview and speaks as words in TTS (exports keep the glyphs).
+- **Pomodoro on Stats.** Structured work/break cycles, Flowmodoro (a break
+  claimable once 3 break minutes are banked) and a free timer, with a gentle
+  app-wide banner and juice in the fill.
+- **Keep Screen On.** A Reading setting (default ON) holds the screen awake
+  on all four reading surfaces — EPUB, PDF, audiobook and note reading —
+  registry-based so tab switches can't wedge it.
+- **BookDrop everywhere, and stable.** Multi-select send sheet from storage,
+  backups, swipes and context menus; JEX/note/book/WAV routing on receive;
+  hotspot transfers (any LAN interface); the port stays 53317 across toggles;
+  launches OFF; a 401 offers a prefilled access-code retry.
+- **Web articles become notes.** Share a URL — Readability extracts it;
+  paywalled pages get a Bypass-Paywalls-Clean userscript pass.
+- **Joplin, both ways.** JEX exports carry the full metadata set and import
+  into real Joplin; Joplin's end-to-end encryption (KeyV1/StringV1) is
+  supported in the notes library.
+- **Under the hood from the 1.7.x line, now solid:** mobi/azw reading with
+  Calibre-exact text extraction, OCR for CamScanner scans (per-book
+  force-OCR), m4b chapter audiobooks, the seconds-based TTS chunk schedule
+  (the audible-gap fix), the background silence bridge, and exact
+  stop→play resume.
 
 Feature tour:
 
@@ -58,7 +83,7 @@ Feature tour:
   row for scoping, move notes between them, plus pin (Pinned section on top)
   and favorite (star). Titles auto-derive from the note's first sentence.
   Backup exports one notebook, the unfiled notes, or the whole library.
-- **Books** (complete in v1.6.0) — the Books tab: import EPUB, PDF, mobi
+- **Books** — the Books tab: import EPUB, PDF, mobi
   (`.mobi`/`.azw`/`.azw3`/`.prc`/`.pdb`), office documents, FictionBook,
   RTF, HTML and plain text, plus audiobooks (M4B / M4A / MP3 / Ogg Opus /
   Opus-in-MP4, Files picker or Open-In) into a cover grid with
@@ -102,8 +127,8 @@ Feature tour:
 - **Storage** (Settings → Storage) — browsable gallery of every cached image
   (attached AND web-downloaded, tap to zoom, share/delete), exported audio
   list, and a usage breakdown.
-- **Onboarding** — a five-page first-launch tour (notes → scanned-PDF OCR →
-  audiobooks → voices → get started).
+- **Onboarding** — a five-page first-launch tour (welcome → scanned-PDF OCR
+  → audiobooks → voices → Pomodoro & Stats).
 - **Logs** (Settings → About) — crash-persistent on-device logs, shareable
   for debugging.
 
@@ -113,13 +138,15 @@ speech *notes* app and TTS is the mission.
 ## How this repo works (no Mac required)
 
 - The Xcode project is **generated from text** (`project.yml`, via XcodeGen) on CI.
-- `.github/workflows/build.yml` runs on every push to `main`:
+- `.github/workflows/build.yml` runs on `main` and by manual dispatch:
   - `logic-tests` — SpeechLogic unit tests (sentence chunker, WAV writer,
-    markdown, XHTML, EPUB/ZIP, PDF chapter logic).
-  - `kokoro-small-spike` / `supertonic-spike` / `epub-spike` / `pdf-spike` —
-    non-blocking contract tests that run each ONNX model (or the EPUB parser
-    against real Gutenberg books / the PDF chapter resolver against real
-    documents) on the macOS runner and assert valid output.
+    markdown, XHTML, EPUB/ZIP, PDF chapter logic, Pomodoro engine, JEX/Joplin
+    crypto).
+  - `kokoro-small-spike` (compact int8 on ORT CPU) / `supertonic-spike` /
+    `epub-spike` / `pdf-spike` — non-blocking contract tests that run each
+    ONNX model (or the EPUB parser against real Gutenberg books / the PDF
+    chapter resolver against real documents) on the macOS runner and assert
+    valid output.
   - `build-ipa` — patches any SPM dependency that declares itself dynamic to
     link statically (LiveContainer requirement), archives an unsigned build,
     verifies the binary has no `@rpath` framework references, and packages
@@ -138,7 +165,8 @@ speechnotes-ios/
 │   │   └── Supertonic/Helper.swift  # vendored upstream runner (MIT)
 │   ├── Services/                # NotesStore, NotebooksStore, BooksStore,
 │   │                            # BookPlaybackController, SpeechPlayer,
-│   │                            # ModelManager, RemoteImageStore, ImportService,
+│   │                            # ModelManager, LocalSend (BookDrop),
+│   │                            # RemoteImageStore, ImportService,
 │   │                            # LogStore, Haptics
 │   ├── Models/                  # Note, Notebook, Book, VoiceCatalog
 │   └── Views/                   # list, editor, read-along, books library,
@@ -148,7 +176,9 @@ speechnotes-ios/
 ├── Packages/SpeechLogic/        # pure-logic SPM package (tested on CI)
 │                                #   SentenceChunker, WAVWriter, MarkdownText,
 │                                #   MarkdownSlashMenu, ZipReader, EpubInfo,
-│                                #   XhtmlText, PdfText, NoteImageStore
+│                                #   XhtmlText, PdfText, NoteImageStore,
+│                                #   PomodoroEngine, ScreenAwakePolicy,
+│                                #   JoplinCrypto/Vault, JexExport/Import
 ├── Tests/KokoroSmallSpike/      # standalone ONNX contract spike
 ├── Tests/SupertonicSpike/       # standalone ONNX contract spike
 ├── Tests/EpubSpike/             # EPUB parser contract spike (real books)
@@ -175,8 +205,8 @@ inside LiveContainer.
 ## Licenses & credits
 
 - [Kokoro](https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX) — Apache-2.0 (model), voice bank from the KokoroTestApp project
-- [Soprano 1.1](https://huggingface.co/ekwek/Soprano-1.1-80M) — Apache-2.0 (Eugene Kwek); [ONNX export](https://huggingface.co/KevinAHM/soprano-1.1-onnx) Apache-2.0
 - [supertonic-3](https://huggingface.co/Supertone/supertonic-3) — Supertone; the vendored Swift Helper is MIT
+- [epub.js](https://github.com/futurepress/epub.js) — FreeBSD, vendored under `App/Resources/epubjs/` for the offline EPUB reader
 - ONNX Runtime (MIT), XcodeGen, and Apple's AVFoundation do the heavy lifting.
 
 Personal sideload project — model licenses permit personal use; revisit before
