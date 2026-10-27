@@ -172,7 +172,7 @@ public enum MathNotation {
                 // nothing — the close search skips escape pairs.
                 let lineEnd = line[index...].firstIndex(of: "\n") ?? line.endIndex
                 if let close = unescapedDollar(in: line, from: afterOpen, before: lineEnd) {
-                    let body = String(line[afterOpen..<close.lowerBound])
+                    let body = String(line[afterOpen..<close])
                     if looksLikeMath(body),
                        let parsed = formula(body, isDisplay: false) {
                         flushText()
@@ -180,7 +180,7 @@ public enum MathNotation {
                             source: parsed.source, display: parsed.display,
                             spoken: parsed.spoken, isBare: false
                         )))
-                        index = close.upperBound
+                        index = line.index(after: close)
                         continue
                     }
                 }

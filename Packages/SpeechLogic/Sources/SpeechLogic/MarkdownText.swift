@@ -525,14 +525,14 @@ public enum MarkdownText {
                 let afterOpen = line.index(after: index)
                 if afterOpen < line.endIndex,
                    let close = MathNotation.unescapedDollar(in: line, from: afterOpen, before: line.endIndex) {
-                    let body = line[afterOpen..<close.lowerBound]
+                    let body = line[afterOpen..<close]
                     // The prose shapes: prices and numbers, or prose with
                     // edge whitespace, stay unprotected.
                     let isMoney = !body.isEmpty && body.allSatisfy { $0.isNumber || $0 == "," || $0 == "." }
                     let isProse = body.isEmpty || body.hasPrefix(" ") || body.hasSuffix(" ")
                     if !isMoney, !isProse, !body.contains(mathGuardOpen), !body.contains(mathGuardClose) {
-                        out += guardToken(line[index..<close.upperBound])
-                        index = close.upperBound
+                        out += guardToken(line[index..<line.index(after: close)])
+                        index = line.index(after: close)
                         continue
                     }
                 }
