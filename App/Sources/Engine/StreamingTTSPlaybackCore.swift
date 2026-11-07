@@ -50,7 +50,8 @@ final class StreamingTTSPlaybackCore: NSObject {
         let exportInterChunkSilence: Float
         let logPrefix: String
         /// Which model file this session renders with (Batch A3). Kokoro has
-        /// two tiers sharing one engine class — fp32 and uint8 — and a device
+        /// two tiers sharing one engine class — fp32 and compact int8 — and a
+        /// device
         /// log that does not say which one ran cannot size `firstMaxChars`
         /// from the RTF it printed.
         var tier: String? = nil
@@ -214,22 +215,199 @@ final class StreamingTTSPlaybackCore: NSObject {
     /// backgrounded.
     private static let backgroundBankTargetSeconds: Double = 45
 
+    // MARK: - Never-run-dry keepalive (the silence bridge)
+
+    /// The device log's own arithmetic: both Kokoro deaths landed 15–25 s
+    /// after backgrounding — exactly when the already-scheduled audio ran
+    /// out — while the deep-banked Supertonic session survived. An
+    /// `AVAudioPlayerNode` that has drained its queue takes the process's
+    /// audio I/O idle with it, and a session with no live I/O loses the
+    /// background-audio assertion no matter what the bank target says. The
+    /// bank boost makes starvation rarer; this bridge makes it survivable:
+    /// whenever the real queue runs dry mid-session (or a backgrounded
+    /// session is still rendering its first chunk), short silent buffers
+    /// keep the render chain live until the producer catches up. The
+    /// listener hears the same silence they would have heard anyway — but
+    /// speech RESUMES when synthesis lands instead of the process being
+    /// suspended mid-book. Main thread only.
+    ///
+    /// Proven NOT sufficient by itself (2026-10-23 §2c): the bridge fired
+    /// and resumed correctly on both engines and the app still died 9–110 s
+    /// after backgrounding — the remaining killers are a crash or a
+    /// memory/system kill, which CrashMarker + the memory vitals name. The
+    /// bridge's job is the one death the audio layer owns: the drained
+    /// queue.
+    private static let bridgeSilenceSeconds: Double = 0.5
+    /// True while a bridge buffer is queued on the node (at most one at a
+    /// time; its completion re-arms while the queue is still dry).
+    private var bridgeArmed = false
+    /// Total bridged silence this starvation incident — logging ledger, and
+    /// the "did real audio ever resume" marker that closes an incident.
+    private var bridgeIncidentSeconds: Double = 0
+    /// Real (non-bridge) buffers currently scheduled on the player node and
+    /// not yet completed — the DRYNESS TEST. Incremented in `schedule`
+    /// before `scheduleBuffer`, decremented in the buffer's completion (both
+    /// main thread), reset with the rest of the session ledger in `speak()`
+    /// and `teardownPlayback()`.
+    ///
+    /// This counter — NOT the schedule cursor — decides whether the bridge
+    /// arms and re-arms. The old branch's bridge compared `scheduledUpTo`
+    /// against its arm-time value, but a SKIPPED chunk advances the cursor
+    /// without queueing anything, so that check ended the bridge while no
+    /// real audio was queued — exactly the starvation it exists to ride out.
+    private var realBuffersOnNode = 0
+
+    /// `backgroundTimeRemaining` for the snapshot/vitals lines: `inf` when
+    /// the system considers this app's background time unbounded (the audio
+    /// assertion holding), a countdown otherwise. Main thread only.
+    private static func taskWindowDescription() -> String {
+        let remaining = UIApplication.shared.backgroundTimeRemaining
+        return remaining.isFinite ? String(format: "%.0fs", remaining) : "inf (assertion held)"
+    }
+
     /// Main thread, from the background-transition observers.
     private func handleBackgroundTransition(leftBackground: Bool) {
         isBackgrounded = leftBackground
         // The snapshot line is the diagnostic the 2026-10-06 log lacked:
         // engine state, bank depth, session activation — one line at the
-        // moment iOS decides whether this process keeps running.
+        // moment iOS decides whether this process keeps running. Memory +
+        // task window join it (2026-10-23 round): the deaths in that device
+        // log landed with live audio I/O and mid-generation — no audio-layer
+        // theory explains those. Footprint-vs-ceiling at the backgrounding
+        // instant (and on every 10 s vitals line in backgroundHealthCheck)
+        // is the jetsam evidence; the task window separates "grace still
+        // held" from "audio assertion alone" at any later cut-off point.
         bankLock.lock()
         let banked = bankedSecondsSnapshot
         let target = bankTargetSecondsSnapshot
         bankLock.unlock()
         let session = AVAudioSession.sharedInstance()
-        Log.shared.info("\(config.logPrefix) \(leftBackground ? "backgrounded" : "foregrounded") — state \(state), banked \(String(format: "%.1f", banked))s / target \(String(format: "%.1f", target))s, scheduled through chunk \(scheduledUpTo + 1), engine \(audioEngineRunning ? "running" : "STOPPED"), session \(session.category)/\(session.mode) (category \(session.categoryOptions.rawValue))")
+        Log.shared.info("\(config.logPrefix) \(leftBackground ? "backgrounded" : "foregrounded") — state \(state), banked \(String(format: "%.1f", banked))s / target \(String(format: "%.1f", target))s, scheduled through chunk \(scheduledUpTo + 1), engine \(audioEngineRunning ? "running" : "STOPPED"), session \(session.category)/\(session.mode) (category \(session.categoryOptions.rawValue)), bridge \(bridgeArmed ? "armed" : "off"), \(ProcessMemory.summary()), task window \(Self.taskWindowDescription())")
         // Re-size the bank for the new target now; recomputeBank's heartbeat
         // would get there within ~0.3 s, but the backgrounding instant is
         // the one moment the main thread is guaranteed responsive.
         recomputeBank()
+        // A session still rendering its first chunk (.generating) has NO
+        // audio I/O at all — the engine starts on the first schedule, which
+        // is exactly what never comes quickly under background CPU
+        // throttling. The transition instant is the one guaranteed-responsive
+        // moment, so start the engine and bridge silence here instead of
+        // waiting for the 10 s health tick (a chapter that just advanced
+        // under the lock screen gets no transition event at all — that case
+        // is the health tick's).
+        if leftBackground, state == .generating {
+            scheduleBridgeSilenceIfNeeded()
+        }
+    }
+
+    // MARK: - Background health check
+
+    /// 10 s self-heal, live only while a session is (started in `speak()`,
+    /// stopped in `teardownPlayback`). The scheduled-audio path can die in
+    /// the background WITHOUT any observable event — the node stops draining
+    /// while the engine still runs (a route reconfig under the lock screen),
+    /// or a session deactivation lands between the per-schedule re-asserts.
+    /// Nothing in the per-schedule path covers the minutes AFTER the last
+    /// schedule when the producer is parked on a full bank. This check
+    /// notices "state says speaking, but the playhead has not advanced" and
+    /// repairs it the same way handleEngineConfigurationChange does:
+    /// re-activate the session, restart the engine if it died, re-drive the
+    /// schedule from the bank, and re-arm the bridge. It acts only while
+    /// backgrounded (foreground stalls are the HangWatchdog's job) and only
+    /// while the state claims a live session; each tick also emits one
+    /// bounded vitals line (memory + task window) so a device log can show
+    /// a trend right up to a cut-off.
+    private var backgroundHealthTimer: Timer?
+    /// The tracker's played-frames sample the last health check saw. The
+    /// playhead CHANGING between checks is the definition of "audibly
+    /// alive"; frozen while state == .speaking is the wedge. (Compared for
+    /// INEQUALITY, not just growth: a tracker reset — rate purge — also
+    /// changes the number and must not read as a frozen playhead.)
+    private var lastHealthPlayedFrames: Int64 = -1
+
+    private func startBackgroundHealthCheck() {
+        stopBackgroundHealthCheck()
+        lastHealthPlayedFrames = -1
+        let timer = Timer(timeInterval: 10.0, repeats: true) { [weak self] _ in
+            self?.backgroundHealthCheck()
+        }
+        // `.common` mode, matching the stall watchdog and the tracker
+        // heartbeat: the default mode stops firing while the user scrolls,
+        // which is exactly when a background stall would go unreported.
+        RunLoop.main.add(timer, forMode: .common)
+        backgroundHealthTimer = timer
+    }
+
+    private func stopBackgroundHealthCheck() {
+        backgroundHealthTimer?.invalidate()
+        backgroundHealthTimer = nil
+    }
+
+    /// Main thread, every 10 s while a session is live. A live, playing
+    /// session passes silently (plus the vitals line); a backgrounded wedge
+    /// gets one repair per occurrence.
+    private func backgroundHealthCheck() {
+        guard isBackgrounded else {
+            // Foreground: keep the baseline fresh so the FIRST background
+            // check never mistakes a pre-background stall for a new one.
+            lastHealthPlayedFrames = playedFrames
+            return
+        }
+        guard state == .speaking || state == .generating else {
+            lastHealthPlayedFrames = playedFrames
+            return
+        }
+        // Ten-second vitals while a backgrounded session is live (one line,
+        // bounded): the 2026-10-23 deaths cut the log mid-generation with
+        // live audio I/O, so the last few lines BEFORE a cut are the only
+        // place a trend can show. A footprint climbing toward the ceiling
+        // across consecutive vitals lines ending in a fresh relaunch IS
+        // the jetsam verdict; a flat footprint exonerates memory.
+        Log.shared.info("\(config.logPrefix) background vitals — \(ProcessMemory.summary()), task window \(Self.taskWindowDescription())")
+        if state == .generating {
+            // A backgrounded .generating session is the chapter-advance /
+            // tap-then-lock case: the first chunk is still rendering, no
+            // buffer has ever scheduled, so the engine may not even run and
+            // nothing holds the audio assertion. (The playhead cannot serve
+            // as the liveness signal here — nothing has ever sounded.)
+            scheduleBridgeSilenceIfNeeded()
+            lastHealthPlayedFrames = playedFrames
+            return
+        }
+        let nowPlayed = playedFrames
+        defer { lastHealthPlayedFrames = nowPlayed }
+        guard lastHealthPlayedFrames >= 0 else { return }
+        if nowPlayed != lastHealthPlayedFrames { return } // playhead moving — alive
+
+        // Frozen: state claims speech, the playhead says nothing is being
+        // consumed. Diagnose and repair, exactly like a configuration
+        // change: the session may have been deactivated behind our back
+        // (the silent killer — the engine "runs", no audio renders, iOS
+        // suspends the process seconds later), or the whole engine died.
+        let session = AVAudioSession.sharedInstance()
+        Log.shared.error(
+            "\(config.logPrefix) background health check — playhead frozen at \(nowPlayed) frames while claiming speech; " +
+            "engine \(audioEngineRunning ? "running" : "STOPPED"), node \(playerNode.isPlaying ? "playing" : "idle"), " +
+            "session \(session.category)/\(session.mode), banked \(String(format: "%.1f", bankedSeconds()))s"
+        )
+        AudioSessionSetup.activate(prefix: config.logPrefix)
+        if !audioEngineRunning {
+            do {
+                audioEngine.prepare()
+                try audioEngine.start()
+                audioEngineRunning = true
+            } catch {
+                Log.shared.error("\(config.logPrefix) background heal could not restart the engine: \(error)")
+                return
+            }
+        }
+        if !playerNode.isPlaying {
+            playerNode.play()
+        }
+        // Re-drive: buffers that finished while wedged never triggered the
+        // next schedule; the bank holds them. The tail of scheduleReadyChunks
+        // re-arms the bridge when the re-drive finds nothing to schedule.
+        scheduleReadyChunks(generation: playbackGeneration)
     }
 
     // MARK: - Rate-change buffer drain
@@ -376,6 +554,7 @@ final class StreamingTTSPlaybackCore: NSObject {
         // `stopStallWatchdog()` from teardownPlayback() and from stop(); this
         // is the backstop for a core dropped without either.
         stallWatchdog?.invalidate()
+        backgroundHealthTimer?.invalidate()
         if let interruptionObserver {
             NotificationCenter.default.removeObserver(interruptionObserver)
         }
@@ -491,6 +670,7 @@ final class StreamingTTSPlaybackCore: NSObject {
             pacingGate?.signal()
         }
         stopStallWatchdog()
+        stopBackgroundHealthCheck()
         // state = .idle fires teardownPlayback(), which ends the metrics
         // session under its own catch-all — no separate endSession here.
         state = .idle
@@ -706,6 +886,7 @@ final class StreamingTTSPlaybackCore: NSObject {
             tier: config.tier
         )
         startStallWatchdog()
+        startBackgroundHealthCheck()
 
         DispatchQueue.main.async { self.state = .generating }
 
@@ -722,6 +903,13 @@ final class StreamingTTSPlaybackCore: NSObject {
         bufferSlots = [Int](repeating: Self.slotPending, count: allChunks.count)
         bufferPool = [:]
         scheduledUpTo = -1
+        // Fresh keepalive ledger (see the silence-bridge block): a
+        // superseded session's bridge buffer may still sit on the node —
+        // its completion is generation-guarded into a no-op, and at most
+        // one extra half-second of silence carries over.
+        bridgeArmed = false
+        bridgeIncidentSeconds = 0
+        realBuffersOnNode = 0
         totalChars = max(1, clean.utf16.count)
         playTracker.reset()
         rateDrainArmed = false
@@ -870,6 +1058,11 @@ final class StreamingTTSPlaybackCore: NSObject {
         // read honestly next to the audio figure.
         metrics.playbackResumed()
         state = .speaking
+        // A pause that landed during a dry, unbridged window (the arm paths
+        // never ran — the state guard rejects .paused) resumes into silence
+        // with nothing queued to re-trigger scheduling: re-check the bridge
+        // now that the state claims speech again. No-op when audio is queued.
+        scheduleBridgeSilenceIfNeeded()
     }
 
     func stop() {
@@ -884,7 +1077,10 @@ final class StreamingTTSPlaybackCore: NSObject {
         // main-queue turn, so a stop() landing in between finds state already
         // .idle, the assignment is a no-op, the didSet never fires and
         // teardown never runs — the timer would tick for the process lifetime.
+        // The background health timer has the same race (speak() starts it
+        // beside the watchdog).
         stopStallWatchdog()
+        stopBackgroundHealthCheck()
         // Before the state flip: `state = .idle` tears down, and teardown ends
         // the session under its own catch-all reason.
         metrics.endSession(reason: "stopped")
@@ -897,9 +1093,9 @@ final class StreamingTTSPlaybackCore: NSObject {
         guard playbackGeneration == generation else { return }
         while true {
             let next = scheduledUpTo + 1
-            guard next < chunks.count else { return }
+            guard next < chunks.count else { break }
             let slot = bufferSlots[next]
-            guard slot != Self.slotPending else { return } // producer hasn't resolved this chunk yet
+            guard slot != Self.slotPending else { break } // producer hasn't resolved this chunk yet
             if slot == Self.slotSkipped {
                 // Failed chunk: step over it so the chain advances and the
                 // natural-finish path still fires when the LAST chunk was
@@ -908,18 +1104,43 @@ final class StreamingTTSPlaybackCore: NSObject {
                 // keeps the read-along cursor moving past unspeakable text.
                 scheduledUpTo = next
                 pacingGate?.signal()
-                if next == chunks.count - 1 { finishLastChunk(generation: generation) }
+                if next == chunks.count - 1 {
+                    finishLastChunk(generation: generation)
+                    // Natural finish tore the pipeline down synchronously
+                    // (state = .idle → teardownPlayback empties bufferSlots):
+                    // the next loop pass would index an empty array. Nothing
+                    // is left to schedule anyway — the cursor is on the last
+                    // chunk.
+                    break
+                }
                 continue
             }
-            guard let buffer = bufferPool[slot] else { return }
+            guard let buffer = bufferPool[slot] else { break }
             scheduledUpTo = next
             pacingGate?.signal()
             schedule(buffer: buffer, index: next, isLast: next == chunks.count - 1, generation: generation)
+            // An engine-start failure inside schedule() flips the session to
+            // .idle, whose synchronous teardown empties bufferSlots UNDER this
+            // loop — the next pass would index an empty array. The tail call
+            // below is a no-op in that state (its guard rejects .idle).
+            if state == .idle { break }
         }
+        // Tail of every scheduling pass — the dry-queue keepalive check. If
+        // the loop exited with real audio still pending generation and the
+        // node queue empty, the bridge keeps the render chain (and the
+        // background audio assertion) alive until the producer lands. No-op
+        // whenever real audio is queued or nothing is left to wait for.
+        scheduleBridgeSilenceIfNeeded()
     }
 
     private func schedule(buffer: AVAudioPCMBuffer, index: Int, isLast: Bool, generation: Int) {
-        ensureAudioEngineRunning(format: buffer.format)
+        // Scheduling must STOP if the engine failed to start: buffers pushed
+        // into a stopped engine silently vanish while the tracker and the
+        // schedule cursor count them as queued — the read-along cursor would
+        // run ahead of nothing. On failure ensureAudioEngineRunning has
+        // already flipped the session to .idle (teardown), so returning here
+        // leaves a consistent dead pipeline.
+        guard ensureAudioEngineRunning(format: buffer.format) else { return }
 
         // Play-end char position includes skipped chunks (their text counts
         // as "passed" so the read-along cursor never stalls on a sentence
@@ -935,10 +1156,17 @@ final class StreamingTTSPlaybackCore: NSObject {
         }
         playTracker.willSchedule(buffer: buffer, endChar: charsDone, totalChars: totalChars)
 
+        // The dryness ledger: this buffer is on the node from NOW until its
+        // completion runs. (The bridge's arm/re-arm decisions read this
+        // counter, so the increment must precede the schedule call and the
+        // decrement must sit at the top of the completion — both main thread,
+        // same turn as the schedule re-drive.)
+        realBuffersOnNode += 1
         playerNode.scheduleBuffer(buffer, at: nil, options: []) { [weak self] in
             DispatchQueue.main.async {
                 guard let self, self.playbackGeneration == generation else { return }
                 self.metrics.bufferEnded()
+                self.realBuffersOnNode = max(0, self.realBuffersOnNode - 1)
                 self.bufferPool[self.bufferSlots[index]] = nil
                 if isLast {
                     self.finishLastChunk(generation: generation)
@@ -984,6 +1212,115 @@ final class StreamingTTSPlaybackCore: NSObject {
             chars: chunks[index].length,
             audioSeconds: Double(buffer.frameLength) / buffer.format.sampleRate
         )
+    }
+
+    // MARK: - Silence bridge
+
+    /// Main thread. Arm the silence bridge if — and only if — the node's
+    /// real queue is DRY: no real buffer is queued or pending on the player
+    /// node (`realBuffersOnNode == 0`) while the session still claims speech
+    /// and the producer still has an unresolved chunk. Every other state is
+    /// inert: real audio queued (not dry), paused (the user asked for
+    /// silence), idle (no session to keep alive), bridge already up.
+    ///
+    /// The dry test is the COUNTER, not the schedule cursor: a skipped chunk
+    /// advances `scheduledUpTo` without queueing anything, so a cursor-based
+    /// check would end the bridge while no real audio is queued — the exact
+    /// starvation the bridge exists to ride out (the old branch's flaw).
+    private func scheduleBridgeSilenceIfNeeded() {
+        guard state == .speaking || state == .generating else { return }
+        guard !bridgeArmed else { return }
+        guard realBuffersOnNode == 0 else { return }
+        // Pending work: with no unresolved chunk there is nothing to wait
+        // for — the last real buffer's completion path owns the ending, and
+        // a fully-skipped tail reaches finishLastChunk synchronously.
+        guard scheduledUpTo + 1 < chunks.count else { return }
+        // The next chunk must be UNRESOLVED: if it just resolved, the
+        // schedule pass in the same turn is about to queue the real buffer —
+        // bridging now would only prepend silence to it (this is what keeps
+        // the bridge OFF the foreground first-chunk path).
+        guard bufferSlots[scheduledUpTo + 1] == Self.slotPending else { return }
+        armBridge()
+    }
+
+    /// Main thread. Schedules one short silent buffer on the player node.
+    /// The tracker marker re-states the last real chunk's end-char, so the
+    /// read-along cursor — and the bookmark chars derived from it — FREEZE
+    /// through the silence instead of advancing over it; the bank ledger
+    /// mirrors the bridge frames in `generatedFrames` at completion so
+    /// `banked` stays a measure of REAL unplayed audio. Re-arms from its own
+    /// completion while no real buffer is queued; the first real scheduling
+    /// ends the incident.
+    private func armBridge() {
+        let rate = sampleRate
+        guard rate > 0 else { return }
+        let frameCount = max(1, AVAudioFrameCount(rate * Self.bridgeSilenceSeconds))
+        let buffer = Self.makeMonoBuffer(
+            samples: [Float](repeating: 0, count: Int(frameCount)),
+            sampleRate: rate
+        )
+        // The engine must actually run: a bridge queued into a stopped
+        // engine is silence nobody renders — worse than no bridge, because
+        // bridgeArmed would block every re-arm. On failure
+        // ensureAudioEngineRunning has already torn the session down (.idle),
+        // which disarms everything; the state guard below double-checks.
+        guard ensureAudioEngineRunning(format: buffer.format) else { return }
+        guard audioEngineRunning, state == .speaking || state == .generating else { return }
+
+        let generation = playbackGeneration
+        bridgeArmed = true
+        // Chars do not advance through silence: the marker re-states the
+        // last real chunk's end-char (0 during .generating — nothing has
+        // been spoken yet). The tracker only emits a NEW position when the
+        // interpolated char count grows, so no onPlayedChars/onProgress
+        // callback fires for the bridge's span.
+        let charsDone = scheduledUpTo >= 0
+            ? chunks[...scheduledUpTo].reduce(0) { $0 + $1.length }
+            : 0
+        playTracker.willSchedule(buffer: buffer, endChar: charsDone, totalChars: totalChars)
+        if bridgeIncidentSeconds == 0 {
+            let thermal = ThermalPressure(
+                thermalStateRawValue: ProcessInfo.processInfo.thermalState.rawValue)
+            Log.shared.info(
+                "\(config.logPrefix) keepalive bridge — node queue dry at chunk \(scheduledUpTo + 2) of \(chunks.count), banked \(String(format: "%.1f", bankedSeconds()))s (\(thermal)); scheduling \(Self.bridgeSilenceSeconds)s silence so the render chain never idles"
+            )
+        }
+        playerNode.scheduleBuffer(buffer, at: nil, options: []) { [weak self] in
+            DispatchQueue.main.async {
+                guard let self, self.playbackGeneration == generation else { return }
+                self.bridgeArmed = false
+                // Ledger: these frames reach `played` through the node clock
+                // the moment they render; mirroring them in `generated` here
+                // keeps `banked` a measure of REAL unplayed audio (neutral
+                // per bridge buffer, instead of draining the bank figure by
+                // every bridged second). Across a tracker reset the entry can
+                // over-report banked by at most one bridge buffer — the safe
+                // direction (generate a beat early).
+                self.generatedFrames += Int64(buffer.frameLength)
+                self.recomputeBank()
+                guard self.state == .speaking || self.state == .generating else {
+                    self.bridgeIncidentSeconds = 0
+                    return
+                }
+                // Re-arm ONLY while no REAL buffer is queued — the counter,
+                // never the schedule cursor (see scheduleBridgeSilenceIfNeeded).
+                if self.realBuffersOnNode == 0,
+                   self.scheduledUpTo + 1 < self.chunks.count {
+                    self.bridgeIncidentSeconds += Self.bridgeSilenceSeconds
+                    self.armBridge()
+                } else {
+                    if self.bridgeIncidentSeconds > 0 {
+                        Log.shared.info(
+                            "\(self.config.logPrefix) keepalive bridge ended — real audio queued after \(String(format: "%.1f", self.bridgeIncidentSeconds))s of bridged silence"
+                        )
+                    }
+                    self.bridgeIncidentSeconds = 0
+                }
+            }
+        }
+        if !playerNode.isPlaying {
+            playerNode.play()
+        }
     }
 
     /// The natural-completion path — reached from the last chunk's buffer
@@ -1037,7 +1374,8 @@ final class StreamingTTSPlaybackCore: NSObject {
         stallWatchdog = nil
     }
 
-    private func ensureAudioEngineRunning(format: AVAudioFormat) {
+    @discardableResult
+    private func ensureAudioEngineRunning(format: AVAudioFormat) -> Bool {
         configureAudioSessionIfNeeded()
         if !audioNodesAttached {
             audioEngine.attach(playerNode)
@@ -1053,7 +1391,12 @@ final class StreamingTTSPlaybackCore: NSObject {
                 audioEngineRunning = true
             } catch {
                 Log.shared.error("\(config.logPrefix) audio engine failed to start: \(error)")
+                // Terminal, and REPORTED: the caller must not keep scheduling
+                // into a stopped engine. The .idle flip runs
+                // teardownPlayback(), which disarms the bridge and zeroes the
+                // queue ledger.
                 state = .idle
+                return false
             }
         }
         // Re-assert on EVERY schedule, not just the first: an interruption,
@@ -1061,10 +1404,12 @@ final class StreamingTTSPlaybackCore: NSObject {
         // inactive behind our back, and a session that is configured but
         // not active is suspended by iOS seconds after the app backgrounds.
         AudioSessionSetup.activate(prefix: config.logPrefix)
+        return true
     }
 
     private func teardownPlayback() {
         stopStallWatchdog()
+        stopBackgroundHealthCheck()
         playTracker.reset()
         playerNode.stop()
         audioEngine.stop()
@@ -1075,6 +1420,13 @@ final class StreamingTTSPlaybackCore: NSObject {
         bufferPool = [:]
         bufferSlots = []
         scheduledUpTo = -1
+        // Keepalive ledger: nothing may stay armed across a teardown. The
+        // node stop above also clears any queued bridge buffer (its
+        // completion is generation-guarded into a no-op), so the dryness
+        // counter must start from zero with the rest of the session state.
+        bridgeArmed = false
+        bridgeIncidentSeconds = 0
+        realBuffersOnNode = 0
         // Session dead — zero the bank counters so a stale snapshot can never
         // pace a session that no longer exists (a new session re-zeros again).
         resetBank()

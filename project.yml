@@ -129,6 +129,13 @@ targets:
             CFBundleURLRole: Viewer
         UIBackgroundModes:
           - audio
+        # Web-article import (Notes): pages are fetched from arbitrary
+        # hosts, and some are http-only or redirect through TLS that ATS
+        # rejects — which would silently turn every such article into the
+        # "saved the link" fallback. A browser-grade fetch is the feature;
+        # this is the one key that lets URLSession behave like one.
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
     settings:
       base:
         PRODUCT_NAME: Speechnotes

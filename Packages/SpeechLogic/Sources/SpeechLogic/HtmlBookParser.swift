@@ -109,7 +109,12 @@ public enum HtmlBookParser {
     /// Browsers sniff; we can't. UTF-8 first (validates), then the meta
     /// charset declaration, then latin-1 — the same floor as the plain-text
     /// battery, and the same reasoning: latin-1 never fails.
-    static func decode(_ data: Data) -> String {
+    ///
+    /// Public since the web-article importer joined its callers: a fetched
+    /// page (and a fetched text/plain response) needs the exact decoding
+    /// battery the saved-file path uses, or the two importers disagree on
+    /// the same bytes.
+    public static func decode(_ data: Data) -> String {
         if let text = String(data: data, encoding: .utf8) { return text }
         let head = String(decoding: data.prefix(2048), as: UTF8.self).lowercased()
         if head.contains("charset=utf-16"),

@@ -4,6 +4,42 @@ Format: newest first. Every critique round, merge, and escalation lands here.
 
 ---
 
+**Web-article import to notes** (2026-11-07):
+- **Symptom.** Sharing a website (any `.com`/URL) to the app did nothing useful: there is no
+  share extension (LiveContainer forbids them), and every extension-free channel mishandled
+  web URLs — clipboard import stored the bare link string as a note, dragging a link errored
+  with "Unsupported file type", and a forwarded `https://` open-URL was silently dropped by
+  `handleOpenURL` (only `speechnotes://…?text=` and file URLs were handled). No code anywhere
+  fetched a page, so the paywall/read-through workflow was a dead feature.
+- **Fix, three parts.** (1) `WebArticle` (SpeechLogic, `Packages/SpeechLogic/Sources/SpeechLogic/WebArticle.swift`):
+  reader-mode extraction — a tolerant cleaner removes chrome blocks (`nav/header/footer/aside/form/script/style/…`,
+  comments, doctype; force-closes any junk block past 250k chars so an unclosed `<form>` can't swallow
+  the page), prefers the page's marked content region (`<article>`/`<main>`/`role="main"`) when it holds
+  ≥40% of visible text, then reuses `HtmlBookParser` for the actual prose; `HtmlBookParser.decode` is now
+  public so the fetch layer shares the charset battery. URL detection (`WebArticle.url(in:)`) is strict
+  single-token http/https plus scheme-less domains with a plausible TLD (`v1.7.4` stays text).
+  Memory-bounded: decoded source capped at 1.5M chars (the cleaner builds a character array — an uncapped
+  8 MB page would spike ~100 MB inside the LiveContainer process).
+  (2) `WebArticleImporter` (App): `URLSession` fetch, desktop Safari UA, 25 s timeout, 8 MB response cap,
+  2xx-only, text/plain short-circuit, HTML reader otherwise, 1M-char output cap, every step logged.
+  (3) `NotesListView`: all four channels now funnel into `importWebArticle` — clipboard link, URL drop,
+  `https://` open-URL, `speechnotes://…?url=…` — plus a new "Import from Web Address…" menu entry (globe
+  icon, TextField alert) that works with no host-app forwarding at all. Success → note with the page
+  headline first and a tappable `[Source](…)` footer; failure → the link itself is saved as a note with
+  an explanatory toast, so a share is never silently lost.
+- **Info.plist.** `NSAppTransportSecurity → NSAllowsArbitraryLoads` added in project.yml — http-only
+  sites and weak-TLS redirects would otherwise fail ATS and always land on the fallback.
+- **Tests.** `WebArticleTests` (SpeechLogicTests): URL detection matrix, chrome removal, article-region
+  preference incl. the teaser-listing rejection and role=main, unclosed-junk force-close, entity/title
+  fidelity. Runs under the existing `logic-tests` CI job (`swift test` on macos-latest).
+- **Device-verify (LiveContainer).** Copy a link in Safari → menu → "New note from clipboard" → article
+  note appears with headline + Source footer, no nav/footer prose. Drag a link onto the list. Shortcut:
+  open `speechnotes://import?url=https%3A%2F%2Fexample.com%2Fstory`. Menu → "Import from Web Address…"
+  with a scheme-less `example.com/story`. Offline/blocked site → link-only note + "saved the link" toast.
+  Watch the device log for `WebImport:` lines naming host/status/bytes when anything fails.
+
+---
+
 **Audiobooks + session robustness** (branch `batch-c-d-session`, 2026-09-21):
 - **No retry.** `generateWithRetry` is deleted from the streaming core. A chunk
   that throws is logged once (with its index out of the total), sounded with

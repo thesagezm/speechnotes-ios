@@ -1,9 +1,10 @@
 import Foundation
 
 /// Downloads and owns the Kokoro model files (Documents/KokoroOnnx/):
-/// fp32 ONNX model (~326 MB, best quality) + uint8 ONNX model (~177 MB, small
-/// tier) sharing one voice bank (~15 MB) + tokenizer (~4 KB), plus the
-/// Supertonic set. One-time downloads; everything is offline after that.
+/// fp32 ONNX model (~326 MB, best quality) + int8-quantized ONNX model
+/// (~92 MB, compact tier) sharing one voice bank (~15 MB) + tokenizer (~4 KB),
+/// plus the Supertonic set. One-time downloads; everything is offline after
+/// that.
 @MainActor
 final class ModelManager: ObservableObject {
     static let shared = ModelManager()
@@ -51,28 +52,48 @@ final class ModelManager: ObservableObject {
     /// Voice bank: 28 style vectors shared by every Kokoro voice.
     static let voicesURL = URL(string: "https://raw.githubusercontent.com/mlalma/KokoroTestApp/main/Resources/voices.npz")!
 
-    // MARK: Small Kokoro model set (uint8 tier)
+    // MARK: Small Kokoro model set (compact tier)
 
-    /// Kokoro uint8 weight-only quant (~177 MB) — the lightweight tier that
-    /// replaces the removed Kitten engine. Same graph, tokenizer, voice bank
-    /// and inference contract as the fp32 set; roughly half the download and
-    /// memory footprint, a small quality step down. The fp16 variant was
-    /// spike-tested first and produces NaN on ORT CPU (CI 34008548349), so
-    /// the proven v0.9–v1.4 uint8 build ships instead. Lives in the SAME
-    /// directory as the fp32 set under its own filename — never as
+    /// Kokoro `model_quantized.onnx` — the lightweight tier that replaces
+    /// the removed Kitten engine, and the compact tier the 2026-10-13 device
+    /// round asked to shrink: the uint8 build was 177.5 MB and the user asked
+    /// for 80–130 MB. Same graph, same inputs, same tokenizer/voice bank as
+    /// the fp32 set; onnxruntime's dynamic-quantized export runs the whole
+    /// network in int8 rather than the weight-only uint8 pass, which is why
+    /// it lands at ~92 MB. The four-way spike (fp32 oracle vs uint8 177 MB,
+    /// uint8f16 114 MB, quantized 92 MB) picked this one: equal-or-better
+    /// spectral fidelity in 5 of 6 cases, and no NaN. The uint8 graph is
+    /// corrupt on ORT CPU (e64b456/f9b2558) — it is not a fallback. The fp16
+    /// sibling (model_fp16.onnx) was spike-tested and produces NaN on ORT CPU
+    /// (CI 34008548349), which is why fp16 is still banned here. Lives in the
+    /// SAME directory as the fp32 set under its own filename — never as
     /// `model.onnx`, which `removeQuantizedDownloads()` deletes when <200 MB.
-    static let smallModelURL = URL(string: "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/onnx/model_uint8.onnx")!
+    static let smallModelURL = URL(string: "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/onnx/model_quantized.onnx")!
 
     nonisolated static var smallModelFileURL: URL {
-        onnxDirectory.appendingPathComponent("model_uint8.onnx")
+        onnxDirectory.appendingPathComponent("model_quantized.onnx")
     }
 
     nonisolated static func smallFilesAreValid() -> Bool {
         let fm = FileManager.default
-        // Threshold rejects the q8f16 variant (~86 MB) so it re-downloads.
+        // Window rejects the old uint8 file (~177 MB) so it re-downloads as
+        // the smaller quantized build, and rejects a truncated download.
         guard let modelSize = (try? fm.attributesOfItem(atPath: smallModelFileURL.path))?[.size] as? Int64,
-              modelSize > 120_000_000 else { return false }
+              modelSize > 80_000_000, modelSize < 100_000_000 else { return false }
         return kokoroVoicesAreValid() && kokoroTokenizerIsValid()
+    }
+
+    /// The retired uint8 compact build (~177 MB, corrupt on ORT CPU) — delete
+    /// it so the compact tier re-downloads as model_quantized.onnx and the
+    /// disk footprint actually drops.
+    nonisolated private static func removeLegacyUint8Model() {
+        let legacy = onnxDirectory.appendingPathComponent("model_uint8.onnx")
+        guard FileManager.default.fileExists(atPath: legacy.path) else { return }
+        try? FileManager.default.removeItem(at: legacy)
+        try? FileManager.default.removeItem(at: legacy.appendingPathExtension("part"))
+        try? FileManager.default.removeItem(at: legacy.appendingPathExtension("resumeData"))
+        try? FileManager.default.removeItem(at: legacy.appendingPathExtension("resumeSource"))
+        Log.shared.info("ModelManager: removed retired uint8 compact model (~177 MB)")
     }
 
     /// v1.3 shipped the Kitten engine (Documents/Kitten/). Removed this
@@ -161,6 +182,7 @@ final class ModelManager: ObservableObject {
     init() {
         Self.migrateLegacyMetalFiles()
         Self.removeQuantizedDownloads()
+        Self.removeLegacyUint8Model()
         Self.removeLegacyKittenFiles()
         if Self.onnxFilesAreValid() {
             state = .ready
@@ -170,7 +192,7 @@ final class ModelManager: ObservableObject {
         }
         if Self.smallFilesAreValid() {
             smallState = .ready
-            Log.shared.info("ModelManager: small (uint8) model already present")
+            Log.shared.info("ModelManager: small (compact int8) model already present")
         } else {
             smallState = .notDownloaded
         }
@@ -372,7 +394,7 @@ final class ModelManager: ObservableObject {
         }
     }
 
-    /// Downloads the small Kokoro set (uint8 ~177 MB; shared voices +
+    /// Downloads the compact Kokoro set (int8 ~92 MB; shared voices +
     /// tokenizer only when missing — the fp32 set usually already has them).
     func startSmallDownload() {
         if case .downloading = smallState { return }
@@ -381,22 +403,22 @@ final class ModelManager: ObservableObject {
         // PocketPal lesson: estimate × ~1.5 headroom (model + shared files).
         if let attrs = try? FileManager.default.attributesOfFileSystem(forPath: NSHomeDirectory()),
            let free = attrs[.systemFreeSize] as? Int64,
-           free < 300_000_000 {
-            let message = "Not enough free space for the small Kokoro model (need ~300 MB, have \(free / 1_000_000) MB)"
+           free < 150_000_000 {
+            let message = "Not enough free space for the compact Kokoro model (need ~150 MB, have \(free / 1_000_000) MB)"
             smallState = .failed(message)
             Log.shared.error("ModelManager: \(message)")
             return
         }
 
         smallState = .downloading(progress: 0)
-        Log.shared.info("ModelManager: starting small Kokoro download (~177 MB uint8)")
+        Log.shared.info("ModelManager: starting small Kokoro download (~92 MB int8)")
 
         Task.detached { [weak self] in
             do {
                 try await self?.download(
                     from: Self.smallModelURL,
                     to: Self.smallModelFileURL,
-                    expectedBytes: 177_464_632,
+                    expectedBytes: 92_361_116,
                     progressRange: 0.0...0.9,
                     publishingTo: { [weak self] value in self?.reportSmallProgress(value) }
                 )
@@ -439,7 +461,7 @@ final class ModelManager: ObservableObject {
         }
     }
 
-    /// Removes the uint8 model only — voices + tokenizer stay for the fp32
+    /// Removes the compact model only — voices + tokenizer stay for the fp32
     /// set (and vice versa).
     func deleteSmallModel() {
         try? FileManager.default.removeItem(at: Self.smallModelFileURL)
@@ -449,7 +471,7 @@ final class ModelManager: ObservableObject {
             try? FileManager.default.removeItem(at: base.appendingPathExtension("resumeSource"))
         }
         smallState = .notDownloaded
-        Log.shared.info("ModelManager: small Kokoro model deleted")
+        Log.shared.info("ModelManager: compact Kokoro model deleted")
     }
 
     private func reportSmallProgress(_ value: Double) {

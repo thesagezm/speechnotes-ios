@@ -12,7 +12,7 @@ final class SpeechPlayer: ObservableObject {
         // Declaration order = picker order (user-set). Kokoro is ONE engine
         // with a quality dial (2026-10-08 device feedback: two Kokoro rows
         // in the Engine picker + a separate "Kokoro quality" picker read as
-        // three ways to say the same thing) — the uint8/fp32 tier choice
+        // three ways to say the same thing) — the compact/fp32 tier choice
         // lives in the quality section, and the picker rows below expose
         // only the engines that are genuinely different machines.
         case system
@@ -437,6 +437,7 @@ final class SpeechPlayer: ObservableObject {
                 persistPlaybackBookmark()
                 engine?.stop()
                 state = .idle
+                endPlaybackGraceIfNeeded()
                 lastRawProgress = 0
                 resumeBaseFraction = 0
                 nowPlayingTitle = nil
@@ -597,7 +598,7 @@ final class SpeechPlayer: ObservableObject {
         // tier flag. Older stored values all carry over:
         //  - "kokoroOnnx" (v1.5–1.7.3 fp32) and the v0.6–v0.7 "kokoro"
         //    (removed Metal engine) → Kokoro at High;
-        //  - "kokoroSmall"/"kitten" (the uint8 tier, both spellings) →
+        //  - "kokoroSmall"/"kitten" (the compact tier, both spellings) →
         //    Kokoro at Compact;
         //  - "soprano" (removed v1.7.1) → Kokoro at High, voice cleared.
         let storedEngine = defaults.string(forKey: "engineKind")
@@ -742,7 +743,7 @@ final class SpeechPlayer: ObservableObject {
     }
 
     /// Same idle-unload contract for the Kokoro session (fp32 ~326 MB of
-    /// resident weights, uint8 ~177 MB). Supertonic already had one; the
+    /// resident weights, compact int8 ~92 MB). Supertonic already had one; the
     /// Kokoro instance was pinned for the whole session once the user
     /// switched off it, and in LiveContainer the jetsam budget is shared
     /// across guests. Reload-on-next-use is transparent (and logged) —
@@ -769,11 +770,11 @@ final class SpeechPlayer: ObservableObject {
     }
 
     /// Which model file the cached OnnxKokoroEngine instance points at —
-    /// the fp32 and uint8 tiers share one slot, so a tier switch must
+    /// the fp32 and compact tiers share one slot, so a tier switch must
     /// rebuild it rather than reuse the other tier's session.
     private var onnxEngineFileIsBig = true
 
-    /// The user's Kokoro tier choice: true = fp32 (High), false = uint8
+    /// The user's Kokoro tier choice: true = fp32 (High), false = compact
     /// (Compact). A Compact choice whose model is missing falls back to
     /// fp32 at build time (`rebuildEngine` decides from what is actually
     /// downloaded) — the dial is the INTENT, the build is the reality.
@@ -823,6 +824,7 @@ final class SpeechPlayer: ObservableObject {
         clearBookmark()
         engine?.stop()
         state = .idle
+        endPlaybackGraceIfNeeded()
         lastRawProgress = 0
         resumeBaseFraction = 0
         nowPlayingTitle = nil
@@ -848,7 +850,7 @@ final class SpeechPlayer: ObservableObject {
     /// Re-drives the engine build after a Kokoro TIER change (the quality
     /// dial) — the same rebuild a kind switch performs, public because the
     /// settings view owns the dial. A tier change mid-session abandons the
-    /// live session exactly like an engine switch: the fp32 and uint8
+    /// live session exactly like an engine switch: the fp32 and compact
     /// graphs are different sessions and audio cannot continue across them.
     func rebuildKokoroTier() {
         guard engineKind == .kokoro else { return }
@@ -874,9 +876,21 @@ final class SpeechPlayer: ObservableObject {
         // The Supertonic set is ~399 MB of resident sessions — release it as
         // soon as another engine takes over (single-slot rule, PocketPal
         // lesson). The other engines' sessions are an order of magnitude
-        // smaller and stay warm for instant switching.
+        // smaller and stay warm for instant switching — EXCEPT Kokoro's:
+        // an fp32 ORT session is ~326 MB, and Supertonic + Kokoro resident
+        // together is exactly the background-persistence jetsam arithmetic
+        // (phys_footprint vs the ceiling, see the memory vitals). The mirror
+        // of the Supertonic release, for the same reason: only the system
+        // engine is cheap enough to keep warm. (scheduleKokoroIdleUnload
+        // above only covers the STAYING-on-Kokoro case; its guard returns
+        // early on a switch-away, which is how the session used to stay
+        // resident here.)
         if engineKind != .supertonic {
             supertonicEngine = nil
+        }
+        if engineKind != .kokoro {
+            onnxEngine = nil
+            onnxEngineFileIsBig = true
         }
         if engineKind == .supertonic, ModelManager.shared.supertonicIsReady {
             if supertonicEngine == nil {
@@ -901,7 +915,7 @@ final class SpeechPlayer: ObservableObject {
                 rebuildOnnxEngine(big: big)
                 engine = onnxEngine
                 usingSystemFallback = false
-                Log.shared.info("SpeechPlayer: engine → Kokoro \(big ? "fp32" : "uint8") (\(voice))")
+                Log.shared.info("SpeechPlayer: engine → Kokoro \(big ? "fp32" : "compact") (\(voice))")
             } else {
                 // Neither model present — the system fallback.
                 if systemEngine == nil {
@@ -935,6 +949,12 @@ final class SpeechPlayer: ObservableObject {
                       activeEngine === self.engine else { return }
                 self.state = newState
                 if newState == .idle {
+                    // The grace window exists for live speech only — idle in
+                    // every form (note finish, chapter finish, stop, abandon)
+                    // hands it back BEFORE the book-chain guard below, since a
+                    // book's between-chapters idle is exactly when the
+                    // chapter-gap grace takes over.
+                    self.endPlaybackGraceIfNeeded()
                     // BOOK completion is handled ENTIRELY by onFinished
                     // (which fires before this idle transition): it advances
                     // the chapter, re-publishes the lock screen, and clears
@@ -956,6 +976,27 @@ final class SpeechPlayer: ObservableObject {
                     self.endReadAlong()
                     NowPlayingCenter.shared.clear()
                 } else {
+                    // Grace-window housekeeping per transition, then the
+                    // lock-screen publish — which must run for EVERY non-idle
+                    // state (the old single else was the publish's home; the
+                    // branches below must not swallow it).
+                    if newState == .paused {
+                        // Paused audio holds no background assertion worth the
+                        // window: hand the grace back so a parked session does
+                        // not pin background time. A backgrounded resume
+                        // re-arms via the .speaking/.generating case below.
+                        self.endPlaybackGraceIfNeeded()
+                    } else if newState == .speaking || newState == .generating {
+                        // A transition INTO live speech while already
+                        // backgrounded (lock-screen play, a chapter advancing
+                        // under the lock screen) fires no scenePhase event —
+                        // arm the grace here. The flag keeps the window scoped
+                        // to real background use; foreground sessions rely on
+                        // being foregrounded.
+                        if self.isAppBackgrounded {
+                            self.beginPlaybackGraceIfNeeded()
+                        }
+                    }
                     NowPlayingCenter.shared.publish(
                         title: self.nowPlayingTitle,
                         subtitle: self.nowPlayingSubtitle(),
@@ -1073,6 +1114,53 @@ final class SpeechPlayer: ObservableObject {
     /// current chapter. A note taking over, an explicit stop, or an audition
     /// clears it.
     var onNaturalFinish: (() -> Void)?
+
+    // MARK: - Background playback grace
+
+    /// The scenePhase-background keep-alive. A BOUNDED grace window (~30 s,
+    /// iOS-assigned), not a keep-alive: it bridges the vulnerable stretch
+    /// where the state claims speech but no audio I/O is sounding yet —
+    /// first-chunk generation, a chapter gap, a thermally throttled render.
+    /// Once audio I/O is live, the background-audio assertion (plus the
+    /// core's silence bridge and 10 s health check) carries the session.
+    ///
+    /// Armed when the app backgrounds with speech live, re-armed on a
+    /// backgrounded state transition INTO speaking/generating (a lock-screen
+    /// play tap fires no scenePhase event), and ended on idle, pause, and
+    /// foreground return — so each backgrounding arms a FRESH window instead
+    /// of inheriting the first task's expiry clock (the bg → 6 s foreground
+    /// peek → bg trap in the 2026-10-23 log).
+    private var playbackGraceTask: UIBackgroundTaskIdentifier = .invalid
+    /// Tracks whether the app is currently backgrounded — set by
+    /// SpeechnotesApp's scenePhase hook, read to decide whether a .speaking/
+    /// .generating transition should (re-)arm the grace. (Setter is internal
+    /// on purpose: SpeechnotesApp is the writer, not SpeechPlayer itself.)
+    var isAppBackgrounded = false
+
+    /// Arms the background grace if (and only if) speech is live. Idempotent.
+    func beginPlaybackGraceIfNeeded() {
+        guard state == .speaking || state == .generating else { return }
+        guard playbackGraceTask == .invalid else { return }
+        playbackGraceTask = UIApplication.shared.beginBackgroundTask(withName: "SpeechPlaybackGrace") { [weak self] in
+            // Expiry is a DIAGNOSTIC event, not an error: with live audio
+            // I/O the background-audio assertion keeps the process running
+            // past it. But a death that follows an EXPIRY line within
+            // seconds on a device log means the assertion was NOT holding —
+            // exactly the correlation this line exists to expose.
+            Log.shared.info("SpeechPlayer: background grace EXPIRED — from here only live audio I/O keeps the process running")
+            self?.endPlaybackGraceIfNeeded()
+        }
+        Log.shared.info("SpeechPlayer: background grace armed for live speech (\(state))")
+    }
+
+    /// Ends the grace — idempotent, safe to call from any state transition
+    /// that means "speech is over or paused" (natural finish, stop, abandon,
+    /// pause) or from the system's expiration handler.
+    func endPlaybackGraceIfNeeded() {
+        guard playbackGraceTask != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(playbackGraceTask)
+        playbackGraceTask = .invalid
+    }
 
     private func nowPlayingSubtitle() -> String? { nowPlayingPayload.subtitle }
     /// Cached cover decode — see NowPlayingPayload.resolvedArtwork(). The

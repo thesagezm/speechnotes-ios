@@ -16,7 +16,7 @@ its model once, and notes are spoken fully offline (airplane-mode tested):
 | Engine | Model size | Voices | Notes |
 |---|---|---|---|
 | Apple (system) | 0 | all system voices | Instant, no download |
-| **Kokoro** (ONNX, CPU) | ~341 MB High / ~177 MB Compact | 28 (US/UK, m/f) | One engine, a quality dial (fp32/uint8) |
+| **Kokoro** (ONNX, CPU) | ~341 MB High / ~92 MB Compact | 28 (US/UK, m/f) | One engine, a quality dial (fp32/int8) |
 | **Supertonic** (ONNX, CPU) | ~399 MB | 10 styles × 31 languages | Multilingual — flow-matching TTS |
 
 A sentence the model cannot synthesize is skipped on the first attempt — one

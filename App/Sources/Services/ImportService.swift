@@ -10,7 +10,9 @@ import UniformTypeIdentifiers
 /// extension-free channels instead: the in-app Files picker, drag & drop
 /// onto the notes list, "New note from clipboard", "Open In" document-type
 /// registration (forwarded by LiveContainer or SideStore where supported),
-/// and the speechnotes:// URL scheme.
+/// the speechnotes:// URL scheme, and — for shared web addresses — the
+/// network fetch in `WebArticleImporter` (clipboard link, dragged link,
+/// `speechnotes://…?url=`, forwarded https:// open-URL).
 ///
 /// Reading is deliberately defensive — the historical "import doesn't work"
 /// reports came from two silent failure modes this now handles and logs:

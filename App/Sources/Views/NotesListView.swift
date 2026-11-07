@@ -14,6 +14,11 @@ struct NotesListView: View {
     @State private var sharingNote: Note?
     @State private var showingRecycleBin = false
     @State private var showingNotebookManager = false
+    /// Web-article fetch in flight — one at a time, so a double-tapped
+    /// clipboard import can't land the same article twice.
+    @State private var isFetchingArticle = false
+    @State private var showingWebAddressPrompt = false
+    @State private var webAddressField = ""
 
     /// Which notebook the list is scoped to. Persisted as a string
     /// ("all" / "unfiled" / "nb-<uuid>") so relaunching restores the view.
@@ -195,7 +200,13 @@ struct NotesListView: View {
             }
             .dropDestination(for: URL.self) { urls, _ in
                 guard let url = urls.first else { return false }
-                importFile(at: url)
+                // A dragged http(s) link is a web article, not a file — this
+                // used to hit the file importer's "Unsupported file type".
+                if url.isFileURL {
+                    importFile(at: url)
+                } else {
+                    importWebArticle(url)
+                }
                 return true
             }
             .dropDestination(for: String.self) { strings, _ in
@@ -223,6 +234,24 @@ struct NotesListView: View {
                 Button("OK") { importErrorMessage = nil }
             } message: {
                 Text(importErrorMessage ?? "")
+            }
+            .alert(
+                "Import from Web Address",
+                isPresented: $showingWebAddressPrompt
+            ) {
+                TextField("https://…", text: $webAddressField)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                Button("Import") {
+                    if let url = WebArticle.url(in: webAddressField) {
+                        importWebArticle(url)
+                    } else {
+                        importErrorMessage = "That doesn't look like a web address."
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Paste a link — the article's text is fetched and saved as a note.")
             }
         }
         .sheet(item: $sharingNote) { note in
@@ -483,6 +512,15 @@ struct NotesListView: View {
             } label: {
                 Label("Import from Files…", systemImage: "folder")
             }
+            // The always-works web channel: no share extension is possible
+            // in LiveContainer, so a pasted address is the one path that
+            // never depends on the host app forwarding anything.
+            Button {
+                webAddressField = ""
+                showingWebAddressPrompt = true
+            } label: {
+                Label("Import from Web Address…", systemImage: "globe")
+            }
             Divider()
             Button {
                 showingRecycleBin = true
@@ -511,6 +549,15 @@ struct NotesListView: View {
 
     private func importFromClipboard() {
         guard let text = ImportService.clipboardText() else { return }
+        // A lone link on the pasteboard is a share intent: fetch the
+        // article. This is THE paywall/reader workflow — Safari's "Copy"
+        // followed by this menu — and it used to save the raw URL string
+        // as a note. On fetch failure the link is still saved, so nothing
+        // is lost either way.
+        if let url = WebArticle.url(in: text) {
+            importWebArticle(url)
+            return
+        }
         addNote(text: text)
     }
 
@@ -538,6 +585,48 @@ struct NotesListView: View {
 
     // MARK: - Import
 
+    /// Fetches a web article and lands its reader text as a note. Every
+    /// share channel funnels here: clipboard link, drag & drop, the
+    /// speechnotes://?url= scheme, raw https:// open-URLs and the
+    /// "Import from Web Address…" prompt. On failure the link itself
+    /// becomes the note — a share is never silently dropped.
+    private func importWebArticle(_ url: URL) {
+        guard !isFetchingArticle else {
+            ToastCenter.shared.show("Already fetching an article…")
+            return
+        }
+        isFetchingArticle = true
+        ToastCenter.shared.show("Fetching \(url.host ?? "article")…", duration: 8)
+        Task.detached(priority: .userInitiated) {
+            let fetched = await WebArticleImporter.importArticle(from: url)
+            await MainActor.run {
+                isFetchingArticle = false
+                guard let fetched else {
+                    Haptics.warning()
+                    addNote(text: url.absoluteString)
+                    ToastCenter.shared.show(
+                        "Couldn't fetch the article — saved the link instead",
+                        duration: 4
+                    )
+                    return
+                }
+                Haptics.success()
+                var text = fetched.text
+                if let title = fetched.title?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !title.isEmpty, !text.hasPrefix(title) {
+                    // The article's own headline first — the note title
+                    // derives from it like every other note's does.
+                    text = title + "\n\n" + text
+                }
+                // A tappable source, and the display renderer speaks it as
+                // just "Source" when Render Markdown is on.
+                text += "\n\n[Source](\(url.absoluteString))"
+                addNote(text: text)
+                ToastCenter.shared.show("Article imported")
+            }
+        }
+    }
+
     private func importFile(at url: URL) {
         guard ImportService.canImport(url) else {
             importErrorMessage = "Unsupported file type: \(url.lastPathComponent)"
@@ -562,9 +651,26 @@ struct NotesListView: View {
             importFile(at: url)
             return
         }
+        let scheme = url.scheme?.lowercased()
+        // A forwarded web article: LiveContainer and Shortcuts hand over the
+        // raw https:// URL the user shared from Safari. This used to fall
+        // through the speechnotes guard below and vanish — the "sharing a
+        // .com link does nothing" report.
+        if scheme == "http" || scheme == "https" {
+            importWebArticle(url)
+            return
+        }
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-              components.scheme?.lowercased() == "speechnotes" else { return }
-        guard let text = components.queryItems?.first(where: { $0.name == "text" })?.value,
+              scheme == "speechnotes" else { return }
+        let queryItems = components.queryItems ?? []
+        // speechnotes://import?url=… — the Shortcuts/automation form of the
+        // share (validated + scheme-less forms normalized by WebArticle).
+        if let target = queryItems.first(where: { $0.name == "url" })?.value
+            .flatMap({ WebArticle.url(in: $0) }) {
+            importWebArticle(target)
+            return
+        }
+        guard let text = queryItems.first(where: { $0.name == "text" })?.value,
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             Log.shared.error("NotesList: speechnotes:// URL without usable text")
             return

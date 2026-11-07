@@ -79,7 +79,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Speech engine")
                 } footer: {
-                    Text("Listed worst to best. Supertonic sounds the best (10 voice styles, 31 languages). Kokoro uint8 (~177 MB) is the lightweight tier; Kokoro fp32 is the solid default. All use the same 28 voices.")
+                    Text("Listed worst to best. Supertonic sounds the best (10 voice styles, 31 languages). Kokoro Compact (~92 MB) is the lightweight tier; Kokoro fp32 is the solid default. All use the same 28 voices.")
                 }
 
                 Section {
@@ -179,7 +179,7 @@ struct SettingsView: View {
                         Button {
                             models.startSmallDownload()
                         } label: {
-                            Label("Download Kokoro small model (~177 MB)", systemImage: "arrow.down.circle")
+                            Label("Download Kokoro small model (~92 MB)", systemImage: "arrow.down.circle")
                         }
                     case .downloading(let progress):
                         ProgressView(value: progress) {
@@ -193,14 +193,14 @@ struct SettingsView: View {
                         }
                     case .ready:
                         Label("Small model ready — fully offline", systemImage: "checkmark.circle")
-                        Button("Delete small model (frees ~177 MB)", role: .destructive) {
+                        Button("Delete small model (frees ~92 MB)", role: .destructive) {
                             models.deleteSmallModel()
                         }
                     }
                 } header: {
                     Text("Kokoro small model")
                 } footer: {
-                    Text("The uint8 build of the same Kokoro graph — half the footprint of fp32 with a small quality step down. Shares the 28-voice catalog, tokenizer and voice bank with the model above.")
+                    Text("The int8-quantized build of the same Kokoro graph — about a quarter of the footprint of fp32 with a small quality step down. Shares the 28-voice catalog, tokenizer and voice bank with the model above.")
                 }
 
                 Section {

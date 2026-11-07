@@ -136,7 +136,7 @@ struct StorageSettingsView: View {
             if let usage {
                 usageRow("Notes (notes.json)", usage.notesBytes)
                 usageRow("Books library", usage.booksBytes)
-                usageRow("Kokoro models (fp32 + uint8)", usage.onnxBytes)
+                usageRow("Kokoro models (fp32 + compact)", usage.onnxBytes)
                 usageRow("Supertonic model", usage.supertonicBytes)
                 usageRow("Exported audio", usage.exportsBytes)
                 usageRow("Cached images", usage.imageBytes)

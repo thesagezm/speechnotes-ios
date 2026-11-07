@@ -27,6 +27,14 @@ struct SpeechnotesApp: App {
     /// the bar, then the notes list pushes the speaking note.
     @State private var selectedTab: Tab = .notes
 
+    init() {
+        // First thing the process does: install the crash marker and replay
+        // the previous launch's verdict. The 2026-10-23 device log cut off
+        // mid-generation with live audio I/O — the next one must be able to
+        // say which of "crashed" vs "system-killed (jetsam/purge)" that was.
+        CrashMarker.installAndReplay()
+    }
+
     private enum Tab: Hashable, CaseIterable, Identifiable {
         case notes, books, stats, settings
 
@@ -212,6 +220,12 @@ struct SpeechnotesApp: App {
                 .onChange(of: scenePhase) { phase in
                     if phase == .background {
                         wasBackgrounded = true
+                        // Arm the bounded playback grace while speech is
+                        // live: the window that bridges first-chunk
+                        // generation and chapter gaps before audio I/O
+                        // takes over the assertion.
+                        player.isAppBackgrounded = true
+                        player.beginPlaybackGraceIfNeeded()
                     }
                     // The watchdog is armed only while foregrounded: a
                     // suspended process freezes the probe thread with it,
@@ -235,6 +249,14 @@ struct SpeechnotesApp: App {
                         audioBooks.persistNow()
                     }
                     if phase == .active {
+                        // Release the playback grace task in the FOREGROUND
+                        // so the NEXT backgrounding arms a FRESH ~30 s
+                        // window. Held-over tasks were the 2026-10-23 log's
+                        // trap: bg → 6 s foreground peek → bg again got the
+                        // FIRST task's expiry clock, not a new one, leaving
+                        // the second backgrounding with no grace at all.
+                        player.isAppBackgrounded = false
+                        player.endPlaybackGraceIfNeeded()
                         // Returning from a REAL backgrounding (the flag is
                         // only armed by .background, so .inactive blips and
                         // the initial activation never reach this):

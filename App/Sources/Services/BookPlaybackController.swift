@@ -142,7 +142,12 @@ final class BookPlaybackController: ObservableObject {
                         chapterIndex: index
                     )
                 )
-                endChapterGapGrace()
+                // NOT endChapterGapGrace(): togglePlay only OPENS the
+                // vulnerable window — the first chunk is still being
+                // generated and no audio is sounding yet. The grace now ends
+                // when speech is actually sounding (watched below), with a
+                // bounded fallback.
+                armChapterGapSpeechWatch()
                 return
             }
             Log.shared.info("BookPlayback: ch\(index) of \(book.title) has no speech text — skipping")
@@ -186,16 +191,95 @@ final class BookPlaybackController: ObservableObject {
 
     // MARK: - Chapter-gap background grace
 
+    /// Bridges the between-chapters gap: NOTHING is playing, so the audio
+    /// assertion is idle and iOS may suspend the app mid-listen. The grace
+    /// ends when speech is actually SOUNDING — never later, and (since the
+    /// 2026-11 fix) never at `togglePlay`, which only opens the window. A
+    /// cold epub parse, PDF OCR, or a thermally throttled first render can
+    /// exceed one ~30 s window, so expiry CHAINS a bounded number of fresh
+    /// windows while the chapter chain is still armed; after that,
+    /// SpeechPlayer's own playback grace plus the engine's silence bridge
+    /// carry the .generating stretch. A bounded bridge over chapter
+    /// transitions — deliberately NOT a general keep-alive.
     private var chapterGapTask: UIBackgroundTaskIdentifier = .invalid
+    /// Consecutive expiries in the CURRENT gap — the chaining bound.
+    private var chapterGapExpiries = 0
+    /// One gap may chain at most this many ~30 s windows before the grace
+    /// is handed back (~90 s of bridged transition, worst case). A chapter
+    /// transition genuinely longer than this loses the grace and rides on
+    /// the engine's own keep-alives.
+    private static let chapterGapMaxExpiries = 3
+    /// Polls for the first audible speech so the grace ends the moment it is
+    /// no longer needed rather than at the fallback timeout.
+    private var chapterGapWatchTask: Task<Void, Never>?
+    /// How long the watch polls for speech before the fallback end.
+    private static let chapterGapSpeechTimeout: TimeInterval = 25
 
     private func beginChapterGapGrace() {
         endChapterGapGrace()
+        chapterGapExpiries = 0
         chapterGapTask = UIApplication.shared.beginBackgroundTask(withName: "BookChapterGap") { [weak self] in
+            guard let self else { return }
+            Log.shared.info("BookPlayback: chapter-gap grace EXPIRED (\(self.activeBook != nil ? "chain still armed" : "chain gone"))")
+            self.renewOrEndChapterGapGrace()
+        }
+        armChapterGapSpeechWatch()
+    }
+
+    /// Expiry path: chain a fresh window while the chapter chain is still
+    /// armed — a note takeover or an explicit stop clears onNaturalFinish
+    /// and/or activeBook, and a spent bound ends the grace for good.
+    private func renewOrEndChapterGapGrace() {
+        guard let player, activeBook != nil, player.onNaturalFinish != nil,
+              chapterGapExpiries < Self.chapterGapMaxExpiries else {
+            endChapterGapGrace()
+            return
+        }
+        chapterGapExpiries += 1
+        chapterGapTask = UIApplication.shared.beginBackgroundTask(withName: "BookChapterGap") { [weak self] in
+            guard let self else { return }
+            Log.shared.info("BookPlayback: chapter-gap grace EXPIRED again (\(self.chapterGapExpiries)/\(Self.chapterGapMaxExpiries))")
+            self.renewOrEndChapterGapGrace()
+        }
+    }
+
+    /// Polls SpeechPlayer state until the new chapter is actually sounding
+    /// (.speaking — audio I/O is live and the engine's assertion + silence
+    /// bridge take over from here), or the bounded fallback elapses. Exits
+    /// early when the chain is abandoned underneath the gap (note takeover,
+    /// book finished).
+    private func armChapterGapSpeechWatch() {
+        chapterGapWatchTask?.cancel()
+        chapterGapWatchTask = Task { [weak self] in
+            let deadline = Date().addingTimeInterval(Self.chapterGapSpeechTimeout)
+            while !Task.isCancelled {
+                guard let self else { return }
+                if let player = self.player {
+                    if player.state == .speaking {
+                        Log.shared.info("BookPlayback: chapter gap closed — speech sounding, grace released")
+                        self.endChapterGapGrace()
+                        return
+                    }
+                    if player.state == .idle, self.activeBook == nil {
+                        // The chain was abandoned (note took over, book
+                        // ended) — the gap is over, nobody is coming.
+                        self.endChapterGapGrace()
+                        return
+                    }
+                }
+                if Date() >= deadline { break }
+                try? await Task.sleep(nanoseconds: 500_000_000)
+            }
+            // Bounded fallback: hand the grace back even if speech never
+            // started; the expiry chaining above covers the longer-window
+            // case while the chain is still armed.
             self?.endChapterGapGrace()
         }
     }
 
     private func endChapterGapGrace() {
+        chapterGapWatchTask?.cancel()
+        chapterGapWatchTask = nil
         guard chapterGapTask != .invalid else { return }
         UIApplication.shared.endBackgroundTask(chapterGapTask)
         chapterGapTask = .invalid

@@ -152,9 +152,9 @@ final class MarkdownTextTests: XCTestCase {
     func testAutolinksBecomeLinkRuns() {
         let runs = MarkdownText.inlineRuns("go to <https://example.com> now")
         XCTAssertEqual(runs, [
-            .text("go to "),
+            .text("go to ", bold: false, italic: false, code: false, strike: false),
             .link(label: "https://example.com", url: "https://example.com"),
-            .text(" now"),
+            .text(" now", bold: false, italic: false, code: false, strike: false),
         ])
     }
 
@@ -236,9 +236,9 @@ final class MarkdownTextTests: XCTestCase {
     func testInlineRunsSplitsImagesAndText() {
         let runs = MarkdownText.inlineRuns("Look ![logo](x.png) here")
         XCTAssertEqual(runs, [
-            .text("Look "),
+            .text("Look ", bold: false, italic: false, code: false, strike: false),
             .image(alt: "logo", url: "x.png"),
-            .text(" here"),
+            .text(" here", bold: false, italic: false, code: false, strike: false),
         ])
     }
 
@@ -389,7 +389,7 @@ final class MarkdownTextTests: XCTestCase {
     func testInlineRunsPreserveEmoji() {
         let runs = MarkdownText.inlineRuns("✅ before [link](https://example.com) after 🎉")
         let joined = runs.map { run -> String in
-            if case .text(let s) = run { return s }
+            if case .text(let s, _, _, _, _) = run { return s }
             return "<non-text>"
         }.joined()
         XCTAssertTrue(joined.contains("✅ before"), "emoji before a link lost: \(joined)")
