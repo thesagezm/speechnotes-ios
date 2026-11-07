@@ -1,18 +1,19 @@
 # HANDOVER — Background TTS persistence (bug 1 of 3), + bugs 2 & 3 queued
 
-Date: 2026-11-07. Base: `main` @ `58a5ddf` (v1.7.4). Branch: main, working
-tree has uncommitted bug-1 changes (5 modified files + 1 new file).
+Date: 2026-11-07. Build branch: `sage-upgrades`, based on `main` @ `9b44659`
+plus the bug-3 implementation in this branch.
 
-Three user-reported bugs, to be fixed one at a time, in order:
+Three user-reported bugs:
 
 1. TTS does not persist in the background (hot or cool phone).
 2. Kokoro artifacts / skipped-mispronounced words / size larger than expected.
 3. Opus audiobook needs several taps before playback; bookmarks unreliable
    in the background.
 
-**Bug 1 is IMPLEMENTED but NOT verified. Bugs 2 and 3 are NOT STARTED.**
-No local Swift toolchain (`swift` unavailable) — CI build requires the
-user's authorization; Xcode/device verification is still required.
+**Bug 1 and bug 2 are committed in `9b44659`. Bug 3 is implemented in the
+next commit on `sage-upgrades`. All three still need CI/device verification.**
+No local Swift toolchain (`swift` unavailable); CI/device verification is
+required.
 
 ## Bug 1 — what was implemented (uncommitted)
 
@@ -191,53 +192,44 @@ file needs no registration.
   completions + speak() reset); read-along/bookmark chars do not advance
   over bridge silence (tracker marker endChar frozen; emits only on growth).
 
-## Bug 2 — Kokoro artifacts / skipped words / size (NOT STARTED)
+## Bug 2 — Kokoro artifacts / skipped words / size (IMPLEMENTED IN 9b44659)
 
-- Main's "Compact" tier still uses `model_uint8.onnx` (~177 MB); repo
-  history says that tier is CORRUPT: `e64b456` ("the quantization gate's
-  verdict — the uint8 tier is corrupt"), `f9b2558` ("the controls cleared
-  the oracle, and the graph itself is the culprit"). Docs/UINT8-TIER-FORENSICS.md.
-- `git show 8dc6104` replaced the uint8 tier with `model_quantized.onnx`
-  (~92 MB int8; fp32-oracle A/B equal-or-better LSD in 5/6 cases; fp16
-  re-confirmed NaN) and retargeted ModelManager, OnnxKokoroEngine, tier
-  naming ("Compact"), UI copy, and Tests/KokoroSmallSpike.
-- `git show 2b1f9ce` has the "TTS word forms" work (numbers/symbols/math)
-  — likely the skipped/mispronounced-word story.
-- Inspect: `App/Sources/Engine/OnnxKokoroEngine.swift` (tokenizer/phoneme
-  mapping; the path that deletes/substitutes phonemes missing from the
-  vocab; chunking, speed, voice-style lookup), `App/Sources/Services/
-  ModelManager.swift` (URL, filename, validation, deletion/migration),
-  `Packages/SpeechLogic/Sources/SpeechLogic/SpeechSanitizer.swift`,
-  `.../SentenceChunker.swift`, `Tests/KokoroSmallSpike/`.
-- Keep four causes separate: (a) graph quality/model tier, (b) phoneme/
-  tokenizer coverage, (c) text normalization (numbers/symbols/math),
-  (d) chunk-boundary artifacts. Int8 alone does not fix pronunciation.
+- Compact tier uses `model_quantized.onnx` (~92 MB int8), replacing the
+  corrupt `model_uint8.onnx`; the legacy uint8 file is auto-deleted and the
+  validation window forces a re-download. UI copy and tests updated.
+- Maths glyphs and ASCII operators are spoken as words via `MarkdownText`'s
+  spoken path. Tokenizer substitution/drop accounting and ORT thread sizing
+  were already on main.
+- Verification pending: logic-tests maths suite, `kokoro-small-spike` on
+  int8, unsigned-IPA build, then a device round (artifacts, pronunciation,
+  compact download size).
 
-## Bug 3 — Opus start taps + background bookmarks (NOT STARTED)
+## Bug 3 — Opus start taps + background bookmarks (IMPLEMENTED, NOT VERIFIED)
 
-- `git show 8dc6104 -- App/Sources/Services/AudioBookPlayer.swift
-  App/Sources/Views/BookAudioReaderView.swift App/Sources/Services/
-  BookAudioBackend.swift` contains the direct fixes: persist the backend's
-  own clock (`BookPosition.audioSeconds`) and resume from it instead of
-  reconstructing seconds from a chapter fraction; nil-clock guard so
-  chapter 1 is not "finished" while an Opus stream loads; the Opus
-  reader's play button resumes a paused live session from the backend
-  clock; cold open uses the persisted absolute playhead;
-  interruption-began flushes the playhead.
-- Also inspect: `App/Sources/Engine/OpusAudioBackend.swift`,
-  `AudioBookPlayer.swift`, `BookAudioBackend.swift`,
-  `BookmarkStore.swift`, and SpeechnotesApp's scenePhase
-  `audioBooks.persistNow()` flush.
-- Multi-tap symptom: first tap starts async Opus setup while the UI still
-  looks idle/tappable → later taps start competing sessions. Fix should
-  make one tap sufficient, expose a real preparing state, and prevent
-  duplicate starts. Bookmark reliability = absolute backend position +
-  persistence on background/interruption + no false "chapter finished"
-  while the Opus clock is nil + recovery from the absolute position.
+Ported and adapted from `8dc6104`, with an additional preparing-state guard
+and a load-time playhead-persistence hardening.
+
+- `BookPosition.audioSeconds` persists the backend's own absolute clock;
+  `BooksStore.updatePosition` accepts it; old manifests decode unchanged.
+- `AudioBookPlayer` reads it on bind, resumes cold starts via `atSeconds`,
+  writes the backend clock on pause/background/interruption, and keeps the
+  previous persisted seconds while a stream is still loading. `tick()` holds
+  the last playhead while the clock is nil (no 0:00:00 flicker), and the
+  nil-clock guard prevents a loading Opus stream from auto-finishing
+  chapter 1.
+- `BookAudioBackend` adds `isPreparingPlayback`; AVPlayer uses
+  `.waitingToPlayAtSpecifiedRate`, Opus already exposes its loading state.
+  The reader publishes a real preparing state, shows a spinner on all three
+  play surfaces, and ignores repeat same-chapter play taps instead of
+  coalescing a competing chapter-start seek. A different chapter pick still
+  works while preparing; pause cancels a pending start.
+- Verification: full diff review + brace-balance smoke check passed on all
+  five changed Swift files. No local compile — needs CI/device: one tap
+  starts an Opus book, no chapter-1 skip, Control-Center pause resumes at
+  the exact second, background/kill mid-load preserves the playhead.
 
 ## Working rules for the next session
 
-- One bug at a time; finish + verify bug 1 report before bug 2, then bug 3.
 - Do not push, commit, or dispatch remote workflows unless the user asks.
 - No local Swift toolchain: local verification = review + brace/parse
   smoke checks; offer CI build only with the user's authorization.

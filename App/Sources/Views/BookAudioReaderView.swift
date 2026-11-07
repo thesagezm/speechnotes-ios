@@ -51,6 +51,10 @@ struct BookAudioReaderView: View {
     /// True when the app-level player is currently loaded with THIS book.
     private var isActive: Bool { audioBook.activeBookID == book.id }
     private var isPlaying: Bool { isActive && audioBook.isPlaying }
+    /// One tap is in flight and the backend is still preparing (the Opus
+    /// whole-file load, an AVPlayer item opening) — the play buttons show a
+    /// spinner and repeat taps are swallowed rather than competing.
+    private var isPreparing: Bool { isActive && audioBook.isPreparingPlayback }
 
     init(book: Book, store: BooksStore) {
         self.book = book
@@ -248,9 +252,16 @@ struct BookAudioReaderView: View {
                     Haptics.tap()
                     togglePlayback()
                 } label: {
-                    Image(systemName: isPlaying ? "pause.circle.fill" : "play.circle.fill")
-                        .font(.system(size: 56))
+                    if isPreparing {
+                        ProgressView()
+                            .scaleEffect(1.6)
+                            .frame(width: 56, height: 56)
+                    } else {
+                        Image(systemName: isPlaying ? "pause.circle.fill" : "play.circle.fill")
+                            .font(.system(size: 56))
+                    }
                 }
+                .accessibilityLabel(isPreparing ? "Preparing playback" : (isPlaying ? "Pause" : "Play"))
 
                 transportIcon("goforward.15", size: 30, weight: .regular, label: "Forward 15 seconds") {
                     audioBook.seekBy(15)
@@ -477,11 +488,16 @@ struct BookAudioReaderView: View {
                     Image(systemName: isPlaying ? "pause.fill" : "play.fill")
                         .font(.system(size: 15, weight: .bold))
                         .foregroundStyle(Color.accentColor)
+                        .opacity(isPreparing ? 0 : 1)
+                    if isPreparing {
+                        ProgressView()
+                            .scaleEffect(0.7)
+                    }
                 }
                 .frame(width: 46, height: 46)
             }
             .buttonStyle(.plain)
-            .accessibilityLabel(isPlaying ? "Pause" : "Play")
+            .accessibilityLabel(isPreparing ? "Preparing playback" : (isPlaying ? "Pause" : "Play"))
 
             Button {
                 Haptics.tap()
@@ -568,10 +584,16 @@ struct BookAudioReaderView: View {
                     Haptics.tap()
                     togglePlayback()
                 } label: {
-                    Image(systemName: isPlaying ? "pause.circle.fill" : "play.circle.fill")
-                        .font(.system(size: 52))
+                    if isPreparing {
+                        ProgressView()
+                            .scaleEffect(1.4)
+                            .frame(width: 52, height: 52)
+                    } else {
+                        Image(systemName: isPlaying ? "pause.circle.fill" : "play.circle.fill")
+                            .font(.system(size: 52))
+                    }
                 }
-                .accessibilityLabel(isPlaying ? "Pause" : "Play")
+                .accessibilityLabel(isPreparing ? "Preparing playback" : (isPlaying ? "Pause" : "Play"))
 
                 Button {
                     Haptics.tap()
@@ -772,6 +794,13 @@ struct BookAudioReaderView: View {
     // MARK: - Playback
 
     private func togglePlayback() {
+        // While the async Opus setup is in flight the UI no longer looks
+        // idle: a preparing session is resumed from its pending seek, and a
+        // repeat play tap must NOT start a competing session.
+        if isPreparing {
+            if audioBook.isPlaying { audioBook.pause() }
+            return
+        }
         if isPlaying {
             audioBook.pause()
         } else {
@@ -781,13 +810,40 @@ struct BookAudioReaderView: View {
 
     private func playChapter(_ index: Int) {
         guard chapters.indices.contains(index) else { return }
+        // One tap suffices: while the async Opus setup is still loading, a
+        // repeat tap on the SAME chapter must not re-enter play() — the
+        // live-backend path would coalesce a seek back to the chapter start
+        // over the pending resume seek. A different chapter pick is still a
+        // legitimate seek and falls through.
+        if isActive, audioBook.isPreparingPlayback, index == audioBook.chapterIndex { return }
         chapterIndex = index
-        // Resume where the playhead is: a fresh chapter start only when the
-        // user picked a DIFFERENT chapter or the playhead sits at zero.
-        let fraction = (index == audioBook.chapterIndex && displayProgress > 0.005 && !audioBook.isPlaying)
-            ? displayProgress
+        // Paused mid-chapter on the LIVE session: resume exactly — the
+        // backend's own clock is the playhead, and re-deriving seconds from
+        // a chapter fraction (start + fraction × span) is the reconstruction
+        // that landed "minutes earlier" on resume (2026-10-13 report).
+        if isActive, !audioBook.isPlaying, index == audioBook.chapterIndex, audioBook.elapsed > 0 {
+            audioBook.resumeCurrent()
+            scrubValue = audioBook.chapterProgress
+            return
+        }
+        // Cold open: the persisted ABSOLUTE playhead when this tap targets
+        // the persisted chapter — it survives quits and Control-Center pauses
+        // that the fraction reconstruction does not. A different chapter
+        // pick starts at that chapter's top, as before.
+        var seconds: Double?
+        if !isActive,
+           index == (book.position?.chapterIndex ?? 0),
+           let persisted = book.position?.audioSeconds, persisted > 0 {
+            seconds = persisted
+        }
+        // Resume fraction only when no absolute playhead exists (legacy
+        // manifests) — otherwise a fresh chapter start only when the user
+        // picked a DIFFERENT chapter.
+        let fraction = seconds == nil
+            ? (index == audioBook.chapterIndex && displayProgress > 0.005 && !audioBook.isPlaying
+               ? displayProgress : nil)
             : nil
-        audioBook.play(book: book, chapterIndex: index, withinChapterFraction: fraction)
+        audioBook.play(book: book, chapterIndex: index, withinChapterFraction: fraction, atSeconds: seconds)
         scrubValue = audioBook.chapterProgress
     }
 

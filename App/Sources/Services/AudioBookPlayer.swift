@@ -32,6 +32,12 @@ final class AudioBookPlayer: ObservableObject {
     @Published private(set) var activeBookID: UUID?
     @Published private(set) var activeBook: Book?
     @Published private(set) var isPlaying = false
+    /// True while a play tap's async setup is still in flight — an Opus
+    /// stream still loading, an AVPlayer item still opening. The reader
+    /// shows a real preparing state from this and swallows repeat play
+    /// taps instead of starting competing sessions (the "needs several
+    /// taps before playback" report). Polled from the backend per tick.
+    @Published private(set) var isPreparingPlayback = false
     @Published private(set) var chapterIndex = 0
     /// 0…1 inside the current chapter — the reader's slider value.
     @Published private(set) var chapterProgress: Double = 0
@@ -151,6 +157,10 @@ final class AudioBookPlayer: ObservableObject {
     private var chapters: [AudioChapter] = []
     /// In-chapter fraction for a cold resume (remote play after stop).
     private var lastFraction: Double = 0
+    /// Absolute file seconds for a cold resume — persisted alongside the
+    /// fraction (see persistPosition) and used whenever non-zero, because
+    /// it is the playhead itself rather than a reconstruction of it.
+    private var lastSeconds: Double = 0
     private var cachedArtwork: UIImage?
     /// Set by pause(), cleared by play() — a chapter end reached while the
     /// user deliberately parked there must not auto-advance.
@@ -195,12 +205,15 @@ final class AudioBookPlayer: ObservableObject {
         let position = book.position
         chapterIndex = min(max(0, position?.chapterIndex ?? 0), max(0, chapters.count - 1))
         lastFraction = min(max(0, position?.chapterFraction ?? 0), 0.999)
+        // A persisted absolute playhead wins over the reconstructed fraction
+        // — see persistPosition. This is the resume source for a cold start.
+        lastSeconds = min(max(0, position?.audioSeconds ?? 0), max(0, book.audioDuration ?? 0))
         loadedURL = nil
     }
 
     // MARK: Transport
 
-    func play(book: Book, chapterIndex index: Int, withinChapterFraction fraction: Double? = nil) {
+    func play(book: Book, chapterIndex index: Int, withinChapterFraction fraction: Double? = nil, atSeconds seconds: Double? = nil) {
         // Single slot: playing another book retires the previous one.
         if let current = activeBookID, current != book.id {
             teardownAudio()
@@ -238,7 +251,11 @@ final class AudioBookPlayer: ObservableObject {
             }
             guard let backend else { return }
             let fileDuration = fileLength
-            let start = clampToChapterStart(fraction: fraction, fileDuration: fileDuration)
+            // A persisted absolute playhead is the exact spot the clock said
+            // the file was at — it needs no chapter-table reconstruction.
+            // When absent (legacy manifests, first open) the chapter start +
+            // fraction reconstructs it as before.
+            let start = seconds ?? clampToChapterStart(fraction: fraction, fileDuration: fileDuration)
             isPlaying = true
             totalDuration = fileDuration
             startTicker()
@@ -279,6 +296,11 @@ final class AudioBookPlayer: ObservableObject {
             // holding the task longer spends the app's background-execution
             // budget for nothing.
             endChapterGapGrace()
+            // Publish the preparing state immediately — the first tick is
+            // up to 0.5 s away, and a multi-GB Opus load is exactly the
+            // window where the UI used to look idle/tappable and invite
+            // the competing second tap.
+            isPreparingPlayback = backend.isPreparingPlayback
         } catch {
             // ONE line, and a reason the UI can act on. The device log for
             // the EAC3 'Harry Potter' book showed this catch firing 30+
@@ -287,6 +309,7 @@ final class AudioBookPlayer: ObservableObject {
             Log.shared.error("AudioBookPlayer: cannot play \(url.lastPathComponent): \(error) — \(reason)")
             playbackBlockedReason = reason
             isPlaying = false
+            isPreparingPlayback = false
             // Leave the ticker running off; a dead ticker would keep
             // publishing a playhead that never moves.
             stopTicker()
@@ -425,6 +448,9 @@ final class AudioBookPlayer: ObservableObject {
         backend?.pause()
         userPaused = true
         isPlaying = false
+        // Pausing mid-prepare cancels the pending start (the backend's
+        // wantsPlayback drops), so the preparing surface ends with it.
+        isPreparingPlayback = false
         persistPosition(force: true)
         publishNowPlaying(force: true)
     }
@@ -470,13 +496,19 @@ final class AudioBookPlayer: ObservableObject {
     func resumeCurrent() {
         guard let book = activeBook ?? boundBook else { return }
         if backend == nil {
-            // Cold resume: start the last chapter at the last fraction.
-            play(book: book, chapterIndex: chapterIndex, withinChapterFraction: lastFraction)
+            // Cold resume: the persisted absolute playhead when the last
+            // session wrote one (a real clock), else the last chapter at
+            // the last fraction.
+            let fraction = lastSeconds > 0 ? nil : lastFraction
+            play(book: book, chapterIndex: chapterIndex, withinChapterFraction: fraction, atSeconds: lastSeconds > 0 ? lastSeconds : nil)
         } else {
             userPaused = false
             backend?.play()
             applyRate(force: true)
             isPlaying = true
+            // A resume while the stream is still loading is preparing, not
+            // yet rendering — say so immediately, not at the next tick.
+            isPreparingPlayback = backend?.isPreparingPlayback ?? false
             publishNowPlaying(force: true)
         }
     }
@@ -666,8 +698,13 @@ final class AudioBookPlayer: ObservableObject {
 
     private var chapterIsFinished: Bool {
         guard let backend else { return false }
+        // Nil clock = the stream is still loading (Opus's whole-file read
+        // on a multi-GB book takes seconds) or the item is still opening.
+        // "0 seconds in" would read as finished for a chapter that starts
+        // at 0 — the auto-advance then skipped chapter 1 of such books the
+        // moment the ticker first fired.
+        guard let here = backend.currentTime else { return false }
         guard let end = effectiveChapterEnd(fileDuration: fileLength) else { return false }
-        let here = backend.currentTime ?? 0
         return here >= end - 0.05
     }
 
@@ -715,10 +752,16 @@ final class AudioBookPlayer: ObservableObject {
         // .waitingToPlayAtSpecifiedRate while buffering a big file.
         let playing = backend.isRendering
         if isPlaying != playing { isPlaying = playing }
+        let preparing = backend.isPreparingPlayback
+        if isPreparingPlayback != preparing { isPreparingPlayback = preparing }
         let value = chapterProgressValue
         if chapterProgress != value { chapterProgress = value }
-        let now = backend.currentTime ?? 0
-        if elapsed != now { elapsed = now }
+        // A nil clock (stream loading, item still opening) is "unknown",
+        // not zero — hold the last published playhead so a cold open at a
+        // persisted 1:23:45 does not flicker to 0:00:00 while the Opus
+        // stream loads. The backend's own clock takes over the moment it
+        // has one.
+        if let now = backend.currentTime, elapsed != now { elapsed = now }
         let duration = cachedFileDuration ?? 0
         if totalDuration != duration, duration > 0 { totalDuration = duration }
 
@@ -798,10 +841,11 @@ final class AudioBookPlayer: ObservableObject {
         // A finished book restarts fresh on next open — the last chapter
         // would otherwise resume at its own end and instantly "finish" again.
         if let book = activeBook {
-            store?.updatePosition(book, chapterIndex: 0, chapterFraction: 0)
+            store?.updatePosition(book, chapterIndex: 0, chapterFraction: 0, audioSeconds: 0)
         }
         boundBook = nil
         lastFraction = 0
+        lastSeconds = 0
         stop()
     }
 
@@ -813,7 +857,21 @@ final class AudioBookPlayer: ObservableObject {
         if !force, let last = lastPersistAt, now.timeIntervalSince(last) < 5 { return }
         lastPersistAt = now
         lastFraction = chapterProgress
-        store.updatePosition(book, chapterIndex: chapterIndex, chapterFraction: chapterProgress, cfi: nil)
+        // Absolute file seconds whenever a real clock is available. The
+        // chapterFraction has to be RECONSTRUCTED from the chapter table
+        // on resume (start + fraction × span), and on books whose chapter
+        // markers sit at coarse boundaries that reconstruction is minutes
+        // off from the paused playhead — the 2026-10-13 "resumes 10–20
+        // minutes back" report. The backend's own clock is exact. While a
+        // stream is still loading the clock is nil, so fall back to the
+        // book's last persisted playhead rather than erasing it.
+        store.updatePosition(
+            book,
+            chapterIndex: chapterIndex,
+            chapterFraction: chapterProgress,
+            cfi: nil,
+            audioSeconds: backend?.currentTime ?? book.position?.audioSeconds
+        )
     }
 
     // MARK: Lock screen / Control Center
@@ -892,6 +950,9 @@ final class AudioBookPlayer: ObservableObject {
     private func teardownAudio() {
         backend?.stop()
         backend = nil
+        // The ticker stops with the backend — reset the preparing flag here
+        // so no surface stays stuck on "preparing" with nothing to poll.
+        isPreparingPlayback = false
         loadedURL = nil
         loadedItemJustCreated = false
         cachedFileDuration = nil
@@ -964,6 +1025,7 @@ final class AudioBookPlayer: ObservableObject {
         Log.shared.error("AudioBookPlayer: \(url.lastPathComponent) failed to decode — \(reason)")
         playbackBlockedReason = reason
         isPlaying = false
+        isPreparingPlayback = false
         stopTicker()
     }
 
@@ -1023,6 +1085,10 @@ final class AudioBookPlayer: ObservableObject {
             // interruption is not the user parking the book.
             interruptedWhilePlaying = isPlaying
             if isPlaying { isPlaying = false }
+            // The process may never come back foreground (the user took the
+            // call and moved on, the system then suspends us) — flush the
+            // real playhead NOW so a later cold resume lands exactly here.
+            persistPosition(force: true)
         case .ended:
             defer { interruptedWhilePlaying = false }
             guard interruptedWhilePlaying, !userPaused else { return }

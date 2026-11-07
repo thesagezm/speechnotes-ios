@@ -1086,12 +1086,13 @@ final class BooksStore: ObservableObject {
         save(updated)
     }
 
-    func updatePosition(_ book: Book, chapterIndex: Int, chapterFraction: Double, cfi: String? = nil) {
+    func updatePosition(_ book: Book, chapterIndex: Int, chapterFraction: Double, cfi: String? = nil, audioSeconds: Double? = nil) {
         var updated = book
         updated.position = BookPosition(
             chapterIndex: chapterIndex,
             chapterFraction: chapterFraction,
-            cfi: cfi
+            cfi: cfi,
+            audioSeconds: audioSeconds
         )
         save(updated)
     }
