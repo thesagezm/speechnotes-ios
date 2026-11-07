@@ -126,7 +126,10 @@ final class WebArticleTests: XCTestCase {
         weight by a comfortable margin, sentence after sentence of ordinary column filler
         that a reader-mode pass should keep whole.</p>
         <p>And a second paragraph inside the same region for the same reason, keeping the
-        region's share of the page far above the forty percent floor.</p></div>
+        region's share of the page far above the forty percent floor.</p>
+        <p>A third paragraph supplies the remaining visible weight, keeping the marked main
+        region comfortably above the four-hundred-character minimum used by the reader-mode
+        selector so this test exercises narrowing rather than the whole-page fallback.</p></div>
         <p>Outside filler.</p>
         </body></html>
         """

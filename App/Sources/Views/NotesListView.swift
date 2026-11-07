@@ -612,8 +612,8 @@ struct NotesListView: View {
                 }
                 Haptics.success()
                 var text = fetched.text
-                if let title = fetched.title?.trimmingCharacters(in: .whitespacesAndNewlines),
-                   !title.isEmpty, !text.hasPrefix(title) {
+                let title = fetched.title.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !title.isEmpty, !text.hasPrefix(title) {
                     // The article's own headline first — the note title
                     // derives from it like every other note's does.
                     text = title + "\n\n" + text
