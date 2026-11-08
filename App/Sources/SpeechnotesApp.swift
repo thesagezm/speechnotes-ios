@@ -40,14 +40,6 @@ struct SpeechnotesApp: App {
         CrashMarker.installAndReplay()
     }
 
-    init() {
-        // First thing the process does: install the crash marker and replay
-        // the previous launch's verdict. The 2026-10-23 device log cut off
-        // mid-generation with live audio I/O — the next one must be able to
-        // say which of "crashed" vs "system-killed (jetsam/purge)" that was.
-        CrashMarker.installAndReplay()
-    }
-
     private enum Tab: Hashable, CaseIterable, Identifiable {
         case notes, books, stats, settings
 
