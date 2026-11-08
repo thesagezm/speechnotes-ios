@@ -166,6 +166,10 @@ struct BookDropView: View {
             }
         }
         .navigationTitle("BookDrop")
+        // The access-code field must release the keyboard: tap outside or
+        // drag the list.
+        .scrollDismissesKeyboard(.immediately)
+        .dismissesKeyboardOnTapOutside()
         .sheet(isPresented: $showingSend) {
             BookDropSendView()
         }

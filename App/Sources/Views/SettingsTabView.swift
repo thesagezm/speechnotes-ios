@@ -24,15 +24,6 @@ struct SettingsTabView: View {
     /// `.onChange` below.
     @AppStorage(ScreenAwakePolicy.preferenceKey) private var keepScreenOn = ScreenAwakePolicy.defaultEnabled
 
-    /// One-time script status for the footer — loading the BPC pair reads
-    /// ~300 KB off disk, so it must not run per body render.
-    private static let bpcVersionLabel: String = {
-        guard let scripts = PaywallBypass.loadScripts() else {
-            return "script missing"
-        }
-        return "v\(scripts.version), \(scripts.origin)"
-    }()
-
     private static let jexType = UTType(importedAs: "com.joplin.jex")
 
     var body: some View {
@@ -48,12 +39,8 @@ struct SettingsTabView: View {
                         AppearanceSettingsView()
                     }
                 }
-                Section {
+                Section("Reading") {
                     Toggle("Keep Screen On", isOn: $keepScreenOn)
-                } header: {
-                    Text("Reading")
-                } footer: {
-                    Text("Keeps the display awake while you read: in the book readers (EPUB, PDF, audiobooks) and in a note's reading mode. Editing a note is unaffected — the keyboard already keeps the screen on. Leaving a reading surface hands the screen back to the system timer.")
                 }
                 Section("Backup") {
                     NavigationLink("Export notes to Joplin (.jex)") {
@@ -87,8 +74,6 @@ struct SettingsTabView: View {
                     .textInputAutocapitalization(.never)
                 } header: {
                     Text("Web import")
-                } footer: {
-                    Text("Pages shared from Safari extract their article text via Readability; when a paywall is detected, the import retries through Bypass Paywalls Clean (\(Self.bpcVersionLabel)). Drop updated bpc.en.user.js and bpc_func.js into On My iPhone → Speechnotes → BypassPaywalls to refresh the script without a rebuild.")
                 }
                 Section("Storage") {
                     // Closure-based link (the value-based NavigationLink from
@@ -111,6 +96,11 @@ struct SettingsTabView: View {
                 }
             }
             .navigationTitle("Settings")
+            // Text fields here (paywall domains) used to hold the keyboard
+            // hostage — no native tap-outside in SwiftUI. Both halves:
+            // drag the list, or tap anywhere that is not the field.
+            .scrollDismissesKeyboard(.immediately)
+            .dismissesKeyboardOnTapOutside()
             .onChange(of: keepScreenOn) { _ in
                 // The controller reads the preference fresh, so one nudge
                 // re-applies it to whatever is on screen right now.

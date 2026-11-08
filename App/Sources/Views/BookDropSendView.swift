@@ -222,6 +222,10 @@ struct BookDropSendView: View {
             }
             .navigationTitle("Send")
             .navigationBarTitleDisplayMode(.inline)
+            // The access-code field releases the keyboard on a tap outside
+            // or a list drag.
+            .scrollDismissesKeyboard(.immediately)
+            .dismissesKeyboardOnTapOutside()
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Close") { dismiss() }

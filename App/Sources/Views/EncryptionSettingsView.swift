@@ -41,6 +41,9 @@ struct EncryptionSettingsView: View {
             }
         }
         .navigationTitle("Encryption")
+        // Passphrase fields release the keyboard on a tap outside / drag.
+        .scrollDismissesKeyboard(.immediately)
+        .dismissesKeyboardOnTapOutside()
         .alert(
             "Encryption",
             isPresented: Binding(
