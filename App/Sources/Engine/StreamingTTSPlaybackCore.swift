@@ -957,7 +957,8 @@ final class StreamingTTSPlaybackCore: NSObject {
         // one extra half-second of silence carries over.
         bridgeArmed = false
         bridgeIncidentSeconds = 0
-        realBuffersOnNode = 0        totalChars = max(1, clean.utf16.count)
+        realBuffersOnNode = 0
+        totalChars = max(1, clean.utf16.count)
         playTracker.reset()
         rateDrainArmed = false
         // A new session inherits its starting rate as the baseline: a rate
@@ -1295,7 +1296,8 @@ final class StreamingTTSPlaybackCore: NSObject {
         // schedule pass in the same turn is about to queue the real buffer —
         // bridging now would only prepend silence to it (this is what keeps
         // the bridge OFF the foreground first-chunk path).
-        guard bufferSlots[scheduledUpTo + 1] == Self.slotPending else { return }        armBridge()
+        guard bufferSlots[scheduledUpTo + 1] == Self.slotPending else { return }
+        armBridge()
     }
 
     /// Main thread. Schedules one short silent buffer on the player node.
@@ -1306,7 +1308,8 @@ final class StreamingTTSPlaybackCore: NSObject {
     /// mirrors the bridge frames in `generatedFrames` at completion so
     /// `banked` stays a measure of REAL unplayed audio. Re-arms from its own
     /// completion while no real buffer is queued; the first real scheduling
-    /// ends the incident.    private func armBridge() {
+    /// ends the incident.
+    private func armBridge() {
         let rate = sampleRate
         guard rate > 0 else { return }
         let frameCount = max(1, AVAudioFrameCount(rate * Self.bridgeSilenceSeconds))
@@ -1329,7 +1332,8 @@ final class StreamingTTSPlaybackCore: NSObject {
         // last real chunk's end-char (0 during .generating — nothing has
         // been spoken yet). The tracker only emits a NEW position when the
         // interpolated char count grows, so no onPlayedChars/onProgress
-        // callback fires for the bridge's span.        let charsDone = scheduledUpTo >= 0
+        // callback fires for the bridge's span.
+        let charsDone = scheduledUpTo >= 0
             ? chunks[...scheduledUpTo].reduce(0) { $0 + $1.length }
             : 0
         playTracker.willSchedule(buffer: buffer, endChar: charsDone, totalChars: totalChars)
@@ -1338,7 +1342,8 @@ final class StreamingTTSPlaybackCore: NSObject {
                 thermalStateRawValue: ProcessInfo.processInfo.thermalState.rawValue)
             Log.shared.info(
 
-                "\(config.logPrefix) keepalive bridge — node queue dry at chunk \(scheduledUpTo + 2) of \(chunks.count), banked \(String(format: "%.1f", bankedSeconds()))s (\(thermal)); scheduling \(Self.bridgeSilenceSeconds)s silence so the render chain never idles"            )
+                "\(config.logPrefix) keepalive bridge — node queue dry at chunk \(scheduledUpTo + 2) of \(chunks.count), banked \(String(format: "%.1f", bankedSeconds()))s (\(thermal)); scheduling \(Self.bridgeSilenceSeconds)s silence so the render chain never idles"
+            )
         }
         playerNode.scheduleBuffer(buffer, at: nil, options: []) { [weak self] in
             DispatchQueue.main.async {
@@ -1350,7 +1355,8 @@ final class StreamingTTSPlaybackCore: NSObject {
 
                 // per bridge buffer, instead of draining the bank figure by
                 // every bridged second). Across a tracker reset the entry can
-                // over-report banked by at most one bridge buffer — the safe                // direction (generate a beat early).
+                // over-report banked by at most one bridge buffer — the safe
+                // direction (generate a beat early).
                 self.generatedFrames += Int64(buffer.frameLength)
                 self.recomputeBank()
                 guard self.state == .speaking || self.state == .generating else {
@@ -1361,13 +1367,15 @@ final class StreamingTTSPlaybackCore: NSObject {
                 // Re-arm ONLY while no REAL buffer is queued — the counter,
                 // never the schedule cursor (see scheduleBridgeSilenceIfNeeded).
                 if self.realBuffersOnNode == 0,
-                   self.scheduledUpTo + 1 < self.chunks.count {                    self.bridgeIncidentSeconds += Self.bridgeSilenceSeconds
+                   self.scheduledUpTo + 1 < self.chunks.count {
+                    self.bridgeIncidentSeconds += Self.bridgeSilenceSeconds
                     self.armBridge()
                 } else {
                     if self.bridgeIncidentSeconds > 0 {
                         Log.shared.info(
 
-                            "\(self.config.logPrefix) keepalive bridge ended — real audio queued after \(String(format: "%.1f", self.bridgeIncidentSeconds))s of bridged silence"                        )
+                            "\(self.config.logPrefix) keepalive bridge ended — real audio queued after \(String(format: "%.1f", self.bridgeIncidentSeconds))s of bridged silence"
+                        )
                     }
                     self.bridgeIncidentSeconds = 0
                 }
