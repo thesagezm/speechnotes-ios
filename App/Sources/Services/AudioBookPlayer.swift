@@ -218,6 +218,13 @@ final class AudioBookPlayer: ObservableObject {
         if let current = activeBookID, current != book.id {
             teardownAudio()
         }
+        // Ownership claim: this player is about to produce audio, so the
+        // OTHER surface (TTS) must end first. SpeechnotesApp wires the
+        // callback to SpeechPlayer.stopForExternalTakeover, which preserves
+        // the note/book's bookmark. One-directional — SpeechPlayer's mirror
+        // callback stops THIS player — so wiring both cannot recurse. A
+        // no-op whenever TTS is already idle (the steady case).
+        claimPlaybackOwnership("play")
         boundBook = book
         chapters = book.audioChapters ?? []
         chapterIndex = min(max(0, index), max(0, chapters.count - 1))
@@ -441,7 +448,11 @@ final class AudioBookPlayer: ObservableObject {
         return nil
     }
 
-    func pause() {
+    /// True when something was actually active to pause — the remote
+    /// handler's "did this command get consumed" answer.
+    @discardableResult
+    func pause() -> Bool {
+        let wasActive = isPlaying || isPreparingPlayback
         // A press is pending its commit: it must not come back playing
         // over an explicit pause.
         pendingSeek?.wasPlaying = false
@@ -453,14 +464,15 @@ final class AudioBookPlayer: ObservableObject {
         isPreparingPlayback = false
         persistPosition(force: true)
         publishNowPlaying(force: true)
+        return wasActive
     }
 
-    func togglePlay() {
+    @discardableResult
+    func togglePlay() -> Bool {
         if isPlaying {
-            pause()
-        } else {
-            resumeCurrent()
+            return pause()
         }
+        return resumeCurrent()
     }
 
     func stop() {
@@ -516,25 +528,64 @@ final class AudioBookPlayer: ObservableObject {
 
     /// Resumes the loaded book, or the bound book on first use. The remote
     /// play button has no chapter index of its own; with nothing bound there
-    /// is nothing to resume and it no-ops.
-    func resumeCurrent() {
-        guard let book = activeBook ?? boundBook else { return }
+    /// is nothing to resume and it no-ops (reported false — the command was
+    /// not consumed).
+    @discardableResult
+    func resumeCurrent() -> Bool {
+        guard let book = activeBook ?? boundBook else { return false }
         if backend == nil {
             // Cold resume: the persisted absolute playhead when the last
             // session wrote one (a real clock), else the last chapter at
             // the last fraction.
+            claimPlaybackOwnership("cold resume")
             let fraction = lastSeconds > 0 ? nil : lastFraction
             play(book: book, chapterIndex: chapterIndex, withinChapterFraction: fraction, atSeconds: lastSeconds > 0 ? lastSeconds : nil)
-        } else {
-            userPaused = false
-            backend?.play()
-            applyRate(force: true)
-            isPlaying = true
-            // A resume while the stream is still loading is preparing, not
-            // yet rendering — say so immediately, not at the next tick.
-            isPreparingPlayback = backend?.isPreparingPlayback ?? false
-            publishNowPlaying(force: true)
+            return true
         }
+        claimPlaybackOwnership("resume")
+        userPaused = false
+        // Re-activate the shared session BEFORE the backend plays: an
+        // interruption or a route change can leave the session inactive
+        // behind our back, and an engine backend (the Opus path) renders
+        // silence into an inactive session — the accepted-but-silent resume.
+        // AVPlayer re-activates internally, but asserting here is free and
+        // covers both backends.
+        AudioSessionSetup.activate(prefix: "AudioBookPlayer")
+        backend?.play()
+        applyRate(force: true)
+        isPlaying = true
+        // A resume while the stream is still loading is preparing, not
+        // yet rendering — say so immediately, not at the next tick.
+        isPreparingPlayback = backend?.isPreparingPlayback ?? false
+        publishNowPlaying(force: true)
+        return true
+    }
+
+    // MARK: - Single playback ownership (TTS ↔ audiobook)
+
+    /// Fired when THIS player is about to produce audio — SpeechnotesApp
+    /// wires it to `SpeechPlayer.stopForExternalTakeover`, which ends the
+    /// TTS pipeline while PRESERVING its bookmark. This is the audiobook
+    /// half of the never-simultaneous-audio rule.
+    var takesOverOtherPlayers: (() -> Void)?
+
+    /// Ends audiobook playback because the OTHER surface (TTS) took the
+    /// audio. `stop()` persists the position first — the book stays
+    /// resumable exactly where the listener left it — and clears the
+    /// lock-screen surface, which the TTS side re-dresses as it starts.
+    /// Releasing the backend here also hands the engine slot (and the
+    /// remote-command route) to the new owner.
+    func stopForExternalTakeover() {
+        guard activeBookID != nil || backend != nil else { return }
+        Log.shared.info("AudioBookPlayer: yielding playback to TTS (position persisted)")
+        stop()
+    }
+
+    /// Cheap by design — the TTS side no-ops when nothing is live.
+    private func claimPlaybackOwnership(_ source: String) {
+        guard let takesOverOtherPlayers else { return }
+        Log.shared.info("AudioBookPlayer: claiming playback ownership (\(source))")
+        takesOverOtherPlayers()
     }
 
     /// Chapter step for the remote skip buttons and the reader.
@@ -921,6 +972,13 @@ final class AudioBookPlayer: ObservableObject {
     /// steal: `NowPlayingCenter` tries this first and falls through to
     /// SpeechPlayer's handler whenever no audiobook is active, so the two
     /// playback paths never fight over `onCommand`.
+    ///
+    /// The handler reports what it actually CONSUMED: the old blanket
+    /// `return true` made every command "succeed" as long as a book id was
+    /// set — even when the player could not act (nothing playing, nothing to
+    /// skip) — which is how a stale `activeBookID` swallowed commands meant
+    /// for TTS. A false return lets the router fall through to SpeechPlayer
+    /// (the live owner after a takeover) or report failure to iOS.
     private func wireRemoteCommandsOnce() {
         guard !remoteWired else { return }
         remoteWired = true
@@ -928,23 +986,41 @@ final class AudioBookPlayer: ObservableObject {
             guard let self, self.activeBookID != nil else { return false }
             switch command {
             case .play:
-                self.resumeCurrent()
+                // resumeCurrent is idempotent for an already-playing book
+                // (backend.play() no-ops, the surface republishes) — routing
+                // through it also repairs a stale isPlaying flag instead of
+                // answering "consumed" and doing nothing.
+                return self.resumeCurrent()
             case .pause:
+                guard self.isPlaying || self.isPreparingPlayback else { return false }
                 self.pause()
+                return true
             case .toggle:
-                if self.isPlaying { self.pause() } else { self.resumeCurrent() }
+                if self.isPlaying || self.isPreparingPlayback {
+                    self.pause()
+                    return true
+                }
+                return self.resumeCurrent()
             case .stop:
                 self.stop()
+                return true
             case .previousChapter:
+                guard !self.chapters.isEmpty else { return false }
                 self.stepChapter(-1)
+                return true
             case .nextChapter:
+                guard !self.chapters.isEmpty else { return false }
                 self.stepChapter(1)
+                return true
             case .skipBackward:
+                guard self.backend != nil else { return false }
                 self.seekBy(-15)
+                return true
             case .skipForward:
+                guard self.backend != nil else { return false }
                 self.seekBy(15)
+                return true
             }
-            return true
         }
     }
 

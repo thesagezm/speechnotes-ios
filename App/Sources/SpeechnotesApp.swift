@@ -121,6 +121,18 @@ struct SpeechnotesApp: App {
                     // Listening-time recording derives from the players'
                     // published state — zero hooks inside the engines.
                     StatsCenter.shared.attach(player: player, audioBooks: audioBooks)
+                    // Single playback ownership (TTS ↔ audiobook): the
+                    // moment either surface starts producing audio — a fresh
+                    // play, a resume, an audition — it stops the other
+                    // through its own position-preserving path, so the two
+                    // can never sound together and the item that yields
+                    // keeps its bookmark/position resumable. This wiring is
+                    // also what re-routes remote commands after a takeover:
+                    // the audiobook's stop() clears its activeBookID, so
+                    // lock-screen taps fall through to the live owner
+                    // instead of being swallowed by a stale handler.
+                    player.takesOverOtherPlayers = { audioBooks.stopForExternalTakeover() }
+                    audioBooks.takesOverOtherPlayers = { player.stopForExternalTakeover() }
                     // BookDrop: route landed files into the import
                     // pipelines. Nearby BookDrop itself always comes up
                     // OFF — applyPersistedEnabledState resets the toggle

@@ -515,6 +515,7 @@ final class SpeechPlayer: ObservableObject {
     /// editor's own bar). The 2026-10-15 device report, both symptoms.
     func playFrom(_ text: String, at offset: Int, note: Note? = nil, book: BookPlaybackRef? = nil) {
         ensureNowPlayingWired()
+        claimPlaybackOwnership("play from point")
         // A note taking over ends book auto-advance and the book's
         // lock-screen dressing (togglePlay's rule); a book play-from-point
         // keeps the chain armed so the chapter still auto-advances.
@@ -764,33 +765,65 @@ final class SpeechPlayer: ObservableObject {
         // Chapter skip is off until a book binds — leaves notes with greyed
         // track buttons instead of the system default (no-op taps).
         NowPlayingCenter.shared.setChapterSkipEnabled(false)
+        // The handler must report whether the TTS side CONSUMED the command:
+        // NowPlayingCenter turns a false into a command failure for iOS, so
+        // the lock screen stops believing taps "worked" against a session
+        // that cannot act on them. NowPlayingCenter dispatches on the main
+        // thread and this class is main-actor — the synchronous Bool return
+        // is sound; no async hop may sit between the decision and the answer.
         NowPlayingCenter.shared.onCommand = { [weak self] command in
-            Task { @MainActor in
-                guard let self else { return }
-                switch command {
-                case .play:
-                    if self.state == .paused { self.engine?.resume() }
-                case .pause:
-                    if self.state == .speaking { self.engine?.pause() }
-                case .toggle:
-                    if self.state == .speaking { self.engine?.pause() }
-                    else if self.state == .paused { self.engine?.resume() }
-                case .stop:
-                    self.stop()
-                case .previousChapter:
-                    // Chapter-gone-back is a book-level op — the player
-                    // forwards to BookPlaybackController, which owns the
-                    // chapter chain. A no-op for notes.
-                    self.onChapterSkip?(-1)
-                case .nextChapter:
-                    self.onChapterSkip?(1)
-                case .skipBackward, .skipForward:
-                    // ±N-second seeking exists only for audiobooks; the
-                    // skip commands never reach this handler (they don't
-                    // fall through the router). Listed for exhaustiveness.
-                    break
-                }
+            guard let self else { return false }
+            return self.consumeRemoteCommand(command)
+        }
+    }
+
+    /// The TTS half of the remote-command router. True = this player acted
+    /// on the command; false = it could not (wrong state, nothing live), so
+    /// the command falls through / reports failure rather than being
+    /// silently swallowed.
+    private func consumeRemoteCommand(_ command: NowPlayingCenter.Command) -> Bool {
+        switch command {
+        case .play:
+            guard state == .paused else { return false }
+            claimPlaybackOwnership("remote play")
+            engine?.resume()
+            return true
+        case .pause:
+            guard state == .speaking else { return false }
+            engine?.pause()
+            return true
+        case .toggle:
+            switch state {
+            case .speaking:
+                engine?.pause()
+                return true
+            case .paused:
+                claimPlaybackOwnership("remote toggle")
+                engine?.resume()
+                return true
+            default:
+                return false
             }
+        case .stop:
+            guard state != .idle else { return false }
+            stop()
+            return true
+        case .previousChapter:
+            // Chapter-gone-back is a book-level op — the player forwards to
+            // BookPlaybackController, which owns the chapter chain. A no-op
+            // for notes, and reported as such.
+            guard nowPlayingBookId != nil else { return false }
+            onChapterSkip?(-1)
+            return true
+        case .nextChapter:
+            guard nowPlayingBookId != nil else { return false }
+            onChapterSkip?(1)
+            return true
+        case .skipBackward, .skipForward:
+            // ±N-second seeking exists only for audiobooks; the skip
+            // commands never reach this handler (they don't fall through
+            // the router). Listed for exhaustiveness.
+            return false
         }
     }
 
@@ -892,11 +925,21 @@ final class SpeechPlayer: ObservableObject {
     /// An abandoned session is a deliberate end, like an explicit stop: the
     /// bookmark is cleared, NOT persisted, so the abandoned position never
     /// auto-resumes on the next foreground (the user chose to leave it).
-    private func abandonLiveSession(reason: String) {
+    ///
+    /// `preservingBookmark: true` is the TAKEOVER variant: the in-flight
+    /// mark is written to its slot (not removed), so the item being
+    /// abandoned stays resumable exactly where the listener left it —
+    /// "note A paused → open note B → play B" must leave A resumable. Same
+    /// cleanup path either way; only the bookmark's fate differs.
+    private func abandonLiveSession(reason: String, preservingBookmark: Bool = false) {
         guard state != .idle else { return }
-        Log.shared.info("SpeechPlayer: abandoning live session (\(reason))")
+        Log.shared.info("SpeechPlayer: abandoning live session (\(reason)\(preservingBookmark ? ", bookmark preserved" : ""))")
         onNaturalFinish = nil
-        clearBookmark()
+        if preservingBookmark {
+            persistPlaybackBookmark()
+        } else {
+            clearBookmark()
+        }
         engine?.stop()
         state = .idle
         endPlaybackGraceIfNeeded()
@@ -1315,24 +1358,62 @@ final class SpeechPlayer: ObservableObject {
         // that forgets the teardown can't wedge the player, because the very
         // next tap heals it.
         healStuckStateIfNeeded()
+        // What does this tap MEAN? The identity decision lives in
+        // SpeechLogic (CI-pinned): the same item the live session is playing
+        // — or a transport-only tap carrying no identity (the mini-player) —
+        // is a pause/resume; a DIFFERENT identified item is a takeover that
+        // preserves the live item's bookmark and starts the tapped one. The
+        // device-log bug this fixes: the old code resumed whatever was
+        // paused regardless of which item the caller asked for.
+        let requestedId = PlaybackTakeoverPolicy.identity(
+            noteId: note?.id.uuidString,
+            bookId: book?.id
+        )
+        let liveId = PlaybackTakeoverPolicy.identity(
+            noteId: nowPlayingNoteId?.uuidString,
+            bookId: nowPlayingBookId
+        )
+        let decision = PlaybackTakeoverPolicy.decide(
+            requestedItemId: requestedId,
+            liveItemId: liveId
+        )
         // Anything that isn't a book speak ends book auto-advance and the
-        // book's lock-screen dressing.
-        if book == nil {
+        // book's lock-screen dressing — but ONLY when the tap actually
+        // hands playback over or starts fresh. A transport-only toggle of a
+        // live book session must keep the chain, the payload and the
+        // read-along exactly as they are (the mini-player pause/resume bug).
+        if book == nil, decision != .transport {
             onNaturalFinish = nil
             nowPlayingPayload = NowPlayingPayload()
+        }
+        if decision == .takeoverKeepBookmark {
+            // Preserve the live item's bookmark, end its session, reset to
+            // idle — the tapped item then starts through the plain idle path
+            // below. abandonLiveSession clears the lock-screen dressing, so
+            // a book takeover re-asserts the chapter buttons (the controller
+            // enables them BEFORE the speak call; the abandon would
+            // otherwise undo that).
+            abandonLiveSession(reason: "switching to another item", preservingBookmark: true)
+            if book != nil {
+                NowPlayingCenter.shared.setChapterSkipEnabled(true)
+            }
         }
         switch state {
         case .generating:
             // Tapping during generation cancels a NOTE's pending speech.
             // For a BOOK the tap is far more likely a stray double-tap:
             // cancelling there would kill the chapter AND the auto-advance
-            // chain, which reads as "the book stopped by itself".
+            // chain, which reads as "the book stopped by itself". (A
+            // takeover never reaches this case — it reset state to .idle
+            // above.)
             if book == nil { stop() }
         case .speaking:
             engine?.pause()
         case .paused:
+            claimPlaybackOwnership("resume")
             engine?.resume()
         case .idle:
+            claimPlaybackOwnership("start")
             ensureNowPlayingWired()
             nowPlayingTitle = note?.title ?? book?.title
             nowPlayingNoteId = note?.id
@@ -1409,6 +1490,34 @@ final class SpeechPlayer: ObservableObject {
         abandonLiveSession(reason: "explicit stop")
     }
 
+    // MARK: - Single playback ownership (TTS ↔ audiobook)
+
+    /// Fired the moment THIS player is about to produce audio — a fresh
+    /// speak, a resume, an audition. SpeechnotesApp wires it to the
+    /// audiobook player's takeover stop, which is what makes the ownership
+    /// rule hold: TTS claiming the audio ends the audiobook through its own
+    /// position-preserving stop, and the two surfaces can never sound
+    /// together. One-directional per side — the audiobook's equivalent
+    /// callback stops THIS player — so wiring both cannot recurse.
+    var takesOverOtherPlayers: (() -> Void)?
+
+    /// Ends a live TTS session because the OTHER playback surface (an
+    /// audiobook) is taking the audio. The bookmark is PRESERVED — the
+    /// note/book stays resumable where the listener left it; only the
+    /// pipeline ends.
+    func stopForExternalTakeover() {
+        guard state != .idle else { return }
+        abandonLiveSession(reason: "audiobook takeover", preservingBookmark: true)
+    }
+
+    /// Internal: fire the takeover callback before producing audio. Cheap by
+    /// design — the audiobook side no-ops when nothing is loaded.
+    private func claimPlaybackOwnership(_ source: String) {
+        guard let takesOverOtherPlayers else { return }
+        Log.shared.info("SpeechPlayer: claiming playback ownership (\(source))")
+        takesOverOtherPlayers()
+    }
+
     // MARK: - Voice auditions
 
     /// Speaks a short sample with a voice WITHOUT committing the selection —
@@ -1480,6 +1589,7 @@ final class SpeechPlayer: ObservableObject {
         auditioningVoice = codename
         let name = VoiceCatalog.shortName(for: codename, kind: targetKind)
         Log.shared.info("SpeechPlayer: auditioning \(codename) (commit \(commit))")
+        claimPlaybackOwnership("voice audition")
         engine?.speak(VoiceCatalog.auditionText(for: name), rateMultiplier: 1.0)
     }
 

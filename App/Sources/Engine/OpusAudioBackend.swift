@@ -326,6 +326,21 @@ final class OpusAudioBackend: BookAudioBackend {
     /// Main thread.
     private func startPlayback() {
         guard let decoder else { return }
+        // IDEMPOTENCE: the play-plus-seek sequence (play() → commitSeek →
+        // play() again) and a resume racing the ticker can reach here while
+        // audio is ALREADY rendering. A second full pass re-ran the session
+        // configure/activate, the graph reconnect decision, engine.start
+        // and the pump — the duplicate "playback start" events in the device
+        // log, and duplicate feed iterations racing the generation counter.
+        // When rendering, a repeat start only needs the session re-asserted
+        // and the lookahead topped up. A seek never lands here: seek() stops
+        // the node FIRST, so isRendering is false and the full path runs
+        // (the seek-driven rearm is preserved).
+        if isRendering {
+            AudioSessionSetup.activate(prefix: "OpusAudioBackend")
+            pump()
+            return
+        }
         // PROBE: the device log from an Opus play tap has never gone deeper
         // than "stream ready" — without this line a silent failure cannot be
         // placed between "engine never started" and "engine ran, no sound".

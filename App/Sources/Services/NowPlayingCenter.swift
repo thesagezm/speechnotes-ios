@@ -1,5 +1,6 @@
 import Foundation
 import MediaPlayer
+import SpeechLogic
 import UIKit
 
 /// Keeps the lock screen / Control Center "Now Playing" surface in sync with
@@ -36,7 +37,10 @@ final class NowPlayingCenter {
     }
 
     /// Set by SpeechPlayer once — decides what each remote command does.
-    var onCommand: ((Command) -> Void)?
+    /// Returns true when the TTS side actually consumed the command (acted
+    /// on it); false lets the target report failure so iOS does not believe
+    /// a command was handled by a session that no longer exists.
+    var onCommand: ((Command) -> Bool)?
 
     /// Set by AudioBookPlayer on its first play and never removed. Returns
     /// true when it consumed the command (an audiobook is the active
@@ -47,16 +51,64 @@ final class NowPlayingCenter {
     /// leave whichever wired second in permanent control.
     var audioBookHandler: ((Command) -> Bool)?
 
-    private func dispatch(_ command: Command) {
+    /// True when SOME owner consumed `command`. A command no owner consumed
+    /// (nothing playing, or the live player cannot act on it) reports
+    /// failure to iOS instead of the old blanket `.success` — the lock
+    /// screen then stops believing every tap "worked" against a dead
+    /// session, which is exactly the stale-surface symptom that made Control
+    /// Center keep sending pause against a paused session.
+    @discardableResult
+    private func dispatch(_ command: Command) -> Bool {
+        var consumed = false
         switch command {
         case .skipBackward, .skipForward:
             // Seconds-addressable content only: a ±15 s seek into
             // synthesized speech is a lie (it's generated per sentence
             // chunk), so these never fall through to SpeechPlayer.
-            if let audioBookHandler { _ = audioBookHandler(command) }
+            if let audioBookHandler { consumed = audioBookHandler(command) }
         default:
-            if let audioBookHandler, audioBookHandler(command) { return }
-            onCommand?(command)
+            if let audioBookHandler, audioBookHandler(command) {
+                consumed = true
+            } else if let onCommand {
+                consumed = onCommand(command)
+            }
+        }
+        logCommandOutcome(command: command, consumed: consumed)
+        return consumed
+    }
+
+    // MARK: Bounded command logging
+
+    /// One line per distinct outcome, throttled so a mash of lock-screen
+    /// taps cannot spam the log: a future device log must be able to
+    /// distinguish a ROUTED command (somebody consumed it) from an IGNORED
+    /// one (no owner acted — nothing is playing, or the live player cannot),
+    /// and from an accepted-but-silent resume (the resume path's own log
+    /// lines cover that case). The throttle holds one suppressed count per
+    /// outcome so the log still says how many repeats it ate.
+    private var lastCommandLogAt: Date?
+    private var lastCommandLogKey: String?
+    private var suppressedCommandLogs = 0
+    private static let commandLogCooldown: TimeInterval = 2.0
+
+    private func logCommandOutcome(command: Command, consumed: Bool) {
+        let key = "\(command)-\(consumed)"
+        let now = Date()
+        if key == lastCommandLogKey, let last = lastCommandLogAt,
+           now.timeIntervalSince(last) < Self.commandLogCooldown {
+            suppressedCommandLogs += 1
+            return
+        }
+        if suppressedCommandLogs > 0, lastCommandLogKey != nil {
+            Log.shared.info("NowPlayingCenter: (+\(suppressedCommandLogs) suppressed repeats)")
+        }
+        suppressedCommandLogs = 0
+        lastCommandLogKey = key
+        lastCommandLogAt = now
+        if consumed {
+            Log.shared.info("NowPlayingCenter: remote \(command) routed to the active playback owner")
+        } else {
+            Log.shared.info("NowPlayingCenter: remote \(command) IGNORED — no playback owner consumed it")
         }
     }
 
@@ -77,6 +129,11 @@ final class NowPlayingCenter {
     /// Wall-clock of the last publish — writes are throttled since every
     /// engine progress tick would otherwise spam mediaserverd.
     private var lastPublishAt: Date?
+    /// The playing state the last WRITE published — the state-edge ledger.
+    /// A publish whose isPlaying differs from this bypasses the cadence
+    /// throttle entirely (see NowPlayingPublishPolicy); reset in `clear()`
+    /// so the first publish of a fresh session is never throttled either.
+    private var lastPublishedIsPlaying: Bool?
 
     private var configured = false
 
@@ -100,13 +157,11 @@ final class NowPlayingCenter {
 
         commands.previousTrackCommand.addTarget { [weak self] _ in
             guard let self else { return .commandFailed }
-            self.dispatch(.previousChapter)
-            return .success
+            return self.dispatch(.previousChapter) ? .success : .commandFailed
         }
         commands.nextTrackCommand.addTarget { [weak self] _ in
             guard let self else { return .commandFailed }
-            self.dispatch(.nextChapter)
-            return .success
+            return self.dispatch(.nextChapter) ? .success : .commandFailed
         }
 
         // The lock screen's skip buttons (v1.7.2, audiobooks): iOS shows
@@ -118,34 +173,28 @@ final class NowPlayingCenter {
         commands.skipForwardCommand.isEnabled = false
         commands.skipBackwardCommand.addTarget { [weak self] _ in
             guard let self else { return .commandFailed }
-            self.dispatch(.skipBackward)
-            return .success
+            return self.dispatch(.skipBackward) ? .success : .commandFailed
         }
         commands.skipForwardCommand.addTarget { [weak self] _ in
             guard let self else { return .commandFailed }
-            self.dispatch(.skipForward)
-            return .success
+            return self.dispatch(.skipForward) ? .success : .commandFailed
         }
 
         commands.togglePlayPauseCommand.addTarget { [weak self] _ in
             guard let self else { return .commandFailed }
-            self.dispatch(.toggle)
-            return .success
+            return self.dispatch(.toggle) ? .success : .commandFailed
         }
         commands.playCommand.addTarget { [weak self] _ in
             guard let self else { return .commandFailed }
-            self.dispatch(.play)
-            return .success
+            return self.dispatch(.play) ? .success : .commandFailed
         }
         commands.pauseCommand.addTarget { [weak self] _ in
             guard let self else { return .commandFailed }
-            self.dispatch(.pause)
-            return .success
+            return self.dispatch(.pause) ? .success : .commandFailed
         }
         commands.stopCommand.addTarget { [weak self] _ in
             guard let self else { return .commandFailed }
-            self.dispatch(.stop)
-            return .success
+            return self.dispatch(.stop) ? .success : .commandFailed
         }
     }
 
@@ -190,14 +239,20 @@ final class NowPlayingCenter {
             playStartedAt = nil
         }
 
-        // Throttle: mediaserverd doesn't need per-tick updates.
-        if !isPlaying, let since = lastPublishAt, now.timeIntervalSince(since) < 0.75 {
-            return
-        }
-        if isPlaying, let since = lastPublishAt, now.timeIntervalSince(since) < 0.5 {
-            return
-        }
+        // Throttle: mediaserverd doesn't need per-tick updates — EXCEPT a
+        // play/pause STATE EDGE, which is exactly what the device-log bug
+        // hinged on (a throttled pause left the published rate nonzero
+        // indefinitely, so Control Center kept showing "playing" and sent
+        // another pause). The decision lives in SpeechLogic so CI pins it:
+        // edges publish immediately; only same-state cadence updates wait.
+        let sinceLast = lastPublishAt.map { now.timeIntervalSince($0) }
+        guard NowPlayingPublishPolicy.shouldPublish(
+            isPlaying: isPlaying,
+            lastPublishedIsPlaying: lastPublishedIsPlaying,
+            secondsSinceLastPublish: sinceLast
+        ) else { return }
         lastPublishAt = now
+        lastPublishedIsPlaying = isPlaying
 
         let displayTitle = (title?.isEmpty == false) ? title! : "Speechnotes"
 
@@ -273,11 +328,15 @@ final class NowPlayingCenter {
     }
 
     /// Clear the lock-screen surface (speech finished, stopped, or reset).
+    /// The publish ledger resets WITH the surface: the first publish of the
+    /// next session must not be throttled against a timestamp (or a playing
+    /// state) that belonged to a session that no longer exists.
     func clear() {
         infoCenter.nowPlayingInfo = nil
         elapsed = 0
         playStartedAt = nil
         lastPublishAt = nil
+        lastPublishedIsPlaying = nil
         currentSubtitle = nil
         currentArtwork = nil
     }

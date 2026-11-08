@@ -285,12 +285,20 @@ final class StreamingTTSPlaybackCore: NSObject {
     /// real audio was queued — exactly the starvation it exists to ride out.
     private var realBuffersOnNode = 0
 
-    /// `backgroundTimeRemaining` for the snapshot/vitals lines: `inf` when
-    /// the system considers this app's background time unbounded (the audio
-    /// assertion holding), a countdown otherwise. Main thread only.
+    /// `backgroundTimeRemaining` for the snapshot/vitals lines: "unbounded"
+    /// when the system considers this app's background time unlimited (the
+    /// audio assertion holding), a countdown otherwise. Main thread only.
+    ///
+    /// UIKit reports the unbounded case as `Double.greatestFiniteMagnitude` —
+    /// FINITE, so an `isFinite` check alone printed a 17-digit number into
+    /// every snapshot/vitals line. Any value at the sentinel's scale means
+    /// the same thing: no countdown exists.
     private static func taskWindowDescription() -> String {
         let remaining = UIApplication.shared.backgroundTimeRemaining
-        return remaining.isFinite ? String(format: "%.0fs", remaining) : "inf (assertion held)"
+        if !remaining.isFinite || remaining >= .greatestFiniteMagnitude / 2 {
+            return "unbounded (assertion held)"
+        }
+        return String(format: "%.0fs", remaining)
     }
 
     /// Main thread, from the background-transition observers.
@@ -1093,24 +1101,65 @@ final class StreamingTTSPlaybackCore: NSObject {
     }
 
     func pause() {
-        guard audioEngineRunning, playerNode.isPlaying else { return }
+        // STATE-driven, not node-flag-driven: a pause accepted while the
+        // node happened to be dry (mid-generation, or a drained queue
+        // between bridge buffers) used to no-op entirely — the session kept
+        // claiming speech and Control Center kept showing "playing". The
+        // node's own pause() is a safe no-op when it is not playing.
+        guard state == .speaking || state == .generating else { return }
+        let nodeWasPlaying = playerNode.isPlaying
         playerNode.pause()
         metrics.playbackPaused()
         state = .paused
+        // Diagnostic edge: distinguish "paused real audio" from "accepted a
+        // pause for a session whose node was already silent" — the latter is
+        // the accepted-but-silent signature a device log must be able to
+        // name. User-action-driven, so this line cannot spam.
+        if !nodeWasPlaying {
+            Log.shared.info("\(config.logPrefix) pause accepted with a DRY node (the session was claiming speech but nothing was sounding)")
+        }
     }
 
     func resume() {
-        guard audioEngineRunning, !playerNode.isPlaying, state == .paused else { return }
+        // The engine/node guard is deliberately GONE from the guard: the
+        // cached flags go stale across interruptions and route changes (iOS
+        // can stop the engine without our observer firing), and a resume
+        // that refuses to run on a stale flag is the accepted-but-silent
+        // wedge. Everything below repairs instead of refusing.
+        guard state == .paused, !playerNode.isPlaying else { return }
+        // 1. Re-activate the session FIRST: iOS leaves it inactive after an
+        //    interruption, and a configured-but-inactive session renders
+        //    silence no matter what the engine and node do.
+        AudioSessionSetup.activate(prefix: config.logPrefix)
+        // 2. Restart the actual engine when it is not running — the cached
+        //    `audioEngineRunning` flag is not trusted here, the engine
+        //    object itself is asked. On failure ensureAudioEngineRunning has
+        //    already flipped the session to .idle (teardown); we then NEVER
+        //    claim .speaking.
+        if !audioEngine.isRunning {
+            let format = connectedFormat
+                ?? AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1)
+            guard let format, ensureAudioEngineRunning(format: format) else {
+                Log.shared.error("\(config.logPrefix) resume aborted — the engine could not be restarted")
+                return
+            }
+        }
+        // 3. The node itself, without the fragile precondition chain: play()
+        //    on a non-playing node is exactly what resume means.
         playerNode.play()
         // Closes the paused-time bank so `wall` in the session summary can be
         // read honestly next to the audio figure.
         metrics.playbackResumed()
         state = .speaking
-        // A pause that landed during a dry, unbridged window (the arm paths
-        // never ran — the state guard rejects .paused) resumes into silence
-        // with nothing queued to re-trigger scheduling: re-check the bridge
-        // now that the state claims speech again. No-op when audio is queued.
+        // 4. Re-drive scheduling and the bridge: a pause that landed during
+        //    a dry window (the arm paths never ran — their state guards
+        //    reject .paused) resumes into silence with nothing queued to
+        //    re-trigger scheduling. Both calls are no-ops when audio is
+        //    already queued, and scheduleReadyChunks' tail re-checks the
+        //    bridge.
+        scheduleReadyChunks(generation: playbackGeneration)
         scheduleBridgeSilenceIfNeeded()
+        Log.shared.info("\(config.logPrefix) resume accepted — engine running, node playing, schedule re-driven")
     }
 
     func stop() {
