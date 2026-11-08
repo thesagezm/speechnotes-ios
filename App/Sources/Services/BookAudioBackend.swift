@@ -23,6 +23,13 @@ protocol BookAudioBackend: AnyObject {
     /// (an AVPlayer item still opening, an Opus stream still loading).
     var currentTime: Double? { get }
 
+    /// True while a play() is in flight but nothing renders yet — an Opus
+    /// stream still loading (the whole-file read on a multi-GB book takes
+    /// seconds), an AVPlayer item still opening/buffering. The reader shows
+    /// a real preparing state from this and ignores repeat play taps
+    /// instead of starting competing sessions.
+    var isPreparingPlayback: Bool { get }
+
     /// The rate playback resumes at after play()/pause(). Kept separate from
     /// `rate` because setting `rate` on a PAUSED AVPlayer silently starts
     /// playback — `AudioBookPlayer.applyRate` documents the trap.
@@ -63,6 +70,11 @@ final class AVPlayerBackend: BookAudioBackend {
     private var durationObserver: NSKeyValueObservation?
 
     var isRendering: Bool { player.timeControlStatus == .playing }
+
+    /// `.waitingToPlayAtSpecifiedRate` is AVPlayer's own "a play() was
+    /// accepted but the item is not ready" — the honest preparing signal
+    /// for this backend.
+    var isPreparingPlayback: Bool { player.timeControlStatus == .waitingToPlayAtSpecifiedRate }
 
     var currentTime: Double? { AudioBookPlayer.seconds(of: player.currentTime()) }
 
