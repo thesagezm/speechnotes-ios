@@ -200,7 +200,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Kokoro small model")
                 } footer: {
-                    Text("The uint8 build of the same Kokoro graph — half the footprint of fp32 with a small quality step down. Shares the 28-voice catalog, tokenizer and voice bank with the model above.")
+                    Text("The int8-quantized build of the same Kokoro graph — about a quarter of the footprint of fp32 with a small quality step down. Shares the 28-voice catalog, tokenizer and voice bank with the model above.")
                 }
 
                 Section {

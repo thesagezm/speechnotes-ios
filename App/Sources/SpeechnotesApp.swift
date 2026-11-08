@@ -40,6 +40,14 @@ struct SpeechnotesApp: App {
         CrashMarker.installAndReplay()
     }
 
+    init() {
+        // First thing the process does: install the crash marker and replay
+        // the previous launch's verdict. The 2026-10-23 device log cut off
+        // mid-generation with live audio I/O — the next one must be able to
+        // say which of "crashed" vs "system-killed (jetsam/purge)" that was.
+        CrashMarker.installAndReplay()
+    }
+
     private enum Tab: Hashable, CaseIterable, Identifiable {
         case notes, books, stats, settings
 
@@ -291,20 +299,13 @@ struct SpeechnotesApp: App {
                 .onChange(of: scenePhase) { phase in
                     if phase == .background {
                         wasBackgrounded = true
-                        // The one sanctioned keep-alive: iOS grants a short
-                        // background task to every app at backgrounding, and
-                        // a TTS session that is mid-synthesis needs it — the
-                        // render-ahead producer runs on a queue, but its bank
-                        // recompute and every callback hop run on the main
-                        // thread, which iOS stops servicing the moment the
-                        // app suspends. The task ends the moment speech
-                        // finishes or the grace expires (whichever first) —
-                        // the same shape as the chapter-gap graces, and
-                        // explicitly NOT a general keep-alive (guideline
-                        // 2.4.2). This is the "playing from the book's own
-                        // screen dies when I switch apps" report: playback
-                        // begun from the reader was the one path that never
-                        // held a task.
+                        // Arm the bounded playback grace while speech is
+                        // live: the window that bridges first-chunk
+                        // generation and chapter gaps before audio I/O
+                        // takes over the assertion. Playback started from any
+                        // surface — the note editor, a book reader, the
+                        // mini-player — gets the same coverage.
+                        player.isAppBackgrounded = true
                         player.beginPlaybackGraceIfNeeded()
                     }
                     // The watchdog is armed only while foregrounded: a
@@ -329,6 +330,14 @@ struct SpeechnotesApp: App {
                         audioBooks.persistNow()
                     }
                     if phase == .active {
+                        // Release the playback grace task in the FOREGROUND
+                        // so the NEXT backgrounding arms a FRESH ~30 s
+                        // window. Held-over tasks were the 2026-10-23 log's
+                        // trap: bg → 6 s foreground peek → bg again got the
+                        // FIRST task's expiry clock, not a new one, leaving
+                        // the second backgrounding with no grace at all.
+                        player.isAppBackgrounded = false
+                        player.endPlaybackGraceIfNeeded()
                         // Returning from a REAL backgrounding (the flag is
                         // only armed by .background, so .inactive blips and
                         // the initial activation never reach this):

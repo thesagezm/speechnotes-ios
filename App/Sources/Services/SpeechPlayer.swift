@@ -437,6 +437,7 @@ final class SpeechPlayer: ObservableObject {
                 persistPlaybackBookmark()
                 engine?.stop()
                 state = .idle
+                endPlaybackGraceIfNeeded()
                 lastRawProgress = 0
                 resumeBaseFraction = 0
                 nowPlayingTitle = nil
@@ -952,17 +953,19 @@ final class SpeechPlayer: ObservableObject {
         // lesson). The other engines' sessions are an order of magnitude
         // smaller and stay warm for instant switching — EXCEPT Kokoro's:
         // an fp32 ORT session is ~326 MB, and Supertonic + Kokoro resident
-        // together is exactly the PLAN-BACKGROUND-PERSISTENCE §4 jetsam kill
-        // arithmetic. The mirror of the Supertonic release, for the same
-        // reason: the system engine is the only one cheap enough to keep.
-        // (scheduleKokoroIdleUnload above only handles the STILL-on-Kokoro
-        // case; its guard returns early on a switch-away, which is how the
-        // session used to stay resident here.)
+        // together is exactly the background-persistence jetsam arithmetic
+        // (phys_footprint vs the ceiling, see the memory vitals). The mirror
+        // of the Supertonic release, for the same reason: only the system
+        // engine is cheap enough to keep warm. (scheduleKokoroIdleUnload
+        // above only covers the STAYING-on-Kokoro case; its guard returns
+        // early on a switch-away, which is how the session used to stay
+        // resident here.)
         if engineKind != .supertonic {
             supertonicEngine = nil
         }
         if engineKind != .kokoro {
             onnxEngine = nil
+            onnxEngineFileIsBig = true
         }
         if engineKind == .supertonic, ModelManager.shared.supertonicIsReady {
             if supertonicEngine == nil {
@@ -1021,6 +1024,12 @@ final class SpeechPlayer: ObservableObject {
                       activeEngine === self.engine else { return }
                 self.state = newState
                 if newState == .idle {
+                    // The grace window exists for live speech only — idle in
+                    // every form (note finish, chapter finish, stop, abandon)
+                    // hands it back BEFORE the book-chain guard below, since a
+                    // book's between-chapters idle is exactly when the
+                    // chapter-gap grace takes over.
+                    self.endPlaybackGraceIfNeeded()
                     // BOOK completion is handled ENTIRELY by onFinished
                     // (which fires before this idle transition): it advances
                     // the chapter, re-publishes the lock screen, and clears
@@ -1043,6 +1052,27 @@ final class SpeechPlayer: ObservableObject {
                     self.endReadAlong()
                     NowPlayingCenter.shared.clear()
                 } else {
+                    // Grace-window housekeeping per transition, then the
+                    // lock-screen publish — which must run for EVERY non-idle
+                    // state (the old single else was the publish's home; the
+                    // branches below must not swallow it).
+                    if newState == .paused {
+                        // Paused audio holds no background assertion worth the
+                        // window: hand the grace back so a parked session does
+                        // not pin background time. A backgrounded resume
+                        // re-arms via the .speaking/.generating case below.
+                        self.endPlaybackGraceIfNeeded()
+                    } else if newState == .speaking || newState == .generating {
+                        // A transition INTO live speech while already
+                        // backgrounded (lock-screen play, a chapter advancing
+                        // under the lock screen) fires no scenePhase event —
+                        // arm the grace here. The flag keeps the window scoped
+                        // to real background use; foreground sessions rely on
+                        // being foregrounded.
+                        if self.isAppBackgrounded {
+                            self.beginPlaybackGraceIfNeeded()
+                        }
+                    }
                     NowPlayingCenter.shared.publish(
                         title: self.nowPlayingTitle,
                         subtitle: self.nowPlayingSubtitle(),
@@ -1173,19 +1203,26 @@ final class SpeechPlayer: ObservableObject {
 
     // MARK: - Background playback grace
 
-    /// The scenePhase-background keep-alive (see SpeechnotesApp). Held ONLY
-    /// while speech is actually live, and ended the moment it isn't —
-    /// `endPlaybackGraceIfNeeded` runs from every idle transition, so an
-    /// abandoned session can't pin the app in the background.
+    /// The scenePhase-background keep-alive. A BOUNDED grace window (~30 s,
+    /// iOS-assigned), not a keep-alive: it bridges the vulnerable stretch
+    /// where the state claims speech but no audio I/O is sounding yet —
+    /// first-chunk generation, a chapter gap, a thermally throttled render.
+    /// Once audio I/O is live, the background-audio assertion (plus the
+    /// core's silence bridge and 10 s health check) carries the session.
+    ///
+    /// Armed when the app backgrounds with speech live, re-armed on a
+    /// backgrounded state transition INTO speaking/generating (a lock-screen
+    /// play tap fires no scenePhase event), and ended on idle, pause, and
+    /// foreground return — so each backgrounding arms a FRESH window instead
+    /// of inheriting the first task's expiry clock.
     private var playbackGraceTask: UIBackgroundTaskIdentifier = .invalid
+    /// Tracks whether the app is currently backgrounded — set by
+    /// SpeechnotesApp's scenePhase hook, read to decide whether a .speaking/
+    /// .generating transition should (re-)arm the grace. (Setter is internal
+    /// on purpose: SpeechnotesApp is the writer, not SpeechPlayer itself.)
+    var isAppBackgrounded = false
 
-    /// Arms the background grace if (and only if) speech is live. Called by
-    /// SpeechnotesApp on .background. Playback started from any surface —
-    /// the note editor, a book reader, the mini-player — gets the same
-    /// coverage; the window where nothing held a task was exactly the
-    /// "force-quits when I leave the book's own screen" report
-    /// (2026-10-13): audio renders, but the first main-thread stall has no
-    /// scheduled audio behind it and iOS suspends the process.
+    /// Arms the background grace if (and only if) speech is live. Idempotent.
     func beginPlaybackGraceIfNeeded() {
         guard state == .speaking || state == .generating else { return }
         guard playbackGraceTask == .invalid else { return }
@@ -1198,12 +1235,12 @@ final class SpeechPlayer: ObservableObject {
             Log.shared.info("SpeechPlayer: background grace EXPIRED — from here only live audio I/O keeps the process running")
             self?.endPlaybackGraceIfNeeded()
         }
-        Log.shared.info("SpeechPlayer: background grace armed for live speech")
+        Log.shared.info("SpeechPlayer: background grace armed for live speech (\(state))")
     }
 
     /// Ends the grace — idempotent, safe to call from any state transition
-    /// that means "speech is over" (natural finish, stop, abandon) or from
-    /// the system's expiration handler.
+    /// that means "speech is over or paused" (natural finish, stop, abandon,
+    /// pause) or from the system's expiration handler.
     func endPlaybackGraceIfNeeded() {
         guard playbackGraceTask != .invalid else { return }
         UIApplication.shared.endBackgroundTask(playbackGraceTask)

@@ -2,12 +2,15 @@ import XCTest
 import OnnxRuntimeBindings
 import SpeechLogic
 
-/// CI spike: proves the small Kokoro tier (uint8, ~177 MB) runs on ONNX
+/// CI spike: proves the compact Kokoro tier (int8 `model_quantized.onnx`,
+/// ~92 MB) runs on ONNX
 /// Runtime CPU before any device build — the model loads, the
 /// input_ids/style/speed contract holds, tokenizer.json's vocab accepts the
 /// app's per-character lookup, and the output is audible-length non-silent
 /// audio written as a WAV. This gate caught the fp16 variant producing NaN
-/// on ORT CPU (CI 34008548349) — the proven uint8 build ships instead.
+/// on ORT CPU (CI 34008548349); fp16 stays banned, and the corrupt uint8
+/// graph (e64b456/f9b2558) was replaced by the int8 build the fp32-oracle
+/// A/B scored equal-or-better in 5 of 6 cases.
 ///
 /// Batch A1 added four proofs around the inference test. Together they
 /// answer the Kokoro gibberish question: **is the tokenizer capable of
@@ -348,7 +351,7 @@ final class KokoroSmallSpikeTests: XCTestCase {
     /// The most recent batch-audit finding I am acting on: the 28-voice
     /// proof must not be able to degrade to a skip.
     ///
-    /// `XCTSkip` is right for the model-inference tests, which need a 177 MB
+    /// `XCTSkip` is right for the model-inference tests, which need a 92 MB
     /// download. It is WRONG for this one: the spike job already downloads
     /// `voices.npz` unconditionally, so its absence means the job's own
     /// plumbing is broken — and a skip would report green on a proof that
@@ -573,21 +576,24 @@ final class KokoroSmallSpikeTests: XCTestCase {
     /// sound: the oracle renders bit-deterministically (0/92 400 samples
     /// differ, rel-RMS 0.000000), and the uint8 graph is STRUCTURALLY
     /// DIFFERENT — onnx.quantize rewrote two MatMuls, so calibration cannot
-    /// fix what is a different computation, not a noisier one.
+    /// fix what is a different computation, not a noisier one. That verdict
+    /// is what retired the uint8 build: the Compact tier now ships the
+    /// int8 `model_quantized.onnx` instead, which the same fp32-oracle A/B
+    /// scored equal-or-better in 5 of 6 cases.
     ///
-    /// A gate that asserts a proven-impossible property can only ever be
-    /// red, and a permanently red job hides the NEXT real regression —
+    /// A gate that asserts a proven-impossible property can only ever
+    /// be red, and a permanently red job hides the NEXT real regression —
     /// that is why this is now an EVIDENCE test: it still renders both
     /// tiers and prints the full metric set (peak/RMS/length/rel-RMS/
     /// best-lag correlation) so any future re-quantization run reports its
     /// numbers in the log, but it pins only what is provable — that the
-    /// uint8 graph RUNS and produces real, finite, audible-length audio
+    /// compact graph RUNS and produces real, finite, audible-length audio
     /// (the shipping bar for the Compact tier), and that the two renders
     /// are recorded as artifacts for the ear.
     ///
-    /// If the uint8 tier is ever re-quantized with a graph that should match
-    /// fp32, restore the correlation assertions from git history
-    /// (60b75f6) and let the gate fail loudly again.
+    /// If a future re-quantization should match fp32, restore the
+    /// correlation assertions from git history (60b75f6) and let the gate
+    /// fail loudly again.
     func testQuantizedRenderEvidence() throws {
         let fm = FileManager.default
         let fp32Path = "\(fixtureDir)/model.onnx"
@@ -601,14 +607,14 @@ final class KokoroSmallSpikeTests: XCTestCase {
         }
         let phonemes = Self.phonemeCorpus[0]
 
-        let uint8Samples = try renderSamples(modelPath: modelPath, phonemes: phonemes, voiceFlat: voiceFlat, vocab: vocab)
+        let compactSamples = try renderSamples(modelPath: modelPath, phonemes: phonemes, voiceFlat: voiceFlat, vocab: vocab)
         let fp32Samples = try renderSamples(modelPath: fp32Path, phonemes: phonemes, voiceFlat: voiceFlat, vocab: vocab)
         XCTAssertGreaterThan(fp32Samples.count, 1_000, "fp32 render too short to compare")
-        XCTAssertGreaterThan(uint8Samples.count, 1_000, "uint8 render too short to compare")
+        XCTAssertGreaterThan(compactSamples.count, 1_000, "compact render too short to compare")
 
         // The shipping bar for the Compact tier, unchanged from the spike's
         // original purpose: the graph runs and produces real audio.
-        for (label, samples) in [("uint8", uint8Samples), ("fp32", fp32Samples)] {
+        for (label, samples) in [("compact", compactSamples), ("fp32", fp32Samples)] {
             let peak = samples.map { abs(Double($0)) }.max() ?? 0
             let rms = sqrt(samples.reduce(0.0) { $0 + Double($1) * Double($1) } / Double(samples.count))
             let nonFinite = samples.reduce(0) { $0 + (Double($1).isFinite ? 0 : 1) }
@@ -618,17 +624,18 @@ final class KokoroSmallSpikeTests: XCTestCase {
             XCTAssertGreaterThan(rms, 0.001, "\(label) output is effectively silent")
         }
 
-        // The divergence metrics, REPORTED not asserted — the 2026-10-08
-        // forensics established this divergence is a property of the
-        // shipped uint8 graph itself (see the method comment).
-        let lengthDelta = abs(uint8Samples.count - fp32Samples.count)
+        // The divergence metrics, REPORTED not asserted — for the retired
+        // uint8 graph the divergence was a property of the shipped graph
+        // itself (see the method comment); the int8 build is expected to
+        // sit close to the fp32 oracle, and the numbers land in the log.
+        let lengthDelta = abs(compactSamples.count - fp32Samples.count)
         let lengthAllowance = max(2_400, fp32Samples.count / 50)
-        print("KOKORO-SMALL-SPIKE quantization evidence: uint8 \(uint8Samples.count) samples vs fp32 \(fp32Samples.count) (delta \(lengthDelta), allowance \(lengthAllowance))")
+        print("KOKORO-SMALL-SPIKE quantization evidence: compact \(compactSamples.count) samples vs fp32 \(fp32Samples.count) (delta \(lengthDelta), allowance \(lengthAllowance))")
         XCTAssertLessThanOrEqual(lengthDelta, lengthAllowance,
                                  "render length diverged — the duration predictor moved, which the evidence table does not cover")
 
-        let n = min(uint8Samples.count, fp32Samples.count)
-        let u = Array(uint8Samples[0..<n])
+        let n = min(compactSamples.count, fp32Samples.count)
+        let u = Array(compactSamples[0..<n])
         let f = Array(fp32Samples[0..<n])
         let fp32RMS = sqrt(f.reduce(0.0) { $0 + Double($1) * Double($1) } / Double(n))
         let diffRMS = sqrt(zip(u, f).reduce(0.0) { $0 + Double($1.0 - $1.1) * Double($1.0 - $1.1) } / Double(n))
@@ -644,12 +651,12 @@ final class KokoroSmallSpikeTests: XCTestCase {
             fVariance += df * df
         }
         let correlation = covariance / max(sqrt(uVariance * fVariance), 1e-9)
-        print("KOKORO-SMALL-SPIKE quantization evidence: rel-RMS \(String(format: "%.4f", relativeRMS)), zero-lag correlation \(String(format: "%.4f", correlation)) — divergence is the documented state of the shipped uint8 graph (f9b2558), not a regression")
+        print("KOKORO-SMALL-SPIKE quantization evidence: rel-RMS \(String(format: "%.4f", relativeRMS)), zero-lag correlation \(String(format: "%.4f", correlation)) — int8 vs the fp32 oracle; the uint8 graph's structural divergence (f9b2558) is history, not a regression")
         // Both renders saved for the ear: correlation numbers alone never
         // carried the verdict — a human listening to the pair did.
         // `corpus-*` rides the existing artifact upload.
         let outDir = ProcessInfo.processInfo.environment["KOKORO_ARTIFACT_DIR"] ?? fixtureDir
-        try? WAVWriter.write(samples: uint8Samples, sampleRate: 24_000, to: URL(fileURLWithPath: "\(outDir)/corpus-quantgate-uint8.wav"))
+        try? WAVWriter.write(samples: compactSamples, sampleRate: 24_000, to: URL(fileURLWithPath: "\(outDir)/corpus-quantgate-compact.wav"))
         try? WAVWriter.write(samples: fp32Samples, sampleRate: 24_000, to: URL(fileURLWithPath: "\(outDir)/corpus-quantgate-fp32.wav"))
     }
 
@@ -657,7 +664,7 @@ final class KokoroSmallSpikeTests: XCTestCase {
     /// process with the SAME inputs, must agree EXACTLY.
     ///
     /// Without this, a zero correlation against fp32 has two possible
-    /// causes and the gate cannot tell them apart: (a) the uint8 weights
+    /// causes and the gate cannot tell them apart: (a) the compact weights
     /// genuinely corrupt the speech, or (b) ONNX Runtime CPU is producing
     /// nondeterministic output for this graph at all (float atomics in a
     /// parallel reduction, a race in an unsupported thread pool, a
@@ -669,7 +676,7 @@ final class KokoroSmallSpikeTests: XCTestCase {
     func testRenderIsDeterministicAcrossSessions() throws {
         let fm = FileManager.default
         guard fm.fileExists(atPath: modelPath), fm.fileExists(atPath: voicePath) else {
-            throw XCTSkip("determinism control needs the uint8 model and voice matrix")
+            throw XCTSkip("determinism control needs the compact model and voice matrix")
         }
         let vocab = try loadVocab()
         let voiceFlat = try Data(contentsOf: URL(fileURLWithPath: voicePath)).withUnsafeBytes {

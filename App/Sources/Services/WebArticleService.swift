@@ -25,6 +25,13 @@ struct WebArticle {
         case bypass
     }
     let route: Route
+
+    /// Strict shared-text → URL normalization used by the Notes importer.
+    /// The parser lives in SpeechLogic; this wrapper keeps the share-sheet
+    /// and clipboard call sites on this module's WebArticle type.
+    static func url(in text: String) -> URL? {
+        SpeechLogic.WebArticle.url(in: text)
+    }
 }
 
 /// URL → article text, in three passes of increasing cost:
