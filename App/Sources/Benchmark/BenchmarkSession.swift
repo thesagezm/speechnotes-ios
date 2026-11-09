@@ -487,7 +487,7 @@ final class BenchmarkSession {
 
     /// Elapsed seconds from `start` to `end`.
     static func seconds(from start: ContinuousClock.Instant, to end: ContinuousClock.Instant) -> Double {
-        let duration = start.durationTime(to: end)
+        let duration = start.duration(to: end)
         return Double(duration.components.seconds) + Double(duration.components.attoseconds) / 1e18
     }
 

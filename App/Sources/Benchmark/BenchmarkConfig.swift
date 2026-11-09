@@ -7,7 +7,7 @@ import Foundation
 /// count, synthesis speed. The config is persisted before a run starts and
 /// re-read by "run at next launch", because a sideloaded app has no launch
 /// arguments — the launch-arg parser exists for CI/simulator only.
-enum BenchmarkTier: String, CaseIterable, Identifiable {
+enum BenchmarkTier: String, Codable, CaseIterable, Identifiable {
     /// Kokoro fp32 (325.5 MB model.onnx) — the shipping default tier.
     case kokoroFP32 = "kokoro-fp32"
     /// Kokoro compact int8 (model_quantized.onnx ~92 MB).

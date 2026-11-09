@@ -34,17 +34,17 @@ final class BenchmarkMathTests: XCTestCase {
 
     func testMean() {
         XCTAssertNil(BenchmarkMath.mean([]))
-        XCTAssertEqual(BenchmarkMath.mean([1, 2, 3])!, 2.0, accuracy: 0.0001)
+        XCTAssertEqual(BenchmarkMath.mean([1.0, 2.0, 3.0])!, 2.0, accuracy: 0.0001)
         XCTAssertEqual(BenchmarkMath.mean([0.5, 0.7])!, 0.6, accuracy: 0.0001)
     }
 
     func testMedianOddAndEven() {
-        XCTAssertEqual(BenchmarkMath.median([3, 1, 2])!, 2.0, accuracy: 0.0001)
-        XCTAssertEqual(BenchmarkMath.median([4, 1, 3, 2])!, 2.5, accuracy: 0.0001)
+        XCTAssertEqual(BenchmarkMath.median([3.0, 1.0, 2.0])!, 2.0, accuracy: 0.0001)
+        XCTAssertEqual(BenchmarkMath.median([4.0, 1.0, 3.0, 2.0])!, 2.5, accuracy: 0.0001)
     }
 
     func testPercentileInterpolates() {
-        let values = [10, 20, 30, 40]
+        let values = [10.0, 20.0, 30.0, 40.0]
         // p95 of 4 values: rank = 0.95 × 3 = 2.85 → 30 + 0.85 × 10 = 38.5.
         XCTAssertEqual(BenchmarkMath.percentile(values, 0.95)!, 38.5, accuracy: 0.0001)
         XCTAssertEqual(BenchmarkMath.percentile(values, 0.25)!, 17.5, accuracy: 0.0001)
@@ -56,7 +56,7 @@ final class BenchmarkMathTests: XCTestCase {
     }
 
     func testPercentileSingleValue() {
-        XCTAssertEqual(BenchmarkMath.percentile([7], 0.9)!, 7, accuracy: 0.0001)
+        XCTAssertEqual(BenchmarkMath.percentile([7.0], 0.9)!, 7, accuracy: 0.0001)
     }
 
     // MARK: - CSV
