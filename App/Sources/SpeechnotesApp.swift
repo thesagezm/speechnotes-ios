@@ -133,6 +133,13 @@ struct SpeechnotesApp: App {
                     // instead of being swallowed by a stale handler.
                     player.takesOverOtherPlayers = { audioBooks.stopForExternalTakeover() }
                     audioBooks.takesOverOtherPlayers = { player.stopForExternalTakeover() }
+                    // Benchmark Mode (Phase 3): a stored "run at next launch"
+                    // config or a CI launch argument starts a sustained-
+                    // synthesis session. The benchmark owns its OWN engine
+                    // instance and refuses to coexist with real playback in
+                    // spirit — the view warns, and the numbers only mean
+                    // anything when nothing else is speaking.
+                    BenchmarkModel.shared.autostartIfNeeded()
                     // BookDrop: route landed files into the import
                     // pipelines. Nearby BookDrop itself always comes up
                     // OFF — applyPersistedEnabledState resets the toggle

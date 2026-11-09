@@ -101,6 +101,12 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
     private var totalDroppedPhonemes = 0
     private var lastLoggedDropCount = -1
 
+    /// Benchmark-only override for `setIntraOpNumThreads` (Phase 3 harness).
+    /// nil = the production policy (`min(activeProcessorCount, 6)`). The
+    /// benchmark harness sets this on its OWN engine instance before the
+    /// first load; a live-playback engine never touches it.
+    var benchmarkIntraOpThreads: Int?
+
     init(
         modelFileURL: URL = ModelManager.onnxModelFileURL,
         modelFilesValid: @escaping () -> Bool = { ModelManager.onnxFilesAreValid() },
@@ -246,7 +252,9 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
             // asked for anyway.
             let options = try ORTSessionOptions()
             let cores = ProcessInfo.processInfo.activeProcessorCount
-            try options.setIntraOpNumThreads(Int32(min(cores, 6)))
+            // The harness override wins when set; see the property comment.
+            let threadCount = benchmarkIntraOpThreads.map(Int32.init) ?? Int32(min(cores, 6))
+            try options.setIntraOpNumThreads(threadCount)
             let session = try ORTSession(env: env, modelPath: modelPath.path, sessionOptions: options)
             ortEnv = env
             ortSession = session
@@ -254,7 +262,7 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
             if let first = outputNames.first {
                 outputName = outputNames.contains("waveform") ? "waveform" : first
             }
-            Log.shared.info("OnnxKokoroEngine: session loaded in \(Date().timeIntervalSince(started))s (output: \(outputName), \(min(cores, 6)) of \(cores) cores)")
+            Log.shared.info("OnnxKokoroEngine: session loaded in \(Date().timeIntervalSince(started))s (output: \(outputName), \(threadCount) of \(cores) cores)")
 
             let tokenizerData = try Data(contentsOf: tokenizerPath)
             let tokenizerJSON = try JSONSerialization.jsonObject(with: tokenizerData) as? [String: Any]
@@ -447,9 +455,15 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
         }
     }
 
-    /// Text → phonemes → tokens → samples. The live speed is read per chunk
-    /// from the core, so slider changes apply from the next sentence.
+    /// Text → phonemes → tokens → samples + token count. The live speed is
+    /// read per chunk from the core, so slider changes apply from the next
+    /// sentence. The benchmark harness calls the Detailed form on its own
+    /// queue through `benchmarkSynthesize`.
     private func generateChunk(_ text: String) throws -> [Float] {
+        try generateChunkDetailed(text).samples
+    }
+
+    private func generateChunkDetailed(_ text: String) throws -> (samples: [Float], tokenCount: Int) {
         let voiceKey = voicesFlat[voice + ".npy"] != nil
             ? voice + ".npy"
             : voicesFlat.keys.sorted().first ?? ""
@@ -481,7 +495,34 @@ final class OnnxKokoroEngine: NSObject, SpeechEngine {
         }
         let duration = Double(samples.count) / core.sampleRate
         Log.shared.info("OnnxKokoroEngine: \(tokens.count) tokens → \(String(format: "%.1f", duration))s audio in \(String(format: "%.2f", Date().timeIntervalSince(started)))s")
-        return samples
+        return (samples, tokens.count)
+    }
+
+    // MARK: - Benchmark (Phase 3 harness)
+
+    /// Loads the model if needed. Returns false only when the model cannot
+    /// serve (not downloaded / load failed) — the harness treats that as a
+    /// failed session, not a skipped chunk.
+    ///
+    /// The benchmark owns its engine instance EXCLUSIVELY and calls every
+    /// benchmark entry point from its own serial queue, so the usual
+    /// generateQueue confinement is satisfied by that ownership (the engine
+    /// is never handed to SpeechPlayer).
+    func benchmarkPrepare() -> Bool {
+        loadModelIfNeeded()
+        return ortSession != nil
+    }
+
+    /// One sustained-synthesis inference: text → samples. The harness drops
+    /// the sample buffer immediately; only the count is recorded. Returns
+    /// tokenCount (nil never happens for Kokoro — it is the vocab-lookup
+    /// count AFTER space substitution, i.e. what the model actually saw).
+    func benchmarkSynthesize(text: String, speed: Float) throws
+        -> (sampleCount: Int, sampleRate: Double, tokenCount: Int?)
+    {
+        core.speed = speed
+        let result = try generateChunkDetailed(text)
+        return (result.samples.count, core.sampleRate, result.tokenCount)
     }
 
     // MARK: - WAV export

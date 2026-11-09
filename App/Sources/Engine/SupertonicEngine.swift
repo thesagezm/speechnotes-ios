@@ -118,6 +118,14 @@ final class SupertonicEngine: NSObject, SpeechEngine {
     private var styles: [String: Style] = [:]
     private var modelLoadAttempted = false
 
+    /// Benchmark-only override for the four sessions' `setIntraOpNumThreads`
+    /// (Phase 3 harness). nil = current behavior — the vendored Helper creates
+    /// its sessions with a bare `ORTSessionOptions()`, i.e. ORT's default
+    /// (unbounded) intra-op pool, which today differs from Kokoro's capped
+    /// `min(cores, 6)`. The override lets the harness hold thread count
+    /// constant across engines; a live-playback engine never touches it.
+    var benchmarkIntraOpThreads: Int?
+
     override init() {
         self.core = StreamingTTSPlaybackCore(config: .init(
             sampleRate: 24_000, // provisional; tts.json's value is published at load
@@ -177,7 +185,12 @@ final class SupertonicEngine: NSObject, SpeechEngine {
         do {
             let started = Date()
             let env = try ORTEnv(loggingLevel: .warning)
-            let textToSpeech = try loadTextToSpeech(ModelManager.supertonicOnnxDirectory.path, false, env)
+            let textToSpeech = try loadTextToSpeech(
+                ModelManager.supertonicOnnxDirectory.path,
+                false,
+                env,
+                intraOpThreads: benchmarkIntraOpThreads.map(Int32.init)
+            )
             ortEnv = env
             tts = textToSpeech
             core.setSampleRate(Double(textToSpeech.sampleRate))
@@ -255,6 +268,12 @@ final class SupertonicEngine: NSObject, SpeechEngine {
     /// read per chunk from the core, so slider changes apply from the next
     /// sentence.
     private func generateChunk(_ text: String) throws -> [Float] {
+        try generateChunkDetailed(text, stepOverride: nil).samples
+    }
+
+    private func generateChunkDetailed(_ text: String, stepOverride: Int?) throws
+        -> (samples: [Float], steps: Int)
+    {
         guard let tts else { throw SupertonicEngineError.modelUnavailable }
         guard let style = styles[voice] ?? styles.values.first else {
             throw SupertonicEngineError.noVoices
@@ -269,9 +288,12 @@ final class SupertonicEngine: NSObject, SpeechEngine {
         // lower the file's quality for nothing).
         let thermal = ThermalPressure(
             thermalStateRawValue: ProcessInfo.processInfo.thermalState.rawValue)
-        let step = core.isExporting
-            ? RenderAheadBankPolicy.fullQualityTotalStep
-            : Self.userStep(for: thermal)
+        // The benchmark pins the step count (its tier IS the step count); a
+        // nil override means the production dial decides.
+        let step = stepOverride
+            ?? (core.isExporting
+                ? RenderAheadBankPolicy.fullQualityTotalStep
+                : Self.userStep(for: thermal))
         let result = try tts.call(text, lang, style, step, speed: core.speed, silenceDuration: 0.05)
         let predictedLen = Int(Float(tts.sampleRate) * result.duration)
         if predictedLen <= 0 {
@@ -294,7 +316,31 @@ final class SupertonicEngine: NSObject, SpeechEngine {
         // step count rides along in the line so a device log shows whether
         // Batch B's 8→4 shed was active when a slow chunk happened.
         Log.shared.info("SupertonicEngine: \(String(format: "%.1f", duration))s audio in \(String(format: "%.2f", Date().timeIntervalSince(started)))s (\(voice), \(lang), thermal \(thermal), steps \(step))")
-        return Array(result.wav.prefix(playableLen))
+        return (Array(result.wav.prefix(playableLen)), step)
+    }
+
+    // MARK: - Benchmark (Phase 3 harness)
+
+    /// Loads the four sessions + styles if needed. False = cannot serve
+    /// (not downloaded / load failed) — a failed session for the harness.
+    ///
+    /// The benchmark owns its engine instance EXCLUSIVELY and calls every
+    /// benchmark entry point from its own serial queue, so the usual
+    /// generateQueue confinement is satisfied by that ownership.
+    func benchmarkPrepare() -> Bool {
+        loadModelIfNeeded()
+        return tts != nil
+    }
+
+    /// One sustained-synthesis inference. `steps` is the flow-matching step
+    /// count actually used (the tier's pinned value), recorded per chunk so
+    /// the CSV can prove which tier ran.
+    func benchmarkSynthesize(text: String, speed: Float, steps: Int) throws
+        -> (sampleCount: Int, sampleRate: Double, tokenCount: Int?)
+    {
+        core.speed = speed
+        let result = try generateChunkDetailed(text, stepOverride: steps)
+        return (result.samples.count, core.sampleRate, nil)
     }
 
     // MARK: - WAV export

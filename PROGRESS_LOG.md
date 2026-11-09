@@ -4,6 +4,53 @@ Format: newest first. Every critique round, merge, and escalation lands here.
 
 ---
 
+**Hybrid CPU+ANE plan, Phases 1–3** (branch `batch-c-d-session`, 2026-11-09):
+- **Phase 1 postmortem** (`Docs/POSTMORTEM-KOKORO-ACCELERATION.md`): the git
+  history contains NO literal Core ML attempt for Kokoro — the "Core ML failed"
+  memory compresses the MLX/Metal engine (ran at RTF ≈ 0.5, died of jetsam:
+  unbounded GPU-cache + buffer growth, 342 MB fp32 resident; removed v0.7.0)
+  and the quantized-tier graveyard (uint8 corrupt via QLinearMatMul graph
+  rewrite; fp16 NaN on ORT CPU, CI 34008548349; int8 92 MB clean and shipped).
+  WhisperKit/CoreML STT worked. Failure classes (a)/(b)/(c) mapped; hypotheses
+  H1–H4 carried forward with falsification vehicles.
+- **Phase 2 placement** (`Docs/PHASE2-OP-INVENTORY-PLACEMENT.md`): both ONNX
+  graphs parsed from the user's local model store (Kokoro fp32 byte-exact to
+  the CI pin). Kokoro: 49 op types, 6× bi-LSTM(256) + 1 STFT + sampling glue
+  stay CPU in every variant; the istftnet decoder holds 193 MB (60 %) of
+  weights — the ANE prize; choice = try ORT CoreML EP first, manual decoder
+  split as fallback. Supertonic ×4: pure ConvNeXt+attention, ZERO hostile ops
+  → direct coremltools MLProgram fp16 conversion. Buckets {64…510} tokens,
+  pre-warm + `SpecializationStrategy=FastPrediction`, int8/palettization only
+  behind the uint8-forensics-style parity gate. **H1a ANSWERED twice**: ORT's
+  Apple pod release settings pass `--use_coreml`, AND the downloaded
+  `pod-archive-onnxruntime-c-1.24.2.zip` ios-arm64 binary contains the full
+  `CoreMLExecutionProvider` (GetCapability/Compile, MLComputeUnits,
+  ModelCacheDirectory, `setSpecializationStrategy:` selector) — the EP ships
+  in the SPM binary the app already links. **RAM question answered**: no
+  runtime API; `com.apple.developer.kernel.increased-memory-limit` exists but
+  free-profile signing strips it (SideStore #1616) and under LiveContainer it
+  must ride on the LC host; the controllable lever is dirty memory (fp16,
+  single-slot, idle-unload, memory-warning shedding, MLX removal — catalog
+  1.11), now measured via `os_proc_available_memory` + phys_footprint.
+- **Phase 3 harness** (`Docs/PHASE3-BENCHMARK-HARNESS.md`, code in
+  `App/Sources/Benchmark/` + `SpeechLogic/BenchmarkMath.swift` + benchmark
+  seams on both engines): sustained-synthesis Benchmark Mode — fixed original
+  corpus (sha256-stamped), per-chunk CSV (tokens/steps, gen/audio/RTF,
+  footprint, available, CPU %, thermal) + session JSON (provenance, RTF
+  temporal quartiles + throttle signature, CPU-seconds, battery start/end,
+  thermal transitions), share-sheet export. Settings → Diagnostics →
+  Benchmark mode; "run at next launch" replaces launch args on device;
+  `-BenchmarkAutoStart` for CI. Engine knobs: tier (fp32/int8/super-high/
+  super-balanced), duration, ORT thread override (new `benchmarkIntraOpThreads`
+  seam; Supertonic's sessions previously had NO thread cap — ORT default —
+  now overridable via a default-parametered vendored `loadTextToSpeech`).
+  Silent audio loop holds background assertion for screen-off runs. Pure
+  math + CSV in SpeechLogic with tests (BenchmarkMathTests). **The baseline
+  device run on the current CPU build is the next action** — protocol in the
+  doc; no Core ML work proceeds before its numbers exist.
+
+---
+
 **Web article import + Bypass Paywalls Clean** (branch `batch-c-d-session`, 2026-10-24):
 - **Shared URLs are articles now, not tag soup.** `WebArticleService`
   (new): fetch with a Safari UA → Mozilla Readability 0.5.0 (vendored,

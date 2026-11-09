@@ -86,6 +86,11 @@ struct SettingsTabView: View {
                         StorageSettingsView()
                     }
                 }
+                Section("Diagnostics") {
+                    NavigationLink("Benchmark mode") {
+                        BenchmarkView()
+                    }
+                }
                 Section("About") {
                     NavigationLink("About") {
                         AboutView()

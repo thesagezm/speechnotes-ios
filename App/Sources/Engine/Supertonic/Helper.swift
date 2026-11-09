@@ -861,15 +861,24 @@ func loadVoiceStyle(_ voiceStylePaths: [String], verbose: Bool) throws -> Style 
     return Style(ttl: ttlValue, dp: dpValue)
 }
 
-func loadTextToSpeech(_ onnxDir: String, _ useGpu: Bool, _ env: ORTEnv) throws -> TextToSpeech {
+func loadTextToSpeech(_ onnxDir: String, _ useGpu: Bool, _ env: ORTEnv, intraOpThreads: Int32? = nil) throws -> TextToSpeech {
     if useGpu {
         throw NSError(domain: "TTS", code: 1, userInfo: [NSLocalizedDescriptionKey: "GPU mode is not supported yet"])
     }
     print("Using CPU for inference\n")
-    
+
     let cfgs = try loadCfgs(onnxDir)
-    
+
     let sessionOptions = try ORTSessionOptions()
+    // Upstream (supertone-inc/supertonic) creates these sessions with a bare
+    // ORTSessionOptions — ORT's default intra-op pool (unbounded). The
+    // optional override is the Speechnotes benchmark harness's thread knob;
+    // nil keeps upstream behavior byte-for-byte. One options instance is
+    // shared by all four session constructions below, so setting it once
+    // covers every session.
+    if let intraOpThreads {
+        try sessionOptions.setIntraOpNumThreads(intraOpThreads)
+    }
     
     let dpPath = "\(onnxDir)/duration_predictor.onnx"
     let textEncPath = "\(onnxDir)/text_encoder.onnx"
