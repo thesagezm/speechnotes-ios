@@ -1,27 +1,29 @@
 #!/usr/bin/env python3
 """Phase 4 — convert + parity gate (runner-side, no device needed).
 
-Three parts, run on the Apple Silicon macOS runner:
+Three parts, run on the Apple Silicon macOS runner (outcomes recorded in
+parity-report.json; updated 2026-11-10 after the first runner round):
 
-  A. KOKORO via ORT's CoreML EP vs ORT CPU on the fp32 graph — the H1
-     (partition viability) + H3 (fp16-style artifacts) experiment, runner
-     edition. Also captures the EP's compute-plan log.
-  B. SUPERTONIC-3 via ORT's CoreML EP vs ORT CPU, same shape — the EP is
-     the fallback for Supertonic if the direct conversion (C) fails.
-  C. SUPERTONIC-3 direct coremltools conversion (fp16 MLProgram, static
-     bucketed shapes, compute_units=ALL at predict) vs ORT CPU, end-to-end
-     through the 4-model chain, then `xcrun coremlcompiler compile` of every
-     .mlpackage. THIS is the shipping path's gate — C failing blocks Phase 5.
+  A.  KOKORO via ORT's CoreML EP vs ORT CPU on the fp32 graph — first round
+      FAILED numerically (Pearson 0.63, exact length: a different utterance
+      — the uint8-tier signature, i.e. the EP's internal fp16 conversion
+      corrupts Kokoro's decoder path).
+  A2. LOCALIZATION for A: the same model through the EP pinned to CPU+GPU,
+      plus the graph split at the decoder boundary and each half parity-
+      checked — tells Phase 5 whether a split can rescue ANE/GPU for
+      Kokoro or whether Kokoro stays CPU.
+  B.  SUPERTONIC-3 chain (encoder → estimator×8 → vocoder) via the EP vs
+      CPU — first round PASSED (Pearson 1.0000, rel-RMS 0.0007). This is
+      THE SHIPPING PATH for Supertonic: the EP, no conversion pipeline.
+  C.  Supertonic direct coremltools conversion — DEFERRED: coremltools
+      cannot ingest ONNX directly (first run failed on this), and with B
+      validated the conversion is only worth building if device EP perf
+      disappoints. Recorded as skipped; never fails the job.
 
-Parity thresholds reuse the repo's B4 quantization gate: length delta
-<= 0.1 s or 2 %, rel-RMS < 0.25 at best ±0.5 s lag, Pearson > 0.9, zero
-non-finite samples. Inputs are FIXED (seeded) and IDENTICAL for both runtimes.
-
-Fail-soft per part: a part's failure is recorded and reported; the job exits
-non-zero only if C (the shipping path) fails.
-
-Artifacts: parity-report.json, *.mlpackage + compiled *.mlmodelc (C), the
-CoreML EP compute-plan log (A/B).
+The job's exit status follows the SHIPPING PATH (B). Inputs are FIXED
+(seed) and IDENTICAL for both runtimes. Parity thresholds reuse the repo's
+B4 quantization gate: length delta <= 0.1 s or 2 %, rel-RMS < 0.25 at best
+±0.5 s lag, Pearson > 0.9, zero non-finite samples.
 """
 
 import json
@@ -30,10 +32,16 @@ import subprocess
 import sys
 
 import numpy as np
+import onnx
 import onnxruntime as ort
 
 WORK = os.environ.get("PARITY_WORK", os.path.expanduser("~/parity-work"))
-REPORT = {"part_a_kokoro_ep": None, "part_b_supertonic_ep": None, "part_c_supertonic_direct": None}
+REPORT = {
+    "part_a_kokoro_ep": None,
+    "part_a2_kokoro_localize": None,
+    "part_b_supertonic_ep": None,
+    "part_c_supertonic_direct": None,
+}
 SEED = 20261109
 
 KOKORO_URL = "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/onnx/model.onnx"
@@ -142,12 +150,14 @@ def parity(wav_ref, wav_new, sample_rate=24000):
     }
 
 
-def make_session(model_path, use_coreml_ep, log_severe=False):
+def make_session(model_path, use_coreml_ep, log_severe=False, compute_units=None):
     providers = ["CoreMLExecutionProvider", "CPUExecutionProvider"] if use_coreml_ep else ["CPUExecutionProvider"]
     so = ort.SessionOptions()
     if log_severe:
         so.log_severity_level = 3
-    return ort.InferenceSession(model_path, sess_options=so, providers=providers)
+    provider_options = [{"MLComputeUnits": compute_units}] if compute_units else None
+    return ort.InferenceSession(model_path, sess_options=so, providers=providers,
+                                provider_options=provider_options)
 
 
 # ---------------------------------------------------------------------------
@@ -167,17 +177,77 @@ def part_a():
     tokens = np.concatenate([[0], ids, [0]]).reshape(1, n)
     style = (rng.standard_normal((1, 256)) * 0.05).astype(np.float32)
     speed = np.array([1.0], dtype=np.float32)
+    feeds = {"input_ids": tokens, "style": style, "speed": speed}
 
     cpu = make_session(f"{WORK}/kokoro/model.onnx", use_coreml_ep=False)
-    ref = cpu.run(None, {"input_ids": tokens, "style": style, "speed": speed})[0].ravel()
+    ref = cpu.run(None, feeds)[0].ravel()
 
     ep = make_session(f"{WORK}/kokoro/model.onnx", use_coreml_ep=True)
-    new = ep.run(None, {"input_ids": tokens, "style": style, "speed": speed})[0].ravel()
-
+    new = ep.run(None, feeds)[0].ravel()
     result = parity(ref, new)
     result["tokens"] = n
-    print("kokoro EP parity:", json.dumps(result))
+    print("kokoro EP (ALL units) parity:", json.dumps(result))
+
+    # A2 — localize the divergence. (1) Same model, EP pinned to CPU+GPU: if
+    # parity recovers, the casualty is ANE fp16; if it stays broken, the EP's
+    # own partitioning is at fault. (2) Decoder-subgraph extraction: compare
+    # [graph start → decoder boundary] and [boundary → waveform] separately.
+    localize = {"whole_all_units": result}
+    gpu = make_session(f"{WORK}/kokoro/model.onnx", use_coreml_ep=True,
+                       compute_units="CPUAndGPU")
+    new_gpu = gpu.run(None, feeds)[0].ravel()
+    localize["whole_cpu_and_gpu"] = parity(ref, new_gpu)
+    print("kokoro EP (CPUAndGPU) parity:", json.dumps(localize["whole_cpu_and_gpu"]))
+
+    try:
+        stage = kokoro_stage_parity(ref_feeds=feeds, ref_out=ref)
+        localize.update(stage)
+    except Exception as e:
+        localize["stage_extraction_error"] = repr(e)
+        print("stage extraction failed:", e)
+
+    result["localization"] = localize
     return result
+
+
+def kokoro_stage_parity(ref_feeds, ref_out):
+    """Split the Kokoro graph at the first decoder node and parity-check each
+    half through the EP. The length match in the whole-model run already
+    says the duration path agrees — the suspect is the istftnet decoder."""
+    model_path = f"{WORK}/kokoro/model.onnx"
+    model = onnx.load(model_path, load_external_data=False)
+    init_names = {init.name for init in model.graph.initializer}
+    boundary = None
+    for node in model.graph.node:
+        if "/decoder/decoder/" in node.name:
+            for inp in node.input:
+                if inp and inp not in init_names:
+                    boundary = inp
+                    break
+            if boundary:
+                break
+    if not boundary:
+        return {"boundary_found": False}
+
+    pre_path = f"{WORK}/kokoro/stage_pre.onnx"
+    dec_path = f"{WORK}/kokoro/stage_decoder.onnx"
+    onnx.utils.extract_model(model_path, pre_path, list(ref_feeds.keys()), [boundary])
+    onnx.utils.extract_model(model_path, dec_path, [boundary], ["waveform"])
+
+    out = {"boundary_found": True, "boundary_tensor": boundary}
+    pre_cpu = make_session(pre_path, False).run(None, list(ref_feeds.values()))[0].ravel()
+    pre_ep = make_session(pre_path, True).run(None, list(ref_feeds.values()))[0].ravel()
+    out["stage_pre_decoder"] = parity(pre_cpu, pre_ep)
+
+    dec_cpu_session = make_session(dec_path, False)
+    mid = pre_cpu.reshape(1, -1)
+    dec_ref = dec_cpu_session.run(None, {boundary: mid})[0].ravel()
+    dec_ep_session = make_session(dec_path, True)
+    dec_new = dec_ep_session.run(None, {boundary: mid})[0].ravel()
+    out["stage_decoder"] = parity(dec_ref, dec_new)
+    out["whole_vs_cpu_reference"] = parity(ref_out, dec_new)
+    print("kokoro stage localization:", json.dumps(out))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -290,99 +360,22 @@ def part_b(cfg, inp, wav_ref, latent_len, steps):
 
 
 def part_c(cfg, inp, wav_ref, latent_len, steps):
-    print("\n===== PART C: supertonic-3 direct coremltools conversion (fp16, static buckets) =====")
-    import coremltools as ct
-
-    ae = cfg.get("ae", {})
-    sample_rate = int(ae.get("sample_rate", 44100))
-    results = {"stages": {}}
-
-    def convert(stage, inputs_desc, outputs):
-        path = f"{WORK}/supertonic/onnx/{stage}.onnx"
-        mlpackage = f"{WORK}/supertonic/mlpackage/{stage}.mlpackage"
-        os.makedirs(os.path.dirname(mlpackage), exist_ok=True)
-        print(f"converting {stage} → fp16 MLProgram …")
-        model = ct.convert(
-            path,
-            inputs=inputs_desc,
-            outputs=[ct.TensorType(name=o) for o in outputs],
-            compute_precision=ct.precision.FLOAT16,
-            minimum_deployment_target=ct.target.iOS18,
-        )
-        model.save(mlpackage)
-        sh(f"xcrun coremlcompiler compile '{mlpackage}' '{WORK}/supertonic/mlmodelc'")
-        size_mb = sum(
-            os.path.getsize(os.path.join(root, f)) / 1e6
-            for root, _, files in os.walk(mlpackage) for f in files
-        )
-        print(f"  saved {mlpackage} ({size_mb:.1f} MB)")
-        return ct.models.MLModel(mlpackage)
-
-    text_len_bucket = inp["bucket_text"]
-    # text_encoder
-    enc_inputs = [
-        ct.TensorType(name="text_ids", shape=(1, text_len_bucket), dtype=np.int64),
-        ct.TensorType(name="style_ttl", shape=(1, 50, 256), dtype=np.float32),
-        ct.TensorType(name="text_mask", shape=(1, 1, text_len_bucket), dtype=np.float32),
-    ]
-    enc_ml = convert("text_encoder", enc_inputs, ["text_emb"])
-    enc_out = enc_ml.predict({
-        "text_ids": inp["text_ids"],
-        "style_ttl": inp["style_ttl"], "text_mask": inp["text_mask"],
-    }, compute_units=ct.ComputeUnit.ALL)
-    print("encoder output keys:", list(enc_out.keys()))
-    text_emb_ml = enc_out["text_emb"].astype(np.float32)
-
-    # duration_predictor (converted for the artifact set; the chain's latent
-    # length comes from the CPU-side duration so both runtimes share it)
-    dp_inputs = [
-        ct.TensorType(name="text_ids", shape=(1, text_len_bucket), dtype=np.int64),
-        ct.TensorType(name="style_dp", shape=(1, 8, 16), dtype=np.float32),
-        ct.TensorType(name="text_mask", shape=(1, 1, text_len_bucket), dtype=np.float32),
-    ]
-    convert("duration_predictor", dp_inputs, ["duration"])
-
-    # vector_estimator
-    est_inputs = [
-        ct.TensorType(name="noisy_latent", shape=(1, 144, latent_len), dtype=np.float32),
-        ct.TensorType(name="text_emb", shape=(1, 256, text_len_bucket), dtype=np.float32),
-        ct.TensorType(name="style_ttl", shape=(1, 50, 256), dtype=np.float32),
-        ct.TensorType(name="latent_mask", shape=(1, 1, latent_len), dtype=np.float32),
-        ct.TensorType(name="text_mask", shape=(1, 1, text_len_bucket), dtype=np.float32),
-        ct.TensorType(name="current_step", shape=(1,), dtype=np.float32),
-        ct.TensorType(name="total_step", shape=(1,), dtype=np.float32),
-    ]
-    est_ml = convert("vector_estimator", est_inputs, ["denoised_latent"])
-    voc_inputs = [ct.TensorType(name="latent", shape=(1, 144, latent_len), dtype=np.float32)]
-    voc_ml = convert("vocoder", voc_inputs, ["wav_tts"])
-
-    rng = np.random.default_rng(SEED + 2)
-    noisy = rng.standard_normal((1, 144, latent_len)).astype(np.float32)
-    latent_mask = np.ones((1, 1, latent_len), np.float32)
-    total = np.array([float(steps)], np.float32)
-    x = noisy
-    est_stages = []
-    for t in range(steps):
-        cur = np.array([float(t)], np.float32)
-        x = est_ml.predict({
-            "noisy_latent": x, "text_emb": text_emb_ml.astype(np.float16).astype(np.float32),
-            "style_ttl": inp["style_ttl"], "latent_mask": latent_mask,
-            "text_mask": inp["text_mask"], "current_step": cur, "total_step": total,
-        }, compute_units=ct.ComputeUnit.ALL)["denoised_latent"].astype(np.float32)
-        est_stages.append(float(np.abs(x).mean()))
-    print("estimator stage means:", [f"{v:.4f}" for v in est_stages])
-    wav_ml = voc_ml.predict({"latent": x.astype(np.float16).astype(np.float32)},
-                            compute_units=ct.ComputeUnit.ALL)["wav_tts"].ravel().astype(np.float64)
-
-    result = parity(wav_ref, wav_ml, sample_rate)
-    result["latent_len"] = latent_len
-    result["fp16_size_mb"] = round(sum(
-        os.path.getsize(os.path.join(root, f)) / 1e6
-        for root, _, files in os.walk(f"{WORK}/supertonic/mlpackage") for f in files
-    ), 1)
-    print("supertonic direct-conversion parity:", json.dumps(result))
-    results["chain"] = result
-    return results
+    """DEFERRED (2026-11-10 runner round): coremltools cannot ingest ONNX
+    directly (source must be pytorch/tensorflow — the first run failed on
+    exactly this). The route to a direct conversion is onnx2torch + trace,
+    which adds a torch dependency and conversion risk for a path that is
+    currently UNNEEDED: Part B proved the ORT CoreML EP is numerically
+    perfect for the whole Supertonic-3 chain, so the shipping path is the
+    EP and this experiment only matters if device EP perf disappoints.
+    Recorded as skipped, not failed."""
+    print("\n===== PART C: supertonic-3 direct conversion — DEFERRED =====")
+    return {
+        "skipped": True,
+        "reason": ("coremltools cannot ingest ONNX directly (source must be "
+                   "pytorch/tensorflow); onnx2torch route deferred — Part B "
+                   "validated the EP as the shipping path. Revisit only if "
+                   "device EP performance disappoints."),
+    }
 
 
 def main():
@@ -415,9 +408,12 @@ def main():
         json.dump(REPORT, f, indent=2)
     print("\n===== SUMMARY =====")
     print(json.dumps(REPORT, indent=2))
-    shipping = REPORT["part_c_supertonic_direct"]
-    ok = bool(shipping and shipping.get("chain", shipping).get("pass"))
-    print("SHIPPING PATH (C):", "PASS" if ok else "FAIL")
+    # The shipping gate is Part B: Supertonic rides the ORT CoreML EP (Part B
+    # validated its numerics); Kokoro stays CPU unless its localization (A2)
+    # yields a viable split. Part C is a deferred experiment, never a failure.
+    shipping = REPORT["part_b_supertonic_ep"]
+    ok = bool(shipping and shipping.get("pass"))
+    print("SHIPPING PATH (B — Supertonic via CoreML EP):", "PASS" if ok else "FAIL")
     sys.exit(0 if ok else 1)
 
 
