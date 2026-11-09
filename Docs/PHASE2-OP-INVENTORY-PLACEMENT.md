@@ -108,7 +108,37 @@ to be *verified by `ProfileComputePlan` + on-device stage timing*, not assumed.
 
 ## 4. Engine choice per model
 
-### Supertonic → **(b) direct coremltools MLProgram conversion** (fp16, compute_units ALL)
+> **Phase-4 outcome (2026-11-10, parity round 3, run 42718617400 — all numbers
+> from `parity-report.json`, macOS ARM runner, onnxruntime 1.24.2 wheel):**
+>
+> - **Supertonic ships via (a) the ORT CoreML EP — this REVERSES the (b)
+>   recommendation below.** The whole 4-model chain through the EP is
+>   numerically perfect against the ORT-CPU fp32 oracle: Pearson **1.0000**,
+>   rel-RMS **0.0007**, exact length (latent_len 742, waveform 2,279,424
+>   samples), zero non-finites, and `active_providers` proves CoreML engaged
+>   on **all four sessions**. The predicted "nothing to split" from §2 is
+>   confirmed — the EP never had a hard job here, so the conversion pipeline
+>   (b) would have bought nothing but artifacts to maintain. (c) is moot for
+>   a different reason: coremltools cannot ingest ONNX at all (source must be
+>   pytorch/tensorflow); the onnx2torch route is deferred and only pays if
+>   on-device EP perf disappoints.
+> - **Kokoro stays on CPU (d) — the EP is banned under EVERY unit
+>   configuration.** With the EP active (provider-proof logged), Kokoro fp32
+>   renders the WRONG UTTERANCE: Pearson 0.6305, rel-RMS 0.7849 (gate: >0.9 /
+>   <0.25), exact length. Round 3's localization killed the last hope: with
+>   `MLComputeUnits=CPUAndGPU` (ANE excluded, `gpu_pin_active_providers`
+>   shows CoreML genuinely active) the result is **identical bad**
+>   (0.6305 / 0.7849) — the corruption is in the EP's CoreML conversion of
+>   the graph itself, not ANE-fp16 rounding. The decoder-stage split
+>   experiment is INCONCLUSIVE (onnx subgraph extraction died on a
+>   topological-validation error: `/encoder/bert/Shape_1` input `input_ids`
+>   not topologically resolvable after extraction), but moot: a split that
+>   routes part of the graph through this EP inherits this failure. The only
+>   unexplored route is the (c) onnx2torch decoder split (direct coremltools
+>   conversion, bypassing the EP) — deferred, `Scripts/convert_parity.py` §C.
+>   Compact int8 (92 MB) remains the low-memory CPU tier.
+
+### Supertonic → **(b) direct coremltools MLProgram conversion** (fp16, compute_units ALL) — **SUPERSEDED: ships via (a) EP, see outcome above**
 
 - **Why (b):** every op is mlprogram-supported and ANE-shaped; there is nothing
   to split. The heavy models (estimator 132 MB, vocoder 101 MB local; 256 MB
@@ -121,7 +151,7 @@ to be *verified by `ProfileComputePlan` + on-device stage timing*, not assumed.
 - **Precision:** fp16 (weights 262 → ~131 MB local; 398 → ~199 MB on
   supertonic-3). int8/palettization behind a flag + quality gate (§6).
 
-### Kokoro → **staged: try (a) ORT CoreML EP first; fallback (c) manual decoder split; (d) stays the baseline**
+### Kokoro → **staged: try (a) ORT CoreML EP first; fallback (c) manual decoder split; (d) stays the baseline** — **RESOLVED: (d) CPU, EP banned in all unit configs, see outcome above**
 
 - **Why EP first:** zero graph surgery, works on the existing byte-pinned
   artifact, and `ProfileComputePlan=1` + provider logging *is* the H1/H2
@@ -232,9 +262,9 @@ LiveContainer, not on Speechnotes.**
 | # | Hypothesis | Status |
 |---|---|---|
 | H1a | ORT 1.24.2 SPM binary lacks the CoreML EP | **ANSWERED, twice over — it ships with it.** (1) Primary source: the SPM binary target is `pod-archive-onnxruntime-c-1.24.2.zip` (Package.swift), and ORT's Apple-pod release build settings pass **`--use_coreml`**. (2) **Binary verification (2026-11-09)**: the downloaded archive's `onnxruntime.xcframework/ios-arm64` binary contains the full `CoreMLExecutionProvider` implementation — `GetCapability`/`Compile` symbols, the `MLComputeUnits` and `ModelCacheDirectory` option keys, and the `setSpecializationStrategy:` selector (FastPrediction path). The EP is available to the app as-is. |
-| H1 | ORT CoreML EP partitions Kokoro into a fallback explosion | plausible per op census (121 Gather + 73 Shape shape-math + 6 LSTMs + STFT); falsified/confirmed by the EP CI job + `ProfileComputePlan` |
-| H2 | Dynamic-axis respecialization thrash | mitigated by design (buckets + pre-warm + FastPrediction); measured by first-N-chunk latency curve |
-| H3 | fp16 artifacts in decoder/vocoder | gated in CI before any device install (parity vs the deterministic ORT fp32 oracle) |
+| H1 | ORT CoreML EP partitions Kokoro into a fallback explosion | **ANSWERED, Phase 4 (rounds 2–3, run 42718617400) — worse than an explosion: silent corruption.** The EP engages (CoreML active in `session.get_providers()` and the per-result `active_providers`), lengths stay exact, but the audio is a DIFFERENT UTTERANCE (Pearson 0.6305, rel-RMS 0.7849 vs gate >0.9/<0.25). Not an ANE-fp16 rounding story: pinning `MLComputeUnits=CPUAndGPU` (ANE excluded, provider-proof logged — the round-2 provider_options bug is fixed) reproduces the failure **identically**. The EP's CoreML conversion of Kokoro's graph is numerically wrong on GPU too. Placement verdict: **Kokoro never ships via the EP — default units banned, GPU-pinned banned; CPU is its engine** unless the deferred onnx2torch decoder split (direct coremltools, no EP) is ever revived. Supertonic is the mirror image: whole chain EP-perfect (Pearson 1.0000, rel-RMS 0.0007, all 4 sessions CoreML-active) → ships via the EP. |
+| H2 | Dynamic-axis respecialization thrash | mitigated by design (buckets + pre-warm + FastPrediction); measured by first-N-chunk latency curve. **Moot for the shipping variant's parity question** — round 3 ran the EP with default dynamic shapes and Supertonic still matched the CPU oracle exactly (best_lag 0, exact length) |
+| H3 | fp16 artifacts in decoder/vocoder | **gate built and passed for the shipping path**: the Phase-4 parity workflow (`.github/workflows/convert-parity.yml` + `Scripts/convert_parity.py`) ran the EP's internal fp16 against the ORT-CPU fp32 oracle — Supertonic PASS (rel-RMS 0.0007 ≪ 0.25), Kokoro FAIL (0.7849) and thereby banned. Device-ear check still applies per the B4 discipline |
 | H4 | ANE can't do the LSTMs | **resolved analytically**: LSTMs stay CPU in every variant; their weight share (~31 MB) and FLOPs share are small |
 
 ## 9. What Phase 3/4 must produce for this plan to proceed
