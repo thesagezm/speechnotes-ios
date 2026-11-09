@@ -1,14 +1,14 @@
 # TTS Baseline — SpeechNotes
 
-Status of this document: **there are no recorded measurements.** Nothing in this
-repository has ever been benchmarked on a device, and no benchmark numbers exist
-in the git history, the docs, or the issue tracker. Every figure below is either
-(a) arithmetic derived from code that can be read, or (b) a placeholder waiting
-for the first device session with the Batch A instrumentation installed.
-
-That is the reason the instrumentation exists. This document states the model,
-states what the model cannot know, and defines the protocol that turns the model
-into numbers.
+Status of this document: **the first measured baseline exists — §8
+(2026-11-09, Benchmark Mode v1, synthesis mode).** Sections 1–7 below are the
+model that produced the instrumentation and the protocol; their "unmeasured"
+placeholders are now superseded where §8 fills them, and left standing where
+they don't (pipeline-mode TTFA, background RTF, nominal-thermal runs — no
+re-run will be taken per the 2026-11-10 decision; §8 lists what that costs).
+Every figure in §1–§7 is either (a) arithmetic derived from code that can be
+read, (b) a placeholder the §8 numbers now replace, or (c) the protocol that
+produced §8.
 
 ---
 
@@ -465,3 +465,85 @@ parallel with the build; the window is just shorter than planned.
 
 If build times regress toward 45 minutes (cold cache, runner contention), revert
 to the plan's original cadence. Re-measure rather than assume.
+
+---
+
+## 8. Measured baseline — 2026-11-09 (the first device numbers)
+
+Source: Benchmark Mode v1 (synthesis mode), six sessions back-to-back on
+2026-11-09 ≈ 21:17–21:55 UTC; raw CSV+JSON archived in
+`Docs/benchmarks/2026-11-09/` (12 files, one pair per session). Provenance
+from the files themselves: **iPhone13,4 (iPhone 12 Pro Max), iOS 27.0** (as
+the device reports it; older docs said 26.5), **app 1.8.1/47, ORT 1.24.2 CPU
+EP**, corpus-v1 (1,488 chars, sha256 `1bdda046…`), 5-minute sustained
+synthesis per tier, speed 1.0.
+
+Protocol notes before reading the numbers:
+
+- **Every session STARTED at thermal `serious`** (the device was already hot
+  before run 1 and got no cooldown). These are hot-device sustained numbers —
+  arguably MORE representative of the app's real long-session use, but not
+  nominal-thermal numbers.
+- **CPU %, footprint and available-memory are ABSENT** — the v1 sampler's
+  timer sat on the same serial queue the synthesis loop occupied, so it never
+  ticked (fixed in the harness after these runs; no re-run per the
+  2026-11-10 decision). The same defect silenced the stop button.
+- **Battery % is unusable at 5-minute scale** (moved ≤ 5 points at 1 %
+  granularity, ± noise). The energy story therefore rides on the drift
+  curves below.
+
+| # | session | threads | chunks | mean RTF | median | p95 | q1/q2/q3 (temporal) | drift 0→end | throttle | cold load | first chunk |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | kokoro-fp32 | 6 (default) | 79 | **0.553** | 0.574 | 0.610 | .481/.542/.585 | 0.46→0.60 (+30 %) | no | 0.65 s | 2.10 s |
+| 2 | kokoro-fp32 | **4** | 69 | 0.628 | 0.665 | 0.676 | .545/.622/.670 | 0.54→0.67 (+24 %) | no | 0.58 s | 2.33 s |
+| 3 | kokoro-int8 | 6 (default) | 54 | **0.812** | 0.841 | 0.913 | .717/.806/.861 | 0.69→0.84 (+22 %) | no | 0.39 s | 2.93 s |
+| 4 | supertonic-high (8 steps) | ORT default | 54 | **0.527** | 0.527 | 0.560 | .509/.529/.530 | 0.49→0.53 (**flat**) | no | 0.66 s | 2.37 s |
+| 5 | supertonic-balanced (6 steps) | ORT default | 59 | 0.493 | 0.492 | 0.607 | .445/.451/.525 | 0.43→0.53 | no | 0.47 s | 2.36 s |
+| 6 | kokoro-fp32 (heat repeat) | 6 (default) | 63 | **0.683** | 0.737 | 0.813 | .492/.658/.769 | 0.47→0.81 (**+72 %**) | **YES** | 0.58 s | 2.06 s |
+
+### Findings (numbered; Phase 5 acceptance and Phase 2 buckets cite these)
+
+1. **Kokoro fp32 sustained: RTF 0.55 hot, drifting +24–30 % inside five
+   minutes; after ~25 min of prior sustained synthesis (run 6) it reads
+   0.683 mean with the throttle signature, closing at 0.81.** §4's
+   falsifiable prediction "RTF ≈ 0.5" holds only as the STARTING number.
+   §2's break-even (`c0 ≥ RTF·c1`, c1 = 160): at sustained RTF 0.6–0.8 the
+   opener needs 96–128 chars — exactly the territory the ChunkSchedule
+   learns to. The stall model's two branches both bind here: chunk sizing
+   helps the mean, prebuffering helps the tail.
+2. **Thread scaling, measured: 4 threads cost +14 % sustained RTF vs the
+   6-thread default (0.628 vs 0.553, same tier, same thermal band).** The
+   `min(cores, 6)` cap stands; nothing below it.
+3. **Supertonic High is both FASTER (0.527) and FLAT (0.49→0.53) than
+   Kokoro fp32 on the same CPU.** Four smaller sessions beat one 326 MB
+   graph under sustained heat — the thermal-stability result that makes the
+   Phase-2 "convert Supertonic first" choice concrete. Balanced (6 steps)
+   is the fastest tier in the app (0.493).
+4. **The compact int8 tier is SLOWER than fp32 (0.812 vs 0.553).** Dynamic
+   int8 matmuls lose on the A14; the tier's value is the 92 MB footprint,
+   not speed. Do not ship it as a "fast" tier (it isn't), and treat fp32→fp16
+   Core ML claims with the same suspicion until measured — §8's int8 result
+   is the cautionary precedent for "smaller must be faster" assumptions.
+5. **chars per audio-second, measured: Kokoro ≈ 19.5 (median 19.8), the
+   app's speech at speed 1.0 — §2 assumed ~15, a 30 % conservative error;
+   Supertonic ≈ 12.7** (its schedule seeds already say 12–13).
+6. **Kokoro token distribution for the bucket plan: 101–179 tokens
+   (median 145) across 265 chunks** for the 100/160-char chunker. The
+   Phase-2 bucket proposal {64…510} collapses to **{128, 192}** — two
+   buckets cover the whole observed distribution with ≤ 7 % padding at the
+   192 ceiling. Supertonic records no token count; its text_length spans
+   59–197 chars → the equivalent shape is {96, 160, 224}.
+7. **Cold model load is page-cache warm at 0.39–0.66 s**; first chunk
+   (TTFA-equivalent, load included) 2.06–2.93 s. The FIRST-ever load (true
+   cold, post-download) was not measured here and remains unknown; §3's
+   25 s figure was a hypothetical that did not appear in these runs.
+
+### What the harness's own defects cost this baseline
+
+- Resource columns (CPU %, footprint, available memory): absent — sampler
+  defect, fixed (dedicated sampler queue + lock; thread-safe stop). Not
+  re-run per the 2026-11-10 decision, so the Phase-2 §7 memory-budget
+  question (the thing that killed the MLX engine) stays OPEN until the
+  first Core ML build reports `phys_footprint` in its own sessions.
+- Thermal transitions in the session JSON: empty (same cause); the per-chunk
+  fallback read did capture fair↔serious flapping around the runs.

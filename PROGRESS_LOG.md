@@ -4,6 +4,54 @@ Format: newest first. Every critique round, merge, and escalation lands here.
 
 ---
 
+**Web article formatting + native share sheet** (branch `batch-c-d-session`,
+2026-11-10):
+- **Root cause of the flat-paragraph imports** (`Docs/WEB-ARTICLE-IMPORT.md`):
+  extraction consumed only Readability's `textContent` — structure was
+  stripped before the note ever saw it. The renderer stack below (cmark-gfm
+  `MarkdownPreviewView`, `MarkdownText.plainText` for TTS) was already
+  complete; nothing fed it.
+- **The walker** (`App/Resources/JS/html-to-markdown.js`): Readability's
+  `parsed.content` DOM → the app's GFM subset, injected beside readability.js
+  at document end. Headings shift down one (the note's first line IS the
+  headline, which the walker also de-dupes), links resolve http(s)-only
+  against the live page base, sigils in prose are escaped, data:/tracking
+  images and JS/mailto links degrade to text. A walker bug costs formatting
+  only — the Swift side keeps markdown solely when it plausibly covers the
+  same text, else falls back to plain. 46-assertion mock-DOM suite
+  (`Scripts/test-html-to-markdown.js`) runs in CI's logic-tests job.
+- **Import paths** prefer `markdown ?? text` (URL shares, clipboard, drag &
+  drop, scheme, local .html); the first article import opts
+  `renderMarkdown` ON only when the user never touched the setting.
+- **ShareExtension target** (`com.speechnotes.ios.Share`, project.yml +
+  `ShareExtension/Sources/ShareViewController.swift`): the share sheet the
+  native install never had. Pages (public.url) and text; hands off via
+  `speechnotes://import?url=/text=` (no App Group — free-account SideStore
+  provisioning stays intact); `NSExtensionContext.open` → responder-chain
+  `openURL:` → honest fallback (copy + clipboard-importer instructions).
+  LiveContainer ignores the embedded `.appex` and keeps its extension-free
+  channels. Extension version fields derive from the app's build settings
+  (`$(MARKETING_VERSION)`) so release bumps stay a two-file edit.
+
+---
+
+**Phase 3 baseline CAPTURED (first device numbers in repo history)** (branch `batch-c-d-session`, 2026-11-09/10):
+- Six 5-minute sustained-synthesis sessions ran on the device (iPhone13,4,
+  iOS 27.0, app 1.8.1/47, thermal `serious` throughout — no cooldown); raw
+  CSV+JSON archived in `Docs/benchmarks/2026-11-09/`, results in
+  `TTS_BASELINE.md` §8. Headlines: Kokoro fp32 sustained RTF 0.553 hot,
+  drifting +30 % inside 5 min, 0.683 mean with the throttle signature after
+  ~25 min of prior synthesis; **Supertonic High faster AND flat (0.527,
+  0.49→0.53)**; compact int8 SLOWER than fp32 (0.812); 4 threads cost +14 %
+  vs 6; Kokoro tokens 101–179 → Phase-2 buckets collapse to {128, 192};
+  chars/audio-s measured 19.5 (Kokoro, vs the 15 assumed) / 12.7 (Supertonic).
+- Harness defect found by the very first runs: the sampler timer and the
+  stop flag both sat on the serial queue the synthesis loop occupied —
+  resource columns absent from these exports, stop never fired mid-loop.
+  Fixed (dedicated sampler queue + NSLock + thread-safe stop). Per the user's
+  2026-11-10 decision: **no re-run** — the CPU %/footprint/memory-budget
+  numbers stay open until the first Core ML build reports them in-app.
+
 **Hybrid CPU+ANE plan, Phases 1–3** (branch `batch-c-d-session`, 2026-11-09):
 - **Phase 1 postmortem** (`Docs/POSTMORTEM-KOKORO-ACCELERATION.md`): the git
   history contains NO literal Core ML attempt for Kokoro — the "Core ML failed"

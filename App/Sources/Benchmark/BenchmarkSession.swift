@@ -125,10 +125,14 @@ final class BenchmarkSession {
     // MARK: - State
 
     private let queue = DispatchQueue(label: "com.speechnotes.benchmark", qos: .userInitiated)
-    private var stopRequested = false
+    /// Stop requests must not route through `queue`: the synthesis loop is
+    /// ONE synchronous block that occupies the queue for the whole session,
+    /// so anything queued behind it would never run. The flag is lock-protected
+    /// and set directly from any thread.
+    private let stopLock = NSLock()
+    private var stopRequestedValue = false
     private var running = false
     private let audioKeeper = BenchmarkAudioKeeper()
-    private var samplerTimer: DispatchSourceTimer?
     private var sampler: Sampler?
 
     private var kokoro: OnnxKokoroEngine?
@@ -145,7 +149,7 @@ final class BenchmarkSession {
     func start() {
         guard !running else { return }
         running = true
-        stopRequested = false
+        stopRequestedValue = false
         onStopChanged?(true)
 
         // Battery + thermal baselines are read on MAIN (UIDevice contract).
@@ -163,11 +167,18 @@ final class BenchmarkSession {
 
     /// Stop between chunks: the partial session is a VALID result (a stopped
     /// run still exports its rows and summary), so stop routes through the
-    /// normal finish path.
+    /// normal finish path. Safe from any thread — see the stopLock note.
     func stop() {
-        queue.async { [weak self] in
-            self?.stopRequested = true
-        }
+        stopLock.lock()
+        stopRequestedValue = true
+        stopLock.unlock()
+    }
+
+    /// Run-loop read of the stop flag (lock-protected; written from any thread).
+    private var stopRequested: Bool {
+        stopLock.lock()
+        defer { stopLock.unlock() }
+        return stopRequestedValue
     }
 
     // MARK: - The run loop (benchQueue)
@@ -237,7 +248,7 @@ final class BenchmarkSession {
             )
             guard !chunks.isEmpty else { throw BenchmarkError.emptyCorpus }
 
-            let sampler = Sampler(queue: queue, sessionStart: clock.now)
+            let sampler = Sampler(sessionStart: clock.now)
             self.sampler = sampler
             sampler.start()
 
@@ -382,16 +393,24 @@ final class BenchmarkSession {
 
     /// The 1 Hz sampler: Mach CPU ticks, footprint, available memory, and
     /// thermal state — with transitions recorded as they flip.
+    ///
+    /// Runs on its OWN queue: the synthesis loop is one synchronous block
+    /// that occupies the session queue for the entire run, and a
+    /// DispatchSourceTimer only fires when its queue is idle — the first
+    /// draft's timer never ticked, which is why the 2026-11-09 baseline
+    /// carries RTF/thermal but no CPU%/footprint columns. State is
+    /// lock-guarded because the run loop (bench queue) and the summary hop
+    /// (main) both read it.
     private final class Sampler {
-        fileprivate private(set) var readings: [CPUReading] = []
-        fileprivate private(set) var transitions: [ThermalTransition] = []
-        private let queue: DispatchQueue
+        private let lock = NSLock()
+        private var readingsStorage: [CPUReading] = []
+        private var transitionsStorage: [ThermalTransition] = []
+        private let queue = DispatchQueue(label: "com.speechnotes.benchmark.sampler", qos: .utility)
         private let sessionStart: ContinuousClock.Instant
         private var timer: DispatchSourceTimer?
         private var lastThermal: String
 
-        init(queue: DispatchQueue, sessionStart: ContinuousClock.Instant) {
-            self.queue = queue
+        init(sessionStart: ContinuousClock.Instant) {
             self.sessionStart = sessionStart
             self.lastThermal = BenchmarkSession.thermalName(ProcessInfo.processInfo.thermalState)
         }
@@ -408,8 +427,22 @@ final class BenchmarkSession {
         }
 
         func stop() {
-            timer?.cancel()
-            timer = nil
+            queue.async { [weak self] in
+                self?.timer?.cancel()
+                self?.timer = nil
+            }
+        }
+
+        var readings: [CPUReading] {
+            lock.lock()
+            defer { lock.unlock() }
+            return readingsStorage
+        }
+
+        var transitions: [ThermalTransition] {
+            lock.lock()
+            defer { lock.unlock() }
+            return transitionsStorage
         }
 
         private func tick() {
@@ -420,21 +453,23 @@ final class BenchmarkSession {
                 availableMB: ProcessMemory.availableBytes().map { Double($0) / 1_048_576 },
                 thermal: BenchmarkSession.thermalName(ProcessInfo.processInfo.thermalState)
             )
-            if let previous = readings.last {
+            lock.lock()
+            defer { lock.unlock() }
+            if let previous = readingsStorage.last {
                 reading.busyPercent = BenchmarkMath.cpuBusyPercent(
                     previous: previous.snapshot,
                     current: reading.snapshot
                 )
             }
             if reading.thermal != lastThermal {
-                transitions.append(ThermalTransition(
+                transitionsStorage.append(ThermalTransition(
                     atSeconds: BenchmarkSession.seconds(from: sessionStart, to: ContinuousClock.now),
                     from: lastThermal,
                     to: reading.thermal
                 ))
                 lastThermal = reading.thermal
             }
-            readings.append(reading)
+            readingsStorage.append(reading)
         }
     }
 
