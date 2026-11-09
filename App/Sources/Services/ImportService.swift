@@ -10,9 +10,11 @@ import UniformTypeIdentifiers
 /// websites (WebArticleService: Readability + the Bypass Paywalls Clean
 /// pass).
 ///
-/// LiveContainer can't host Share Extensions, so import flows through
-/// extension-free channels instead: the in-app Files picker, drag & drop
-/// onto the notes list, "New note from clipboard", "Open In" document-type
+/// LiveContainer can't host Share Extensions, so the share sheet itself is
+/// only a channel on NATIVE installs (ShareExtension target → the
+/// speechnotes:// scheme). Every install — LC or not — keeps the
+/// extension-free channels: the in-app Files picker, drag & drop onto the
+/// notes list, "New note from clipboard", "Open In" document-type
 /// registration (forwarded by LiveContainer or SideStore where supported),
 /// the speechnotes:// URL scheme, and — for shared web addresses — the
 /// network fetch in `WebArticleService` (clipboard link, dragged link,
@@ -117,11 +119,13 @@ final class ImportService {
             raw = await pdfText(from: url)
         case "html", "htm":
             // Saved pages are articles: the same Readability extraction a
-            // shared URL gets, on the local bytes (no fetch). The
+            // shared URL gets, on the local bytes (no fetch) — markdown
+            // preferred so headings and links survive; relative targets
+            // degrade to plain text (no base URI on a local file). The
             // DocumentBook flattener stays the fallback for page-shaped
             // files Readability can't parse as articles.
             if let article = await WebArticleService.shared.article(fromLocalHTMLFile: url) {
-                raw = article.text
+                raw = article.markdown ?? article.text
                 articleTitle = article.title
             } else {
                 raw = documentText(from: url, kind: kind)

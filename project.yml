@@ -37,6 +37,17 @@ targets:
         product: onnxruntime
       - package: MLX
       - package: MLXUtilsLibrary
+      # The share sheet entry point. GATED OFF (embed: false): LiveContainer
+      # hosts NO app extensions (Docs/PLAN.md §2), so the .appex can never
+      # function there, and shipping an unsigned PlugIns/ copy into the LC
+      # guest bundle is an unverified signing risk to the primary install
+      # path. The target still BUILDS in CI (compile coverage); the IPA stays
+      # extension-free. Flip to embed: true only with the user's say-so, and
+      # only behind an LC install smoke test. No App Group either way — the
+      # extension hands off through the speechnotes:// scheme, which needs
+      # no entitlement, so SideStore's free-account provisioning is enough.
+      - target: ShareExtension
+        embed: false
     info:
       path: App/Resources/Info.plist
       properties:
@@ -165,11 +176,55 @@ targets:
         TARGETED_DEVICE_FAMILY: "1"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+  ShareExtension:
+    type: app-extension
+    platform: iOS
+    sources:
+      - ShareExtension/Sources
+    dependencies:
+      # WebArticle.url(in:) — the SAME strict shared-text → URL parser the
+      # app's import channels use, so the extension and the app agree on
+      # what counts as a link.
+      - package: SpeechLogic
+    info:
+      path: ShareExtension/Info.plist
+      properties:
+        CFBundleDisplayName: Speechnotes
+        # Derive from the app's build settings so a release bump stays a
+        # two-file edit (version-check.sh guards the app pair; these expand
+        # at archive time).
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.share-services
+          # The Xcode-template form: Swift classes register as
+          # Module.Class — this target's module name is ShareExtension.
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).ShareViewController
+          NSExtensionAttributes:
+            # Pages (public.url) and text (selected text, pasted links).
+            # One item of each, nothing else — public.webpage (full saved
+            # pages) stays OFF: those already route through the app's
+            # Open-In document types, where the file importer can use the
+            # bytes; here they'd extract to nothing.
+            NSExtensionActivationRule:
+              NSExtensionActivationSupportsWebURLWithMaxCount: 1
+              NSExtensionActivationSupportsTextWithMaxCount: 1
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.speechnotes.ios.Share
+        TARGETED_DEVICE_FAMILY: "1"
+        SKIP_INSTALL: YES
 schemes:
   SpeechnotesIOS:
     build:
       targets:
         SpeechnotesIOS: all
+        # Build-only: the extension compiles with every archive (compile
+        # coverage) but nothing embeds it — the app's dependency is embed:
+        # false, so the Archive action stays single-product (the app) and
+        # the packaged IPA carries no PlugIns/ (LiveContainer constraint).
+        ShareExtension:
+          build: true
     run:
       config: Debug
     archive:

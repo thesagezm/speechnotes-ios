@@ -11,6 +11,11 @@ extraction pipeline phones home.)
 | `bpc.en.user.js` | https://gitflic.ru/project/magnolia1234/bypass-paywalls-clean-filters/blob/raw?file=userscript/bpc.en.user.js | 4.4.7.4 | MIT (per its own header) |
 | `bpc_func.js` | https://gitflic.ru/project/magnolia1234/bypass-paywalls-clean-filters/blob/raw?file=userscript/bpc_func.js | 4.4.7.2-era (matches 4.4.7.x) | MIT (same project) |
 
+`html-to-markdown.js` is NOT vendored — it is a first-party file (the
+content-DOM → markdown walker; pipeline and tests in
+`Docs/WEB-ARTICLE-IMPORT.md`). It sits beside the vendored pair only
+because it rides the same injection path.
+
 Downloaded and vendored 2026-10-24, byte-identical to upstream so a future
 refresh is a plain diff. `bpc.en.user.js` declares `@require bpc_func.js` —
 a userscript manager would fetch it; the app injects both manually, in

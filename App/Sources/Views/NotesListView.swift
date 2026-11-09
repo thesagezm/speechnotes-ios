@@ -659,16 +659,33 @@ struct NotesListView: View {
                     return
                 }
                 Haptics.success()
-                var text = fetched.text
+                // The formatted body when the walker produced one —
+                // headings, lists, quotes, tables and the page's own
+                // hyperlinks (textContent flattens those away) — plain
+                // textContent otherwise. Speech strips the sigils either
+                // way (MarkdownText.plainText).
+                var text = fetched.markdown ?? fetched.text
                 let title = fetched.title.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !title.isEmpty, !text.hasPrefix(title) {
-                    // The article's own headline first — the note title
-                    // derives from it like every other note's does.
+                    // The article's own headline first, as a PLAIN line —
+                    // the note title derives from it like every other
+                    // note's does, and a "# " prefix would leak into the
+                    // derived title shown in rows and the title field.
                     text = title + "\n\n" + text
                 }
                 // A tappable source, and the display renderer speaks it as
                 // just "Source" when Render Markdown is on.
                 text += "\n\n[Source](\(url.absoluteString))"
+                // A first formatted import opts into markdown rendering —
+                // headings, links and lists only exist on screen with it
+                // on, and showing the note as raw sigils would read as
+                // "no formatting" anyway. Only when the setting was never
+                // touched (object(forKey:) nil = never set — @AppStorage
+                // materializes the key on first write); an explicit off
+                // stays off.
+                if UserDefaults.standard.object(forKey: "renderMarkdown") == nil {
+                    UserDefaults.standard.set(true, forKey: "renderMarkdown")
+                }
                 addNote(text: text)
                 ToastCenter.shared.show("Article imported")
             }

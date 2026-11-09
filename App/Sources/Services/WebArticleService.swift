@@ -11,6 +11,12 @@ struct WebArticle {
     let siteName: String?
     let excerpt: String?
     let text: String
+    /// The same article as GFM markdown (Readability's content DOM walked
+    /// by html-to-markdown.js): headings, emphasis, lists, quotes, tables
+    /// and — the point — the page's own hyperlinks, which textContent
+    /// flattens away. nil when the walker produced nothing usable; callers
+    /// fall back to `text`.
+    let markdown: String?
     let sourceURL: URL
 
     enum Route: String {
@@ -275,6 +281,18 @@ private final class HeadlessArticlePass: NSObject, WKNavigationDelegate, WKScrip
         return source
     }()
 
+    /// The content-DOM → markdown walker (html-to-markdown.js). Loaded once;
+    /// when missing, articles import as plain textContent — the pre-1.9
+    /// behavior — instead of failing.
+    private static let markdownWalkerSource: String? = {
+        guard let url = Bundle.main.url(forResource: "html-to-markdown", withExtension: "js"),
+              let source = try? String(contentsOf: url, encoding: .utf8), !source.isEmpty else {
+            Log.shared.error("WebArticle: html-to-markdown.js missing from bundle — articles import without formatting")
+            return nil
+        }
+        return source
+    }()
+
     init(bypass: Bool, scripts: PaywallBypass.Scripts? = nil, quiet: TimeInterval, cap: TimeInterval) {
         self.quiet = quiet
         self.cap = cap
@@ -286,6 +304,13 @@ private final class HeadlessArticlePass: NSObject, WKNavigationDelegate, WKScrip
         if let readability = Self.readabilitySource {
             controller.addUserScript(WKUserScript(
                 source: readability,
+                injectionTime: .atDocumentEnd,
+                forMainFrameOnly: true
+            ))
+        }
+        if let walker = Self.markdownWalkerSource {
+            controller.addUserScript(WKUserScript(
+                source: walker,
                 injectionTime: .atDocumentEnd,
                 forMainFrameOnly: true
             ))
@@ -370,13 +395,28 @@ private final class HeadlessArticlePass: NSObject, WKNavigationDelegate, WKScrip
             var parsed = new Readability(clone, { charThreshold: 80 }).parse();
             if (!parsed || !parsed.textContent || parsed.textContent.trim().length < 1)
               return JSON.stringify({ ok: false, error: 'unreadable' });
+            // Content DOM → GFM markdown (html-to-markdown.js). Guarded so a
+            // walker bug can only cost the formatting, never the article:
+            // the payload still carries textContent as the fallback.
+            var markdown = '';
+            try {
+              if (typeof __snArticleToMarkdown === 'function' && parsed.content) {
+                var contentRoot = parsed.content.documentElement
+                  || parsed.content.body
+                  || parsed.content;
+                markdown = __snArticleToMarkdown(contentRoot, document.baseURI, parsed.title || '') || '';
+              }
+            } catch (e) {
+              markdown = '';
+            }
             return JSON.stringify({
               ok: true,
               title: parsed.title || '',
               byline: parsed.byline || '',
               siteName: parsed.siteName || '',
               excerpt: parsed.excerpt || '',
-              text: parsed.textContent || ''
+              text: parsed.textContent || '',
+              markdown: markdown
             });
           } catch (e) {
             return JSON.stringify({ ok: false, error: String(e) });
@@ -399,12 +439,27 @@ private final class HeadlessArticlePass: NSObject, WKNavigationDelegate, WKScrip
             Log.shared.info("WebArticle: \(route.rawValue) pass produced only \(text.count) chars — treating as nothing")
             return nil
         }
+        // The markdown is kept only when it plausibly covers the same
+        // article: the walker flattens links/images into syntax but drops
+        // nothing else, so a result far shorter than the text means the
+        // conversion went sideways — fall back to plain text wholesale
+        // rather than ship a truncated article.
+        var markdown: String?
+        if let rawMarkdown = decoded.markdown {
+            let cleaned = Self.postprocessMarkdown(rawMarkdown)
+            if !cleaned.isEmpty, cleaned.count >= max(40, text.count / 3) {
+                markdown = cleaned
+            } else {
+                Log.shared.info("WebArticle: \(route.rawValue) markdown unusable (\(cleaned.count) chars vs \(text.count) text) — importing plain")
+            }
+        }
         return WebArticle(
             title: decoded.title ?? "",
             byline: (decoded.byline?.isEmpty ?? true) ? nil : decoded.byline,
             siteName: (decoded.siteName?.isEmpty ?? true) ? nil : decoded.siteName,
             excerpt: (decoded.excerpt?.isEmpty ?? true) ? nil : decoded.excerpt,
             text: text,
+            markdown: markdown,
             sourceURL: sourceURL ?? webView.url ?? URL(string: "about:blank")!,
             route: route
         )
@@ -417,6 +472,7 @@ private final class HeadlessArticlePass: NSObject, WKNavigationDelegate, WKScrip
         var siteName: String?
         var excerpt: String?
         var text: String?
+        var markdown: String?
         var error: String?
     }
 
@@ -430,6 +486,18 @@ private final class HeadlessArticlePass: NSObject, WKNavigationDelegate, WKScrip
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
         return String(lines.joined(separator: "\n\n").prefix(WebArticleService.maxTextChars))
+    }
+
+    /// Markdown keeps its structure: same blank-run collapse and length cap
+    /// as `postprocess`, but no per-line whitespace stripping — code fences
+    /// and nested lists are whitespace-significant.
+    private static func postprocessMarkdown(_ raw: String) -> String {
+        let collapsed = raw
+            .replacingOccurrences(of: "\\n{3,}", with: "\n\n", options: .regularExpression)
+        return String(
+            collapsed.trimmingCharacters(in: .whitespacesAndNewlines)
+                .prefix(WebArticleService.maxTextChars)
+        )
     }
 
     // MARK: WKNavigationDelegate (main thread, per WebKit)

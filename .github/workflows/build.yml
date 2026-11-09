@@ -25,6 +25,13 @@ jobs:
       - name: Version-field consistency check
         run: Scripts/version-check.sh
 
+      # The web-article markdown walker is JavaScript in the bundle
+      # (html-to-markdown.js) — its 46-assertion DOM-mock suite runs in
+      # Node here so a walker edit that regresses the emitted GFM fails
+      # CI before it ships a broken import.
+      - name: Web-article markdown walker tests
+        run: node Scripts/test-html-to-markdown.js
+
       - name: Run SpeechLogic package tests
         run: |
           set -o pipefail
