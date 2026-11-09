@@ -12,6 +12,15 @@ name: Convert + parity (Core ML gate)
 
 on:
   workflow_dispatch:
+  # Registered workflows need the file on the default branch for API
+  # dispatch from a feature branch; until then, a push that TOUCHES the
+  # experiment's own files is the trigger. The filter means ordinary code
+  # pushes never run this job — only intentional experiment changes do.
+  push:
+    branches: [batch-c-d-session]
+    paths:
+      - "Scripts/convert_parity.py"
+      - ".github/workflows/convert-parity.yml"
 
 jobs:
   convert-parity:
