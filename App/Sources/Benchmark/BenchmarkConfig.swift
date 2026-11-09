@@ -16,6 +16,12 @@ enum BenchmarkTier: String, Codable, CaseIterable, Identifiable {
     case supertonicHigh = "supertonic-high"
     /// Supertonic at 6 steps (the "Balanced" dial).
     case supertonicBalanced = "supertonic-balanced"
+    /// Supertonic High with the CoreML EP appended to all four sessions
+    /// (Phase 5: the EP-vs-CPU device comparison; runner parity PASS,
+    /// run 42718617400).
+    case supertonicHighCoreML = "supertonic-high-coreml"
+    /// Supertonic Balanced with the CoreML EP.
+    case supertonicBalancedCoreML = "supertonic-balanced-coreml"
 
     var id: String { rawValue }
 
@@ -25,14 +31,16 @@ enum BenchmarkTier: String, Codable, CaseIterable, Identifiable {
         case .kokoroCompact: return "Kokoro Compact int8 (CPU)"
         case .supertonicHigh: return "Supertonic High · 8 steps (CPU)"
         case .supertonicBalanced: return "Supertonic Balanced · 6 steps (CPU)"
+        case .supertonicHighCoreML: return "Supertonic High · 8 steps (Core ML EP)"
+        case .supertonicBalancedCoreML: return "Supertonic Balanced · 6 steps (Core ML EP)"
         }
     }
 
     /// The step count pinned for the run (Supertonic only).
     var flowSteps: Int? {
         switch self {
-        case .supertonicHigh: return 8
-        case .supertonicBalanced: return 6
+        case .supertonicHigh, .supertonicHighCoreML: return 8
+        case .supertonicBalanced, .supertonicBalancedCoreML: return 6
         default: return nil
         }
     }
@@ -43,14 +51,14 @@ enum BenchmarkTier: String, Codable, CaseIterable, Identifiable {
     var firstChunkChars: Int {
         switch self {
         case .kokoroFP32, .kokoroCompact: return 100
-        case .supertonicHigh, .supertonicBalanced: return 60
+        case .supertonicHigh, .supertonicBalanced, .supertonicHighCoreML, .supertonicBalancedCoreML: return 60
         }
     }
 
     var batchChunkChars: Int {
         switch self {
         case .kokoroFP32, .kokoroCompact: return 160
-        case .supertonicHigh, .supertonicBalanced: return 200
+        case .supertonicHigh, .supertonicBalanced, .supertonicHighCoreML, .supertonicBalancedCoreML: return 200
         }
     }
 }

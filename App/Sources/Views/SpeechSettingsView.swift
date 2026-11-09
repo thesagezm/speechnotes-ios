@@ -10,6 +10,12 @@ struct SpeechSettingsView: View {
     /// (`SupertonicEngine.RenderQuality`), so a change applies from the
     /// next chunk with no restart.
     @AppStorage("supertonicRenderQuality") private var supertonicRenderQuality = "high"
+    /// The Phase-5 CoreML EP experiment dial. Default OFF: the flag is read
+    /// by SpeechPlayer's supertonic branch when it builds the engine, and
+    /// onChange forces the rebuild that swaps the session set. The
+    /// Benchmark Mode tiers carry their own variant selection — this flag
+    /// only governs normal playback.
+    @AppStorage("supertonicUseCoreML") private var supertonicUseCoreML = false
 
     /// Kokoro's tier dial, stored under the same `kokoroTier` key
     /// `SpeechPlayer.kokoroWantsBigModel` reads. It MUST be @AppStorage, not
@@ -223,6 +229,16 @@ struct SpeechSettingsView: View {
                     Text("Supertonic quality")
                 } footer: {
                     Text("High renders every chunk with the full 8 denoising steps — the best sound, roughly twice the generation work (still faster than playback). Balanced is the middle step: 6 steps, most of High's quality at ~3/4 of its time. Automatic drops to 4 steps only when the phone runs critically hot. Fast always uses 4 steps: quickest, with audible artifacts. Applies from the next chunk — no restart needed.")
+                }
+                Section {
+                    Toggle("Render with Core ML (experimental)", isOn: $supertonicUseCoreML)
+                        .onChange(of: supertonicUseCoreML) { _ in
+                            player.rebuildSupertonicEngineVariant()
+                        }
+                } header: {
+                    Text("Core ML experiment")
+                } footer: {
+                    Text("Routes Supertonic's four ONNX sessions through Apple's Core ML execution provider (Apple Neural Engine / GPU where they fit) instead of pure CPU. Off by default — lab-proven numerically identical, but the on-device speed, battery and heat comparison is still pending. Toggling it rebuilds the engine; any playing speech stops at the next sentence boundary. Use Benchmark Mode to measure EP vs CPU back-to-back.")
                 }
             }
 

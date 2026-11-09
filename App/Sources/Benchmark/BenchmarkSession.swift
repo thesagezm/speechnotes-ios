@@ -219,6 +219,10 @@ final class BenchmarkSession {
                 let engine = SupertonicEngine()
                 engine.benchmarkIntraOpThreads = config.intraOpThreads
                 supertonic = engine
+            case .supertonicHighCoreML, .supertonicBalancedCoreML:
+                let engine = SupertonicEngine(usesCoreMLEP: true)
+                engine.benchmarkIntraOpThreads = config.intraOpThreads
+                supertonic = engine
             }
 
             // 2. Model load — COLD by construction: every session builds a
@@ -230,7 +234,7 @@ final class BenchmarkSession {
             switch config.tier {
             case .kokoroFP32, .kokoroCompact:
                 prepared = kokoro?.benchmarkPrepare() ?? false
-            case .supertonicHigh, .supertonicBalanced:
+            case .supertonicHigh, .supertonicBalanced, .supertonicHighCoreML, .supertonicBalancedCoreML:
                 prepared = supertonic?.benchmarkPrepare() ?? false
             }
             guard prepared else {
@@ -379,7 +383,7 @@ final class BenchmarkSession {
         case .kokoroFP32, .kokoroCompact:
             guard let kokoro else { throw BenchmarkError.modelNotAvailable(config.tier) }
             return try kokoro.benchmarkSynthesize(text: text, speed: config.speed)
-        case .supertonicHigh, .supertonicBalanced:
+        case .supertonicHigh, .supertonicBalanced, .supertonicHighCoreML, .supertonicBalancedCoreML:
             guard let supertonic else { throw BenchmarkError.modelNotAvailable(config.tier) }
             return try supertonic.benchmarkSynthesize(
                 text: text,

@@ -861,7 +861,7 @@ func loadVoiceStyle(_ voiceStylePaths: [String], verbose: Bool) throws -> Style 
     return Style(ttl: ttlValue, dp: dpValue)
 }
 
-func loadTextToSpeech(_ onnxDir: String, _ useGpu: Bool, _ env: ORTEnv, intraOpThreads: Int32? = nil) throws -> TextToSpeech {
+func loadTextToSpeech(_ onnxDir: String, _ useGpu: Bool, _ env: ORTEnv, intraOpThreads: Int32? = nil, useCoreML: Bool = false) throws -> TextToSpeech {
     if useGpu {
         throw NSError(domain: "TTS", code: 1, userInfo: [NSLocalizedDescriptionKey: "GPU mode is not supported yet"])
     }
@@ -875,9 +875,26 @@ func loadTextToSpeech(_ onnxDir: String, _ useGpu: Bool, _ env: ORTEnv, intraOpT
     // optional override is the Speechnotes benchmark harness's thread knob;
     // nil keeps upstream behavior byte-for-byte. One options instance is
     // shared by all four session constructions below, so setting it once
-    // covers every session.
+    // covers every session (the CoreML EP append below rides the same share).
     if let intraOpThreads {
         try sessionOptions.setIntraOpNumThreads(intraOpThreads)
+    }
+    // Speechnotes' CoreML EP variant (Phase 5 of the hybrid CPU+ANE plan).
+    // Configuration mirrors the Phase-4 runner parity gate EXACTLY (run
+    // 42718617400, Part B): EP appended with default compute units —
+    // MLComputeUnits "All" — which passed the oracle gate at Pearson 1.0000
+    // / rel-RMS 0.0007 with CoreML active on all four sessions. Anything
+    // else (GPU pin, static shapes) would be an unmeasured configuration.
+    // A failed append degrades to CPU-only rather than failing the load:
+    // the EP is an experiment dial, never a load-bearing dependency.
+    if useCoreML {
+        do {
+            let providerOptions: [AnyHashable: Any] = ["MLComputeUnits": "All"]
+            try sessionOptions.appendCoreMLExecutionProviderWithOptionsV2(providerOptions)
+            print("CoreML EP: appended (MLComputeUnits=All) — shared by all 4 sessions\n")
+        } catch {
+            print("CoreML EP: append failed — falling back to CPU-only: \(error)\n")
+        }
     }
     
     let dpPath = "\(onnxDir)/duration_predictor.onnx"

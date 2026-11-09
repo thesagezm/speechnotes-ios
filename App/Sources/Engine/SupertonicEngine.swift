@@ -14,7 +14,13 @@ import SpeechLogic
 /// confined to the core's generateQueue. The sample rate comes from tts.json
 /// at load and is published to the core before the first buffer is built.
 final class SupertonicEngine: NSObject, SpeechEngine {
-    let name = "Supertonic (CPU)"
+    /// Phase-5 experiment dial: append ORT's CoreML EP to all four sessions.
+    /// Parity was proven runner-side (run 42718617400: Pearson 1.0000); the
+    /// device round (RTF/thermal/footprint + parity by ear) decides shipping.
+    /// Default OFF — the CPU path stays the shipped baseline until then.
+    let usesCoreMLEP: Bool
+
+    var name: String { usesCoreMLEP ? "Supertonic (Core ML EP)" : "Supertonic (CPU)" }
 
     var onStateChanged: ((SpeechState) -> Void)?
     var onProgress: ((Double) -> Void)?
@@ -126,7 +132,12 @@ final class SupertonicEngine: NSObject, SpeechEngine {
     /// constant across engines; a live-playback engine never touches it.
     var benchmarkIntraOpThreads: Int?
 
-    override init() {
+    /// - Parameter usesCoreMLEP: builds all four ORT sessions with the
+    ///   CoreML EP appended (see the property comment). Affects session
+    ///   construction only — chunking, scheduling and thermal policy are
+    ///   the shared core's, identical for both variants.
+    init(usesCoreMLEP: Bool = false) {
+        self.usesCoreMLEP = usesCoreMLEP
         self.core = StreamingTTSPlaybackCore(config: .init(
             sampleRate: 24_000, // provisional; tts.json's value is published at load
             chunkMaxChars: Self.chunkMaxChars,
@@ -153,7 +164,7 @@ final class SupertonicEngine: NSObject, SpeechEngine {
             ),
             exportInterChunkSilence: 0.05,
             logPrefix: "SupertonicEngine",
-            tier: "supertonic"
+            tier: usesCoreMLEP ? "supertonic-coreml" : "supertonic"
         ))
         super.init()
 
@@ -189,7 +200,8 @@ final class SupertonicEngine: NSObject, SpeechEngine {
                 ModelManager.supertonicOnnxDirectory.path,
                 false,
                 env,
-                intraOpThreads: benchmarkIntraOpThreads.map(Int32.init)
+                intraOpThreads: benchmarkIntraOpThreads.map(Int32.init),
+                useCoreML: usesCoreMLEP
             )
             ortEnv = env
             tts = textToSpeech
@@ -201,7 +213,7 @@ final class SupertonicEngine: NSObject, SpeechEngine {
                 let path = ModelManager.supertonicStyleFileURL(voice: voice).path
                 styles[voice] = try loadVoiceStyle([path], verbose: false)
             }
-            Log.shared.info("SupertonicEngine: 4 sessions + \(styles.count) styles loaded in \(String(format: "%.1f", Date().timeIntervalSince(started)))s (\(textToSpeech.sampleRate) Hz)")
+            Log.shared.info("SupertonicEngine: 4 sessions + \(styles.count) styles loaded in \(String(format: "%.1f", Date().timeIntervalSince(started)))s (\(textToSpeech.sampleRate) Hz, Core ML EP: \(usesCoreMLEP ? "on" : "off"))")
             // Only latch AFTER success — a transient load failure (jettison
             // mid-load, file lock) used to brick the engine until relaunch.
             modelLoadAttempted = true

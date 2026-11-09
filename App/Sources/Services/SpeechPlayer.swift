@@ -975,6 +975,19 @@ final class SpeechPlayer: ObservableObject {
         rebuildEngine()
     }
 
+    /// Re-drives the engine build after the Supertonic CoreML EP flag
+    /// changes (Phase 5 experiment dial, settings-owned). Same semantics as
+    /// rebuildKokoroTier: a variant change mid-session abandons the live
+    /// session exactly like an engine switch, because the CPU and EP
+    /// sessions are different ORT graphs. The rebuild itself reconciles the
+    /// warm engine's variant with the flag (the supertonic branch below
+    /// keeps a same-kind engine warm — the EP check is what forces the
+    /// rebuild).
+    func rebuildSupertonicEngineVariant() {
+        guard engineKind == .supertonic else { return }
+        rebuildEngine()
+    }
+
     private func rebuildEngine() {
         // A live session belongs to the OLD engine. Stopping it makes that
         // core publish .idle — but its onStateChanged closure fails the
@@ -1011,8 +1024,14 @@ final class SpeechPlayer: ObservableObject {
             onnxEngineFileIsBig = true
         }
         if engineKind == .supertonic, ModelManager.shared.supertonicIsReady {
-            if supertonicEngine == nil {
-                let supertonic = SupertonicEngine()
+            // The warm-engine guard reconciles the VARIANT too: a same-kind
+            // rebuild (flag flip) must not keep the old-variant session set.
+            // Default OFF — the CPU engine is the shipped baseline; the Core
+            // ML EP engine (Phase 5) is an explicit settings opt-in.
+            let wantsCoreML = UserDefaults.standard.bool(forKey: "supertonicUseCoreML")
+            if supertonicEngine == nil || supertonicEngine?.usesCoreMLEP != wantsCoreML {
+                supertonicEngine = nil
+                let supertonic = SupertonicEngine(usesCoreMLEP: wantsCoreML)
                 supertonic.voice = supertonicVoice
                 supertonic.lang = supertonicLang
                 supertonicEngine = supertonic
