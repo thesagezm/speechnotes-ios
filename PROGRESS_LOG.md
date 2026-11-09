@@ -670,3 +670,31 @@ sway, and the paused freeze preserved via the schedule's `paused:`.
 README brought to v1.8.0 reality (Kokoro Compact ~92 MB dynamic int8, not
 ~177 MB; Soprano credit removed — no engine; epub.js credited; layout/CI
 sections match the tree). Release notes: `Docs/RELEASE-V1.8.0.md`.
+
+**Parity round 3 harvested; Phase 5 EP variant flagged in (2026-11-10,
+`ed50e7a`).** Round 3 (run 42718617400, success) settled both placements:
+Supertonic's whole 4-model chain through the ORT CoreML EP is numerically
+PERFECT vs the CPU oracle (Pearson 1.0000, rel-RMS 0.0007, exact length,
+CoreML active on all four sessions) → it ships via the EP, no conversion
+pipeline; Kokoro's EP is BANNED under every unit configuration — the A2
+localization proved the failure (Pearson 0.6305) is identical with the EP
+pinned to CPUAndGPU (ANE excluded, provider-proof logged), so it is the
+EP's CoreML conversion itself, not ANE-fp16; the GPU-pinned experiment is
+dead and Kokoro stays CPU. Placement doc §4/§8 updated (`4ba0ff0`). H1b
+answered: ORT 1.24.2's ObjC binding exposes
+`appendCoreMLExecutionProviderWithOptionsV2` (MLComputeUnits dict) through
+the umbrella header. The Supertonic CoreML-EP engine variant is now behind
+runtime flags: `loadTextToSpeech(useCoreML:)` appends the EP with
+MLComputeUnits=All (the exact runner-proven config; append failure
+degrades to CPU), Benchmark Mode gains the
+supertonic-high/balanced-coreml tiers for the EP-vs-CPU device
+comparison, and normal playback gets a "Render with Core ML
+(experimental)" settings toggle — default OFF, one build,
+runtime-selectable. Acceptance stays gated on the device round: RTF ≤
+CPU tiers or thermal/footprint win, no audible difference, thermal never
+past serious. Also this session: the parallel web-import workstream's
+finished feature committed separately (`05cc552`) — its new ShareExtension
+target is GATED build-only (embed: false) because LiveContainer hosts no
+app extensions; enabling embed needs the user's say-so + an LC smoke
+test. CI: manual dispatch run 42723938178 on `ed50e7a` (compile oracle;
+one round budgeted).
