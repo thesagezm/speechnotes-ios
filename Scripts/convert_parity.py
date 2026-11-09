@@ -155,9 +155,23 @@ def make_session(model_path, use_coreml_ep, log_severe=False, compute_units=None
     so = ort.SessionOptions()
     if log_severe:
         so.log_severity_level = 3
-    provider_options = [{"MLComputeUnits": compute_units}] if compute_units else None
-    return ort.InferenceSession(model_path, sess_options=so, providers=providers,
+    # ORT requires provider_options to align with providers 1:1 — a shorter
+    # list is rejected and (worse) some ORT builds then silently drop the
+    # CoreML EP, which makes a parity run meaningless. The GPU/CPU pin is
+    # how we separate "ANE fp16 corrupts the math" from "the partition is
+    # at fault"; every session's ACTIVE providers are recorded below so a
+    # silently-CPU-only run can never masquerade as an EP result again.
+    provider_options = None
+    if compute_units:
+        provider_options = [{"MLComputeUnits": compute_units}, {}]
+    sess = ort.InferenceSession(model_path, sess_options=so, providers=providers,
                                 provider_options=provider_options)
+    SESSION_PROVIDERS.append(sess.get_providers())
+    print(f"  session active providers: {sess.get_providers()}")
+    return sess
+
+
+SESSION_PROVIDERS = []
 
 
 # ---------------------------------------------------------------------------
@@ -186,21 +200,24 @@ def part_a():
     new = ep.run(None, feeds)[0].ravel()
     result = parity(ref, new)
     result["tokens"] = n
+    result["active_providers"] = ep.get_providers()
     print("kokoro EP (ALL units) parity:", json.dumps(result))
 
     # A2 — localize the divergence. (1) Same model, EP pinned to CPU+GPU: if
-    # parity recovers, the casualty is ANE fp16; if it stays broken, the EP's
-    # own partitioning is at fault. (2) Decoder-subgraph extraction: compare
-    # [graph start → decoder boundary] and [boundary → waveform] separately.
-    localize = {"whole_all_units": result}
+    # parity holds WITH the CoreML EP verified active, the casualty is ANE
+    # fp16; if the EP refuses nodes, the pin tells us that too. (2) Decoder-
+    # subgraph extraction: compare [graph start → decoder boundary] and
+    # [boundary → waveform] separately.
+    localize = {"whole_all_units": dict(result)}
     gpu = make_session(f"{WORK}/kokoro/model.onnx", use_coreml_ep=True,
                        compute_units="CPUAndGPU")
+    localize["gpu_pin_active_providers"] = gpu.get_providers()
     new_gpu = gpu.run(None, feeds)[0].ravel()
     localize["whole_cpu_and_gpu"] = parity(ref, new_gpu)
     print("kokoro EP (CPUAndGPU) parity:", json.dumps(localize["whole_cpu_and_gpu"]))
 
     try:
-        stage = kokoro_stage_parity(ref_feeds=feeds, ref_out=ref)
+        stage = kokoro_stage_parity(ref_feeds=feeds)
         localize.update(stage)
     except Exception as e:
         localize["stage_extraction_error"] = repr(e)
@@ -210,7 +227,7 @@ def part_a():
     return result
 
 
-def kokoro_stage_parity(ref_feeds, ref_out):
+def kokoro_stage_parity(ref_feeds):
     """Split the Kokoro graph at the first decoder node and parity-check each
     half through the EP. The length match in the whole-model run already
     says the duration path agrees — the suspect is the istftnet decoder."""
@@ -226,6 +243,7 @@ def kokoro_stage_parity(ref_feeds, ref_out):
                     break
             if boundary:
                 break
+    print(f"decoder boundary tensor: {boundary}")
     if not boundary:
         return {"boundary_found": False}
 
@@ -235,17 +253,17 @@ def kokoro_stage_parity(ref_feeds, ref_out):
     onnx.utils.extract_model(model_path, dec_path, [boundary], ["waveform"])
 
     out = {"boundary_found": True, "boundary_tensor": boundary}
-    pre_cpu = make_session(pre_path, False).run(None, list(ref_feeds.values()))[0].ravel()
-    pre_ep = make_session(pre_path, True).run(None, list(ref_feeds.values()))[0].ravel()
-    out["stage_pre_decoder"] = parity(pre_cpu, pre_ep)
+    pre_cpu_out = make_session(pre_path, False).run(None, list(ref_feeds.values()))[0]
+    pre_ep_out = make_session(pre_path, True).run(None, list(ref_feeds.values()))[0]
+    out["stage_pre_decoder"] = parity(np.asarray(pre_cpu_out).ravel(), np.asarray(pre_ep_out).ravel())
 
+    # Decoder isolation: BOTH decoders consume the CPU pre-stage output, so
+    # this measures the decoder under the EP alone, not accumulated drift.
     dec_cpu_session = make_session(dec_path, False)
-    mid = pre_cpu.reshape(1, -1)
-    dec_ref = dec_cpu_session.run(None, {boundary: mid})[0].ravel()
     dec_ep_session = make_session(dec_path, True)
-    dec_new = dec_ep_session.run(None, {boundary: mid})[0].ravel()
+    dec_ref = dec_cpu_session.run(None, {boundary: pre_cpu_out})[0].ravel()
+    dec_new = dec_ep_session.run(None, {boundary: pre_cpu_out})[0].ravel()
     out["stage_decoder"] = parity(dec_ref, dec_new)
-    out["whole_vs_cpu_reference"] = parity(ref_out, dec_new)
     print("kokoro stage localization:", json.dumps(out))
     return out
 
@@ -355,6 +373,9 @@ def part_b(cfg, inp, wav_ref, latent_len, steps):
     wav_ep = chain(True)
     result = parity(wav_ref, wav_ep, sample_rate)
     result["latent_len"] = latent_len
+    # Prove the CoreML EP actually carried nodes for the chain's sessions
+    # (a silently-CPU-only fallback would make this parity trivial).
+    result["active_providers"] = SESSION_PROVIDERS[-4:] if len(SESSION_PROVIDERS) >= 4 else SESSION_PROVIDERS[:]
     print("supertonic EP parity:", json.dumps(result))
     return result
 

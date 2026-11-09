@@ -50,21 +50,27 @@ jobs:
         if: always()
         run: |
           echo "### Convert + parity outcome" >> "$GITHUB_STEP_SUMMARY"
-          if [ -f parity-work/parity-report.json ]; then
-            python - <<'EOF'
-          import json
-          report = json.load(open("parity-work/parity-report.json"))
-          for part, r in report.items():
-              if r is None:
-                  print(f"- {part}: not run")
-              elif r.get("pass") is True:
-                  print(f"- {part}: PASS " + json.dumps({k: r[k] for k in ("pearson", "rel_rms", "length_delta") if k in r}))
-              else:
-                  print(f"- {part}: FAIL " + json.dumps(r.get("reason") or r.get("error") or r, default=str)[:400])
+          python - <<'EOF'
+          import json, os
+          path = "parity-work/parity-report.json"
+          if not os.path.exists(path):
+              print("No report produced — see parity.log")
+          else:
+              try:
+                  report = json.load(open(path))
+                  for part, r in report.items():
+                      if r is None:
+                          print(f"- {part}: not run")
+                      elif r.get("pass") is True:
+                          print(f"- {part}: PASS " + json.dumps({k: r[k] for k in ("pearson", "rel_rms", "length_delta") if k in r}))
+                      elif r.get("skipped"):
+                          print(f"- {part}: SKIPPED — {r.get('reason', '')[:200]}")
+                      else:
+                          print(f"- {part}: FAIL " + json.dumps(r.get("reason") or r.get("error") or r, default=str)[:400])
+              except Exception as e:
+                  print(f"Report unreadable ({e}) — tail of file:")
+                  print(open(path, errors="replace").read()[-800:])
           EOF
-          else
-            echo "No report produced — see parity.log" >> "$GITHUB_STEP_SUMMARY"
-          fi
 
       - name: Upload parity artifacts
         if: always()
