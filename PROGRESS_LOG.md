@@ -4,6 +4,49 @@ Format: newest first. Every critique round, merge, and escalation lands here.
 
 ---
 
+**E-Ink appearance mode** (branch `batch-c-d-session`, 2026-11-10):
+- **One new mode, app-wide effects.** Settings → Appearance → Theme gains
+  "E-Ink" (4th segment beside System/Light/Dark): paper white, ink black,
+  square edges, hairline borders — no glass/materials, no gradients, no
+  color, no animation or transitions anywhere. The accent picker does not
+  matter while the mode is on (ink is ink) and its hue returns the moment
+  the mode is left.
+- **Plumbing** (`AppTheme.swift`, new `Views/EInkSupport.swift`,
+  `SpeechnotesApp.swift`): `AppearanceMode.eink` forces the light scheme;
+  `isEInk` rides the environment (`\.isEInk`) for inline view swaps; the
+  root applies `.transaction { animation = nil }` (every SwiftUI animation
+  snaps) + `.grayscale(1.0)` (every hardcoded tint drains) +
+  `.buttonBorderShape(.rectangle)`; `EInk.applyChrome(enabled:)` flattens
+  the UIKit tab/nav bars to opaque paper with 1pt ink hairlines and calls
+  `UIView.setAnimationsEnabled(false)` (push/pop, sheets, keyboard — the
+  UIKit-level motion SwiftUI can't reach). Called at app init so relaunch
+  into the mode doesn't flash stock chrome.
+- **Notes section (the flagship)**: notebook chips go square (active =
+  solid ink block, inactive = paper + hairline); the list renders flat
+  full-width rows with hairline separators (`.einkListStyle()`); swipe
+  tints go ink; pin/star lose orange/yellow for black; the slash menu,
+  formatting bar and markdown preview (quotes, code blocks, tables) square
+  off and print-style.
+- **Shared one-liners** so the sweep didn't bury files in if/else:
+  `.einkPaper { regular }` (square paper tile + hairline),
+  `.einkInk { regular }` (solid ink block), `.einkCard(radius:style:)`
+  (rounded card squares off), `.einkClip(cornerRadius:)` (square content
+  clip). ~30 view files swept: mini-players and bubbles (material pills →
+  paper slabs, ring trims → ink), playback rail (portrait + landscape),
+  toast, books shelf, stats cards/heatmap/chart, reading goals, pomodoro
+  (timer card, banner), storage gallery, onboarding, PDF reader chrome,
+  web-article surfaces.
+- **EPUB reader** gets its own `eink` page theme (reader.js THEMES:
+  `#ffffff`/`#000000` — pure ink, full contrast, nothing softened) plus
+  the sheet entry and the chrome/page color maps.
+- **Honest limits**: system sheets/alerts/keyboard keep iOS's rounded
+  chrome (light + grayscale only); the "generating" spinner still spins;
+  PDF reader page surface untouched (PDFKit). All animations die at the
+  root transaction — no view logic changed, so leaving the mode restores
+  the stock look bit-for-bit.
+
+---
+
 **Web article formatting + native share sheet** (branch `batch-c-d-session`,
 2026-11-10):
 - **Root cause of the flat-paragraph imports** (`Docs/WEB-ARTICLE-IMPORT.md`):

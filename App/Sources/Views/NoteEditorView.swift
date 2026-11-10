@@ -10,6 +10,7 @@ struct NoteEditorView: View {
     @EnvironmentObject private var player: SpeechPlayer
     @EnvironmentObject private var theme: AppTheme
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.isEInk) private var isEInk
     @State private var draft: String = ""
     @State private var titleDraft: String = ""
     @State private var didLoad = false
@@ -896,15 +897,23 @@ struct NoteEditorView: View {
             }
         }
         .frame(maxHeight: 260)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(.regularMaterial)
-                .shadow(color: .black.opacity(0.18), radius: 12, y: 4)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.08))
-        )
+        .background {
+            // E-Ink: flat paper card with an ink hairline — no material, no
+            // shadow, no rounding.
+            if isEInk {
+                EInk.surface
+            } else {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(.regularMaterial)
+                    .shadow(color: .black.opacity(0.18), radius: 12, y: 4)
+            }
+        }
+        .overlay {
+            if !isEInk {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.08))
+            }
+        }
         .padding(.horizontal, 10)
         .padding(.bottom, 8)
         .transition(.opacity.combined(with: .move(edge: .bottom)))

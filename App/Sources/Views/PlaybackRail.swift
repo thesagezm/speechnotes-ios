@@ -114,6 +114,7 @@ struct PlaybackRail: View {
     var observesPlayer: Bool = false
 
     @EnvironmentObject private var theme: AppTheme
+    @Environment(\.isEInk) private var isEInk
     /// The live player — the rail's own subscription, used when
     /// `observesPlayer` is set (see there for why).
     @EnvironmentObject private var livePlayer: SpeechPlayer
@@ -241,15 +242,17 @@ struct PlaybackRail: View {
                 .padding(.vertical, 14)
                 .frame(width: Self.idealWidth)
                 .fixedSize(horizontal: false, vertical: true)
-                .background(
+                .einkPaper {
                     RoundedRectangle(cornerRadius: 26, style: .continuous)
                         .fill(.bar)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 26, style: .continuous)
-                        .strokeBorder(Color.primary.opacity(0.07))
-                )
-                .shadow(color: .black.opacity(0.12), radius: 14, y: 4)
+                }
+                .overlay {
+                    if !isEInk {
+                        RoundedRectangle(cornerRadius: 26, style: .continuous)
+                            .strokeBorder(Color.primary.opacity(0.07))
+                    }
+                }
+                .shadow(color: isEInk ? .clear : .black.opacity(0.12), radius: 14, y: 4)
                 .overlay(alignment: .topTrailing) {
                     // Minimize — the portrait bar's chevron affordance,
                     // pointing off the trailing edge.
@@ -300,14 +303,26 @@ struct PlaybackRail: View {
                 action.onTogglePlay()
             } label: {
                 ZStack {
-                    Circle()
-                        .fill(.ultraThinMaterial)
-                        .shadow(color: .black.opacity(0.18), radius: 8, y: 3)
-                    if let progress = effectiveProgress {
+                    if isEInk {
+                        Rectangle()
+                            .fill(EInk.paper)
+                            .overlay(Rectangle().strokeBorder(EInk.ink, lineWidth: EInk.hairline))
+                        if let progress = effectiveProgress {
+                            Rectangle()
+                                .trim(from: 0, to: max(0.001, min(1, progress)))
+                                .stroke(EInk.ink, style: StrokeStyle(lineWidth: 3))
+                                .rotationEffect(.degrees(-90))
+                        }
+                    } else {
                         Circle()
-                            .trim(from: 0, to: max(0.001, min(1, progress)))
-                            .stroke(theme.accentGradient, style: StrokeStyle(lineWidth: 3, lineCap: .round))
-                            .rotationEffect(.degrees(-90))
+                            .fill(.ultraThinMaterial)
+                            .shadow(color: .black.opacity(0.18), radius: 8, y: 3)
+                        if let progress = effectiveProgress {
+                            Circle()
+                                .trim(from: 0, to: max(0.001, min(1, progress)))
+                                .stroke(theme.accentGradient, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                                .rotationEffect(.degrees(-90))
+                        }
                     }
                     Image(systemName: playIcon)
                         .font(.system(size: 15, weight: .bold))
@@ -333,15 +348,17 @@ struct PlaybackRail: View {
             .accessibilityLabel("Expand playback rail")
         }
         .padding(10)
-        .background(
+        .einkPaper {
             RoundedRectangle(cornerRadius: 26, style: .continuous)
                 .fill(.ultraThinMaterial)
                 .shadow(color: .black.opacity(0.14), radius: 10, y: 3)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 26, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.07))
-        )
+        }
+        .overlay {
+            if !isEInk {
+                RoundedRectangle(cornerRadius: 26, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.07))
+            }
+        }
         .padding(.horizontal, Self.horizontalPadding)
         // The capsule's own natural size is what the minimized column hands
         // back to the content (2026-10-06 user report — the earlier
@@ -446,11 +463,20 @@ struct PlaybackRail: View {
         VStack(spacing: 5) {
             GeometryReader { proxy in
                 ZStack(alignment: .leading) {
-                    Capsule().fill(Color.secondary.opacity(0.25))
-                    if let progress = effectiveProgress, progress > 0 {
-                        Capsule()
-                            .fill(theme.accentFadeGradient)
-                            .frame(width: max(4, proxy.size.width * progress))
+                    if isEInk {
+                        Rectangle().fill(Color.secondary.opacity(0.25))
+                        if let progress = effectiveProgress, progress > 0 {
+                            Rectangle()
+                                .fill(EInk.ink)
+                                .frame(width: max(4, proxy.size.width * progress))
+                        }
+                    } else {
+                        Capsule().fill(Color.secondary.opacity(0.25))
+                        if let progress = effectiveProgress, progress > 0 {
+                            Capsule()
+                                .fill(theme.accentFadeGradient)
+                                .frame(width: max(4, proxy.size.width * progress))
+                        }
                     }
                 }
             }
@@ -488,7 +514,7 @@ struct PlaybackRail: View {
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 6)
-                    .background(Capsule().fill(Color.secondary.opacity(0.12)))
+                    .einkPaper { Capsule().fill(Color.secondary.opacity(0.12)) }
                     .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
@@ -505,9 +531,14 @@ struct PlaybackRail: View {
             action.onTogglePlay()
         } label: {
             ZStack {
-                Circle()
-                    .fill(theme.accentGradient)
-                    .shadow(color: .black.opacity(0.15), radius: 6, y: 3)
+                if isEInk {
+                    Rectangle()
+                        .fill(EInk.ink)
+                } else {
+                    Circle()
+                        .fill(theme.accentGradient)
+                        .shadow(color: .black.opacity(0.15), radius: 6, y: 3)
+                }
                 if effectiveIsGenerating {
                     ProgressView()
                         .tint(.white)
@@ -537,7 +568,7 @@ struct PlaybackRail: View {
                         .font(.footnote.weight(.medium))
                         .foregroundStyle(action.readAlongOn ? Color.accentColor : .secondary)
                         .frame(width: 36, height: 36)
-                        .background(Circle().fill(Color.secondary.opacity(0.12)))
+                        .einkPaper { Circle().fill(Color.secondary.opacity(0.12)) }
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(action.readAlongOn ? "Read-along on" : "Read-along off")
@@ -552,7 +583,7 @@ struct PlaybackRail: View {
                         .font(.footnote.weight(.bold))
                         .foregroundStyle(.red)
                         .frame(width: 36, height: 36)
-                        .background(Circle().fill(Color.red.opacity(0.12)))
+                        .einkPaper { Circle().fill(Color.red.opacity(0.12)) }
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Stop playback")

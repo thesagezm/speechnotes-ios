@@ -10,6 +10,7 @@ struct MiniPlayerBar: View {
 
     @EnvironmentObject private var player: SpeechPlayer
     @EnvironmentObject private var theme: AppTheme
+    @Environment(\.isEInk) private var isEInk
     @AppStorage("miniPlayerCollapsed") private var miniPlayerCollapsed = false
 
     private var playIcon: String {
@@ -25,10 +26,19 @@ struct MiniPlayerBar: View {
             if let progress = player.progress, player.state == .speaking {
                 GeometryReader { proxy in
                     ZStack(alignment: .leading) {
-                        Capsule().fill(Color.secondary.opacity(0.25))
-                        Capsule()
-                            .fill(theme.accentFadeGradient)
-                            .frame(width: max(4, proxy.size.width * progress))
+                        // E-Ink: square track, solid ink fill — the accent
+                        // gradient is already flat black in this mode.
+                        if isEInk {
+                            Rectangle().fill(Color.secondary.opacity(0.25))
+                            Rectangle()
+                                .fill(EInk.ink)
+                                .frame(width: max(4, proxy.size.width * progress))
+                        } else {
+                            Capsule().fill(Color.secondary.opacity(0.25))
+                            Capsule()
+                                .fill(theme.accentFadeGradient)
+                                .frame(width: max(4, proxy.size.width * progress))
+                        }
                     }
                 }
                 .frame(height: 3)
@@ -45,7 +55,13 @@ struct MiniPlayerBar: View {
                         .font(.system(size: 16, weight: .bold))
                         .foregroundStyle(.white)
                         .frame(width: 38, height: 38)
-                        .background(Circle().fill(theme.accentGradient))
+                        .background {
+                            if isEInk {
+                                Rectangle().fill(EInk.ink)
+                            } else {
+                                Circle().fill(theme.accentGradient)
+                            }
+                        }
                 }
                 .disabled(player.state == .generating)
                 .accessibilityLabel(player.state == .speaking ? "Pause" : "Play")
@@ -56,9 +72,15 @@ struct MiniPlayerBar: View {
                 } label: {
                     Image(systemName: "stop.fill")
                         .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(.red)
+                        .foregroundStyle(isEInk ? Color.black : Color.red)
                         .frame(width: 32, height: 32)
-                        .background(Circle().fill(Color.red.opacity(0.12)))
+                        .background {
+                            if isEInk {
+                                EInk.surface
+                            } else {
+                                Circle().fill(Color.red.opacity(0.12))
+                            }
+                        }
                 }
                 .accessibilityLabel("Stop playback")
 
@@ -105,7 +127,13 @@ struct MiniPlayerBar: View {
                             .font(.system(size: 14, weight: .semibold))
                             .foregroundStyle(player.sleepTimer == .off ? .secondary : Color.accentColor)
                             .frame(width: 32, height: 32)
-                            .background(Circle().fill(Color.secondary.opacity(0.12)))
+                            .background {
+                                if isEInk {
+                                    EInk.surface
+                                } else {
+                                    Circle().fill(Color.secondary.opacity(0.12))
+                                }
+                            }
                         if player.sleepTimer != .off {
                             Circle()
                                 .fill(Color.accentColor)
@@ -125,7 +153,13 @@ struct MiniPlayerBar: View {
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(.secondary)
                         .frame(width: 32, height: 32)
-                        .background(Circle().fill(Color.secondary.opacity(0.12)))
+                        .background {
+                            if isEInk {
+                                EInk.surface
+                            } else {
+                                Circle().fill(Color.secondary.opacity(0.12))
+                            }
+                        }
                 }
                 .accessibilityLabel("Minimize player")
             }
@@ -134,15 +168,23 @@ struct MiniPlayerBar: View {
             .contentShape(Rectangle())
             .onTapGesture { onTap?() }
         }
-        .background(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .fill(.ultraThinMaterial)
-                .shadow(color: .black.opacity(0.18), radius: 12, y: 4)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.06))
-        )
+        .background {
+            // E-Ink: opaque paper card, square, one ink hairline — no
+            // material, no shadow.
+            if isEInk {
+                EInk.surface
+            } else {
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .shadow(color: .black.opacity(0.18), radius: 12, y: 4)
+            }
+        }
+        .overlay {
+            if !isEInk {
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.06))
+            }
+        }
         .padding(.horizontal, 12)
     }
 }
@@ -152,6 +194,7 @@ struct MiniPlayerBar: View {
 struct MiniPlayerBubble: View {
     @EnvironmentObject private var player: SpeechPlayer
     @EnvironmentObject private var theme: AppTheme
+    @Environment(\.isEInk) private var isEInk
     @AppStorage("miniPlayerCollapsed") private var miniPlayerCollapsed = false
 
     var body: some View {
@@ -160,15 +203,28 @@ struct MiniPlayerBubble: View {
             miniPlayerCollapsed = false
         } label: {
             ZStack {
-                Circle()
-                    .fill(.ultraThinMaterial)
-                    .shadow(color: .black.opacity(0.2), radius: 10, y: 3)
+                if isEInk {
+                    // E-Ink: a square ink-bordered tile replaces the
+                    // floating glass bubble.
+                    Rectangle()
+                        .fill(EInk.paper)
+                        .overlay(Rectangle().strokeBorder(EInk.ink, lineWidth: EInk.hairline))
 
-                // Progress ring.
-                Circle()
-                    .trim(from: 0, to: player.progress ?? 0)
-                    .stroke(theme.accentGradient, style: StrokeStyle(lineWidth: 3.5, lineCap: .round))
-                    .rotationEffect(.degrees(-90))
+                    Rectangle()
+                        .trim(from: 0, to: player.progress ?? 0)
+                        .stroke(EInk.ink, style: StrokeStyle(lineWidth: 3.5))
+                        .rotationEffect(.degrees(-90))
+                } else {
+                    Circle()
+                        .fill(.ultraThinMaterial)
+                        .shadow(color: .black.opacity(0.2), radius: 10, y: 3)
+
+                    // Progress ring.
+                    Circle()
+                        .trim(from: 0, to: player.progress ?? 0)
+                        .stroke(theme.accentGradient, style: StrokeStyle(lineWidth: 3.5, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                }
 
                 if player.state == .generating {
                     ProgressView()

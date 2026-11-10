@@ -7,6 +7,7 @@ import SwiftUI
 /// those. Speed reuses SpeechPlayer.rateMultiplier so the preference is
 /// shared with note playback.
 struct BookPlayerBar: View {
+    @Environment(\.isEInk) private var isEInk
     let book: Book
     let chapterIndex: Int
     @ObservedObject var player: SpeechPlayer
@@ -175,14 +176,14 @@ struct BookPlayerBar: View {
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.secondary)
                     .frame(width: 28, height: 28)
-                    .background(Circle().fill(Color.secondary.opacity(0.12)))
+                    .einkPaper { Circle().fill(Color.secondary.opacity(0.12)) }
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Minimize playback controls")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
-        .background(.bar)
+        .background(isEInk ? AnyShapeStyle(EInk.paper) : AnyShapeStyle(.bar))
     }
 
     private var progressLabel: String {

@@ -21,6 +21,9 @@ xcuserdata/
 .DS_Store
 Thumbs.db
 
+# Local agent-session state (ZCode plans/notes) — never project material
+.zcode/
+
 # Python
 __pycache__/
 *.pyc

@@ -10,6 +10,7 @@ import SwiftUI
 /// page (its CTA was discoverable anyway) to make room for the Pomodoro &
 /// Stats page without growing the flow past five pages (user request).
 struct OnboardingView: View {
+    @Environment(\.isEInk) private var isEInk
     /// Called when the user finishes (or skips) the flow.
     let onDone: () -> Void
 
@@ -49,10 +50,17 @@ struct OnboardingView: View {
                         .font(.headline)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 14)
-                        .background(
-                            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                .fill(page == lastPage ? Color.accentColor : Color.secondary.opacity(0.15))
-                        )
+                        .background {
+                            if isEInk {
+                                Rectangle().fill(page == lastPage ? EInk.ink : EInk.paper)
+                                    .overlay(
+                                        Rectangle().strokeBorder(page == lastPage ? Color.clear : EInk.ink, lineWidth: EInk.hairline)
+                                    )
+                            } else {
+                                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                    .fill(page == lastPage ? Color.accentColor : Color.secondary.opacity(0.15))
+                            }
+                        }
                         .foregroundStyle(page == lastPage ? Color.white : Color.primary)
                 }
                 .padding(.horizontal, 28)

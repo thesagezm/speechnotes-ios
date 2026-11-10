@@ -10,6 +10,7 @@ import SpeechLogic
 struct StatsTabView: View {
     @EnvironmentObject private var books: BooksStore
     @EnvironmentObject private var notes: NotesStore
+    @Environment(\.isEInk) private var isEInk
 
     private enum RangeOption: String, CaseIterable, Identifiable {
         case week = "Week"
@@ -116,7 +117,7 @@ struct StatsTabView: View {
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 28)
                         .padding(.horizontal, 16)
-                        .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(Color(.secondarySystemGroupedBackground)))
+                        .einkCard(radius: 18, style: Color(.secondarySystemGroupedBackground))
                     }
                 }
                 .padding(.horizontal, 16)
@@ -161,7 +162,7 @@ struct StatsTabView: View {
                 .font(.body.weight(.semibold))
                 .foregroundStyle(tint)
                 .frame(width: 30, height: 30)
-                .background(tint.opacity(0.15), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .background(tint.opacity(0.15), in: isEInk ? AnyShape(Rectangle()) : AnyShape(RoundedRectangle(cornerRadius: 8, style: .continuous)))
             Text(value)
                 .font(.subheadline.weight(.bold))
                 .lineLimit(1)
@@ -172,7 +173,7 @@ struct StatsTabView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
-        .background(cardBackground)
+        .einkCard(radius: 18, style: Color(.secondarySystemGroupedBackground))
     }
 
     private var activityCard: some View {
@@ -184,7 +185,7 @@ struct StatsTabView: View {
             legend
         }
         .padding(14)
-        .background(cardBackground)
+        .einkCard(radius: 18, style: Color(.secondarySystemGroupedBackground))
     }
 
     /// The bars must wear the legend's colours, not Swift Charts' own
@@ -210,7 +211,7 @@ struct StatsTabView: View {
                     y: .value("Minutes", slice.minutes)
                 )
                 .foregroundStyle(by: .value("Kind", slice.kind.label))
-                .cornerRadius(2.5)
+                .cornerRadius(isEInk ? 0 : 2.5)
             }
             .chartXAxis {
                 AxisMarks(values: .stride(by: .day)) { _ in
@@ -226,7 +227,7 @@ struct StatsTabView: View {
                     y: .value("Minutes", slice.minutes)
                 )
                 .foregroundStyle(by: .value("Kind", slice.kind.label))
-                .cornerRadius(2)
+                .cornerRadius(isEInk ? 0 : 2)
             }
             .chartScrollableAxes(.horizontal)
             .chartXVisibleDomain(length: 60 * 60 * 24 * 10)
@@ -239,7 +240,7 @@ struct StatsTabView: View {
                     y: .value("Minutes", slice.minutes)
                 )
                 .foregroundStyle(by: .value("Kind", slice.kind.label))
-                .cornerRadius(2.5)
+                .cornerRadius(isEInk ? 0 : 2.5)
             }
             .chartXAxis {
                 AxisMarks(values: .stride(by: .month)) { _ in
@@ -255,7 +256,7 @@ struct StatsTabView: View {
         HStack(spacing: 14) {
             ForEach(StatsKind.allCases, id: \.rawValue) { kind in
                 HStack(spacing: 5) {
-                    RoundedRectangle(cornerRadius: 2)
+                    (isEInk ? AnyShape(Rectangle()) : AnyShape(RoundedRectangle(cornerRadius: 2)))
                         .fill(kind.legendColor)
                         .frame(width: 10, height: 10)
                     Text(kind.label)
@@ -276,7 +277,7 @@ struct StatsTabView: View {
             heatmap
         }
         .padding(14)
-        .background(cardBackground)
+        .einkCard(radius: 18, style: Color(.secondarySystemGroupedBackground))
     }
 
     private var heatmap: some View {
@@ -294,7 +295,7 @@ struct StatsTabView: View {
 
     private func heatmapCell(_ date: Date?) -> some View {
         let level = heatmapLevel(date)
-        return RoundedRectangle(cornerRadius: 3, style: .continuous)
+        return (isEInk ? AnyShape(Rectangle()) : AnyShape(RoundedRectangle(cornerRadius: 3, style: .continuous)))
             .fill(level.fill)
             .frame(width: 13, height: 13)
             .accessibilityLabel(date.map { "Reading on \(Self.dayFormatter.string(from: $0)): \(heatmapMinutes($0)) minutes" } ?? "No data")
@@ -322,7 +323,7 @@ struct StatsTabView: View {
             }
         }
         .padding(14)
-        .background(cardBackground)
+        .einkCard(radius: 18, style: Color(.secondarySystemGroupedBackground))
     }
 
     private func subjectRow(_ row: SubjectRow) -> some View {
@@ -330,7 +331,7 @@ struct StatsTabView: View {
             if let book = row.book {
                 BookCoverView(book: book, height: 46)
                     .frame(width: 34)
-                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                    .einkClip(cornerRadius: 5)
             } else {
                 Image(systemName: "note.text")
                     .font(.body)
@@ -348,9 +349,15 @@ struct StatsTabView: View {
                 if let progress = row.progress {
                     GeometryReader { proxy in
                         ZStack(alignment: .leading) {
-                            Capsule().fill(Color(.systemFill))
-                            Capsule().fill(Color.accentColor)
-                                .frame(width: proxy.size.width * min(max(progress, 0), 1))
+                            if isEInk {
+                                Rectangle().fill(Color(.systemFill))
+                                Rectangle().fill(EInk.ink)
+                                    .frame(width: proxy.size.width * min(max(progress, 0), 1))
+                            } else {
+                                Capsule().fill(Color(.systemFill))
+                                Capsule().fill(Color.accentColor)
+                                    .frame(width: proxy.size.width * min(max(progress, 0), 1))
+                            }
                         }
                     }
                     .frame(height: 4)
@@ -364,10 +371,6 @@ struct StatsTabView: View {
         .padding(.vertical, 7)
     }
 
-    private var cardBackground: some View {
-        RoundedRectangle(cornerRadius: 18, style: .continuous)
-            .fill(Color(.secondarySystemGroupedBackground))
-    }
 
     // MARK: - Data
 

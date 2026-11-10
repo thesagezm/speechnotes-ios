@@ -9,6 +9,7 @@ import SpeechLogic
 /// countdown, and the controls. Customization lives on a subpage
 /// (PomodoroConfigView); this card is the always-visible viewer.
 struct PomodoroCard: View {
+    @Environment(\.isEInk) private var isEInk
     @ObservedObject private var store = PomodoroStore.shared
     @State private var showingConfig = false
 
@@ -26,7 +27,7 @@ struct PomodoroCard: View {
                         .font(.subheadline.weight(.bold))
                         .foregroundStyle(.white)
                         .frame(width: 28, height: 28)
-                        .background(Capsule().fill(Color.blue))
+                        .einkInk { Capsule().fill(Color.blue) }
                 }
                 .accessibilityLabel("Set up the pomodoro timer")
             }
@@ -43,7 +44,7 @@ struct PomodoroCard: View {
             PomodoroTodayLine(record: store.todayRecord())
         }
         .padding(14)
-        .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(Color(.secondarySystemGroupedBackground)))
+        .einkCard(radius: 18, style: Color(.secondarySystemGroupedBackground))
         .sheet(isPresented: $showingConfig) {
             PomodoroConfigView()
         }
@@ -75,10 +76,7 @@ private struct PomodoroIdleView: View {
                     .foregroundStyle(.tertiary)
             }
             .padding(12)
-            .background(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(Color.blue.opacity(0.08))
-            )
+            .einkCard(radius: 14, style: Color.blue.opacity(0.08))
         }
         .buttonStyle(.plain)
     }
@@ -106,6 +104,7 @@ private struct PomodoroTodayLine: View {
 // MARK: - Running state
 
 private struct PomodoroRunView: View {
+    @Environment(\.isEInk) private var isEInk
     @ObservedObject var store: PomodoroStore
     // Internal on purpose: a `private` here would make the synthesized
     // memberwise init private and the call site in PomodoroCard (same
@@ -148,7 +147,7 @@ private struct PomodoroRunView: View {
         let paused = session.isPaused
 
         return ZStack {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
+            (isEInk ? AnyShape(Rectangle()) : AnyShape(RoundedRectangle(cornerRadius: 16, style: .continuous)))
                 .fill(Color(.systemFill).opacity(0.45))
             GeometryReader { proxy in
                 let fillWidth = max(6, proxy.size.width * CGFloat(max(0.001, min(1, progress))))
@@ -175,11 +174,16 @@ private struct PomodoroRunView: View {
         }
         .frame(height: 84)
         .frame(maxWidth: .infinity)
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(tint.opacity(0.25), lineWidth: 1)
-        )
+        .clipShape(isEInk ? AnyShape(Rectangle()) : AnyShape(RoundedRectangle(cornerRadius: 16, style: .continuous)))
+        .overlay {
+            // E-Ink: full ink hairline on the timer card.
+            if isEInk {
+                Rectangle().strokeBorder(EInk.ink, lineWidth: EInk.hairline)
+            } else {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .strokeBorder(tint.opacity(0.25), lineWidth: 1)
+            }
+        }
     }
 
     /// Fixed phases count down; flowmodoro's open focus counts up (the pot).
@@ -268,7 +272,7 @@ private struct PomodoroRunView: View {
             .font(.caption2.weight(.bold))
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
-            .background(Capsule().fill(PomodoroPalette.tint(for: session.phase).opacity(0.15)))
+            .einkPaper { Capsule().fill(PomodoroPalette.tint(for: session.phase).opacity(0.15)) }
             .foregroundStyle(PomodoroPalette.tint(for: session.phase))
     }
 
@@ -396,6 +400,7 @@ private struct PomodoroRunView: View {
 /// classic's per-block/per-break minute tuning.
 struct PomodoroConfigView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.isEInk) private var isEInk
     @ObservedObject private var store = PomodoroStore.shared
     @State private var draft: PomodoroConfig
 
@@ -610,7 +615,7 @@ struct PomodoroConfigView: View {
                 .font(.footnote.weight(.semibold))
                 .foregroundStyle(tint)
                 .frame(width: 26, height: 26)
-                .background(tint.opacity(0.15), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .background(tint.opacity(0.15), in: isEInk ? AnyShape(Rectangle()) : AnyShape(RoundedRectangle(cornerRadius: 7, style: .continuous)))
             VStack(alignment: .leading, spacing: 1) {
                 Text(title).font(.subheadline.weight(.semibold))
                 Text(subtitle).font(.caption).foregroundStyle(.secondary)
@@ -724,10 +729,10 @@ struct PomodoroConfigView: View {
                     .foregroundStyle(.white)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 6)
-                    .background(
+                    .einkInk {
                         RoundedRectangle(cornerRadius: 12, style: .continuous)
                             .fill(canStart ? Color.blue : Color.blue.opacity(0.4))
-                    )
+                    }
             }
             .buttonStyle(.plain)
             .disabled(!canStart)
@@ -796,6 +801,7 @@ struct PomodoroBannerModifier: ViewModifier {
 }
 
 private struct PomodoroBannerCard: View {
+    @Environment(\.isEInk) private var isEInk
     let banner: PomodoroBanner
     @ObservedObject private var store = PomodoroStore.shared
 
@@ -805,7 +811,7 @@ private struct PomodoroBannerCard: View {
                 .font(.body.weight(.semibold))
                 .foregroundStyle(banner.tint)
                 .frame(width: 34, height: 34)
-                .background(banner.tint.opacity(0.14), in: Circle())
+                .background(banner.tint.opacity(0.14), in: isEInk ? AnyShape(Rectangle()) : AnyShape(Circle()))
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(banner.title)
@@ -841,20 +847,24 @@ private struct PomodoroBannerCard: View {
                     .font(.caption2.weight(.bold))
                     .foregroundStyle(.secondary)
                     .frame(width: 24, height: 24)
-                    .background(Color(.tertiarySystemFill), in: Circle())
+                    .background(Color(.tertiarySystemFill), in: isEInk ? AnyShape(Rectangle()) : AnyShape(Circle()))
             }
             .accessibilityLabel("Dismiss")
         }
         .padding(12)
-        .background(
+        .einkPaper {
             RoundedRectangle(cornerRadius: 20, style: .continuous)
                 .fill(.ultraThinMaterial)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .strokeBorder(banner.tint.opacity(0.22), lineWidth: 1)
-        )
-        .shadow(color: .black.opacity(0.08), radius: 12, y: 4)
+        }
+        .overlay {
+            if isEInk {
+                Rectangle().strokeBorder(EInk.ink, lineWidth: EInk.hairline)
+            } else {
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .strokeBorder(banner.tint.opacity(0.22), lineWidth: 1)
+            }
+        }
+        .shadow(color: isEInk ? .clear : .black.opacity(0.08), radius: 12, y: 4)
         .onTapGesture { store.dismissBanner() }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(banner.title). \(banner.subtitle ?? "")")

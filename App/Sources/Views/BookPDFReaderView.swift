@@ -243,7 +243,7 @@ struct BookPDFReaderView: View {
                             .font(.footnote)
                             .foregroundStyle(Color.accentColor)
                             .frame(width: 30, height: 30)
-                            .background(Circle().fill(Color.secondary.opacity(0.12)))
+                            .einkPaper { Circle().fill(Color.secondary.opacity(0.12)) }
                     }
                 }
                 .buttonStyle(.plain)

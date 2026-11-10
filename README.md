@@ -126,6 +126,11 @@ Feature tour:
 - **Markdown option** (Settings → Notes) — preview rendered markdown in the
   editor (eye/pencil toggle), and speech reads the plain text without
   markdown symbols.
+- **E-Ink mode** (Settings → Appearance → Theme) — paper white, ink black,
+  square edges, hairline borders: no glass, no gradients, no color, no
+  animation, anywhere in the app (notes list and editor included). The
+  accent color picker only colors the app again once the mode is left. The
+  EPUB reader gets its own E-Ink page theme to match.
 - **Import** — .txt / .md / .pdf via the Files picker, drag & drop,
   `speechnotes://import?text=…` links, and clipboard; iCloud-aware with
   encoding fallbacks (UTF-8/16/32, latin-1).

@@ -483,6 +483,8 @@ struct BookReaderView: View {
         case "sepia": return Color(red: 246 / 255, green: 239 / 255, blue: 226 / 255)
         case "dark": return Color(red: 18 / 255, green: 18 / 255, blue: 18 / 255)
         case "trueBlack": return .black
+        // E-Ink: the same paper white — the difference lives in the text
+        // ink (#000 vs #1a1a1a), which only the shell applies.
         default: return .white
         }
     }
@@ -719,6 +721,7 @@ struct BookReaderView: View {
                         Text("Sepia").tag("sepia")
                         Text("Dark").tag("dark")
                         Text("True Black").tag("trueBlack")
+                        Text("E-Ink").tag("eink")
                     }
                     .pickerStyle(.segmented)
                 }

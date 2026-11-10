@@ -43,7 +43,7 @@ struct MinimizedBookTransport: View {
                 .font(.system(size: 13, weight: .bold))
                 .foregroundStyle(.white)
                 .frame(width: 28, height: 28)
-                .background(Circle().fill(Color.accentColor))
+                .einkInk { Circle().fill(Color.accentColor) }
             }
             .buttonStyle(.plain)
 
@@ -82,18 +82,18 @@ struct MinimizedBookTransport: View {
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.secondary)
                     .frame(width: 28, height: 28)
-                    .background(Circle().fill(Color.secondary.opacity(0.12)))
+                    .einkPaper { Circle().fill(Color.secondary.opacity(0.12)) }
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Expand playback controls")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .background(
+        .einkPaper {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .fill(.ultraThinMaterial)
                 .shadow(color: .black.opacity(0.12), radius: 8, y: 2)
-        )
+        }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
     }
@@ -114,7 +114,7 @@ struct MinimizedBookTransport: View {
                 .font(.system(size: 12, weight: .bold))
                 .foregroundStyle(enabled ? Color.accentColor : Color.secondary.opacity(0.4))
                 .frame(width: 26, height: 26)
-                .background(Circle().fill(Color.secondary.opacity(0.12)))
+                .einkPaper { Circle().fill(Color.secondary.opacity(0.12)) }
         }
         .buttonStyle(.plain)
         .disabled(!enabled)

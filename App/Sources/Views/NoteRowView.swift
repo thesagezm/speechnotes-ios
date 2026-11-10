@@ -8,6 +8,9 @@ import SwiftUI
 struct NoteRowView: View {
     let note: Note
     let meta: NotesStore.RowMetadata
+    /// E-Ink mode: the pin and star keep their glyphs but lose their hues —
+    /// solid ink reads as "flagged" without a color to dither.
+    @Environment(\.isEInk) private var isEInk
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -22,11 +25,11 @@ struct NoteRowView: View {
             HStack(spacing: 4) {
                 if note.isPinned {
                     Image(systemName: "pin.fill")
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(isEInk ? Color.black : Color.orange)
                 }
                 if note.isFavorite {
                     Image(systemName: "star.fill")
-                        .foregroundStyle(.yellow)
+                        .foregroundStyle(isEInk ? Color.black : Color.yellow)
                 }
                 Text(note.updatedAt, format: .relative(presentation: .named))
                 Text("·").foregroundStyle(.tertiary)

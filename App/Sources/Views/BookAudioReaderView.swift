@@ -88,6 +88,7 @@ struct BookAudioReaderView: View {
     }
 
     @Environment(\.isLandscape) private var isLandscape
+    @Environment(\.isEInk) private var isEInk
     /// Tap-to-hide chrome — PER-SURFACE storage (round 5): each reader hides
     /// and shows its own title bar; the old app-wide key stranded hidden
     /// bars across surfaces.
@@ -343,7 +344,13 @@ struct BookAudioReaderView: View {
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(.secondary)
                         .frame(width: 28, height: 28)
-                        .background(Circle().fill(Color.secondary.opacity(0.12)))
+                        .background {
+                            if isEInk {
+                                EInk.surface
+                            } else {
+                                Circle().fill(Color.secondary.opacity(0.12))
+                            }
+                        }
                         .contentShape(Circle())
                 }
                 .buttonStyle(.plain)
@@ -436,7 +443,7 @@ struct BookAudioReaderView: View {
             .font(.footnote.weight(.medium))
             .padding(.horizontal, 12)
             .padding(.vertical, 7)
-            .background(Capsule().fill(Color.secondary.opacity(0.12)))
+            .einkPaper { Capsule().fill(Color.secondary.opacity(0.12)) }
         }
         .accessibilityLabel("Playback speed \(Self.rateLabel(audioBook.rate))")
     }
@@ -449,7 +456,7 @@ struct BookAudioReaderView: View {
                 .font(.caption.weight(.semibold).monospacedDigit())
                 .padding(.horizontal, 8)
                 .padding(.vertical, 5)
-                .background(Capsule().fill(Color.secondary.opacity(0.12)))
+                .einkPaper { Capsule().fill(Color.secondary.opacity(0.12)) }
         }
         .accessibilityLabel("Playback speed \(Self.rateLabel(audioBook.rate))")
     }
@@ -498,7 +505,7 @@ struct BookAudioReaderView: View {
             .foregroundStyle(audioBook.sleepTimerActive ? Color.accentColor : .primary)
             .padding(.horizontal, 12)
             .padding(.vertical, 7)
-            .background(Capsule().fill(Color.secondary.opacity(0.12)))
+            .einkPaper { Capsule().fill(Color.secondary.opacity(0.12)) }
         }
         .accessibilityLabel(audioBook.sleepTimerActive ? "Sleep timer active" : "Sleep timer")
     }
@@ -522,7 +529,7 @@ struct BookAudioReaderView: View {
             .foregroundStyle(audioBook.sleepTimerActive ? Color.accentColor : .secondary)
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
-            .background(Capsule().fill(Color.secondary.opacity(0.12)))
+            .einkPaper { Capsule().fill(Color.secondary.opacity(0.12)) }
         }
         .accessibilityLabel(audioBook.sleepTimerActive ? "Sleep timer active" : "Sleep timer")
     }
@@ -573,13 +580,23 @@ struct BookAudioReaderView: View {
                 togglePlayback()
             } label: {
                 ZStack {
-                    Circle()
-                        .fill(.ultraThinMaterial)
-                        .shadow(color: .black.opacity(0.18), radius: 8, y: 3)
-                    Circle()
-                        .trim(from: 0, to: max(0.001, min(1, displayProgress)))
-                        .stroke(theme.accentGradient, style: StrokeStyle(lineWidth: 3, lineCap: .round))
-                        .rotationEffect(.degrees(-90))
+                    if isEInk {
+                        Rectangle()
+                            .fill(EInk.paper)
+                            .overlay(Rectangle().strokeBorder(EInk.ink, lineWidth: EInk.hairline))
+                        Rectangle()
+                            .trim(from: 0, to: max(0.001, min(1, displayProgress)))
+                            .stroke(EInk.ink, style: StrokeStyle(lineWidth: 3))
+                            .rotationEffect(.degrees(-90))
+                    } else {
+                        Circle()
+                            .fill(.ultraThinMaterial)
+                            .shadow(color: .black.opacity(0.18), radius: 8, y: 3)
+                        Circle()
+                            .trim(from: 0, to: max(0.001, min(1, displayProgress)))
+                            .stroke(theme.accentGradient, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                            .rotationEffect(.degrees(-90))
+                    }
                     Image(systemName: isPlaying ? "pause.fill" : "play.fill")
                         .font(.system(size: 15, weight: .bold))
                         .foregroundStyle(Color.accentColor)
@@ -608,15 +625,17 @@ struct BookAudioReaderView: View {
             .accessibilityLabel("Expand playback rail")
         }
         .padding(10)
-        .background(
+        .einkPaper {
             RoundedRectangle(cornerRadius: 26, style: .continuous)
                 .fill(.ultraThinMaterial)
                 .shadow(color: .black.opacity(0.14), radius: 10, y: 3)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 26, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.07))
-        )
+        }
+        .overlay {
+            if !isEInk {
+                RoundedRectangle(cornerRadius: 26, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.07))
+            }
+        }
         .padding(.horizontal, PlaybackRail.horizontalPadding)
         // The outer width frame now lives in `audioRail` — one function of the
         // shared preference for both states, matching PlaybackRail. What used
@@ -710,15 +729,17 @@ struct BookAudioReaderView: View {
         .padding(.vertical, 14)
         .frame(width: PlaybackRail.idealWidth)
         .fixedSize(horizontal: false, vertical: true)
-        .background(
+        .einkPaper {
             RoundedRectangle(cornerRadius: 26, style: .continuous)
                 .fill(.bar)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 26, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.07))
-        )
-        .shadow(color: .black.opacity(0.12), radius: 14, y: 4)
+        }
+        .overlay {
+            if !isEInk {
+                RoundedRectangle(cornerRadius: 26, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.07))
+            }
+        }
+        .shadow(color: isEInk ? .clear : .black.opacity(0.12), radius: 14, y: 4)
         .padding(.horizontal, 10)
         .frame(maxHeight: .infinity, alignment: .center)
         .overlay(alignment: .topTrailing) {
@@ -984,10 +1005,7 @@ struct BookAudioReaderView: View {
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(Color.orange.opacity(0.12))
-            )
+            .einkCard(radius: 10, style: Color.orange.opacity(0.12))
             .padding(.horizontal, 16)
             .accessibilityLabel("Playback unavailable: \(reason)")
         }

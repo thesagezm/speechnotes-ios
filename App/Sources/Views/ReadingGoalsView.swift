@@ -218,6 +218,7 @@ enum GoalMath {
 /// per-goal gradients, a thick rounded progress bar, status pills, and a
 /// celebratory state when the finish line is crossed.
 struct GoalsCard: View {
+    @Environment(\.isEInk) private var isEInk
     @EnvironmentObject private var books: BooksStore
     @ObservedObject private var goalStore = GoalStore.shared
     @State private var showingEditor = false
@@ -239,7 +240,7 @@ struct GoalsCard: View {
                         .font(.subheadline.weight(.bold))
                         .foregroundStyle(.white)
                         .frame(width: 28, height: 28)
-                        .background(Capsule().fill(Color.green))
+                        .einkInk { Capsule().fill(Color.green) }
                 }
                 .accessibilityLabel("Add goal")
             }
@@ -259,7 +260,7 @@ struct GoalsCard: View {
             }
         }
         .padding(14)
-        .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(Color(.secondarySystemGroupedBackground)))
+        .einkCard(radius: 18, style: Color(.secondarySystemGroupedBackground))
         .sheet(isPresented: $showingEditor) {
             GoalEditorView { book, start, deadline in
                 goalStore.add(book: book, start: start, deadline: deadline)
@@ -306,16 +307,14 @@ struct GoalsCard: View {
             Spacer()
         }
         .padding(12)
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Color.green.opacity(0.08))
-        )
+        .einkCard(radius: 14, style: Color.green.opacity(0.08))
     }
 }
 
 /// One goal card. The palette cycles per goal so several goals read as
 /// distinct streaks rather than a wall of identical rows.
 struct GoalRow: View {
+    @Environment(\.isEInk) private var isEInk
     let goal: ReadingGoal
     let book: Book?
 
@@ -327,13 +326,13 @@ struct GoalRow: View {
             if let book {
                 BookCoverView(book: book, height: 56)
                     .frame(width: 40)
-                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .einkClip(cornerRadius: 6)
             } else {
                 Image(systemName: "book.closed")
                     .font(.title3)
                     .foregroundStyle(.secondary)
                     .frame(width: 40, height: 56)
-                    .background(Color(.systemFill), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .background(Color(.systemFill), in: isEInk ? AnyShape(Rectangle()) : AnyShape(RoundedRectangle(cornerRadius: 6, style: .continuous)))
             }
 
             VStack(alignment: .leading, spacing: 6) {
@@ -344,14 +343,23 @@ struct GoalRow: View {
 
                 GeometryReader { proxy in
                     ZStack(alignment: .leading) {
-                        Capsule().fill(Color(.systemFill))
-                        if let fraction = progress.fraction {
-                            Capsule()
-                                .fill(LinearGradient(
-                                    colors: [palette.0, palette.1],
-                                    startPoint: .leading, endPoint: .trailing
-                                ))
-                                .frame(width: max(8, proxy.size.width * min(max(fraction, 0), 1)))
+                        if isEInk {
+                            Rectangle().fill(Color(.systemFill))
+                            if let fraction = progress.fraction {
+                                Rectangle()
+                                    .fill(EInk.ink)
+                                    .frame(width: max(8, proxy.size.width * min(max(fraction, 0), 1)))
+                            }
+                        } else {
+                            Capsule().fill(Color(.systemFill))
+                            if let fraction = progress.fraction {
+                                Capsule()
+                                    .fill(LinearGradient(
+                                        colors: [palette.0, palette.1],
+                                        startPoint: .leading, endPoint: .trailing
+                                    ))
+                                    .frame(width: max(8, proxy.size.width * min(max(fraction, 0), 1)))
+                            }
                         }
                     }
                 }
@@ -362,7 +370,7 @@ struct GoalRow: View {
                         .font(.caption2.weight(.bold))
                         .padding(.horizontal, 8)
                         .padding(.vertical, 3)
-                        .background(Capsule().fill(statusColor(progress).opacity(0.18)))
+                        .einkPaper { Capsule().fill(statusColor(progress).opacity(0.18)) }
                         .foregroundStyle(statusColor(progress))
                     if let unit = progress.unitLabel {
                         Text(unit)
@@ -385,10 +393,7 @@ struct GoalRow: View {
             }
         }
         .padding(10)
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(palette.0.opacity(0.08))
-        )
+        .einkCard(radius: 14, style: palette.0.opacity(0.08))
     }
 
     private func statusText(_ progress: GoalProgress) -> String {
@@ -432,6 +437,7 @@ struct GoalRow: View {
 
 /// Create-goal flow: pick a book, set the start and the finish-by dates.
 struct GoalEditorView: View {
+    @Environment(\.isEInk) private var isEInk
     @EnvironmentObject private var books: BooksStore
     @Environment(\.dismiss) private var dismiss
 
@@ -479,7 +485,7 @@ struct GoalEditorView: View {
                                 HStack(spacing: 12) {
                                     BookCoverView(book: book, height: 44)
                                         .frame(width: 32)
-                                        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                                        .einkClip(cornerRadius: 5)
                                     Text(book.title)
                                         .font(.subheadline)
                                         .foregroundStyle(.primary)
@@ -530,10 +536,10 @@ struct GoalEditorView: View {
                             .foregroundStyle(.white)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 6)
-                            .background(
+                            .einkInk {
                                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                                     .fill(selectedBook != nil && datesValid ? Color.green : Color.green.opacity(0.4))
-                            )
+                            }
                     }
                     .buttonStyle(.plain)
                     .disabled(selectedBook == nil || !datesValid)
@@ -559,6 +565,7 @@ struct GoalEditorView: View {
 /// One goal, blown up: gradient progress ring, schedule facts, and the
 /// honest pace verdict (linear expectation between the two dates).
 struct GoalDetailView: View {
+    @Environment(\.isEInk) private var isEInk
     let goal: ReadingGoal
     let book: Book?
     let onDelete: () -> Void
@@ -624,10 +631,7 @@ struct GoalDetailView: View {
                             value: progress.daysLeft <= 0 ? "Deadline reached" : "\(progress.daysLeft) day\(progress.daysLeft == 1 ? "" : "s")"
                         )
                     }
-                    .background(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .fill(Color(.secondarySystemGroupedBackground))
-                    )
+                    .einkCard(radius: 14, style: Color(.secondarySystemGroupedBackground))
 
                     Text(paceMessage(progress))
                         .font(.footnote)
@@ -804,10 +808,10 @@ struct GoalScheduleEditorView: View {
                             .foregroundStyle(.white)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 6)
-                            .background(
+                            .einkInk {
                                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                                     .fill(datesValid ? Color.green : Color.green.opacity(0.4))
-                            )
+                            }
                     }
                     .buttonStyle(.plain)
                     .disabled(!datesValid)

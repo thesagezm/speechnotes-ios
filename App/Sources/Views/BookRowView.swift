@@ -55,6 +55,7 @@ struct BookRowView: View {
 /// cover (or PDFs, whose first page could be rendered later). Loads +
 /// decodes once per cell off-main via `.task` — never inline in body.
 struct BookCoverView: View {
+    @Environment(\.isEInk) private var isEInk
     let book: Book
     /// Height drives the layout; width follows the ~2:3 book aspect.
     var height: CGFloat
@@ -78,11 +79,17 @@ struct BookCoverView: View {
             }
         }
         .frame(width: height * 0.7, height: height)
-        .clipShape(RoundedRectangle(cornerRadius: 4))
-        .overlay(
-            RoundedRectangle(cornerRadius: 4)
-                .strokeBorder(.primary.opacity(0.08))
-        )
+        .einkClip(cornerRadius: 4)
+        .overlay {
+            // E-Ink: an ink hairline on the cover block; the feather-light
+            // primary border otherwise.
+            if isEInk {
+                Rectangle().strokeBorder(EInk.ink, lineWidth: EInk.hairline)
+            } else {
+                RoundedRectangle(cornerRadius: 4)
+                    .strokeBorder(.primary.opacity(0.08))
+            }
+        }
         .task(id: book.id) {
             guard image == nil else { return }
             let url = BooksStore.coverFileURL(book)

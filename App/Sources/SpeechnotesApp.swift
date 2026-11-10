@@ -38,6 +38,12 @@ struct SpeechnotesApp: App {
         // — the next one must be able to say which of "crashed" vs
         // "system-killed (jetsam/purge)" that was.
         CrashMarker.installAndReplay()
+        // E-Ink mode persists across launches — flatten the system chrome
+        // BEFORE the first frame renders, or the stock glass tab bar
+        // flashes for a frame on relaunch into the mode. Read the key
+        // directly (the same one AppTheme persists) rather than spinning
+        // up a throwaway AppTheme instance.
+        EInk.applyChrome(enabled: UserDefaults.standard.string(forKey: "appAppearance") == "eink")
     }
 
     private enum Tab: Hashable, CaseIterable, Identifiable {
@@ -91,6 +97,12 @@ struct SpeechnotesApp: App {
             // removed by request). The playback controls stay lateral — that
             // distinction is deliberate.
             tabContent
+                // E-Ink mode root sweep — nil every SwiftUI transaction's
+                // animation and grayscale the whole tree. Plain-Bool
+                // modifier because this sits ABOVE the environmentObject
+                // injection below (see the .globalMiniPlayer note for why
+                // order matters on this chain).
+                .modifier(EInkRootModifier(isEInk: theme.isEInk))
                 .accentColor(theme.accentColor)
                 .preferredColorScheme(theme.colorScheme)
                 // Eager StateObject work (engine session setup,
@@ -383,6 +395,14 @@ struct SpeechnotesApp: App {
                 .environmentObject(audioBooks)
                 .environmentObject(WavPlayer.shared)
                 .environmentObject(theme)
+                // The E-Ink flag rides the same outermost node — views read
+                // it as @Environment(\.isEInk) to swap styling inline.
+                .environment(\.isEInk, theme.isEInk)
+                .onChange(of: theme.isEInk) { enabled in
+                    // Entering: flatten bars + kill UIKit animation.
+                    // Leaving: rebuild the stock chrome and re-enable.
+                    EInk.applyChrome(enabled: enabled)
+                }
                 // First launch only — self-contained, no eager work
                 // (LiveContainer launch hygiene).
                 .fullScreenCover(isPresented: Binding(

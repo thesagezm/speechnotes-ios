@@ -88,7 +88,7 @@ final class AppTheme: ObservableObject {
         didSet { UserDefaults.standard.set(readerTableSpacing, forKey: "readerTableSpacing") }
     }
 
-    enum AppearanceMode: String { case light = "light", dark = "dark", system = "system" }
+    enum AppearanceMode: String { case light = "light", dark = "dark", system = "system", eink = "eink" }
 
     init() {
         let defaults = UserDefaults.standard
@@ -108,15 +108,21 @@ final class AppTheme: ObservableObject {
         readerTableSpacing = 1.0
     }
 
-    var accentColor: Color { accentChoice.color }
+    var accentColor: Color { isEInk ? .black : accentChoice.color }
+
+    /// E-Ink mode: the accent picker does not matter (ink is ink) — the
+    /// accent renders solid black and the chosen hue only returns once the
+    /// mode is left.
+    var isEInk: Bool { appearance == AppearanceMode.eink.rawValue }
 
     /// Accent → translucent-accent fade for buttons, play glyphs and the
     /// progress ring. Hardcoding a second hue (e.g. .purple) fought 11 of
     /// the 12 accent choices — everything accent-tinted derives from the
-    /// chosen color now.
+    /// chosen color now. E-Ink mode flattens both stops to opaque black:
+    /// a gradient is a GUI effect, and ink has none.
     var accentGradient: LinearGradient {
         LinearGradient(
-            colors: [accentColor, accentColor.opacity(0.5)],
+            colors: accentStops,
             startPoint: .topLeading,
             endPoint: .bottomTrailing
         )
@@ -125,7 +131,7 @@ final class AppTheme: ObservableObject {
     /// Horizontal variant for progress bars.
     var accentFadeGradient: LinearGradient {
         LinearGradient(
-            colors: [accentColor, accentColor.opacity(0.5)],
+            colors: accentStops,
             startPoint: .leading,
             endPoint: .trailing
         )
@@ -137,15 +143,21 @@ final class AppTheme: ObservableObject {
     /// left→right accentFadeGradient.)
     var accentFadeVerticalGradient: LinearGradient {
         LinearGradient(
-            colors: [accentColor, accentColor.opacity(0.5)],
+            colors: accentStops,
             startPoint: .top,
             endPoint: .bottom
         )
     }
 
+    /// The shared gradient stops: the accent fading to half opacity, or —
+    /// in E-Ink mode — solid opaque black at both ends.
+    private var accentStops: [Color] {
+        isEInk ? [.black, .black] : [accentColor, accentColor.opacity(0.5)]
+    }
+
     var colorScheme: ColorScheme? {
         switch appearance {
-        case AppearanceMode.light.rawValue: return .light
+        case AppearanceMode.light.rawValue, AppearanceMode.eink.rawValue: return .light
         case AppearanceMode.dark.rawValue: return .dark
         default: return nil
         }

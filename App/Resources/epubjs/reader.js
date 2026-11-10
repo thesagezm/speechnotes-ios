@@ -38,7 +38,9 @@
     light: { background: "#ffffff", color: "#1a1a1a" },
     sepia: { background: "#f6efe2", color: "#3b3128" },
     dark: { background: "#121212", color: "#d8d4cf" },
-    trueBlack: { background: "#000000", color: "#c9c9c9" }
+    trueBlack: { background: "#000000", color: "#c9c9c9" },
+    // E-Ink: pure ink on paper — full contrast, nothing softened.
+    eink: { background: "#ffffff", color: "#000000" }
   };
 
   var FONTS = {

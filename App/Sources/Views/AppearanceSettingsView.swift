@@ -57,13 +57,18 @@ struct AppearanceSettingsView: View {
             } footer: {
                 Text("Automatic downloads every web image in a note to the cache as soon as you open it. Manual downloads an image only when you actually view it. Either way, Storage → Cached images can delete a single note's images, and permanently deleting a note from the recycle bin removes its web images with it.")
             }
-            Section("Appearance") {
+            Section {
                 Picker("Theme", selection: $theme.appearance) {
                     Text("System").tag("system")
                     Text("Light").tag("light")
                     Text("Dark").tag("dark")
+                    Text("E-Ink").tag("eink")
                 }
                 .pickerStyle(.segmented)
+            } header: {
+                Text("Appearance")
+            } footer: {
+                Text("E-Ink: paper white, ink black, square edges, hairline borders — no glass, no gradients, no color, no animation. The accent color only returns when you leave the mode.")
             }
             Section("Reading View") {
                 VStack(alignment: .leading, spacing: 8) {

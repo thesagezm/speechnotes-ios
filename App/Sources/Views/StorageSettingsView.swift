@@ -6,6 +6,7 @@ import SpeechLogic
 /// the download-cache cleanup under Maintenance. The Storage TAB became the
 /// Books library, so this screen is now the only home for that content.
 struct StorageSettingsView: View {
+    @Environment(\.isEInk) private var isEInk
     @Environment(\.openURL) private var openURL
     @StateObject private var exports = ExportsStore()
     /// Shared so the global mini-player and this screen observe ONE playhead.
@@ -680,12 +681,18 @@ struct StorageSettingsView: View {
             ZStack(alignment: .topTrailing) {
                 GalleryThumb(fileURL: entry.fileURL)
                     .frame(width: 84, height: 84)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .einkClip(cornerRadius: 8)
                 if entry.isFromWeb {
                     Image(systemName: "globe")
                         .font(.caption2)
                         .padding(4)
-                        .background(.ultraThinMaterial, in: Circle())
+                        .background {
+                            if isEInk {
+                                EInk.surface
+                            } else {
+                                Circle().fill(.ultraThinMaterial)
+                            }
+                        }
                         .padding(4)
                 }
             }

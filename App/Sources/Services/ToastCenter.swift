@@ -49,6 +49,7 @@ final class ToastCenter: ObservableObject {
 /// Uses `ToastCenter.shared` directly (no environment dependency) so it can
 /// sit anywhere on the root chain; attach it next to `.globalMiniPlayer()`.
 struct AppToastOverlay: ViewModifier {
+    @Environment(\.isEInk) private var isEInk
     @ObservedObject private var toasts = ToastCenter.shared
 
     func body(content: Content) -> some View {
@@ -73,14 +74,24 @@ struct AppToastOverlay: ViewModifier {
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 11)
-                .background(
-                    Capsule()
-                        .fill(.regularMaterial)
-                        .shadow(color: .black.opacity(0.18), radius: 10, y: 4)
-                )
-                .overlay(
-                    Capsule().strokeBorder(Color.primary.opacity(0.06))
-                )
+                .background {
+                    // E-Ink: a flat paper slab with an ink hairline. (The
+                    // move+opacity transition and the ease animation are
+                    // nil'd at the root transaction in this mode — the
+                    // toast appears instantly, which is the point.)
+                    if isEInk {
+                        EInk.surface
+                    } else {
+                        Capsule()
+                            .fill(.regularMaterial)
+                            .shadow(color: .black.opacity(0.18), radius: 10, y: 4)
+                    }
+                }
+                .overlay {
+                    if !isEInk {
+                        Capsule().strokeBorder(Color.primary.opacity(0.06))
+                    }
+                }
                 .padding(.horizontal, 20)
                 .padding(.bottom, 102)
                 .transition(.move(edge: .bottom).combined(with: .opacity))

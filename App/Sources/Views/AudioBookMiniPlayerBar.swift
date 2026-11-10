@@ -11,16 +11,24 @@ struct AudioBookMiniPlayerBar: View {
 
     @EnvironmentObject private var audioBooks: AudioBookPlayer
     @EnvironmentObject private var theme: AppTheme
+    @Environment(\.isEInk) private var isEInk
     @AppStorage("miniPlayerCollapsed") private var miniPlayerCollapsed = false
 
     var body: some View {
         VStack(spacing: 0) {
             GeometryReader { proxy in
                 ZStack(alignment: .leading) {
-                    Capsule().fill(Color.secondary.opacity(0.25))
-                    Capsule()
-                        .fill(theme.accentFadeGradient)
-                        .frame(width: max(4, proxy.size.width * audioBooks.chapterProgress))
+                    if isEInk {
+                        Rectangle().fill(Color.secondary.opacity(0.25))
+                        Rectangle()
+                            .fill(EInk.ink)
+                            .frame(width: max(4, proxy.size.width * audioBooks.chapterProgress))
+                    } else {
+                        Capsule().fill(Color.secondary.opacity(0.25))
+                        Capsule()
+                            .fill(theme.accentFadeGradient)
+                            .frame(width: max(4, proxy.size.width * audioBooks.chapterProgress))
+                    }
                 }
             }
             .frame(height: 3)
@@ -41,7 +49,13 @@ struct AudioBookMiniPlayerBar: View {
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(.secondary)
                         .frame(width: 40, height: 40)
-                        .background(Circle().fill(Color.secondary.opacity(0.12)))
+                        .background {
+                            if isEInk {
+                                EInk.surface
+                            } else {
+                                Circle().fill(Color.secondary.opacity(0.12))
+                            }
+                        }
                         .accessibilityHidden(true)
                 }
 
@@ -53,7 +67,13 @@ struct AudioBookMiniPlayerBar: View {
                         .font(.system(size: 16, weight: .bold))
                         .foregroundStyle(.white)
                         .frame(width: 38, height: 38)
-                        .background(Circle().fill(theme.accentGradient))
+                        .background {
+                            if isEInk {
+                                Rectangle().fill(EInk.ink)
+                            } else {
+                                Circle().fill(theme.accentGradient)
+                            }
+                        }
                 }
                 .accessibilityLabel(audioBooks.isPlaying ? "Pause" : "Play")
 
@@ -63,9 +83,15 @@ struct AudioBookMiniPlayerBar: View {
                 } label: {
                     Image(systemName: "stop.fill")
                         .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(.red)
+                        .foregroundStyle(isEInk ? Color.black : Color.red)
                         .frame(width: 32, height: 32)
-                        .background(Circle().fill(Color.red.opacity(0.12)))
+                        .background {
+                            if isEInk {
+                                EInk.surface
+                            } else {
+                                Circle().fill(Color.red.opacity(0.12))
+                            }
+                        }
                 }
                 .accessibilityLabel("Stop playback")
 
@@ -92,7 +118,13 @@ struct AudioBookMiniPlayerBar: View {
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(.secondary)
                         .frame(width: 32, height: 32)
-                        .background(Circle().fill(Color.secondary.opacity(0.12)))
+                        .background {
+                            if isEInk {
+                                EInk.surface
+                            } else {
+                                Circle().fill(Color.secondary.opacity(0.12))
+                            }
+                        }
                 }
                 .accessibilityLabel("Minimize player")
             }
@@ -101,15 +133,21 @@ struct AudioBookMiniPlayerBar: View {
             .contentShape(Rectangle())
             .onTapGesture { onTap?() }
         }
-        .background(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .fill(.ultraThinMaterial)
-                .shadow(color: .black.opacity(0.18), radius: 12, y: 4)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.06))
-        )
+        .background {
+            if isEInk {
+                EInk.surface
+            } else {
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .shadow(color: .black.opacity(0.18), radius: 12, y: 4)
+            }
+        }
+        .overlay {
+            if !isEInk {
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.06))
+            }
+        }
         .padding(.horizontal, 12)
     }
 }
@@ -119,6 +157,7 @@ struct AudioBookMiniPlayerBar: View {
 struct AudioBookMiniPlayerBubble: View {
     @EnvironmentObject private var audioBooks: AudioBookPlayer
     @EnvironmentObject private var theme: AppTheme
+    @Environment(\.isEInk) private var isEInk
     @AppStorage("miniPlayerCollapsed") private var miniPlayerCollapsed = false
 
     var body: some View {
@@ -127,14 +166,25 @@ struct AudioBookMiniPlayerBubble: View {
             miniPlayerCollapsed = false
         } label: {
             ZStack {
-                Circle()
-                    .fill(.ultraThinMaterial)
-                    .shadow(color: .black.opacity(0.2), radius: 10, y: 3)
+                if isEInk {
+                    Rectangle()
+                        .fill(EInk.paper)
+                        .overlay(Rectangle().strokeBorder(EInk.ink, lineWidth: EInk.hairline))
 
-                Circle()
-                    .trim(from: 0, to: audioBooks.chapterProgress)
-                    .stroke(theme.accentGradient, style: StrokeStyle(lineWidth: 3.5, lineCap: .round))
-                    .rotationEffect(.degrees(-90))
+                    Rectangle()
+                        .trim(from: 0, to: audioBooks.chapterProgress)
+                        .stroke(EInk.ink, style: StrokeStyle(lineWidth: 3.5))
+                        .rotationEffect(.degrees(-90))
+                } else {
+                    Circle()
+                        .fill(.ultraThinMaterial)
+                        .shadow(color: .black.opacity(0.2), radius: 10, y: 3)
+
+                    Circle()
+                        .trim(from: 0, to: audioBooks.chapterProgress)
+                        .stroke(theme.accentGradient, style: StrokeStyle(lineWidth: 3.5, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                }
 
                 Image(systemName: audioBooks.isPlaying ? "pause.fill" : "play.fill")
                     .font(.system(size: 18, weight: .bold))

@@ -205,7 +205,7 @@ struct CachedImage: View {
         }
         .accessibilityLabel(alt.isEmpty ? "image" : alt)
         .frame(maxWidth: .infinity)
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .einkClip(cornerRadius: 8)
         .task(id: url) {
             await load()
         }

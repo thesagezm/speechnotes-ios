@@ -16,6 +16,7 @@ struct PlayerControlsBar: View {
 
     @EnvironmentObject private var player: SpeechPlayer
     @EnvironmentObject private var theme: AppTheme
+    @Environment(\.isEInk) private var isEInk
     /// Mirrors NoteEditorView's read-along switch — shared via AppStorage.
     @AppStorage("readAlongEnabled") private var readAlongEnabled = true
     /// Collapsed to the slim pill — frees editor space while playing.
@@ -56,7 +57,7 @@ struct PlayerControlsBar: View {
                     .font(.system(size: 13, weight: .bold))
                     .foregroundStyle(.white)
                     .frame(width: 28, height: 28)
-                    .background(Circle().fill(Color.accentColor))
+                    .einkInk { Circle().fill(Color.accentColor) }
             }
             .disabled(playButtonDisabled)
 
@@ -79,17 +80,17 @@ struct PlayerControlsBar: View {
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.secondary)
                     .frame(width: 28, height: 28)
-                    .background(Circle().fill(Color.secondary.opacity(0.12)))
+                    .einkPaper { Circle().fill(Color.secondary.opacity(0.12)) }
             }
             .accessibilityLabel("Expand playback controls")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .background(
+        .einkPaper {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .fill(.ultraThinMaterial)
                 .shadow(color: .black.opacity(0.12), radius: 8, y: 2)
-        )
+        }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
     }
@@ -101,10 +102,17 @@ struct PlayerControlsBar: View {
             if let progress = player.progress, player.state == .speaking {
                 GeometryReader { proxy in
                     ZStack(alignment: .leading) {
-                        Capsule().fill(Color.secondary.opacity(0.25))
-                        Capsule()
-                            .fill(theme.accentFadeGradient)
-                            .frame(width: max(4, proxy.size.width * progress))
+                        if isEInk {
+                            Rectangle().fill(Color.secondary.opacity(0.25))
+                            Rectangle()
+                                .fill(EInk.ink)
+                                .frame(width: max(4, proxy.size.width * progress))
+                        } else {
+                            Capsule().fill(Color.secondary.opacity(0.25))
+                            Capsule()
+                                .fill(theme.accentFadeGradient)
+                                .frame(width: max(4, proxy.size.width * progress))
+                        }
                     }
                 }
                 .frame(height: 4)
@@ -118,9 +126,14 @@ struct PlayerControlsBar: View {
                     player.togglePlay(SpeechText.forText(speechText), note: note)
                 } label: {
                     ZStack {
-                        Circle()
-                            .fill(theme.accentGradient)
-                            .shadow(color: .black.opacity(0.15), radius: 6, y: 3)
+                        if isEInk {
+                            Rectangle()
+                                .fill(EInk.ink)
+                        } else {
+                            Circle()
+                                .fill(theme.accentGradient)
+                                .shadow(color: .black.opacity(0.15), radius: 6, y: 3)
+                        }
                         if player.state == .generating {
                             ProgressView()
                                 .tint(.white)
@@ -154,7 +167,7 @@ struct PlayerControlsBar: View {
                             .font(.body.weight(.medium))
                             .foregroundStyle(Color.accentColor)
                             .frame(width: 36, height: 36)
-                            .background(Circle().fill(Color.secondary.opacity(0.12)))
+                            .einkPaper { Circle().fill(Color.secondary.opacity(0.12)) }
                     }
                     .accessibilityLabel("Rewind one sentence")
 
@@ -168,7 +181,7 @@ struct PlayerControlsBar: View {
                             .font(.body.weight(.medium))
                             .foregroundStyle(readAlongEnabled ? Color.accentColor : .secondary)
                             .frame(width: 36, height: 36)
-                            .background(Circle().fill(Color.secondary.opacity(0.12)))
+                            .einkPaper { Circle().fill(Color.secondary.opacity(0.12)) }
                     }
                     .accessibilityLabel(readAlongEnabled ? "Read-along on" : "Read-along off")
 
@@ -180,7 +193,7 @@ struct PlayerControlsBar: View {
                             .font(.body.weight(.medium))
                             .foregroundStyle(Color.accentColor)
                             .frame(width: 36, height: 36)
-                            .background(Circle().fill(Color.secondary.opacity(0.12)))
+                            .einkPaper { Circle().fill(Color.secondary.opacity(0.12)) }
                     }
                     .accessibilityLabel("Forward one sentence")
 
@@ -192,7 +205,7 @@ struct PlayerControlsBar: View {
                             .font(.body.weight(.bold))
                             .foregroundStyle(.red)
                             .frame(width: 36, height: 36)
-                            .background(Circle().fill(Color.red.opacity(0.12)))
+                            .einkPaper { Circle().fill(Color.red.opacity(0.12)) }
                     }
                     .accessibilityLabel("Stop playback")
                 }
@@ -214,7 +227,7 @@ struct PlayerControlsBar: View {
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(.secondary)
                         .frame(width: 28, height: 28)
-                        .background(Circle().fill(Color.secondary.opacity(0.12)))
+                        .einkPaper { Circle().fill(Color.secondary.opacity(0.12)) }
                 }
                 .accessibilityLabel("Minimize playback controls")
             }
@@ -222,7 +235,7 @@ struct PlayerControlsBar: View {
         }
         .padding(.top, 8)
         .padding(.bottom, 10)
-        .background(.bar)
+        .background(isEInk ? AnyShapeStyle(EInk.paper) : AnyShapeStyle(.bar))
     }
 
     /// Current engine + voice, one tap from the picker.
@@ -243,7 +256,7 @@ struct PlayerControlsBar: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
-            .background(Capsule().fill(Color.secondary.opacity(0.12)))
+            .einkPaper { Capsule().fill(Color.secondary.opacity(0.12)) }
             .foregroundStyle(.secondary)
         }
         .buttonStyle(.plain)

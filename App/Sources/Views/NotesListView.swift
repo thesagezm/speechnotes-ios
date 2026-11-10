@@ -4,6 +4,7 @@ import SpeechLogic
 struct NotesListView: View {
     @EnvironmentObject private var notes: NotesStore
     @EnvironmentObject private var player: SpeechPlayer
+    @Environment(\.isEInk) private var isEInk
     @ObservedObject private var notebooks = NotebooksStore.shared
     @State private var path: [UUID] = []
     @State private var showingImporter = false
@@ -332,7 +333,14 @@ struct NotesListView: View {
                         .font(.caption)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 6)
-                        .background(Capsule().fill(Color.secondary.opacity(0.12)))
+                        .background {
+                            // E-Ink: square chip, paper fill, ink hairline.
+                            if isEInk {
+                                EInk.surface
+                            } else {
+                                Capsule().fill(Color.secondary.opacity(0.12))
+                            }
+                        }
                 }
                 .accessibilityLabel("Manage notebooks")
             }
@@ -350,13 +358,27 @@ struct NotesListView: View {
                     .font(.caption.weight(isActive ? .semibold : .regular))
                 Text("\(count)")
                     .font(.caption2.monospacedDigit())
-                    .foregroundStyle(isActive ? Color.white.opacity(0.8) : Color.secondary)
+                    .foregroundStyle(isActive ? Color.white.opacity(isEInk ? 1 : 0.8) : Color.secondary)
             }
             .padding(.horizontal, 11)
             .padding(.vertical, 6)
-            .background(
-                Capsule().fill(isActive ? Color.accentColor : Color.secondary.opacity(0.12))
-            )
+            .background {
+                // E-Ink: square chips — the active one is a solid ink block
+                // (white text), inactive ones are paper with an ink hairline.
+                // Meaning comes from weight and border, not hue.
+                if isEInk {
+                    Rectangle()
+                        .fill(isActive ? Color.black : Color.white)
+                        .overlay(
+                            Rectangle().strokeBorder(
+                                isActive ? Color.clear : Color.black,
+                                lineWidth: 1
+                            )
+                        )
+                } else {
+                    Capsule().fill(isActive ? Color.accentColor : Color.secondary.opacity(0.12))
+                }
+            }
             .foregroundStyle(isActive ? Color.white : Color.primary)
         }
         .buttonStyle(.plain)
@@ -427,19 +449,21 @@ struct NotesListView: View {
                             } label: {
                                 Label(note.isPinned ? "Unpin" : "Pin", systemImage: note.isPinned ? "pin.slash" : "pin")
                             }
-                            .tint(.orange)
+                            // E-Ink: ink blocks — identity comes from the
+                            // glyph, not the hue.
+                            .tint(isEInk ? Color.black : .orange)
                             Button {
                                 sharingNote = note
                             } label: {
                                 Label("Share", systemImage: "doc.on.doc")
                             }
-                            .tint(.indigo)
+                            .tint(isEInk ? Color.black : .indigo)
                             Button {
                                 exportNote(note)
                             } label: {
                                 Label("Export", systemImage: "square.and.arrow.up")
                             }
-                            .tint(.blue)
+                            .tint(isEInk ? Color.black : .blue)
                         }
                     }
                     // Offsets index this section's slice, not the store —
@@ -456,6 +480,9 @@ struct NotesListView: View {
                 }
             }
         }
+        // E-Ink: flat full-width rows with hairline separators on paper,
+        // instead of the rounded inset cards. No-op outside E-Ink.
+        .einkListStyle()
     }
 
     private func era(for date: Date) -> String {

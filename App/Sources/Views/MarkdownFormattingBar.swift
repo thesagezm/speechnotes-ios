@@ -19,6 +19,9 @@ struct MarkdownFormattingBar: View {
     let insertImage: () -> Void
     /// Inserter for a link — the editor passes the chosen label + URL in.
     let insertLink: (String, String) -> Void
+    /// E-Ink mode: the bar goes opaque paper and the tiles square off with
+    /// ink hairlines instead of the translucent rounded tints.
+    @Environment(\.isEInk) private var isEInk
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -58,7 +61,7 @@ struct MarkdownFormattingBar: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 6)
         }
-        .background(.bar)
+        .background(isEInk ? AnyShapeStyle(EInk.paper) : AnyShapeStyle(.bar))
         .overlay(alignment: .top) { Divider() }
     }
 
@@ -73,17 +76,32 @@ struct MarkdownFormattingBar: View {
         Divider().frame(height: 22).padding(.horizontal, 4)
     }
 
+    /// One formatting tile: translucent rounded tint normally, square paper
+    /// block with an ink hairline in E-Ink mode.
+    @ViewBuilder
+    private func inkTile<Content: View>(_ content: Content) -> some View {
+        if isEInk {
+            content
+                .background(EInk.paper)
+                .overlay(Rectangle().strokeBorder(EInk.ink, lineWidth: EInk.hairline))
+        } else {
+            content
+                .background(Color.secondary.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 7))
+        }
+    }
+
     @ViewBuilder
     private func button(symbol: String, a11y: String, action: @escaping () -> Void) -> some View {
         Button {
             Haptics.tap()
             action()
         } label: {
-            Image(systemName: symbol)
-                .font(.system(size: 16, weight: .medium))
-                .frame(width: 34, height: 34)
-                .background(Color.secondary.opacity(0.08))
-                .clipShape(RoundedRectangle(cornerRadius: 7))
+            inkTile(
+                Image(systemName: symbol)
+                    .font(.system(size: 16, weight: .medium))
+                    .frame(width: 34, height: 34)
+            )
         }
         .buttonStyle(.plain)
         // Symbol-only buttons read as "button" 13× to VoiceOver without this.
@@ -98,11 +116,11 @@ struct MarkdownFormattingBar: View {
             Haptics.tap()
             action()
         } label: {
-            Text(label)
-                .font(.system(size: 13, weight: .semibold))
-                .frame(width: 34, height: 34)
-                .background(Color.secondary.opacity(0.08))
-                .clipShape(RoundedRectangle(cornerRadius: 7))
+            inkTile(
+                Text(label)
+                    .font(.system(size: 13, weight: .semibold))
+                    .frame(width: 34, height: 34)
+            )
         }
         .buttonStyle(.plain)
         .accessibilityLabel(a11y)

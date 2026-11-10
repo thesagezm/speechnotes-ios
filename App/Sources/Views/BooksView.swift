@@ -66,6 +66,7 @@ struct BooksView: View {
     @EnvironmentObject private var store: BooksStore
     @EnvironmentObject private var player: SpeechPlayer
     @EnvironmentObject private var audioBooks: AudioBookPlayer
+    @Environment(\.isEInk) private var isEInk
     @State private var showingImporter = false
     @State private var bookToDelete: Book?
     /// Long-press "Add a goal" — pushes that book into the goal editor.
@@ -294,7 +295,15 @@ struct BooksView: View {
                     .font(.subheadline)
             }
             .padding(20)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+            .background {
+                // E-Ink: opaque paper slab with an ink hairline, square.
+                if isEInk {
+                    EInk.surface
+                } else {
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(.regularMaterial)
+                }
+            }
         }
     }
 

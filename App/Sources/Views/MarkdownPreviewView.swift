@@ -18,6 +18,7 @@ struct MarkdownPreviewView: View {
     @State private var safariURL: URL?
     @State private var zoomedImage: (url: URL, alt: String)?
     @Environment(\.noteId) private var envNoteId
+    @Environment(\.isEInk) private var isEInk
     @EnvironmentObject private var theme: AppTheme
 
     // MARK: - Spacing (user-tunable in Appearance → Reading View)
@@ -182,10 +183,19 @@ struct MarkdownPreviewView: View {
             listRows(items, markerBuilder: { index, _ in "\(index + 1)." })
         case .quote(_, let spans):
             HStack(alignment: .top, spacing: 10) {
-                RoundedRectangle(cornerRadius: 2)
-                    .fill(Color.secondary.opacity(0.4))
-                    .frame(width: 3)
-                    .padding(.top, 2)
+                // E-Ink: the quote rule goes solid ink and square — a crisp
+                // printed-style margin note instead of a soft gray pill.
+                if isEInk {
+                    Rectangle()
+                        .fill(EInk.ink)
+                        .frame(width: 3)
+                        .padding(.top, 2)
+                } else {
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(Color.secondary.opacity(0.4))
+                        .frame(width: 3)
+                        .padding(.top, 2)
+                }
                 styledSpans(spans)
                     .foregroundStyle(.secondary)
                     .lineSpacing(quoteLineSpacing)
@@ -208,7 +218,17 @@ struct MarkdownPreviewView: View {
             }
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.15)))
+            .background {
+                // E-Ink: square code block with an ink hairline — no soft
+                // gray rounding.
+                if isEInk {
+                    Rectangle()
+                        .fill(Color.secondary.opacity(0.15))
+                        .overlay(Rectangle().strokeBorder(EInk.ink, lineWidth: EInk.hairline))
+                } else {
+                    RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.15))
+                }
+            }
             .padding(.bottom, blockGap)
         case .divider:
             Divider().padding(.vertical, 10)
@@ -341,7 +361,8 @@ struct MarkdownPreviewView: View {
             columnCount: columnCount,
             widths: layout.widths,
             numeric: layout.numeric,
-            ruleColor: Self.ruleColor,
+            // E-Ink: ink rules — a table prints, not glows.
+            ruleColor: isEInk ? EInk.ink : Self.ruleColor,
             headerFill: Self.headerFill,
             stripeFill: Self.stripeFill,
             horizontalPadding: layout.horizontalPadding,
@@ -400,11 +421,15 @@ struct MarkdownPreviewView: View {
                 )
             }
         }
-        .background(
-            RoundedRectangle(cornerRadius: 6)
-                .strokeBorder(ruleColor, lineWidth: 0.5)
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .background {
+            if isEInk {
+                Rectangle().strokeBorder(EInk.ink, lineWidth: EInk.hairline)
+            } else {
+                RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(ruleColor, lineWidth: 0.5)
+            }
+        }
+        .clipShape(isEInk ? AnyShape(Rectangle()) : AnyShape(RoundedRectangle(cornerRadius: 6)))
     }
 
     /// One grid row: cells separated by hairline columns. Cells top-align —
@@ -425,7 +450,8 @@ struct MarkdownPreviewView: View {
                 if index > 0 {
                     Rectangle()
                         .fill(ruleColor)
-                        .frame(width: 0.5)
+                        // E-Ink: a full-point rule — sub-point dithers.
+                        .frame(width: isEInk ? EInk.hairline : 0.5)
                 }
                 cell(
                     cells[safe: index] ?? [],
@@ -442,7 +468,7 @@ struct MarkdownPreviewView: View {
         .overlay(alignment: .bottom) {
             Rectangle()
                 .fill(ruleColor)
-                .frame(height: 0.5)
+                .frame(height: isEInk ? EInk.hairline : 0.5)
         }
     }
 
