@@ -272,6 +272,10 @@ final class PhononEngine: NSObject, SpeechEngine {
         }
         var pastKVCount = 0
         var latentHistory = try Self.emptyTensor(dims: [1, 0, Self.latentDim])
+        // The latent history grows by the full 8 frames per call (fed back
+        // whole, no prompt to drop) — the audio_latents output's row count
+        // keys off THIS, not the KV count.
+        var latentHistoryCount = 0
 
         var newLatents: [Float] = []
         newLatents.reserveCapacity(budget * Self.latentDim)
@@ -308,8 +312,8 @@ final class PhononEngine: NSObject, SpeechEngine {
             // The flow's audio_latents is the CUMULATIVE latent history,
             // denormalized; only the trailing 8 rows are this call's frames.
             let cumulative = try Self.floatValues(
-                outputs["audio_latents"]!, dims: [1, pastKVCount + Self.framesPerCall, Self.latentDim])
-            newLatents.append(contentsOf: cumulative[(pastKVCount * Self.latentDim)...])
+                outputs["audio_latents"]!, dims: [1, latentHistoryCount + Self.framesPerCall, Self.latentDim])
+            newLatents.append(contentsOf: cumulative[(latentHistoryCount * Self.latentDim)...])
             let eos = try Self.floatValues(outputs["eos_logits"]!, dims: [1, Self.framesPerCall])
 
             // KV feedback: keep the latent K/Vs, drop the re-run prompt
@@ -337,6 +341,7 @@ final class PhononEngine: NSObject, SpeechEngine {
             kv = newKV
             pastKVCount += Self.framesPerCall - 1
             latentHistory = outputs["present.audio_latents"]!
+            latentHistoryCount += Self.framesPerCall
 
             // EOS countdown (Python's PocketTTSEosThresholdCriteria): the
             // frame that crossed the threshold and the tail frames are kept.

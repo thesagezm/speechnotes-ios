@@ -162,6 +162,9 @@ final class PhononSpikeTests: XCTestCase {
         }
         var pastKVCount = 0
         var latentHistory = try emptyTensor(dims: [1, 0, latentDim])
+        // The latent history grows by the full 8 frames per call (it is fed
+        // back whole, no prompt to drop) — the audio_latents output's row
+        // count keys off THIS, not the KV count.
         var latentHistoryCount = 0
 
         var newLatents: [Float] = []
@@ -195,9 +198,11 @@ final class PhononSpikeTests: XCTestCase {
 
             // The flow's audio_latents is the CUMULATIVE latent history,
             // denormalized; only the trailing 8 rows are this call's frames.
+            // Its row count follows the fed-back latent history (+8), not
+            // the KV cache (+7 — the prompt block never lands there).
             let cumulative = try floatValues(
-                outputs["audio_latents"]!, dims: [1, pastKVCount + framesPerCall, latentDim])
-            newLatents.append(contentsOf: cumulative[(pastKVCount * latentDim)...])
+                outputs["audio_latents"]!, dims: [1, latentHistoryCount + framesPerCall, latentDim])
+            newLatents.append(contentsOf: cumulative[(latentHistoryCount * latentDim)...])
             let eos = try floatValues(outputs["eos_logits"]!, dims: [1, framesPerCall])
             onCall(call, pastKVCount, eos)
 
