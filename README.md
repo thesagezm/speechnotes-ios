@@ -12,9 +12,10 @@ Notes-style pill; maths renders AND speaks; Pomodoro (Structured / Flowmodoro /
 free timer) lives on the Stats tab; **Keep Screen On** holds any reading
 surface; BookDrop scans any LAN interface (hotspot transfers work), keeps its
 port stable across toggles, launches OFF, and recovers from access-code
-prompts; shared URLs become formatted notes — headings, lists, quotes and
-the article's own hyperlinks render (Readability → markdown walker, with a
-Bypass-Paywalls-Clean pass for paywalled pages; Safari's share sheet hands
+prompts; shared URLs become formatted notes — headings, lists, quotes,
+images and the article's own hyperlinks render (Readability → markdown
+walker, then a Bypass-Paywalls-Clean pass on every import by default so
+paywalled pages recover their full text; Safari's share sheet hands
 links straight over on native installs via the Share Extension —
 `Docs/WEB-ARTICLE-IMPORT.md`); JEX exports import into real Joplin (full metadata
 set) and Joplin's end-to-end encryption round-trips; .mobi/azw books, scanned
@@ -69,9 +70,11 @@ zero-width joiners, control bytes, embedded-font glyphs) never reach the model.
   launches OFF; a 401 offers a prefilled access-code retry.
 - **Web articles become notes.** Share a URL (share sheet on native
   installs, clipboard, drag & drop or the scheme elsewhere) — Readability
-  extracts it, and the content DOM becomes markdown so headings, lists and
-  the page's hyperlinks survive into the note; paywalled pages get a
-  Bypass-Paywalls-Clean userscript pass.
+  extracts it, and the content DOM becomes markdown so headings, lists,
+  images and the page's hyperlinks survive into the note. Every import
+  also runs the Bypass-Paywalls-Clean userscript pass (toggle in
+  Appearance → Web Import) and the fuller text wins, so paywalled pages
+  recover their article.
 - **Joplin, both ways.** JEX exports carry the full metadata set and import
   into real Joplin; Joplin's end-to-end encryption (KeyV1/StringV1) is
   supported in the notes library.

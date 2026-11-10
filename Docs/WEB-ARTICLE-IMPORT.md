@@ -13,12 +13,22 @@ matter how well the note rendered.
 
 ## The pipeline now
 
-1. **Fetch** — the three passes are unchanged: DIRECT (URLSession +
-   Readability on the fetched HTML), BYPASS (BPC userscript in an
-   ephemeral webview), RENDERED (plain webview navigation for JS shells).
-2. **Extract** — Readability still produces `textContent` (the fallback,
-   and the paywall heuristic's length signal), and now also hands back
-   `parsed.content`: the article's own DOM.
+1. **Fetch** — the passes: DIRECT (URLSession + Readability on the fetched
+   HTML), BYPASS (BPC userscript in an ephemeral webview), RENDERED (plain
+   webview navigation for JS shells), LEGACY (tag-strip, last fallback).
+   The BYPASS pass runs for EVERY import while the toggle is on (default,
+   Appearance → Web Import): the plain fetch cannot see past a wall that
+   kept its markers out of the HTML, so every article goes fetch → BPC and
+   the better result wins (`bypassResultWins`: the bypass text must beat
+   the direct one by 150 chars, or the direct one must be a stub). On
+   clean pages the two agree and the direct result stands.
+2. **Extract** — Readability produces `textContent` (the fallback, and the
+   paywall heuristic's length signal) and `content`. NOTE: `content` is an
+   HTML STRING in @mozilla/readability (the default serializer is
+   `el.innerHTML`) — the extraction JS re-parses it with DOMParser before
+   walking. Handing the string straight to the walker once produced zero
+   markdown on every real page (the mock suite passed because its fake
+   parse returned a node).
 3. **Walk** — `html-to-markdown.js` (injected at document end, like
    Readability itself) flattens that DOM to the GFM subset the app
    renders/speaks: headings (shifted down one level — the note's first
@@ -27,7 +37,10 @@ matter how well the note rendered.
    relative-with-no-base degrade to text), bold/italic/strike, inline
    code, fenced code blocks (language class on `<pre>` or `<code>`),
    nested lists + GFM task checkboxes, blockquotes, pipe tables, `---`,
-   images (data:/tracking-pixel dropped, lazy `data-src` honored), figure
+   images — `data-src`/`data-lazy-src`/`data-original` before a placeholder
+   `src`, `srcset`/`data-srcset` largest-candidate fallback, `<picture>`
+   resolved to ONE image (the `<img>` inside, else a `<source>` srcset) —
+   junk paragraphs dropped whole ("Advertisement", caption toggles), figure
    captions as italics, definition lists as bold-term paragraphs. Markdown
    significators in the article's own text are backslash-escaped, and a
    leading heading equal to the article title is dropped (the note's title
@@ -43,6 +56,17 @@ matter how well the note rendered.
    the user never touched the setting** — an explicit off stays off.
    TTS/read-along strip the sigils through `MarkdownText.plainText` as
    with any markdown note.
+
+## Why imports used to hang, then fail
+
+`WKWebView.evaluateJavaScript` has NO internal timeout. A page suspended
+in the background (app backgrounded mid-import) never answers the
+extraction call, the pipeline never returned, and `isFetchingArticle`
+stayed true — every later import was refused with "Already fetching an
+article…" until relaunch. The extraction now races the JS answer against
+a claim-guarded continuation (WebKit's completion handler and a detached
+timeout, exactly one resume wins), so every import terminates: fetch 20s
+timeout, settle caps, 15s extraction bound.
 
 ## The share sheet (native installs only)
 
@@ -63,7 +87,7 @@ binary, so the extension does not disturb the LiveContainer contract.
 ## Testing the walker
 
 `Scripts/test-html-to-markdown.js` runs the walker against a minimal DOM
-mock (the exact API surface it touches) — 46 assertions covering
+mock (the exact API surface it touches) — 53 assertions covering
 headings/level-shift, title dedupe, inline markup, escaping, link
 resolution classes, lists (nested, ordered, task), quotes, fences,
 tables, images, dropped chrome, whitespace discipline. CI runs it in the

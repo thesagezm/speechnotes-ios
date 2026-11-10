@@ -663,8 +663,9 @@ struct NotesListView: View {
     /// Fetches a web article and lands its reader text as a note. Every
     /// share channel funnels here: clipboard link, drag & drop, the
     /// speechnotes://?url= scheme, raw https:// open-URLs and the
-    /// "Import from Web Address…" prompt. On failure the link itself
-    /// becomes the note — a share is never silently dropped.
+    /// "Import from Web Address…" prompt. On failure the legacy tag-strip
+    /// gets one try, and the link itself becomes the note last — a share
+    /// is never silently dropped.
     private func importWebArticle(_ url: URL) {
         guard !isFetchingArticle else {
             ToastCenter.shared.show("Already fetching an article…")
@@ -673,7 +674,20 @@ struct NotesListView: View {
         isFetchingArticle = true
         ToastCenter.shared.show("Fetching \(url.host ?? "article")…", duration: 8)
         Task.detached(priority: .userInitiated) {
+            // Bounded awaits all the way down (fetch timeout, settle caps,
+            // the extraction-JS claim race), so this Task always completes
+            // and `isFetchingArticle` always resets — a backgrounded
+            // import can no longer wedge the importer with a hung
+            // "Already fetching an article…" state.
             let fetched = await WebArticleService.shared.article(from: url)
+                ?? await ImportService.legacyWebsiteText(from: url).map { text in
+                    WebArticle(
+                        title: url.host ?? "Web article",
+                        byline: nil, siteName: nil, excerpt: nil,
+                        text: text, markdown: nil,
+                        sourceURL: url, route: .legacyStripped
+                    )
+                }
             await MainActor.run {
                 isFetchingArticle = false
                 guard let fetched else {
@@ -687,8 +701,8 @@ struct NotesListView: View {
                 }
                 Haptics.success()
                 // The formatted body when the walker produced one —
-                // headings, lists, quotes, tables and the page's own
-                // hyperlinks (textContent flattens those away) — plain
+                // headings, lists, quotes, tables, images and the page's
+                // own hyperlinks (textContent flattens those away) — plain
                 // textContent otherwise. Speech strips the sigils either
                 // way (MarkdownText.plainText).
                 var text = fetched.markdown ?? fetched.text

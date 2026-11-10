@@ -186,6 +186,31 @@ check('tracking pixel (width 1) dropped',
 check('lazy data-src picked up',
   md(el('div', {}, el('p', {}, el('img', { 'data-src': 'https://cdn.example.com/a.png', alt: '' }))), 'https://example.com/'),
   '![](https://cdn.example.com/a.png)');
+check('data-src beats placeholder src (lazy pattern)',
+  md(el('div', {}, el('p', {}, el('img', { src: 'https://example.com/1px.gif', 'data-src': 'https://cdn.example.com/real.jpg', alt: 'real' }))), 'https://example.com/'),
+  '![real](https://cdn.example.com/real.jpg)');
+check('picture > img resolves (lazy <picture> markup)',
+  md(el('div', {}, el('p', {}, el('span', {}, el('picture', {},
+    el('source', { srcset: 'https://cdn.example.com/w320.jpg 320w', media: '(max-width: 320px)' }),
+    el('img', { src: 'https://cdn.example.com/hero.jpg', alt: 'Hero' }))))), 'https://example.com/'),
+  '![Hero](https://cdn.example.com/hero.jpg)');
+check('picture with source-only srcset falls back to the source',
+  md(el('div', {}, el('picture', {},
+    el('source', { srcset: 'https://cdn.example.com/s1.jpg 1x, https://cdn.example.com/s2.jpg 2x' }),
+    el('img', { alt: 'From source' }))), 'https://example.com/'),
+  '![From source](https://cdn.example.com/s2.jpg)');
+check('srcset fallback picks the last (largest) candidate',
+  md(el('div', {}, el('p', {}, el('img', { srcset: 'https://cdn.example.com/a.jpg 400w, https://cdn.example.com/b.jpg 1200w', alt: 'big' }))), 'https://example.com/'),
+  '![big](https://cdn.example.com/b.jpg)');
+check('bare advertisement paragraph dropped',
+  md(el('div', {}, el('p', {}, text('Advertisement')), el('p', {}, text('Real body')))),
+  'Real body');
+check('caption toggle paragraph dropped',
+  md(el('div', {}, el('p', {}, text('Hide caption')), el('p', {}, text('body')))),
+  'body');
+check('a paragraph that merely MENTIONS an ad survives',
+  md(el('div', {}, el('p', {}, text('The advertisement industry is changing')))),
+  'The advertisement industry is changing');
 
 // ---- 9. dropped structure ----
 check('script/style/iframe/form noise dropped',

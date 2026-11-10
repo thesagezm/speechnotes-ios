@@ -66,8 +66,16 @@ targets:
         # loosen anything off-LAN). The receive side needs no multicast
         # entitlement and no NSBonjourServices: we never multicast.
         NSLocalNetworkUsageDescription: "BookDrop finds nearby devices on your local network to send and receive books and notes. Nothing leaves the network."
+        # ONE dictionary, two keys: NSAllowsLocalNetworking is the BookDrop
+        # sender's exception (discovery + upload POST to plain http://<lan-ip>),
+        # NSAllowsArbitraryLoads is the web-article importer's browser-grade
+        # fetch (pages from arbitrary hosts, some http-only or redirecting
+        # through TLS that ATS would otherwise reject). Declaring the key twice
+        # used to let the second dictionary silently overwrite the first and
+        # break the LAN sender.
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
+          NSAllowsArbitraryLoads: true
         # v1.6.1 probe (device-gated): landscape keys were re-added in v1.2.0
         # and that build black-screened at launch inside LiveContainer on iOS 26
         # (v1.1 differs ONLY by these keys — verified byte-level 2026-08-18, see
@@ -158,13 +166,6 @@ targets:
             CFBundleURLRole: Viewer
         UIBackgroundModes:
           - audio
-        # Web-article import (Notes): pages are fetched from arbitrary
-        # hosts, and some are http-only or redirect through TLS that ATS
-        # rejects — which would silently turn every such article into the
-        # "saved the link" fallback. A browser-grade fetch is the feature;
-        # this is the one key that lets URLSession behave like one.
-        NSAppTransportSecurity:
-          NSAllowsArbitraryLoads: true
     settings:
       base:
         PRODUCT_NAME: Speechnotes

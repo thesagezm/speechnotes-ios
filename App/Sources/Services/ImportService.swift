@@ -330,7 +330,7 @@ final class ImportService {
             Log.shared.info("ImportService: article via \(article.route.rawValue) pass — \(url.absoluteString)")
             return formattedWebNote(from: article)
         }
-        return await legacyStrippedWebsiteText(from: url)
+        return await legacyWebsiteText(from: url)
     }
 
     /// The note body a web article becomes: title as the first line (notes
@@ -353,9 +353,12 @@ final class ImportService {
 
     /// The pre-Readability website importer, verbatim in behavior: bounded
     /// fetch, script/style bodies dropped, tags stripped, entities decoded.
-    /// Only reached when the article pipeline returned nothing — a
-    /// non-article page Readability rejects can still leave useful text.
-    private static func legacyStrippedWebsiteText(from url: URL) async -> String? {
+    /// Reached when the article pipeline returned nothing (NotesListView's
+    /// last fallback before "saved the link") — a non-article page
+    /// Readability rejects can still leave useful text. Internal: the notes
+    /// list wraps its result back into a WebArticle so the note shape is
+    /// identical to a pipeline import.
+    static func legacyWebsiteText(from url: URL) async -> String? {
         var request = URLRequest(url: url)
         request.timeoutInterval = 20
         request.cachePolicy = .reloadIgnoringLocalCacheData

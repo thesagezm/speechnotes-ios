@@ -4,6 +4,49 @@ Format: newest first. Every critique round, merge, and escalation lands here.
 
 ---
 
+**Web import: flat-paragraph root cause found + fixed, bypass on every import, hang-proof pipeline** (branch `batch-c-d-session`, 2026-11-10):
+- **Why EVERY article imported flat (no headings/links/images):** the
+  vendored Readability 0.5.0 returns `parsed.content` as an HTML STRING
+  (its default serializer is `el.innerHTML`), but the extraction JS handed
+  it to the markdown walker as if it were a DOM node — `.documentElement`/
+  `.body` on a string are undefined, the walker saw a string with no
+  childNodes, and emitted `''` on every page. The Swift cover-rule then
+  discarded the empty markdown, so every import fell back to textContent.
+  Verified live against Guardian/Ars/NYT/Wired/Apple (0 markdown chars
+  everywhere, pre-fix). Fix: re-parse `content` with DOMParser before
+  walking (Docs/WEB-ARTICLE-IMPORT.md documents the contract). The mock
+  suite never caught it because its fake parse() returned a node.
+- **Walker image fixes (live-verified: Guardian hero, Ars hero, Wired
+  hero + avatar, NYT hero + caption now all import):** Wired's
+  `P > SPAN > PICTURE > IMG` died at `case PICTURE: return ''` — the img
+  inside was never reached; `<picture>` now resolves to ONE image (the
+  `<img>` inside, else a `<source>` srcset). `data-src`/`data-lazy-src`/
+  `data-original` go before a placeholder `src`; `srcset`/`data-srcset`
+  fall back to the largest candidate. Junk paragraphs ("Advertisement",
+  caption toggles, including link-wrapped `[SKIP ADVERTISEMENT](…)`) drop
+  whole. Walker suite grew 46 → 53 assertions, all green.
+- **Why imports could hang FOREVER (the "completely failing" report):**
+  `evaluateJavaScript` has no internal timeout — a page suspended in the
+  background never answers, the pipeline never returned, and
+  `isFetchingArticle` stuck true, refusing every later import with
+  "Already fetching an article…". The extraction now races the JS answer
+  against a 15s claim-guarded continuation (WebKit's completion + a
+  detached timeout, exactly one resume wins — a task-group race would
+  drain the group and hang anyway). NotesListView also gains a
+  legacy-tag-strip fallback before "saved the link".
+- **BPC on EVERY import (default ON):** the heuristics no longer gate the
+  bypass pass (a wall that kept its markers out of the HTML sails past
+  them) — every import goes fetch → BPC, `bypassResultWins` picks the
+  fuller text (+150-char margin or direct-stub). Toggle moved to
+  Appearance → Web Import; the always-bypass domain list is GONE (user
+  call: unnecessary). Heuristics stay as the log/diagnostic signal.
+- **project.yml:** the duplicate `NSAppTransportSecurity` keys (one per
+  feature since v1.6.1/1.8.0) let the web-import dict silently overwrite
+  the BookDrop dict — merged into one dictionary carrying both
+  `NSAllowsLocalNetworking` and `NSAllowsArbitraryLoads`.
+
+---
+
 **Phonon engine integration** (branch `batch-c-d-session`, 2026-11-10):
 - **The engine**: Gradium's Phonon (31M-param English streaming TTS,
   Apache-2.0) via `onnx-community/phonon-31m-en-ONNX` — the app's 4th neural

@@ -4,20 +4,21 @@ import Foundation
 /// pass. The BPC pair (`bpc_func.js` + `bpc.en.user.js`, userscript form by
 /// magnolia1234) is vendored in App/Resources/JS — see its VENDOR-NOTES.md.
 ///
-/// BYPASS IS OPT-IN PER SETTING, default ON, and only actually runs when
-/// `PaywallHeuristics` detects a wall (or the domain is in the always-list,
-/// or the plain fetch produced nothing). A copy dropped into
-/// Documents/BypassPaywalls/ (visible in the Files app) overrides the
-/// bundled pair without a rebuild, so the script can be refreshed when
-/// sites change — keep both files' versions in lockstep.
+/// BYPASS IS ON BY DEFAULT AND RUNS ON EVERY ARTICLE: the plain fetch cannot
+/// see past a publisher wall that kept its markers out of the HTML, so the
+/// heuristics no longer gate the pass — every import goes fetch → BPC and
+/// the better result wins. A copy dropped into Documents/BypassPaywalls/
+/// (visible in the Files app) overrides the bundled pair without a rebuild,
+/// so the script can be refreshed when sites change — keep both files'
+/// versions in lockstep.
 enum PaywallBypass {
 
     static let enabledKey = "webImport.bypassPaywalls"
-    static let alwaysDomainsKey = "webImport.bypassAlwaysDomains"
 
-    /// Master toggle. Default ON: the pass costs nothing on clean pages
-    /// (the heuristics gate it), and a user sharing a paywalled article
-    /// wants the text on the first try, not after a settings trip.
+    /// Master toggle. Default ON: every import runs the BPC pass (clean
+    /// pages cost a slower second pass; walled ones recover their full text
+    /// with the script's own archive fallbacks — a user sharing a paywalled
+    /// article wants the text on the first try, not after a settings trip).
     static var isEnabled: Bool {
         get {
             UserDefaults.standard.object(forKey: enabledKey) == nil
@@ -25,36 +26,6 @@ enum PaywallBypass {
                 : UserDefaults.standard.bool(forKey: enabledKey)
         }
         set { UserDefaults.standard.set(newValue, forKey: enabledKey) }
-    }
-
-    /// Domains (comma or newline separated) that skip the plain fetch's
-    /// verdict and go straight through the BPC pass — for sites whose walls
-    /// the heuristics miss or that 403 non-browser requests.
-    static var alwaysBypassDomainsRaw: String {
-        get { UserDefaults.standard.string(forKey: alwaysDomainsKey) ?? "" }
-        set { UserDefaults.standard.set(newValue, forKey: alwaysDomainsKey) }
-    }
-
-    static func alwaysBypassDomains() -> Set<String> {
-        Set(
-            alwaysBypassDomainsRaw
-                .components(separatedBy: CharacterSet(charactersIn: ",\n"))
-                .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
-                .filter { !$0.isEmpty }
-        )
-    }
-
-    /// Exact host match, or the domain covers subdomains ("nytimes.com"
-    /// matches "www.nytimes.com"). Registered domains only — no suffix
-    /// collisions ("times.com" must not match "sometimees.com").
-    static func alwaysBypass(host: String?) -> Bool {
-        guard let host = host?.lowercased() else { return false }
-        for domain in alwaysBypassDomains() {
-            if host == domain || host.hasSuffix("." + domain) {
-                return true
-            }
-        }
-        return false
     }
 
     // MARK: - Scripts

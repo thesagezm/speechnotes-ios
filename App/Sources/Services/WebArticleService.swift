@@ -29,6 +29,9 @@ struct WebArticle {
         /// Offscreen webview navigation with the BPC userscript injected —
         /// the paywall pass.
         case bypass
+        /// The pre-Readability tag-strip (ImportService.legacyWebsiteText),
+        /// wrapped so a legacy import lands in the same note shape.
+        case legacyStripped = "legacy"
     }
     let route: Route
 
@@ -44,28 +47,32 @@ struct WebArticle {
 ///
 /// 1. DIRECT — plain URLSession fetch (Safari-ish UA), then Readability on
 ///    the fetched HTML inside a headless WKWebView (`loadHTMLString`). Most
-///    pages finish here in one round-trip.
-/// 2. BYPASS — when `PaywallHeuristics` flags the fetched HTML (or the
-///    domain is on the always-list, or the fetch itself failed), the page
-///    is loaded into a fresh EPHEMERAL webview with the Bypass Paywalls
+///    pages finish here in one round-trip and its result stands whenever the
+///    bypass pass doesn't beat it.
+/// 2. BYPASS — a fresh EPHEMERAL webview navigation with the Bypass Paywalls
 ///    Clean userscript (shim + bpc_func.js + bpc.en.user.js, vendored in
-///    App/Resources/JS) injected at document start. The fresh store is the
-///    "clear cookies" half of BPC's recipe; the script's own
-///    cookie/localStorage surgery and archive fallbacks run in-page; its
-///    one privileged API (`GM.xmlHttpRequest`) bridges to URLSession via
-///    `webkit.messageHandlers.bpcFetch`.
-/// 3. RENDERED — plain webview load for JS app shells when there was
-///    nothing to readability-parse and no wall detected.
+///    App/Resources/JS) injected at document start. Runs for EVERY import
+///    while the toggle is on (default): on clean pages it reproduces the
+///    same article, on walled ones its cookie/localStorage surgery and
+///    archive fallbacks (archive.ph et al. through the GM bridge) recover
+///    the full text, and `bypassResultWins` picks the better result. The
+///    fresh store is the "clear cookies" half of BPC's recipe.
+/// 3. RENDERED — plain webview load for JS app shells when the bypass
+///    toggle is off (or the scripts are missing) and the fetch found
+///    nothing.
 ///
 /// The service is used from background import tasks; WKWebView work is
 /// hopped to the main actor internally (creation, delegate callbacks,
 /// evaluateJavaScript all arrive on main — the settle loop reads state on
-/// main only).
+/// main only). Every await is bounded: the fetch by its request timeout,
+/// the settle by its cap, and the final extraction JS by a claim-guarded
+/// continuation race (Webkit's evaluateJavaScript has NO internal timeout,
+/// so a backgrounded import must be able to abandon it).
 final class WebArticleService {
 
     struct Options {
-        /// Route through the BPC pass when a wall is detected. Honors the
-        /// global toggle inside `PaywallBypass`.
+        /// Run the BPC bypass pass on every import (still honors the global
+        /// toggle inside `PaywallBypass`).
         var allowBypass = true
         /// Try the plain rendered pass before giving up (JS app shells).
         var allowRenderedFallback = true
@@ -87,6 +94,15 @@ final class WebArticleService {
     private static let bypassSettleQuiet: TimeInterval = 4.0
     private static let settleCap: TimeInterval = 20
     private static let bypassSettleCap: TimeInterval = 40
+    /// Hard bound on the final extraction JS call. WKWebView's
+    /// `evaluateJavaScript` has NO internal timeout: if the app is
+    /// backgrounded mid-import, page JS is suspended and the call can hang
+    /// forever — the pipeline never returns, the "Fetching…" toast outlives
+    /// the app, and every later import is refused with "Already fetching an
+    /// article…". Abandoning the call after this bound (WebKit offers no
+    /// cancellation; the webview is torn down right after) is what keeps
+    /// backgrounded imports from wedging the importer permanently.
+    private static let extractionTimeout: TimeInterval = 15
 
     private let fetchSession: URLSession = {
         let config = URLSessionConfiguration.ephemeral
@@ -107,44 +123,39 @@ final class WebArticleService {
 
     func article(from url: URL, options: Options = Options()) async -> WebArticle? {
         guard url.scheme == "http" || url.scheme == "https" else { return nil }
-        let host = url.host?.lowercased()
         let bypassAvailable = options.allowBypass && PaywallBypass.isEnabled && PaywallBypass.loadScripts() != nil
-        let alwaysBypass = bypassAvailable && PaywallBypass.alwaysBypass(host: host)
 
         var direct: WebArticle?
-        var paywalled = false
-        var fetchedAnything = false
 
-        if !alwaysBypass {
-            if let html = await fetchHTML(url) {
-                fetchedAnything = true
-                if let parsed = await parse(html: html, baseURL: url) {
-                    direct = parsed
-                    let inspection = PaywallHeuristics.inspect(
-                        html: html,
-                        extractedTextLength: parsed.text.count
-                    )
-                    paywalled = inspection.paywalled
-                    if inspection.paywalled {
-                        Log.shared.info("WebArticle: paywall detected (\(inspection.reasons.joined(separator: "; "))) — \(url.absoluteString)")
-                    }
-                    if !paywalled, parsed.text.count >= 40 {
-                        Log.shared.info("WebArticle: direct import (\(parsed.text.count) chars) — \(url.absoluteString)")
-                        return parsed
-                    }
-                } else {
-                    Log.shared.info("WebArticle: readability found nothing in fetched HTML — \(url.absoluteString)")
+        if let html = await fetchHTML(url) {
+            if let parsed = await parse(html: html, baseURL: url) {
+                direct = parsed
+                // Heuristics stay as the DIAGNOSTIC: they log WHY a page
+                // looks walled. They no longer gate the bypass pass —
+                // a wall that kept its markers out of the HTML sails
+                // past them, and the bypass runs for every import anyway.
+                let inspection = PaywallHeuristics.inspect(
+                    html: html,
+                    extractedTextLength: parsed.text.count
+                )
+                if inspection.paywalled {
+                    Log.shared.info("WebArticle: paywall signals (\(inspection.reasons.joined(separator: "; "))) — \(url.absoluteString)")
                 }
+                if !inspection.paywalled, parsed.text.count >= 40 {
+                    Log.shared.info("WebArticle: direct import (\(parsed.text.count) chars) — \(url.absoluteString)")
+                }
+            } else {
+                Log.shared.info("WebArticle: readability found nothing in fetched HTML — \(url.absoluteString)")
             }
-        } else {
-            Log.shared.info("WebArticle: \(host ?? url.absoluteString) on the always-bypass list — going straight to the BPC pass")
         }
 
-        // The bypass pass: detected wall, always-domain, a fetch that came
-        // back empty/403, or a page whose readable text was a stub.
-        let wantsBypass = bypassAvailable
-            && (alwaysBypass || paywalled || !fetchedAnything || (direct?.text.count ?? 0) < 40)
-        if wantsBypass {
+        // BPC ON EVERY IMPORT (the default): the bypass pass runs for every
+        // article, not only when the heuristics fired. On clean pages it
+        // reproduces the same article and `bypassResultWins` keeps the
+        // direct one; on walled ones its cookie/localStorage surgery and
+        // archive fallbacks (GM.xmlHttpRequest bridge → archive.ph et al.)
+        // recover the text the plain fetch could never see.
+        if bypassAvailable {
             Log.shared.info("WebArticle: BPC pass starting — \(url.absoluteString)")
             if let bypassed = await render(url: url, bypass: true) {
                 if Self.bypassResultWins(bypassed, over: direct) {
@@ -159,8 +170,10 @@ final class WebArticleService {
 
         if let direct { return direct }
 
-        // Last resort for JS app shells: render the page without any
-        // userscript and extract from the live DOM.
+        // Last resort for JS app shells: render the page WITHOUT any
+        // userscript and extract from the live DOM. Reached when the bypass
+        // toggle is off (or scripts missing) and the fetch found nothing —
+        // and when a BPC pass itself extracted nothing from a shell page.
         if options.allowRenderedFallback, let rendered = await render(url: url, bypass: false) {
             Log.shared.info("WebArticle: rendered fallback import (\(rendered.text.count) chars) — \(url.absoluteString)")
             return rendered
@@ -398,12 +411,23 @@ private final class HeadlessArticlePass: NSObject, WKNavigationDelegate, WKScrip
             // Content DOM → GFM markdown (html-to-markdown.js). Guarded so a
             // walker bug can only cost the formatting, never the article:
             // the payload still carries textContent as the fallback.
+            //
+            // Readability's default serializer returns `content` as an HTML
+            // STRING (`el.innerHTML` — the @mozilla/readability contract on
+            // every 0.3+ release, confirmed in our vendored 0.5.0). Handing
+            // that string to the walker yields nothing (no childNodes), which
+            // is why every article once imported flat. Re-parse it into a DOM
+            // first; a future version returning a real node skips the parse.
             var markdown = '';
             try {
               if (typeof __snArticleToMarkdown === 'function' && parsed.content) {
-                var contentRoot = parsed.content.documentElement
-                  || parsed.content.body
-                  || parsed.content;
+                var contentRoot = parsed.content;
+                if (typeof contentRoot === 'string') {
+                  contentRoot = new DOMParser().parseFromString(contentRoot, 'text/html');
+                }
+                contentRoot = contentRoot.documentElement
+                  || contentRoot.body
+                  || contentRoot;
                 markdown = __snArticleToMarkdown(contentRoot, document.baseURI, parsed.title || '') || '';
               }
             } catch (e) {
@@ -423,11 +447,51 @@ private final class HeadlessArticlePass: NSObject, WKNavigationDelegate, WKScrip
           }
         })()
         """
-        guard let result = try? await webView.evaluateJavaScript(js),
-              let raw = result as? String,
-              let data = raw.data(using: .utf8),
+        // The race: JS answer vs. the hard bound — and the bound MUST win
+        // even when the answer never comes. A task-group race would drain
+        // the group on exit, i.e. wait for the hung JS task itself, so this
+        // uses the completion-callback form of evaluateJavaScript with a
+        // claim-guarded continuation: WebKit's completion and the detached
+        // timeout both try to resume, exactly one of them wins. The late
+        // completion of a suspended webview is dropped harmlessly — the
+        // teardown below deallocates the webview either way.
+        enum EvalOutcome {
+            case value(Any?, Error?)
+            case timedOut
+        }
+        /// Resume-exactly-once guard: WebKit's callback and the timeout
+        /// task race from different threads.
+        final class OnceClaim: @unchecked Sendable {
+            private let lock = NSLock()
+            private var claimed = false
+            func claim() -> Bool {
+                lock.lock()
+                defer { lock.unlock() }
+                if claimed { return false }
+                claimed = true
+                return true
+            }
+        }
+        let outcome: EvalOutcome = await withCheckedContinuation { continuation in
+            let claim = OnceClaim()
+            self.webView.evaluateJavaScript(js) { result, error in
+                guard claim.claim() else { return }
+                continuation.resume(returning: .value(result, error))
+            }
+            Task.detached(priority: .utility) {
+                try? await Task.sleep(nanoseconds: UInt64(Self.extractionTimeout * 1_000_000_000))
+                guard claim.claim() else { return }
+                continuation.resume(returning: .timedOut)
+            }
+        }
+        guard case .value(let raw, let error) = outcome else {
+            Log.shared.info("WebArticle: extraction JS hit the \(Int(Self.extractionTimeout))s bound — \(route.rawValue) pass")
+            return nil
+        }
+        guard error == nil, let html = raw as? String,
+              let data = html.data(using: .utf8),
               let decoded = try? JSONDecoder().decode(ExtractedArticle.self, from: data) else {
-            Log.shared.info("WebArticle: extraction call failed on \(route.rawValue) pass")
+            Log.shared.info("WebArticle: extraction call failed on \(route.rawValue) pass\(error.map { ": \($0.localizedDescription)" } ?? "")")
             return nil
         }
         guard decoded.ok, let decodedText = decoded.text, !decodedText.isEmpty else {

@@ -12,12 +12,6 @@ struct SettingsTabView: View {
     /// player surface) programmatically.
     @State private var pushStorageForExport = false
 
-    /// Web import (shared URLs → article notes): the Bypass Paywalls Clean
-    /// toggle and always-bypass domain list. @AppStorage keys are the same
-    /// ones `PaywallBypass` reads, so no glue code.
-    @AppStorage(PaywallBypass.enabledKey) private var bypassEnabled = true
-    @AppStorage(PaywallBypass.alwaysDomainsKey) private var alwaysBypassDomains = ""
-
     /// Keep Screen On (Settings → Reading): the key/default live in
     /// `ScreenAwakePolicy` (SpeechLogic) so the toggle and the controller
     /// cannot drift apart. The controller re-applies on this change via
@@ -61,19 +55,6 @@ struct SettingsTabView: View {
                     NavigationLink("BookDrop") {
                         BookDropView()
                     }
-                }
-                Section {
-                    Toggle("Paywall bypass", isOn: $bypassEnabled)
-                    TextField(
-                        "Always bypass domains (comma-separated)",
-                        text: $alwaysBypassDomains,
-                        axis: .vertical
-                    )
-                    .lineLimit(1...3)
-                    .autocorrectionDisabled()
-                    .textInputAutocapitalization(.never)
-                } header: {
-                    Text("Web import")
                 }
                 Section("Storage") {
                     // Closure-based link (the value-based NavigationLink from

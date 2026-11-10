@@ -7,6 +7,9 @@ struct AppearanceSettingsView: View {
     /// True = Automatic: a note's web images download to the cache on open.
     /// False = Manual: images download only when actually displayed.
     @AppStorage("imageCacheAutomatic") private var imageCacheAutomatic = true
+    /// Web import (shared URLs → article notes): the Bypass Paywalls Clean
+    /// toggle. @AppStorage key is the one `PaywallBypass` reads, no glue.
+    @AppStorage(PaywallBypass.enabledKey) private var bypassEnabled = true
 
     var body: some View {
         Form {
@@ -56,6 +59,14 @@ struct AppearanceSettingsView: View {
                 Text("Images")
             } footer: {
                 Text("Automatic downloads every web image in a note to the cache as soon as you open it. Manual downloads an image only when you actually view it. Either way, Storage → Cached images can delete a single note's images, and permanently deleting a note from the recycle bin removes its web images with it.")
+            }
+
+            Section {
+                Toggle("Bypass Paywalls", isOn: $bypassEnabled)
+            } header: {
+                Text("Web Import")
+            } footer: {
+                Text("Fetches every shared article twice — a plain fetch, then the Bypass Paywalls Clean pass; the better result becomes the note, so paywalled pages recover their full text. Off means the plain fetch only, and imports faster.")
             }
             Section {
                 Picker("Theme", selection: $theme.appearance) {

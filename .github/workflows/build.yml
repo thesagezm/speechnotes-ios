@@ -26,7 +26,7 @@ jobs:
         run: Scripts/version-check.sh
 
       # The web-article markdown walker is JavaScript in the bundle
-      # (html-to-markdown.js) — its 46-assertion DOM-mock suite runs in
+      # (html-to-markdown.js) — its 53-assertion DOM-mock suite runs in
       # Node here so a walker edit that regresses the emitted GFM fails
       # CI before it ships a broken import.
       - name: Web-article markdown walker tests

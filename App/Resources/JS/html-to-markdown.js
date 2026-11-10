@@ -107,8 +107,32 @@
         return href.replace(/ /g, '%20').replace(/\(/g, '%28').replace(/\)/g, '%29');
     }
 
+    // Best URL out of a srcset attribute: candidates are "url [descriptor]"
+    // separated by commas. Scanned from the END — the last candidate is the
+    // largest by convention — and the first one that resolves wins.
+    function srcsetCandidate(attr) {
+        if (!attr) return null;
+        var parts = String(attr).split(',');
+        for (var i = parts.length - 1; i >= 0; i--) {
+            var url = collapse(parts[i]).trim().split(/\s+/)[0];
+            if (!url) continue;
+            var resolved = resolve(url);
+            if (resolved) return resolved;
+        }
+        return null;
+    }
+
     function imageMarkdown(img) {
-        var src = resolve(img.getAttribute('src') || img.getAttribute('data-src'));
+        // Lazy-load pattern: `data-src` (and friends) holds the REAL image
+        // while `src` is often a 1px placeholder or a tracking gif — the
+        // real attributes go first, `srcset` last (it is the fallback
+        // delivery for the same picture, not another image).
+        var src = resolve(img.getAttribute('data-src'))
+            || resolve(img.getAttribute('src'))
+            || resolve(img.getAttribute('data-lazy-src'))
+            || resolve(img.getAttribute('data-original'))
+            || srcsetCandidate(img.getAttribute('data-srcset'))
+            || srcsetCandidate(img.getAttribute('srcset'));
         if (!src) return '';
         var w = parseInt(img.getAttribute('width') || '', 10) || 0;
         var h = parseInt(img.getAttribute('height') || '', 10) || 0;
@@ -161,6 +185,30 @@
         return '[' + label + '](' + encodeDestination(href) + ')';
     }
 
+    // A <picture> resolves to ONE image: the <img> inside it when that
+    // resolves (it carries the alt text), otherwise a <source>'s srcset.
+    // Walking the children directly would emit both the source's and the
+    // img's URL — two copies of the same photograph.
+    function pictureMarkdown(picture) {
+        var imgs = [];
+        descendants(picture, 'IMG', imgs);
+        if (imgs.length) {
+            var md = imageMarkdown(imgs[0]);
+            if (md) return md;
+        }
+        var sources = [];
+        descendants(picture, 'SOURCE', sources);
+        for (var i = 0; i < sources.length; i++) {
+            var src = srcsetCandidate(sources[i].getAttribute('srcset'))
+                || srcsetCandidate(sources[i].getAttribute('data-srcset'));
+            if (src) {
+                var alt = imgs.length ? collapse(imgs[0].getAttribute('alt') || '') : '';
+                return '![' + esc(alt) + '](' + encodeDestination(src) + ')';
+            }
+        }
+        return '';
+    }
+
     // Inline context: runs of text with markup, newlines only for <br>.
     function inline(node) {
         if (node.nodeType === TEXT_NODE) return esc(collapse(node.nodeValue || ''));
@@ -181,8 +229,13 @@
                 return wrap('~~', inlineChildren(node));
             case 'CODE': case 'TT': case 'KBD': case 'SAMP':
                 return inlineCode(node);
-            case 'IMG': case 'PICTURE': case 'SOURCE':
-                return name === 'IMG' ? imageMarkdown(node) : '';
+            case 'IMG':
+                return imageMarkdown(node);
+            case 'PICTURE':
+                // Wired-style `P > SPAN > PICTURE > IMG`: the image lives
+                // INSIDE the picture element, so returning '' (the old
+                // behavior) silently dropped every lazy `<picture>` photo.
+                return pictureMarkdown(node);
             default:
                 return inlineChildren(node);
         }
@@ -205,6 +258,21 @@
                 .trim()
         );
     }
+
+    // Paragraphs that are page machinery, never content — matched against
+    // the COLLAPSED WHOLE paragraph, case-insensitively, so a sentence that
+    // merely mentions an ad survives. (NYT pages lead with a bare
+    // "Advertisement" paragraph; caption toggles ride between figures.)
+    var JUNK_PARAGRAPHS = {
+        'advertisement': 1,
+        'advertisementhide caption': 1,
+        'advertisement hide caption': 1,
+        'hide caption': 1,
+        'toggle caption': 1,
+        'skip advertisement': 1,
+        'skip to main content': 1,
+        'skip to content': 1,
+    };
 
     // ---- Blocks -----------------------------------------------------------
 
@@ -339,9 +407,20 @@
                 case 'H4': out.push(headingMarkdown(child, 4)); return;
                 case 'H5': out.push(headingMarkdown(child, 5)); return;
                 case 'H6': out.push(headingMarkdown(child, 6)); return;
-                case 'P':
-                    out.push(paragraphText(child));
+                case 'P': {
+                    var text = paragraphText(child);
+                    // Compare the UNESCAPED inner text — escapes and link
+                    // syntax exist for the markdown parser, not for this
+                    // lookup ("[SKIP ADVERTISEMENT](…) is still an ad").
+                    var key = collapse(inlineChildren(child))
+                        .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+                        .replace(/\\/g, '')
+                        .trim().toLowerCase();
+                    if (text && !JUNK_PARAGRAPHS[key]) {
+                        out.push(text);
+                    }
                     return;
+                }
                 case 'UL': out.push(listMarkdown(child, 0, false)); return;
                 case 'OL': out.push(listMarkdown(child, 0, true)); return;
                 case 'BLOCKQUOTE':
@@ -369,6 +448,10 @@
                     if (img) out.push(img);
                     return;
                 }
+                case 'PICTURE':
+                    // Some sites emit <picture> as the block itself.
+                    out.push(pictureMarkdown(child));
+                    return;
                 default:
                     // DIV/SECTION/ARTICLE/MAIN/FIGURE/BODY and anything
                     // unknown: keep walking — content inside wins.
