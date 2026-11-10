@@ -287,18 +287,28 @@ final class PhononEngine: NSObject, SpeechEngine {
         }
         var pastKVCount = 0
         var latentHistory = try Self.emptyTensor(dims: [1, 0, Self.latentDim])
-        // The latent history grows by the full 8 frames per call (fed back
-        // whole, no prompt to drop) — the audio_latents output's row count
-        // keys off THIS, not the KV count.
-        var latentHistoryCount = 0
+        // One counter for BOTH books: with the input-slot row kept (see the
+        // KV feedback below) the KV grows by the same +8 frames per call as
+        // the latent history, so `pastKVCount` is simultaneously the fed-back
+        // KV row count, the cumulative audio_latents row count, and the
+        // reference-timeline position offset. (The old +7/+8 two-counter
+        // split is gone.)
 
         var newLatents: [Float] = []
         newLatents.reserveCapacity(budget * Self.latentDim)
         var countdown: Int? = nil
         var rng = SeededGenerator(seed: UInt64(Date().timeIntervalSince1970 * 1_000_000_000))
+        // Diagnostics for the device log: a healthy run's eos logits sit
+        // deep negative while speaking and SPIKE at the sentence end; a
+        // gradual climb or a never-crossing run within budget is the
+        // degenerate-context signature, and a non-finite latent means the
+        // runtime itself corrupted the graph state.
+        var eosPeak: Float = -.infinity
+        var eosPeakCall = 0
 
         let started = Date()
         var crossedEOS = false
+        var callIndex = 0
         for _ in 0..<max(1, Int(ceil(Double(budget) / Double(Self.framesPerCall)))) {
             let total = pastKVCount + P + (Self.framesPerCall - 1)
             let noise = (0..<(Self.framesPerCall * Self.latentDim)).map { _ -> Float in
@@ -329,36 +339,67 @@ final class PhononEngine: NSObject, SpeechEngine {
             // The flow's audio_latents is the CUMULATIVE latent history,
             // denormalized; only the trailing 8 rows are this call's frames.
             let cumulative = try Self.floatValues(
-                outputs["audio_latents"]!, dims: [1, latentHistoryCount + Self.framesPerCall, Self.latentDim])
-            newLatents.append(contentsOf: cumulative[(latentHistoryCount * Self.latentDim)...])
+                outputs["audio_latents"]!, dims: [1, pastKVCount + Self.framesPerCall, Self.latentDim])
+            let frameValues = cumulative[(pastKVCount * Self.latentDim)...]
+            if frameValues.contains(where: { !$0.isFinite }) {
+                throw PhononEngineError.corruptLatents(call: callIndex)
+            }
+            newLatents.append(contentsOf: frameValues)
             let eos = try Self.floatValues(outputs["eos_logits"]!, dims: [1, Self.framesPerCall])
+            let callPeak = eos.max() ?? -.infinity
+            if callPeak > eosPeak {
+                eosPeak = callPeak
+                eosPeakCall = callIndex
+            }
 
-            // KV feedback: keep the latent K/Vs, drop the re-run prompt
-            // block [past_kv : past_kv + P) of each present cache — the
-            // latent history stays attended while the prompt is recomputed
-            // fresh at offset past_kv (RoPE positions stay monotonic).
+            // KV feedback: keep the latent K/Vs, drop the re-run voice+text
+            // block of each present cache. The prompt block is
+            // [past_kv : past_kv + P) with the CURRENT input latent in its
+            // LAST row — that row is kept (it is latent L_{n-1}'s position on
+            // the reference timeline), so per call the KV grows by the same
+            // +8 as the latent history and `present` becomes
+            // [fed-back latents | input-slot row | 7 new]. Positions
+            // arange(past_kv, past_kv + P + 7) then place every frame query
+            // and every fed-back row at its exact reference offset.
+            //
+            // LAYOUT: the cache is [1, heads, seq, dim] — HEAD-major. Rows
+            // are therefore strided, NOT contiguous: copying
+            // `values[firstRow * heads * dim ...]` grabs head 0's rows and
+            // calls it every head's. The first port did exactly that — call 1
+            // fed back garbage-aligned rows (one head only), call 2+ attended
+            // poisoned context, and the audio degenerated into the repeat
+            // spiral the device round reported, while shape-only CI stayed
+            // green. The copy below walks the heads.
             let presentTotal = pastKVCount + P + (Self.framesPerCall - 1)
+            let keepHead = pastKVCount
+            let keepTail = Self.framesPerCall
+            let headFloats = presentTotal * Self.headDim
+            let newHeadFloats = (keepHead + keepTail) * Self.headDim
             var newKV: [ORTValue] = []
             newKV.reserveCapacity(Self.flowLayers * 2)
             for index in 0..<(Self.flowLayers * 2) {
                 let name = index % 2 == 0 ? "present.\(index / 2).key" : "present.\(index / 2).value"
                 let values = try Self.floatValues(outputs[name]!, dims: [1, Self.attentionHeads, presentTotal, Self.headDim])
-                let keepHead = pastKVCount
-                let keepTail = Self.framesPerCall - 1
-                let stride = Self.attentionHeads * Self.headDim
-                var kept: [Float] = []
-                kept.reserveCapacity((keepHead + keepTail) * stride)
-                if keepHead > 0 {
-                    kept.append(contentsOf: values[0..<(keepHead * stride)])
+                var kept = [Float](repeating: 0, count: Self.attentionHeads * newHeadFloats)
+                for head in 0..<Self.attentionHeads {
+                    let source = head * headFloats
+                    var destination = head * newHeadFloats
+                    if keepHead > 0 {
+                        kept.replaceSubrange(destination..<destination + keepHead * Self.headDim,
+                                             with: values[source..<source + keepHead * Self.headDim])
+                        destination += keepHead * Self.headDim
+                    }
+                    // [past+P-1, presentTotal) = the input-slot row + the 7
+                    // frame rows, contiguous per head.
+                    let tail = source + (presentTotal - keepTail) * Self.headDim
+                    kept.replaceSubrange(destination..<destination + keepTail * Self.headDim,
+                                         with: values[tail..<tail + keepTail * Self.headDim])
                 }
-                let tailStart = (presentTotal - keepTail) * stride
-                kept.append(contentsOf: values[tailStart..<(tailStart + keepTail * stride)])
                 newKV.append(try Self.floatTensor(values: kept, dims: [1, Self.attentionHeads, keepHead + keepTail, Self.headDim]))
             }
             kv = newKV
-            pastKVCount += Self.framesPerCall - 1
+            pastKVCount += Self.framesPerCall
             latentHistory = outputs["present.audio_latents"]!
-            latentHistoryCount += Self.framesPerCall
 
             // EOS countdown (Python's PocketTTSEosThresholdCriteria): the
             // frame that crossed the threshold and the tail frames are kept.
@@ -372,6 +413,7 @@ final class PhononEngine: NSObject, SpeechEngine {
                     done = countdown! <= 0
                 }
             }
+            callIndex += 1
             if done { break }
         }
         if !crossedEOS {
@@ -401,7 +443,7 @@ final class PhononEngine: NSObject, SpeechEngine {
         guard !pcm.isEmpty else { throw PhononEngineError.noOutput }
 
         let duration = Double(pcm.count) / core.sampleRate
-        Log.shared.info("PhononEngine: \(T) tokens → \(Self.frameString(duration))s audio (\(totalLatents) frames) in \(Self.frameString(Date().timeIntervalSince(started)))s (\(voiceShortName))")
+        Log.shared.info("PhononEngine: \(T) tokens → \(Self.frameString(duration))s audio (\(totalLatents) frames, \(callIndex) calls) in \(Self.frameString(Date().timeIntervalSince(started)))s, eos peak \(String(format: "%.2f", eosPeak)) at call \(eosPeakCall) (\(voiceShortName))")
         return pcm
     }
 
@@ -465,6 +507,10 @@ enum PhononEngineError: LocalizedError {
     case voiceShape(Int)
     case noOutput
     case emptyText
+    /// Non-finite latents out of the flow graph — the runtime corrupted the
+    /// graph state (never seen on x86; a device log with this is the
+    /// numeric-divergence signal, not a content problem).
+    case corruptLatents(call: Int)
 
     var errorDescription: String? {
         switch self {
@@ -473,6 +519,7 @@ enum PhononEngineError: LocalizedError {
         case .voiceShape(let n): return "Phonon voice embedding has an unexpected size (\(n))."
         case .noOutput: return "Phonon returned no audio for this chunk."
         case .emptyText: return "The note is empty."
+        case .corruptLatents(let call): return "Phonon produced non-finite audio state at call \(call)."
         }
     }
 }

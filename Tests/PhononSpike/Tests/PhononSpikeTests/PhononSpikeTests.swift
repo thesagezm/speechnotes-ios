@@ -165,10 +165,11 @@ final class PhononSpikeTests: XCTestCase {
         }
         var pastKVCount = 0
         var latentHistory = try emptyTensor(dims: [1, 0, latentDim])
-        // The latent history grows by the full 8 frames per call (it is fed
-        // back whole, no prompt to drop) — the audio_latents output's row
-        // count keys off THIS, not the KV count.
-        var latentHistoryCount = 0
+        // One counter for BOTH books: with the input-slot row kept (see the
+        // KV feedback below) the KV grows by the same +8 frames per call as
+        // the latent history, so `pastKVCount` is simultaneously the fed-back
+        // KV row count, the cumulative audio_latents row count, and the
+        // reference-timeline position offset.
 
         var newLatents: [Float] = []
         var countdown: Int? = nil
@@ -204,35 +205,49 @@ final class PhononSpikeTests: XCTestCase {
             // Its row count follows the fed-back latent history (+8), not
             // the KV cache (+7 — the prompt block never lands there).
             let cumulative = try floatValues(
-                outputs["audio_latents"]!, dims: [1, latentHistoryCount + framesPerCall, latentDim])
-            newLatents.append(contentsOf: cumulative[(latentHistoryCount * latentDim)...])
+                outputs["audio_latents"]!, dims: [1, pastKVCount + framesPerCall, latentDim])
+            newLatents.append(contentsOf: cumulative[(pastKVCount * latentDim)...])
             let eos = try floatValues(outputs["eos_logits"]!, dims: [1, framesPerCall])
             onCall(call, pastKVCount, eos)
 
-            // KV feedback: keep the latent K/Vs, drop the re-run prompt
-            // block [past_kv : past_kv + P) of each present cache.
+            // KV feedback: keep the latent K/Vs, drop the re-run voice+text
+            // block of each present cache. The prompt block's LAST row (the
+            // current input latent) is kept too, so the KV grows by the same
+            // +8 per call as the latent history and every frame query and
+            // fed-back row sits at its exact reference-timeline offset.
+            //
+            // LAYOUT: the cache is [1, heads, seq, dim] — HEAD-major; rows
+            // are strided, so a contiguous float prefix is NOT "the first N
+            // rows of every head" (the first port's bug — poisoned context
+            // from call 2 on). The copy walks the heads.
             let presentTotal = pastKVCount + P + (framesPerCall - 1)
+            let keepHead = pastKVCount
+            let keepTail = framesPerCall
+            let headFloats = presentTotal * headDim
+            let newHeadFloats = (keepHead + keepTail) * headDim
             var newKV: [ORTValue] = []
             newKV.reserveCapacity(flowLayers * 2)
             for index in 0..<(flowLayers * 2) {
                 let name = index % 2 == 0 ? "present.\(index / 2).key" : "present.\(index / 2).value"
                 let values = try floatValues(outputs[name]!, dims: [1, attentionHeads, presentTotal, headDim])
-                let keepHead = pastKVCount
-                let keepTail = framesPerCall - 1
-                let stride = attentionHeads * headDim
-                var kept: [Float] = []
-                kept.reserveCapacity((keepHead + keepTail) * stride)
-                if keepHead > 0 {
-                    kept.append(contentsOf: values[0..<(keepHead * stride)])
+                var kept = [Float](repeating: 0, count: attentionHeads * newHeadFloats)
+                for head in 0..<attentionHeads {
+                    let source = head * headFloats
+                    var destination = head * newHeadFloats
+                    if keepHead > 0 {
+                        kept.replaceSubrange(destination..<destination + keepHead * headDim,
+                                             with: values[source..<source + keepHead * headDim])
+                        destination += keepHead * headDim
+                    }
+                    let tail = source + (presentTotal - keepTail) * headDim
+                    kept.replaceSubrange(destination..<destination + keepTail * headDim,
+                                         with: values[tail..<tail + keepTail * headDim])
                 }
-                let tailStart = (presentTotal - keepTail) * stride
-                kept.append(contentsOf: values[tailStart..<(tailStart + keepTail * stride)])
                 newKV.append(try floatTensor(values: kept, dims: [1, attentionHeads, keepHead + keepTail, headDim]))
             }
             kv = newKV
-            pastKVCount += framesPerCall - 1
+            pastKVCount += framesPerCall
             latentHistory = outputs["present.audio_latents"]!
-            latentHistoryCount += framesPerCall
 
             // EOS countdown — the frame that crossed the threshold and the
             // tail frames are all kept (Python's PocketTTSEosThresholdCriteria).

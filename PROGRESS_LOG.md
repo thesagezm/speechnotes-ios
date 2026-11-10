@@ -876,3 +876,41 @@ User decision this round: NO benchmark session now — they will judge the
 EP variant's speed themselves by ear/feel; the Benchmark Mode EP tiers
 remain the formal acceptance instrument for when there IS time. Kokoro
 gets no EP code (round-3 parity ban stands).
+
+**Phonon repeat spiral root-caused: the KV feedback sliced the cache
+head-major-blind (2026-11-10, this session).** The device report: TTS and
+the voice audition start fine for ~two words, then repeat/stutter/whisper
+into "long sick syllables" — on every run. Diagnosis, with the whole
+pinning workspace still alive in `/tmp/phonon` (models, venv, the Python
+mirror `final.py`/`contract.py`, the hub's torch `PocketTTSGenerationMixin`
+reference): (1) the Python pin's own rendered WAVs (`out-hello.wav` 17.9 s,
+`out-fox.wav` 87 s for 3.5/10 s sentences) turned out to be an artifact of
+`final.py` appending the CUMULATIVE `audio_latents` per call (`lat[-8:, :]`
+slices the batch axis) — the engine appends correctly, so that red herring
+was retired; (2) 46 x86 ORT runs (10-12 seeds × 3 feedback variants,
+sentence AND 217-char chunk scale) render CLEAN with sharp EOS crossings —
+the recipe is not the catastrophe; (3) a graph trace of `model.onnx` pinned
+the true semantics: `position_ids` covers only the NEW `P+7` positions
+(`Slice_29 = position_ids[0:P]`, frames at `[P+k]`), the fed-back KV keeps
+its baked RoPE, and `Slice_8` takes `[-1:]` of `[bos | history]` — only the
+LAST latent feeds the prompt block's input slot; (4) the app engine and the
+spike BOTH sliced the KV feedback with a contiguous float prefix
+(`values[0..<(keepHead * heads * dim)]`), but the cache is
+`[1, heads, seq, dim]` — HEAD-major, rows strided: call 1 fed back
+head-7-only garbage-aligned rows, call 2+ attended poisoned context. That
+is the repeat spiral, device-only (the app's engine runs nowhere but the
+device), and it explains CI's marginal EOS ("crossed 20/26 with one seed,
+never with another" — misread as noise variance; healthy runs spike sharply
+at 12-20 calls, which is what x86 shows). Fix: the feedback copy walks the
+heads (`[0, past) ++ [past+P-1, presentTotal)` per head — the prompt block's
+input-slot row is kept, so the KV now grows +8/call == the latent history
+and `arange(past_kv, …)` lands on the exact reference timeline; the
+"slot" variant, 0/12 degenerate in the sweep). Engine gains a finiteness
+guard on the new latents (`PhononEngineError.corruptLatents` — the
+numeric-divergence signal) and logs the per-chunk eos peak + call; the
+spike mirrors the fixed recipe; `Docs/PHONON-PORT.md` documents the
+semantics + the layout trap. Audition text through the fixed recipe on
+x86: 8/8 seeds clean (10.2-12.2 s, self-sim ≤ 0.18, eos peak 6.1-9.3).
+OPEN: the device round — one audition + one sentence; if still wrong,
+Settings → Logs → filter "PhononEngine" (per-chunk eos peak line + the
+NaN guard discriminate AR degeneration from runtime corruption).

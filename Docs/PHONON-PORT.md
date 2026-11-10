@@ -68,18 +68,46 @@ Outputs:
 | `eos_logits` | float32 [1, 8] | end-of-speech logits for the 8 NEW frames |
 | `present.{0..5}.key/value` | float32 [1, 8, past+P+7, 64] | KV cache = fed-back cache + re-run prompt (P) + 7 new latent positions |
 
-**KV feedback policy**: keep the latent K/Vs, drop the re-run prompt block.
-`present` = [fed-back latents (past_kv) | prompt (P) | 7 new] — the next
-call feeds back `[0 : past_kv) ++ [past_kv + P :]`, i.e. everything except
-the middle prompt block. This keeps the latent history attended (the
-reference loop's semantics) while the prompt is recomputed fresh each call
-at offset `past_kv` (RoPE positions stay monotonic; cos/sin cache covers
-8192 positions).
+**KV feedback policy**: keep the latent K/Vs, drop the re-run voice+text
+block of each present cache. `present` = [fed-back latents (past_kv) |
+prompt (P) | 7 new] where the prompt block's LAST row is the CURRENT input
+latent — that row is KEPT (it is latent L_{n-1}'s position on the reference
+timeline), so the next call feeds back `[0 : past_kv) ++ [past_kv + P - 1 :]`.
+The KV therefore grows by the same +8 frames per call as the latent history
+(`past_kv == latentHistoryCount`), and `position_ids = arange(past_kv,
+past_kv + P + 7)` places every frame query and every fed-back row at its
+exact reference-timeline offset (latent L_i is input at position P + i — the
+graph re-runs each call's input latent inside its prompt block at that same
+offset). The re-run voice+text rows sit at nearer attention distances than
+the reference's receding prompt (unavoidable: the input slot is welded to
+the prompt block's end); the reference-faithful latent geometry is what the
+model's dynamics ride on, and x86 sweeps show it clean. The cos/sin cache
+covers 8192 positions; the EOS-capped call count keeps offsets well under.
+
+**KV LAYOUT TRAP (the device bug)**: the caches are `[1, heads, seq, dim]`
+— HEAD-major. Rows are STRIDED: position t of every head is 8 separate
+64-float segments. Copying a contiguous float prefix (or suffix) of the
+buffer is NOT "the first/last N rows of every head" — it takes head 0 (or
+head 7's tail) and feeds it back for all eight heads. The first port did
+exactly that: call 1 already fed back garbage-aligned rows, call 2+ attended
+poisoned context, and the audio degenerated into the repeat spiral →
+stutter → whisper the device round reported — while the CI spike (same bug)
+only ever scored shapes/EOS/non-silence and its marginal crossings
+("crossed at call 20/26 with one seed, never with another") were
+misdiagnosed as noise-dependent EOS timing. The x86 Python mirrors slice
+correctly through numpy and render clean (46 runs, 10-12 seeds × 3 feedback
+variants, sentence and 217-char chunk scale): the recipe was never the
+problem. The feedback copy must walk the heads explicitly.
 
 **EOS stop rule** (generation_config + preprocessor_config): first frame
 whose logit > 4.0 starts a countdown of `frames_after_eos` (1 frame; 3 for
 text ≤ 4 words) — stop when it runs out. Frame budget:
-`ceil((T/3 + 2) * 12.5)`.
+`ceil((T/3 + 2) * 12.5)`. A healthy run's logits sit deep negative
+(-5…-9) while speaking and SPIKE past +4 at the sentence end; the engine
+logs the per-chunk eos peak + the call it peaked at. A gradual climb, a
+never-crossing run within budget, or a non-finite latent is the
+degenerate/corrupt-context signal (see the KV layout trap above), not
+noise variance.
 
 ## Mimi decoder contract (`mimi_decoder.onnx` — STATELESS)
 
