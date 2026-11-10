@@ -103,7 +103,10 @@ final class PhononEngine: NSObject, SpeechEngine {
     /// (Phase 3 harness). nil = the production policy (`min(activeProcessorCount, 6)`).
     var benchmarkIntraOpThreads: Int?
 
-    init() {
+    /// NSObject's designated `init()` — a bare override is required because
+    /// the signature matches the superclass one exactly (the parameterized
+    /// inits of the other engines never hit this).
+    override init() {
         self.core = StreamingTTSPlaybackCore(config: .init(
             sampleRate: Self.sampleRate,
             chunkMaxChars: Self.chunkMaxChars,
@@ -306,9 +309,11 @@ final class PhononEngine: NSObject, SpeechEngine {
             feeds["input_ids"] = try Self.int64Tensor(values: ids.map(Int64.init), dims: [1, T])
             feeds["audio_prompt_latents"] = try Self.floatTensor(values: voice, dims: [1, Self.voiceFrames, Self.voiceDim])
             feeds["attention_mask"] = try Self.int64Tensor(values: [Int64](repeating: 1, count: total), dims: [1, total])
-            feeds["position_ids"] = try Self.int64Tensor(
-                values: (pastKVCount..<(pastKVCount + P + Self.framesPerCall - 1)).map(Int64.init),
-                dims: [1, P + Self.framesPerCall - 1])
+            // Hoisted so the tensor call is not a range→map→dims expression
+            // sandwich — this line is the one that blew the type-checker's
+            // time budget in the first compile round.
+            let positionValues: [Int64] = (pastKVCount..<(pastKVCount + P + Self.framesPerCall - 1)).map(Int64.init)
+            feeds["position_ids"] = try Self.int64Tensor(values: positionValues, dims: [1, positionValues.count])
             feeds["noise"] = try Self.floatTensor(values: noise, dims: [1, Self.framesPerCall, Self.latentDim])
             for (index, value) in kv.enumerated() {
                 feeds["past_key_values.\(index / 2).\(index % 2 == 0 ? "key" : "value")"] = value
@@ -473,6 +478,52 @@ enum PhononEngineError: LocalizedError {
 }
 
 // MARK: - Shared tensor plumbing + seeded noise
+//
+// Shapes are tracked by the caller and passed IN — the vendored binding is
+// only used for bytes in/out (the spike carries the same helpers).
+
+extension PhononEngine {
+    static func emptyTensor(dims: [Int]) throws -> ORTValue {
+        try ORTValue(tensorData: NSMutableData(data: Data()), elementType: .float,
+                     shape: dims.map { NSNumber(value: $0) })
+    }
+
+    static func int64Tensor(values: [Int64], dims: [Int]) throws -> ORTValue {
+        var littleEndian = values
+        for index in littleEndian.indices { littleEndian[index] = values[index].littleEndian }
+        let data = littleEndian.withUnsafeBufferPointer { buffer in
+            Data(bytes: buffer.baseAddress!, count: buffer.count * MemoryLayout<Int64>.size)
+        }
+        return try ORTValue(tensorData: NSMutableData(data: data), elementType: .int64,
+                            shape: dims.map { NSNumber(value: $0) })
+    }
+
+    static func floatTensor(values: [Float], dims: [Int]) throws -> ORTValue {
+        let data = values.withUnsafeBufferPointer { buffer in
+            Data(bytes: buffer.baseAddress!, count: buffer.count * MemoryLayout<Float>.size)
+        }
+        return try ORTValue(tensorData: NSMutableData(data: data), elementType: .float,
+                            shape: dims.map { NSNumber(value: $0) })
+    }
+
+    static func floatValues(_ value: ORTValue, dims: [Int]) throws -> [Float] {
+        let raw = try value.tensorData() as Data
+        let expected = dims.reduce(1, *)
+        precondition(raw.count == expected * MemoryLayout<Float>.size,
+                     "unexpected tensor size \(raw.count) for \(dims)")
+        return raw.withUnsafeBytes { rawBytes in
+            Array(rawBytes.bindMemory(to: Float.self))
+        }
+    }
+
+    static func int64Values(_ value: ORTValue, count: Int) throws -> [Int64] {
+        let raw = try value.tensorData() as Data
+        precondition(raw.count == count * MemoryLayout<Int64>.size)
+        return raw.withUnsafeBytes { rawBytes in
+            Array(rawBytes.bindMemory(to: Int64.self)).map { Int64(littleEndian: $0) }
+        }
+    }
+}
 
 /// Deterministic SplitMix64 → Box-Muller standard normal. Shared with the
 /// CI spike (Tests/PhononSpike) so the two run the same noise recipe.

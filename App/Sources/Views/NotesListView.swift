@@ -679,15 +679,21 @@ struct NotesListView: View {
             // and `isFetchingArticle` always resets — a backgrounded
             // import can no longer wedge the importer with a hung
             // "Already fetching an article…" state.
-            let fetched = await WebArticleService.shared.article(from: url)
-                ?? await ImportService.legacyWebsiteText(from: url).map { text in
-                    WebArticle(
-                        title: url.host ?? "Web article",
-                        byline: nil, siteName: nil, excerpt: nil,
-                        text: text, markdown: nil,
-                        sourceURL: url, route: .legacyStripped
-                    )
-                }
+            // `??`'s RHS is an autoclosure and cannot take `await` — the
+            // fallback chain is spelled out as branches instead.
+            let fetched: WebArticle?
+            if let primary = await WebArticleService.shared.article(from: url) {
+                fetched = primary
+            } else if let text = await ImportService.legacyWebsiteText(from: url) {
+                fetched = WebArticle(
+                    title: url.host ?? "Web article",
+                    byline: nil, siteName: nil, excerpt: nil,
+                    text: text, markdown: nil,
+                    sourceURL: url, route: .legacyStripped
+                )
+            } else {
+                fetched = nil
+            }
             await MainActor.run {
                 isFetchingArticle = false
                 guard let fetched else {
