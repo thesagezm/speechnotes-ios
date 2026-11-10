@@ -106,6 +106,24 @@ Format: newest first. Every critique round, merge, and escalation lands here.
   and emails (`@` skipped) inherit the hub's documented text-prep gaps.
   Device round: by-ear quality + RTF vs Kokoro, benchmark tier ready when
   there is time.
+- **CI outcome (9 rounds, 7ab6aba — logic tests + app archive + phonon
+  spike all green; one EPUB-spike job lost to runner capacity, an infra
+  flake unrelated to the changes):** the compile rounds caught what the
+  prototype missed — `String(bytes:encoding:)` takes String.Encoding;
+  `session.run(outputNames:)` is a Set; a bare `init()` on an NSObject
+  subclass needs `override`; the engine's tensor plumbing had lived only
+  in the spike; HF's Prepend skips EMPTY strings (whitespace-only text →
+  `[]`, verified against the reference). Two REAL contract finds the spike
+  proved on the vendored binary: the cumulative `audio_latents` row count
+  follows the latent-history feedback (+8/call) while KV grows +7 (the
+  prompt never lands there) — two counters the engine must not confuse;
+  and EOS crossing is noise-dependent (same sentence: crossed at call 20/26
+  with one seed, never crossed with another) → the engine runs the hub's
+  frame budget ×1.5 and logs when even that truncates. Memory: the decoder
+  costs ~2.7 MB RSS per latent (400-latent window = +1.1 GB — jetsam
+  territory), so the window is 160 and real chunks decode in ONE call.
+  Spike finals: load +178 MB, RTF 0.309 (macOS runner), rms 0.0397 —
+  audible; the A14 numbers come from the device round.
 
 ---
 
