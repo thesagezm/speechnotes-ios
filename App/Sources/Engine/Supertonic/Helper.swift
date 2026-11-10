@@ -890,7 +890,7 @@ func loadTextToSpeech(_ onnxDir: String, _ useGpu: Bool, _ env: ORTEnv, intraOpT
     if useCoreML {
         do {
             let providerOptions: [AnyHashable: Any] = ["MLComputeUnits": "All"]
-            try sessionOptions.appendCoreMLExecutionProviderWithOptionsV2(providerOptions)
+            try sessionOptions.appendCoreMLExecutionProvider(withOptionsV2: providerOptions)
             print("CoreML EP: appended (MLComputeUnits=All) — shared by all 4 sessions\n")
         } catch {
             print("CoreML EP: append failed — falling back to CPU-only: \(error)\n")
