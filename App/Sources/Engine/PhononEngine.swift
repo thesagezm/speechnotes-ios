@@ -59,8 +59,14 @@ final class PhononEngine: NSObject, SpeechEngine {
     private static let flowLayers = 6
     /// The Mimi decoder's rotary positions run over the upsampled sequence
     /// against an 8000-position cos/sin cache — empirically ~500 latents per
-    /// call is safe (512 fails), and 400 keeps long chunks well clear.
-    private static let decodeWindow = 400
+    /// call is safe (512 fails). The ceiling that actually bites is MEMORY:
+    /// the decoder's ConvTranspose activations cost ~2.7 MB per latent
+    /// (measured: 160 latents ≈ +430 MB RSS, 400 ≈ +1.1 GB — jetsam
+    /// territory on the A14). `chunkMaxChars` keeps real chunks ≤ ~150
+    /// latents, so this window never splits in practice; it is the safety
+    /// valve for pathological tokenization, and 160 is where the memory
+    /// spike stays survivable.
+    private static let decodeWindow = 160
 
     /// Supertonic-style chunk ceiling: the hub treats ~50 tokens as one
     /// sentence chunk; ~50 tokens ≈ 200 chars, kept slightly tighter for
@@ -261,7 +267,13 @@ final class PhononEngine: NSObject, SpeechEngine {
         let T = ids.count
         guard T > 0 else { throw PhononEngineError.emptyText }
         let P = Self.voiceFrames + T + 1
-        let budget = Int(ceil((Double(T) / 3 + 2) * Self.frameRate))
+        // The hub's frame budget, with a 1.5× margin: EOS timing is
+        // noise-dependent and two observed runs of the same sentence landed
+        // at 20/26 calls (Python seed) and past 26/26 (Swift seed) — the
+        // hub's own driver logs "may be truncated" when its budget bites.
+        // The countdown stops the loop the moment EOS actually crosses; the
+        // margin only buys the unlucky draws.
+        let budget = Int(ceil((Double(T) / 3 + 2) * Self.frameRate * 1.5))
         let framesAfterEOS = Self.words(in: text) <= 4 ? 3 : 1
         let voice = try voiceEmbedding()
 

@@ -9,7 +9,7 @@ import XCTest
 final class PhononTokenizerTests: XCTestCase {
 
     private func makeTokenizer() throws -> PhononTokenizer {
-        let url = Bundle.module.url(forResource: "phonon-tokenizer", withExtension: "json")!
+        let url = Bundle.module.url(forResource: "phonon-tokenizer", withExtension: "json", subdirectory: "Fixtures")!
         return try PhononTokenizer(tokenizerData: try Data(contentsOf: url))
     }
 
@@ -23,7 +23,7 @@ final class PhononTokenizerTests: XCTestCase {
     /// emoji (byte fallback), whitespace collapse.
     func testEncodingMatchesReferenceIds() throws {
         let tokenizer = try makeTokenizer()
-        let url = Bundle.module.url(forResource: "phonon-tokenizer-fixtures", withExtension: "json")!
+        let url = Bundle.module.url(forResource: "phonon-tokenizer-fixtures", withExtension: "json", subdirectory: "Fixtures")!
         let fixtures = try JSONDecoder().decode([Fixture].self, from: Data(contentsOf: url))
         XCTAssertEqual(fixtures.count, 14)
         for fixture in fixtures {

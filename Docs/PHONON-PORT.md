@@ -93,8 +93,16 @@ Outputs: `audio_values` float32 [1, 1, ~1920·N] (24 kHz mono),
 
 **Window limit**: the decoder's rotary positions run over the upsampled
 sequence (~16× the latent count) against an 8000-position cos/sin cache —
-empirically N ≤ ~500 per call. The engine decodes in windows of ≤ 400
-latents and concatenates the PCM. (N = 512 fails; ≤ 256 verified clean.)
+empirically N ≤ ~500 per call (N = 512 fails; ≤ 256 verified clean). The
+ceiling that actually bites is MEMORY: the decoder's ConvTranspose
+activations cost ~2.7 MB per latent (measured RSS deltas: 50 → +96 MB,
+100 → +236 MB, 160 → +431 MB, 208 → +536 MB, 400 → +1084 MB). The engine
+decodes in windows of ≤ 160 latents — real chunks (≤ ~150 latents at
+`chunkMaxChars` 180) decode in ONE call, so the window is a safety valve
+only; a split window has a conv-context boundary artifact. EOS timing is
+noise-dependent: two runs of the same 43-token sentence crossed at call
+20/26 (Python seed) and rode past the budget (Swift seed) — the engine
+runs the hub's frame budget × 1.5 and logs when even that is reached.
 
 ## Tokenizer
 

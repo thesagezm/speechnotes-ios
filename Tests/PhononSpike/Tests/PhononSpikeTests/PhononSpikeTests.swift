@@ -45,7 +45,10 @@ final class PhononSpikeTests: XCTestCase {
     static let attentionHeads = 8
     static let headDim = 64
     static let flowLayers = 6
-    static let decodeWindow = 400
+    /// Memory-capped (see PhononEngine.decodeWindow): ~2.7 MB of decoder
+    /// activation per latent — 160 keeps the spike's RSS spike survivable
+    /// and matches the engine.
+    static let decodeWindow = 160
 
     func testGenerateSpeech() throws {
         let env = ProcessInfo.processInfo.environment
