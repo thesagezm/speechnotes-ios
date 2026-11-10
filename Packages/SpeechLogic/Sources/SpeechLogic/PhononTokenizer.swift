@@ -116,7 +116,9 @@ public struct PhononTokenizer {
             case .strip:
                 result = result.trimmingCharacters(in: .whitespacesAndNewlines)
             case .prepend(let prefix):
-                result = prefix + result
+                // HF's Prepend skips empty strings — this is what keeps
+                // stripped-bare text from becoming a lone "▁" piece.
+                if !result.isEmpty { result = prefix + result }
             }
         }
         return result
