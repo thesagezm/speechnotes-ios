@@ -126,6 +126,10 @@ public struct PhononTokenizer {
     /// `input_ids` (add_special_tokens is implicit: this vocab adds none).
     public func encode(_ text: String) throws -> [Int] {
         var normalized = applyNormalizer(text)
+        // HF's Prepend/Metaspace skip empty strings — text the normalizer
+        // strips bare ("   ") encodes to NOTHING, not to a lone "▁" piece
+        // (verified against the reference tokenizer).
+        guard !normalized.isEmpty else { return [] }
         // Metaspace pre-tokenizer: spaces → "▁" (the normalizer's final
         // Prepend already put the leading one), then split at every "▁".
         normalized = String(normalized.map { $0 == " " ? Self.metaspace : $0 })

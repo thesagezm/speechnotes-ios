@@ -102,7 +102,7 @@ final class WebArticleService {
     /// article…". Abandoning the call after this bound (WebKit offers no
     /// cancellation; the webview is torn down right after) is what keeps
     /// backgrounded imports from wedging the importer permanently.
-    private static let extractionTimeout: TimeInterval = 15
+    fileprivate static let extractionTimeout: TimeInterval = 15
 
     private let fetchSession: URLSession = {
         let config = URLSessionConfiguration.ephemeral
@@ -479,13 +479,13 @@ private final class HeadlessArticlePass: NSObject, WKNavigationDelegate, WKScrip
                 continuation.resume(returning: .value(result, error))
             }
             Task.detached(priority: .utility) {
-                try? await Task.sleep(nanoseconds: UInt64(Self.extractionTimeout * 1_000_000_000))
+                try? await Task.sleep(nanoseconds: UInt64(WebArticleService.extractionTimeout * 1_000_000_000))
                 guard claim.claim() else { return }
                 continuation.resume(returning: .timedOut)
             }
         }
         guard case .value(let raw, let error) = outcome else {
-            Log.shared.info("WebArticle: extraction JS hit the \(Int(Self.extractionTimeout))s bound — \(route.rawValue) pass")
+            Log.shared.info("WebArticle: extraction JS hit the \(Int(WebArticleService.extractionTimeout))s bound — \(route.rawValue) pass")
             return nil
         }
         guard error == nil, let html = raw as? String,
