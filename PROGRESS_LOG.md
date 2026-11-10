@@ -914,3 +914,46 @@ x86: 8/8 seeds clean (10.2-12.2 s, self-sim ≤ 0.18, eos peak 6.1-9.3).
 OPEN: the device round — one audition + one sentence; if still wrong,
 Settings → Logs → filter "PhononEngine" (per-chunk eos peak line + the
 NaN guard discriminate AR degeneration from runtime corruption).
+
+**Phonon positions fixed to the reference recipe: the re-run prompt rows stop riding
+the timeline (2026-11-11).** The device report after the KV-feedback fix: "much much
+better, but after 4 words repetitions or artifacts or some whispering" — calls 2-3
+(4 words ≈ 20-25 frames). This session verified the handover's #1 suspect against
+GROUND TRUTH READ FROM THE REPO (not re-derived), then shipped the ~3-line fix.
+Ground truth, three independent sources, all agreeing: `qnn/runner/phonon.cpp`
+(Gradium's official QNN export driver — the closest thing to an export contract)
+bakes the voice KV at 0..V-1 and the text prefill ONCE at V..V+T-1, then runs ONE
+latent row per call at `pos = cache length` (`*buf_.pos = pos; …; pos++`) on the
+contiguous absolute timeline 0,1,2,…, cache never trimmed; `transformer.rs:736-745`
+pins RoPE offset = `current_end` (FlowLm; trim is Mimi-only); `synth.rs:1233/1319` +
+`flow_lm.rs:296` prompt the text once per chunk, one `StepInput::Bos/Latent` row per
+step. `ios/PhononTTS/Phonon.swift` is a thin FFI wrapper — no per-call driving to
+override anything. Our graph forces a prompt-block re-run per call (HF export
+format), but `position_ids` values may be NON-CONTIGUOUS (Slice_29 = [0:P], frames
+at [P+k] — proven last session), so the shipped contiguous
+`arange(past_kv, past_kv+P+7)` was the one structural error: the re-run voice+text
+rode the moving timeline, freezing its attention distances at call-1 values (the
+prompt appears adjacent forever instead of receding as the latent history grows)
+and changing its K/V every call — exactly the after-~4-words degradation.
+PHONON-PORT.md's "unavoidable deviation" claim was removed as WRONG AND BACKWARDS:
+the reference's prompt never recedes — it is cached once at fixed positions forever.
+Fix (engine + spike mirror): `position_ids = concat(arange(0, P-1),
+arange(P + past_kv - 1, P + past_kv + 7))` — voice+text at their true absolute
+positions on every call, input slot at `P+past_kv-1` (bos at V+T = P-1, then +1 per
+latent), frames after; call 1 (past_kv = 0) degenerates to the old contiguous form.
+x86 A/B (`/tmp/phonon-diag/position_recipe_ab.py`; same pre-generated noise tape fed
+to BOTH arms, position_ids the only variable): call-1 latents BIT-IDENTICAL, diverge
+from call 2 (onset matches the device symptom); layer-0 re-run prompt-row KV drift
+across calls 9.2-10.0 (shipped) → **0.000e+00 bitwise (recipe)** — the fed-back
+cache now replicates the reference's baked cache, which is a stronger parity result
+than any metric separation, so the handover's optional Rust/torch parity gate was
+skipped; zero-noise determinism probe confirms the same signature. Renders (8 seeds
+× audition + 217-char chunk): 0/8 degenerate on both arms — no regression — and the
+recipe is mildly better: EOS crosses earlier (18-19 vs 25-31 calls on the long
+text) with sharper peaks and natural-band durations (mean 14.1 s vs 18.6 s), i.e.
+EOS timing was drifting late under the corrupted geometry. CI: dispatched build.yml
+run 42923777452 on `1b232f5` (batch-c-d-session). OPEN: device round — the ear is
+the acceptance bar; if artifacts persist, Settings → Logs → filter "PhononEngine"
+(per-chunk eos-peak + frame counts discriminate AR degeneration from runtime
+corruption). Secondary threads parked from the handover: per-chunk
+thermalState/memory logging for the late-session RTF degradation (2.7), untouched.
