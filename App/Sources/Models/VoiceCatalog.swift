@@ -57,6 +57,40 @@ enum VoiceCatalog {
         )
     }
 
+    /// The Phonon pack — the hub default voice plus every named en-us/en-gb
+    /// voice of gradium/phonon-voices (name/accent/gender from its
+    /// voices.jsonl). The model ALWAYS speaks English; the accent is the
+    /// accent the voice was designed in. Order = picker order: default, US,
+    /// UK (females then males per accent).
+    static let phonon: [VoiceDescriptor] = [
+        VoiceDescriptor(id: "default", displayName: "Default", accent: nil, gender: "Neutral"),
+        VoiceDescriptor(id: "NbpkqMVS3CJeq2j8", displayName: "Zoey", accent: "American", gender: "Female"),
+        VoiceDescriptor(id: "NIWIOv5vTi5eRMj8", displayName: "Juniper", accent: "American", gender: "Female"),
+        VoiceDescriptor(id: "vjFyp2BcCyTlUmYb", displayName: "Everly", accent: "American", gender: "Female"),
+        VoiceDescriptor(id: "4SZHfMpw-p46Ywgs", displayName: "Harper", accent: "American", gender: "Female"),
+        VoiceDescriptor(id: "bXwrkHhURL1VFJdG", displayName: "Hadley", accent: "American", gender: "Female"),
+        VoiceDescriptor(id: "nGzMHMPAWGaJFHOo", displayName: "Delia", accent: "American", gender: "Female"),
+        VoiceDescriptor(id: "LMDIYE0Oa377Qh6Z", displayName: "Easton", accent: "American", gender: "Male"),
+        VoiceDescriptor(id: "40QrMVgAxFiUnP9f", displayName: "Micah", accent: "American", gender: "Male"),
+        VoiceDescriptor(id: "0zLApsZfVLLNaEGl", displayName: "Trevor", accent: "American", gender: "Male"),
+        VoiceDescriptor(id: "_6Aslh2DxfmnRLmP", displayName: "Russell", accent: "American", gender: "Male"),
+        VoiceDescriptor(id: "qIxlZ7Ei8KvWlyQH", displayName: "Preston", accent: "American", gender: "Male"),
+        VoiceDescriptor(id: "d9XCyhjo4JhkHF1d", displayName: "Miles", accent: "American", gender: "Male"),
+        VoiceDescriptor(id: "6PWnV0Nq4wu7RVBT", displayName: "Maeve", accent: "British", gender: "Female"),
+        VoiceDescriptor(id: "GgfEkEJtxZR7gnpy", displayName: "Freya", accent: "British", gender: "Female"),
+        VoiceDescriptor(id: "uem82D50GRv2Dwma", displayName: "Pippa", accent: "British", gender: "Female"),
+        VoiceDescriptor(id: "y9bQqIDnyxwqK01t", displayName: "Elodie-Rose", accent: "British", gender: "Female"),
+        VoiceDescriptor(id: "gDT1nz7Ie36ZhL-C", displayName: "Imogen", accent: "British", gender: "Female"),
+        VoiceDescriptor(id: "m9MxpY6IUGXtWp76", displayName: "Lottie", accent: "British", gender: "Female"),
+        VoiceDescriptor(id: "gfP44RlHwr2kEwk7", displayName: "Bryony", accent: "British", gender: "Female"),
+        VoiceDescriptor(id: "X6NceqF285Gr04gb", displayName: "Alfie", accent: "British", gender: "Male"),
+        VoiceDescriptor(id: "YyKcxPG7iIgS3jsK", displayName: "Hugh", accent: "British", gender: "Male"),
+        VoiceDescriptor(id: "zUCxzrOrugTSis03", displayName: "Edwin", accent: "British", gender: "Male"),
+        VoiceDescriptor(id: "JOW0vchyswkQUMDS", displayName: "Spencer", accent: "British", gender: "Male"),
+        VoiceDescriptor(id: "dME3IWyZBvmh1n1q", displayName: "Toby", accent: "British", gender: "Male"),
+        VoiceDescriptor(id: "Zn7g6NxLqXlJb7Qi", displayName: "Teddy", accent: "British", gender: "Male"),
+    ]
+
     /// Display names for Supertonic's language codes (AVAILABLE_LANGS in
     /// Helper.swift). "na" has no official expansion — labelled Neutral.
     static let supertonicLanguages: [String: String] = [
@@ -73,6 +107,7 @@ enum VoiceCatalog {
     static func descriptors(for kind: SpeechPlayer.EngineKind) -> [VoiceDescriptor] {
         switch kind {
         case .supertonic: return supertonic
+        case .phonon: return phonon
         default: return kokoro
         }
     }

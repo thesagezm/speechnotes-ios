@@ -234,6 +234,76 @@ jobs:
           path: supertonic-spike.log
           if-no-files-found: warn
 
+  phonon-spike:
+    name: Phonon spike (validates ONNX contract on vendored ORT)
+    runs-on: macos-latest
+    timeout-minutes: 25
+    # Informative and non-blocking by design (matches the other spikes; the
+    # phone is the real bench). This one proves the com.microsoft contrib ops
+    # (GroupQueryAttention, RotaryEmbedding, QuickGelu) run on the exact SPM
+    # binary the app links, and that the pinned call recipe (Docs/PHONON-PORT.md)
+    # reaches EOS and decodes audible speech in Swift — the whole engine path
+    # minus the StreamingTTSPlaybackCore plumbing.
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # --http1.1 + --retry-all-errors: the HF CDN flakes HTTP/2 streams on
+      # big files (observed 2026-11-10; exit 92 mid-transfer).
+      - name: Download Phonon fp32 model set (~166 MB)
+        run: |
+          mkdir -p ~/phonon-spike/onnx ~/phonon-spike/voices
+          BASE="https://huggingface.co/onnx-community/phonon-31m-en-ONNX/resolve/main"
+          curl --http1.1 -sL --retry 5 --retry-all-errors --retry-delay 2 -o ~/phonon-spike/onnx/model.onnx "$BASE/onnx/model.onnx"
+          curl --http1.1 -sL --retry 5 --retry-all-errors --retry-delay 2 -o ~/phonon-spike/onnx/model.onnx_data "$BASE/onnx/model.onnx_data"
+          curl --http1.1 -sL --retry 5 --retry-all-errors --retry-delay 2 -o ~/phonon-spike/onnx/mimi_decoder.onnx "$BASE/onnx/mimi_decoder.onnx"
+          curl --http1.1 -sL --retry 5 --retry-all-errors --retry-delay 2 -o ~/phonon-spike/onnx/mimi_decoder.onnx_data "$BASE/onnx/mimi_decoder.onnx_data"
+          curl --http1.1 -sL --retry 5 --retry-all-errors --retry-delay 2 -o ~/phonon-spike/onnx/tokenizer.json "$BASE/tokenizer.json"
+          curl --http1.1 -sL --retry 5 --retry-all-errors --retry-delay 2 -o ~/phonon-spike/voices/default.bin "$BASE/voices/default.bin"
+          # Size gates (bytes from the hub tree, 2026-11-10) — a truncated
+          # transfer must fail here, not inside the graph.
+          test "$(stat -f%z ~/phonon-spike/onnx/model.onnx_data)" -eq 121833472
+          test "$(stat -f%z ~/phonon-spike/onnx/mimi_decoder.onnx_data)" -eq 43670480
+          test "$(stat -f%z ~/phonon-spike/voices/default.bin)" -eq 256000
+          ls -lh ~/phonon-spike/onnx ~/phonon-spike/voices
+
+      - name: Run Phonon spike test
+        id: test
+        run: |
+          set -o pipefail
+          cd Tests/PhononSpike
+          swift test 2>&1 | tee ../../phonon-spike.log
+
+      - name: Show failure summary
+        if: always()
+        run: |
+          grep -E "PHONON-SPIKE|error:|failed|Fatal|Crash|unexpected exit|Executed" phonon-spike.log \
+            | grep -vE "warning:" \
+            | tail -n 40 > phonon-summary.txt || true
+          echo "----- PHONON SPIKE SUMMARY -----"
+          cat phonon-summary.txt
+          echo "--------------------------------"
+          if [ -s phonon-summary.txt ] && [ "${{ steps.test.outcome }}" = "failure" ]; then
+            python3 -c "import pathlib; t = pathlib.Path('phonon-summary.txt').read_text()[:5500]; print('::error title=Phonon spike failure::' + t.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A'))"
+          fi
+
+      - name: Upload sample audio
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phonon-sample
+          path: ~/phonon-spike/sample.wav
+          if-no-files-found: error
+
+      - name: Upload spike log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phonon-spike-log
+          path: phonon-spike.log
+          if-no-files-found: warn
+
   epub-spike:
     name: EPUB spike (ZipReader/EpubInfo vs real books)
     runs-on: macos-latest

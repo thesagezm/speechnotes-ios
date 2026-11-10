@@ -44,6 +44,7 @@ struct StorageSettingsView: View {
         let booksBytes: Int64
         let onnxBytes: Int64
         let supertonicBytes: Int64
+        let phononBytes: Int64
         let exportsBytes: Int64
         let imageBytes: Int64
     }
@@ -106,6 +107,7 @@ struct StorageSettingsView: View {
                 booksBytes: BooksStore.directorySize(),
                 onnxBytes: ExportsStore.directorySize(ModelManager.onnxDirectory),
                 supertonicBytes: ExportsStore.directorySize(ModelManager.supertonicDirectory),
+                phononBytes: ExportsStore.directorySize(ModelManager.phononDirectory),
                 exportsBytes: ExportsStore.directorySize(ExportsStore.exportsDirectory),
                 imageBytes: NoteImageStore.totalFootprint() + RemoteImageStore.totalFootprint()
             )
@@ -224,6 +226,7 @@ struct StorageSettingsView: View {
                 }
                 usageRow("Kokoro models (fp32 + compact)", usage.onnxBytes)
                 usageRow("Supertonic model", usage.supertonicBytes)
+                usageRow("Phonon model", usage.phononBytes)
                 usageRow("Exported audio", usage.exportsBytes)
                 usageRow("Cached images", usage.imageBytes)
             } else {

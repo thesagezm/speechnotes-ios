@@ -15,7 +15,7 @@ struct SettingsView: View {
     /// Any neural engine is selected AND its model is ready — the system
     /// engine (and so the system voice) is not in the playback path.
     private var neuralEngineIsActive: Bool {
-        (player.engineKind == .kokoro || player.engineKind == .supertonic)
+        (player.engineKind == .kokoro || player.engineKind == .phonon || player.engineKind == .supertonic)
             && !player.usingSystemFallback
     }
 
@@ -23,6 +23,7 @@ struct SettingsView: View {
     private var activeVoiceCodename: String {
         switch player.engineKind {
         case .supertonic: return player.supertonicVoice
+        case .phonon: return player.phononVoice
         default: return player.voice
         }
     }
@@ -30,6 +31,7 @@ struct SettingsView: View {
     private var neuralModelMissing: Bool {
         switch player.engineKind {
         case .kokoro: return !models.isReady && !models.smallIsReady
+        case .phonon: return !models.phononIsReady
         case .supertonic: return !models.supertonicIsReady
         default: return false
         }
@@ -38,6 +40,7 @@ struct SettingsView: View {
     private var voicePickerScope: VoicePickerSheet.Scope {
         switch player.engineKind {
         case .supertonic: return .supertonic
+        case .phonon: return .phonon
         default: return .kokoro
         }
     }
@@ -45,6 +48,7 @@ struct SettingsView: View {
     private var voiceSectionHeader: String {
         switch player.engineKind {
         case .supertonic: return "Supertonic voice"
+        case .phonon: return "Phonon voice"
         default: return "Kokoro voice"
         }
     }
@@ -79,7 +83,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Speech engine")
                 } footer: {
-                    Text("Listed worst to best. Supertonic sounds the best (10 voice styles, 31 languages). Kokoro Compact (~92 MB) is the lightweight tier; Kokoro fp32 is the solid default. All use the same 28 voices.")
+                    Text("Listed smallest to largest. Kokoro Compact (~92 MB) is the lightweight tier; Kokoro fp32 is the solid default; Phonon (~192 MB) is the compact English engine. Supertonic sounds the best. All fully offline.")
                 }
 
                 Section {
@@ -108,6 +112,8 @@ struct SettingsView: View {
                     switch player.engineKind {
                     case .supertonic:
                         Text("10 voice styles, all fluent in 31 languages — pick the language in the voice picker. Tap a voice to hear a sample.")
+                    case .phonon:
+                        Text("The hub default voice plus 26 American and British voices — every voice speaks English. Tap a voice to hear a sample.")
                     default:
                         Text("Friendly names with codenames — e.g. Heart is af_heart, American female. Tap a voice to hear a sample.")
                     }
@@ -141,6 +147,36 @@ struct SettingsView: View {
                     Text("Supertonic model")
                 } footer: {
                     Text("Supertone supertonic-3 — flow-matching TTS with 31 languages (English, Korean, Japanese, German, French and more) and 10 voice styles. Large (~399 MB) and CPU-based; keep it as the optional multilingual engine alongside Kokoro.")
+                }
+
+                Section {
+                    switch models.phononState {
+                    case .notDownloaded:
+                        Button {
+                            models.startPhononDownload()
+                        } label: {
+                            Label("Download Phonon model (~192 MB)", systemImage: "arrow.down.circle")
+                        }
+                    case .downloading(let progress):
+                        ProgressView(value: progress) {
+                            Text("Downloading Phonon… \(Int(progress * 100))%")
+                        }
+                    case .failed(let message):
+                        Label("Phonon download failed: \(message)", systemImage: "exclamationmark.triangle")
+                            .font(.footnote)
+                        Button("Retry") {
+                            models.startPhononDownload()
+                        }
+                    case .ready:
+                        Label("Phonon model ready", systemImage: "checkmark.circle")
+                        Button("Delete Phonon model (frees ~192 MB)", role: .destructive) {
+                            models.deletePhononModels()
+                        }
+                    }
+                } header: {
+                    Text("Phonon model")
+                } footer: {
+                    Text("Gradium Phonon — a 31M-parameter English streaming TTS, the smallest neural engine in the app: two fp32 graphs, a tokenizer and 27 voices (~192 MB). English only; the speed slider has no effect here; no Core ML experiment.")
                 }
 
                 Section {

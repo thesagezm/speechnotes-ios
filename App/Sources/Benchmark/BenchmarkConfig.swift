@@ -22,6 +22,9 @@ enum BenchmarkTier: String, Codable, CaseIterable, Identifiable {
     case supertonicHighCoreML = "supertonic-high-coreml"
     /// Supertonic Balanced with the CoreML EP.
     case supertonicBalancedCoreML = "supertonic-balanced-coreml"
+    /// Phonon fp32 (flow + decoder, ~166 MB of weights) — the compact
+    /// English engine's device numbers.
+    case phononFP32 = "phonon-fp32"
 
     var id: String { rawValue }
 
@@ -33,6 +36,7 @@ enum BenchmarkTier: String, Codable, CaseIterable, Identifiable {
         case .supertonicBalanced: return "Supertonic Balanced · 6 steps (CPU)"
         case .supertonicHighCoreML: return "Supertonic High · 8 steps (Core ML EP)"
         case .supertonicBalancedCoreML: return "Supertonic Balanced · 6 steps (Core ML EP)"
+        case .phononFP32: return "Phonon fp32 (CPU)"
         }
     }
 
@@ -51,6 +55,7 @@ enum BenchmarkTier: String, Codable, CaseIterable, Identifiable {
     var firstChunkChars: Int {
         switch self {
         case .kokoroFP32, .kokoroCompact: return 100
+        case .phononFP32: return 80
         case .supertonicHigh, .supertonicBalanced, .supertonicHighCoreML, .supertonicBalancedCoreML: return 60
         }
     }
@@ -58,6 +63,7 @@ enum BenchmarkTier: String, Codable, CaseIterable, Identifiable {
     var batchChunkChars: Int {
         switch self {
         case .kokoroFP32, .kokoroCompact: return 160
+        case .phononFP32: return 180
         case .supertonicHigh, .supertonicBalanced, .supertonicHighCoreML, .supertonicBalancedCoreML: return 200
         }
     }

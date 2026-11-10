@@ -137,6 +137,7 @@ final class BenchmarkSession {
 
     private var kokoro: OnnxKokoroEngine?
     private var supertonic: SupertonicEngine?
+    private var phonon: PhononEngine?
 
     init(config: BenchmarkConfig) {
         self.config = config
@@ -223,6 +224,10 @@ final class BenchmarkSession {
                 let engine = SupertonicEngine(usesCoreMLEP: true)
                 engine.benchmarkIntraOpThreads = config.intraOpThreads
                 supertonic = engine
+            case .phononFP32:
+                let engine = PhononEngine()
+                engine.benchmarkIntraOpThreads = config.intraOpThreads
+                phonon = engine
             }
 
             // 2. Model load — COLD by construction: every session builds a
@@ -236,6 +241,8 @@ final class BenchmarkSession {
                 prepared = kokoro?.benchmarkPrepare() ?? false
             case .supertonicHigh, .supertonicBalanced, .supertonicHighCoreML, .supertonicBalancedCoreML:
                 prepared = supertonic?.benchmarkPrepare() ?? false
+            case .phononFP32:
+                prepared = phonon?.benchmarkPrepare() ?? false
             }
             guard prepared else {
                 throw BenchmarkError.modelNotAvailable(config.tier)
@@ -390,6 +397,9 @@ final class BenchmarkSession {
                 speed: config.speed,
                 steps: config.tier.flowSteps ?? 8
             )
+        case .phononFP32:
+            guard let phonon else { throw BenchmarkError.modelNotAvailable(config.tier) }
+            return try phonon.benchmarkSynthesize(text: text, speed: config.speed)
         }
     }
 

@@ -17,6 +17,7 @@ final class SpeechPlayer: ObservableObject {
         // only the engines that are genuinely different machines.
         case system
         case kokoro
+        case phonon
         case supertonic
 
         var id: String { rawValue }
@@ -25,6 +26,7 @@ final class SpeechPlayer: ObservableObject {
             switch self {
             case .system: return "Apple system voice"
             case .kokoro: return "Kokoro — on-device neural, 28 voices"
+            case .phonon: return "Phonon — compact on-device neural (English)"
             case .supertonic: return "Supertonic — best quality, multilingual"
             }
         }
@@ -74,6 +76,13 @@ final class SpeechPlayer: ObservableObject {
         didSet {
             UserDefaults.standard.set(supertonicVoice, forKey: "supertonicVoice")
             supertonicEngine?.voice = supertonicVoice
+        }
+    }
+    /// Phonon voice id ("default" + the hub's en-us/en-gb voice_ids).
+    @Published var phononVoice: String {
+        didSet {
+            UserDefaults.standard.set(phononVoice, forKey: "phononVoice")
+            phononEngine?.voice = phononVoice
         }
     }
     @Published var supertonicLang: String {
@@ -221,7 +230,10 @@ final class SpeechPlayer: ObservableObject {
     }
     /// Engine/voice to restore when the running audition finishes; nil once
     /// the user makes an explicit selection mid-audition.
-    private var preAuditionState: (kind: EngineKind, voice: String, supertonicVoice: String)?
+    // The third slot carries whichever voice the ACTIVE engine kind uses at
+    // audition time — supertonicVoice for .supertonic, phononVoice for
+    // .phonon, the Kokoro voice is slot two.
+    private var preAuditionState: (kind: EngineKind, voice: String, secondaryVoice: String)?
 
     // MARK: - Playback resume bookmark
 
@@ -652,6 +664,10 @@ final class SpeechPlayer: ObservableObject {
             return usingSystemFallback
                 ? "Apple voice (model missing)"
                 : VoiceCatalog.subtitle(for: voice, kind: .kokoro)
+        case .phonon:
+            return usingSystemFallback
+                ? "Apple voice (model missing)"
+                : VoiceCatalog.subtitle(for: phononVoice, kind: .phonon)
         case .supertonic:
             return usingSystemFallback
                 ? "Apple voice (model missing)"
@@ -662,6 +678,7 @@ final class SpeechPlayer: ObservableObject {
     private var engine: (any SpeechEngine)?
     private var onnxEngine: OnnxKokoroEngine?
     private var supertonicEngine: SupertonicEngine?
+    private var phononEngine: PhononEngine?
     private var systemEngine: SystemEngine?
 
     init() {
@@ -699,6 +716,7 @@ final class SpeechPlayer: ObservableObject {
         voice = defaults.string(forKey: "voice") ?? "am_eric"
         supertonicVoice = defaults.string(forKey: "supertonicVoice") ?? "M1"
         supertonicLang = defaults.string(forKey: "supertonicLang") ?? "en"
+        phononVoice = defaults.string(forKey: "phononVoice") ?? "default"
         systemVoiceIdentifier = defaults.string(forKey: "systemVoiceIdentifier")
     }
 
@@ -877,6 +895,28 @@ final class SpeechPlayer: ObservableObject {
         }
     }
 
+    /// Phonon joins the same single-slot idle-unload group: two fp32 ORT
+    /// sessions (~166 MB of weights) stay resident after the user switches
+    /// away, same jetsam arithmetic as Supertonic/Kokoro. Reload-on-next-use
+    /// is transparent (and logged).
+    private var phononIdleUnloadTask: Task<Void, Never>?
+    private func schedulePhononIdleUnload() {
+        phononIdleUnloadTask?.cancel()
+        guard engineKind == .phonon, phononEngine != nil else { return }
+        phononIdleUnloadTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 5 * 60 * 1_000_000_000)
+            guard !Task.isCancelled, let self else { return }
+            guard self.engineKind == .phonon else { return }
+            guard self.state == .idle, !self.isExporting else { return }
+            guard self.phononEngine?.hasLoadedModel == true else { return }
+            Log.shared.info("SpeechPlayer: unloading idle Phonon sessions")
+            let keepVoice = self.phononVoice
+            self.phononEngine = nil
+            self.rebuildEngine()
+            self.phononEngine?.voice = keepVoice
+        }
+    }
+
     /// Which model file the cached OnnxKokoroEngine instance points at —
     /// the fp32 and compact tiers share one slot, so a tier switch must
     /// rebuild it rather than reuse the other tier's session.
@@ -1003,6 +1043,7 @@ final class SpeechPlayer: ObservableObject {
 
         scheduleSupertonicIdleUnload()
         scheduleKokoroIdleUnload()
+        schedulePhononIdleUnload()
 
         // The Supertonic set is ~399 MB of resident sessions — release it as
         // soon as another engine takes over (single-slot rule, PocketPal
@@ -1015,13 +1056,17 @@ final class SpeechPlayer: ObservableObject {
         // engine is cheap enough to keep warm. (scheduleKokoroIdleUnload
         // above only covers the STAYING-on-Kokoro case; its guard returns
         // early on a switch-away, which is how the session used to stay
-        // resident here.)
+        // resident here.) Phonon (~166 MB of fp32 flow+decoder weights)
+        // joins the same release-on-switch rule.
         if engineKind != .supertonic {
             supertonicEngine = nil
         }
         if engineKind != .kokoro {
             onnxEngine = nil
             onnxEngineFileIsBig = true
+        }
+        if engineKind != .phonon {
+            phononEngine = nil
         }
         if engineKind == .supertonic, ModelManager.shared.supertonicIsReady {
             // The warm-engine guard reconciles the VARIANT too: a same-kind
@@ -1039,6 +1084,25 @@ final class SpeechPlayer: ObservableObject {
             engine = supertonicEngine
             usingSystemFallback = false
             Log.shared.info("SpeechPlayer: engine → Supertonic (\(supertonicVoice), \(supertonicLang))")
+        } else if engineKind == .phonon {
+            if ModelManager.shared.phononIsReady {
+                if phononEngine == nil {
+                    let phonon = PhononEngine()
+                    phonon.voice = phononVoice
+                    phononEngine = phonon
+                }
+                engine = phononEngine
+                usingSystemFallback = false
+                Log.shared.info("SpeechPlayer: engine → Phonon (\(phononVoice))")
+            } else {
+                if systemEngine == nil {
+                    systemEngine = SystemEngine()
+                }
+                systemEngine?.voiceIdentifier = systemVoiceIdentifier
+                engine = systemEngine
+                usingSystemFallback = true
+                Log.shared.info("SpeechPlayer: Phonon selected but model missing — system voice in use")
+            }
         } else if engineKind == .kokoro {
             // The tier the DIAL asks for, falling back to whichever Kokoro
             // model is actually present — Compact with only fp32 downloaded
@@ -1069,7 +1133,7 @@ final class SpeechPlayer: ObservableObject {
             }
             systemEngine?.voiceIdentifier = systemVoiceIdentifier
             engine = systemEngine
-            usingSystemFallback = engineKind == .supertonic
+            usingSystemFallback = engineKind == .supertonic || engineKind == .phonon
             if usingSystemFallback {
                 Log.shared.info("SpeechPlayer: neural engine selected but model missing — system voice in use")
             }
@@ -1567,6 +1631,8 @@ final class SpeechPlayer: ObservableObject {
         let targetKind: EngineKind
         if ModelManager.supertonicVoices.contains(codename) {
             targetKind = .supertonic
+        } else if ModelManager.phononVoices.contains(codename) {
+            targetKind = .phonon
         } else if ModelManager.knownVoices.contains(codename) {
             targetKind = .kokoro
         } else {
@@ -1584,15 +1650,18 @@ final class SpeechPlayer: ObservableObject {
         case .kokoro:
             modelReady = ModelManager.shared.isReady || ModelManager.shared.smallIsReady
         case .supertonic: modelReady = ModelManager.shared.supertonicIsReady
+        case .phonon: modelReady = ModelManager.shared.phononIsReady
         case .system: modelReady = false
         }
         guard modelReady else { return }
 
         if preAuditionState == nil, !commit {
-            preAuditionState = (engineKind, voice, supertonicVoice)
+            preAuditionState = (engineKind, voice,
+                                engineKind == .phonon ? phononVoice : supertonicVoice)
         }
         switch targetKind {
         case .supertonic: supertonicVoice = codename
+        case .phonon: phononVoice = codename
         case .kokoro: voice = codename
         case .system: break // single-voice engines need no assignment
         }
@@ -1618,6 +1687,7 @@ final class SpeechPlayer: ObservableObject {
         switch kind {
         case .kokoro: return "recentKokoroVoices"
         case .supertonic: return "recentSupertonicVoices"
+        case .phonon: return "recentPhononVoices"
         case .system: return "recentSystemVoices"
         }
     }
@@ -1645,7 +1715,9 @@ final class SpeechPlayer: ObservableObject {
             case .kokoro:
                 voice = saved.voice
             case .supertonic:
-                supertonicVoice = saved.supertonicVoice
+                supertonicVoice = saved.secondaryVoice
+            case .phonon:
+                phononVoice = saved.secondaryVoice
             case .system:
                 break
             }

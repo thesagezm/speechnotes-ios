@@ -64,13 +64,14 @@ struct SpeechSettingsView: View {
     }
 
     private var neuralEngineIsActive: Bool {
-        (player.engineKind == .kokoro || player.engineKind == .supertonic)
+        (player.engineKind == .kokoro || player.engineKind == .phonon || player.engineKind == .supertonic)
             && !player.usingSystemFallback
     }
 
     private var activeVoiceCodename: String {
         switch player.engineKind {
         case .supertonic: return player.supertonicVoice
+        case .phonon: return player.phononVoice
         default: return player.voice
         }
     }
@@ -78,6 +79,7 @@ struct SpeechSettingsView: View {
     private var neuralModelMissing: Bool {
         switch player.engineKind {
         case .kokoro: return !models.isReady && !models.smallIsReady
+        case .phonon: return !models.phononIsReady
         case .supertonic: return !models.supertonicIsReady
         default: return false
         }
@@ -86,6 +88,7 @@ struct SpeechSettingsView: View {
     private var voicePickerScope: VoicePickerSheet.Scope {
         switch player.engineKind {
         case .supertonic: return .supertonic
+        case .phonon: return .phonon
         default: return .kokoro
         }
     }
@@ -93,6 +96,7 @@ struct SpeechSettingsView: View {
     private var voiceSectionHeader: String {
         switch player.engineKind {
         case .supertonic: return "Supertonic voice"
+        case .phonon: return "Phonon voice"
         default: return "Kokoro voice"
         }
     }
@@ -123,7 +127,7 @@ struct SpeechSettingsView: View {
             } header: {
                 Text("Speech engine")
             } footer: {
-                Text("Listed worst to best. Supertonic sounds the best (10 voice styles, 31 languages). Kokoro runs on-device with 28 voices — its High/Compact download choice is in the Kokoro quality section below.")
+                Text("Listed smallest to largest. Kokoro runs on-device with 28 voices (High/Compact download choice in the Kokoro quality section below). Phonon is the compact English engine — 26 voices, no speed control. Supertonic sounds the best (10 voice styles, 31 languages).")
             }
 
             // Kokoro's quality dial — the tier choice (fp32/int8), shown
@@ -156,6 +160,8 @@ struct SpeechSettingsView: View {
                 switch player.engineKind {
                 case .supertonic:
                     Text("10 voice styles, all fluent in 31 languages — pick the language in the voice picker. Tap a voice to hear a sample.")
+                case .phonon:
+                    Text("The hub default voice plus 26 American and British voices — every voice speaks English. Tap a voice to hear a sample.")
                 default:
                     Text("Friendly names with codenames — e.g. Heart is af_heart, American female. Tap a voice to hear a sample.")
                 }
@@ -242,6 +248,26 @@ struct SpeechSettingsView: View {
                 }
             }
 
+
+            Section {
+                switch models.phononState {
+                case .notDownloaded:
+                    Button { models.startPhononDownload() } label: {
+                        Label("Download Phonon model (~192 MB)", systemImage: "arrow.down.circle")
+                    }
+                case .downloading(let progress):
+                    ProgressView(value: progress) { Text("Downloading Phonon… \(Int(progress*100))%") }
+                case .failed(let message):
+                    Label("Phonon download failed: \(message)", systemImage: "exclamationmark.triangle")
+                        .font(.footnote)
+                    Button("Retry") { models.startPhononDownload() }
+                case .ready:
+                    Label("Phonon model ready", systemImage: "checkmark.circle")
+                    Button("Delete Phonon model (frees ~192 MB)", role: .destructive) { models.deletePhononModels() }
+                }
+            } header: { Text("Phonon model") } footer: {
+                Text("Gradium Phonon — a 31M-parameter English streaming TTS, the smallest neural engine in the app: two fp32 graphs, a tokenizer and 27 voices (~192 MB). English only; speed slider has no effect (the model has no speed input); no Core ML experiment. Kokoro covers more voices and both stay fully offline.")
+            }
 
             Section {
                 switch models.state {

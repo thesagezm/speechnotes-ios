@@ -9,11 +9,13 @@ struct VoicePickerSheet: View {
     /// (either tier plays the same 28 voices).
     enum Scope {
         case kokoro
+        case phonon
         case supertonic
 
         var engineKind: SpeechPlayer.EngineKind {
             switch self {
             case .supertonic: return .supertonic
+            case .phonon: return .phonon
             case .kokoro: return .kokoro
             }
         }
@@ -21,6 +23,7 @@ struct VoicePickerSheet: View {
         var title: String {
             switch self {
             case .supertonic: return "Supertonic voice"
+            case .phonon: return "Phonon voice"
             case .kokoro: return "Kokoro voice"
             }
         }
@@ -40,6 +43,7 @@ struct VoicePickerSheet: View {
     private var selectedVoice: String {
         switch scope {
         case .kokoro: return player.voice
+        case .phonon: return player.phononVoice
         case .supertonic: return player.supertonicVoice
         }
     }
@@ -47,6 +51,7 @@ struct VoicePickerSheet: View {
     private var modelReady: Bool {
         switch scope {
         case .kokoro: return models.isReady || models.smallIsReady
+        case .phonon: return models.phononIsReady
         case .supertonic: return models.supertonicIsReady
         }
     }
@@ -70,6 +75,7 @@ struct VoicePickerSheet: View {
     private var recentKey: String {
         switch scope {
         case .supertonic: return "recentSupertonicVoices"
+        case .phonon: return "recentPhononVoices"
         case .kokoro: return "recentKokoroVoices"
         }
     }
@@ -254,6 +260,7 @@ struct VoicePickerSheet: View {
         Haptics.tap()
         switch scope {
         case .kokoro: player.voice = descriptor.id
+        case .phonon: player.phononVoice = descriptor.id
         case .supertonic: player.supertonicVoice = descriptor.id
         }
         // An explicit pick during a sounding audition wins over the restore.

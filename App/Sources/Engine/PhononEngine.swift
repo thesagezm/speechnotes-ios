@@ -1,0 +1,498 @@
+import AVFoundation
+import OnnxRuntimeBindings
+import SpeechLogic
+
+/// Phonon engine (Gradium phonon-31m-en): a 31M-param English streaming TTS
+/// over TWO fp32 ONNX graphs — a causal flow transformer that emits one
+/// 32-dim latent per 80 ms frame plus an end-of-speech logit, and the
+/// stateless Mimi codec decoder that turns latents into 24 kHz PCM. The
+/// pinned call contract lives in Docs/PHONON-PORT.md (pinned empirically
+/// with ORT before any Swift; the spike re-proves it on the vendored
+/// runtime every CI run).
+///
+/// All pipeline machinery (chunking, bounded generation-ahead pacing,
+/// scheduling, play-time position tracking, WAV export, audio session +
+/// interruption handling) lives in StreamingTTSPlaybackCore; this class
+/// contributes model loading + synthesis, confined to the core's
+/// generateQueue. Each sentence chunk gets a fresh KV/latent state — the
+/// hub's own driver resets per chunk, which is also what makes successive
+/// sentences join cleanly.
+///
+/// Rate: Phonon has NO native speed control (the flow export baked its
+/// duration conditioning into a constant), so `speed` is accepted and
+/// ignored — the engine speaks at its natural pace at every slider value.
+/// The slider still drives the core's chunk-opener sizing.
+final class PhononEngine: NSObject, SpeechEngine {
+    var name = "Phonon — on-device neural (English)"
+
+    var onStateChanged: ((SpeechState) -> Void)?
+    var onProgress: ((Double) -> Void)?
+    /// Play-time position (see SpeechEngine.onPlayedChars).
+    var onPlayedChars: ((Int) -> Void)?
+    /// Natural completion (see SpeechEngine.onFinished).
+    var onFinished: (() -> Void)?
+
+    /// Voice id — one of ModelManager.phononVoices ("default" + the hub's
+    /// en-us/en-gb voice_ids). Friendly names live in VoiceCatalog.
+    var voice = "default"
+
+    /// Live rate — forwarded to the core (schedule sizing only; the model
+    /// itself has no speed input, see the type doc).
+    var speed: Float {
+        get { core.speed }
+        set { core.speed = newValue }
+    }
+
+    // Pinned graph contract — see Docs/PHONON-PORT.md for every constant's
+    // provenance.
+    private static let sampleRate: Double = 24_000
+    private static let samplesPerFrame = 1920
+    private static let latentDim = 32
+    private static let framesPerCall = 8
+    private static let voiceDim = 512
+    private static let voiceFrames = 125
+    private static let frameRate = 12.5
+    private static let eosThreshold: Float = 4.0
+    private static let temperature: Float = 0.3
+    private static let attentionHeads = 8
+    private static let headDim = 64
+    private static let flowLayers = 6
+    /// The Mimi decoder's rotary positions run over the upsampled sequence
+    /// against an 8000-position cos/sin cache — empirically ~500 latents per
+    /// call is safe (512 fails), and 400 keeps long chunks well clear.
+    private static let decodeWindow = 400
+
+    /// Supertonic-style chunk ceiling: the hub treats ~50 tokens as one
+    /// sentence chunk; ~50 tokens ≈ 200 chars, kept slightly tighter for
+    /// responsiveness.
+    private static let chunkMaxChars = 180
+
+    private let core: StreamingTTSPlaybackCore
+
+    /// How many times `validationResult()` ran the filesystem walk on this
+    /// instance — the first is always logged, later ones only when they get
+    /// slow. Main thread only (every `speak()`/export call is).
+    private var validationCalls = 0
+    /// Cached `phononFilesAreValid()` result + monotonic stamp; success
+    /// latches for 30 s (the per-voice size checks live upstream of TTFA's
+    /// t0). Failure is never latched — a transient blip must not brick the
+    /// engine (R7).
+    private var lastValidationResult: Bool?
+    private var lastValidationAt: ContinuousClock.Instant?
+    private static let validationTTL: TimeInterval = 30
+
+    /// True once sessions were actually loaded this instance — the idle
+    /// unload only pays off when there's something resident to free.
+    var hasLoadedModel: Bool { modelLoadAttempted }
+
+    // Model state — the core's generateQueue only.
+    private var ortEnv: ORTEnv?
+    private var flowSession: ORTSession?
+    private var decodeSession: ORTSession?
+    private var tokenizer: PhononTokenizer?
+    private var loadedVoices: [String: [Float]] = [:]
+    private var modelLoadAttempted = false
+
+    /// Benchmark-only override for both sessions' `setIntraOpNumThreads`
+    /// (Phase 3 harness). nil = the production policy (`min(activeProcessorCount, 6)`).
+    var benchmarkIntraOpThreads: Int?
+
+    init() {
+        self.core = StreamingTTSPlaybackCore(config: .init(
+            sampleRate: Self.sampleRate,
+            chunkMaxChars: Self.chunkMaxChars,
+            // Opener seed: Phonon's RTF is unmeasured on device (the hub
+            // measures several× realtime in a browser); Kokoro's seeds are
+            // the closest starting point (24 kHz flow TTS, similar chunk
+            // sizes). The schedule adapts from its own measurements either
+            // way — these only decide the FIRST opener.
+            firstMaxChars: 80,
+            schedule: ChunkSchedule.State(
+                targetSeconds: ChunkSchedule.initialTargetSeconds,
+                fallbackCharactersPerAudioSecond: ChunkSchedule.kokoroCharactersPerAudioSecond
+            ),
+            exportInterChunkSilence: 0.05,
+            logPrefix: "PhononEngine",
+            tier: "phonon"
+        ))
+        super.init()
+
+        core.isModelReady = { [weak self] in
+            guard let self else { return false }
+            self.loadModelIfNeeded()
+            return self.flowSession != nil
+        }
+        core.generateChunk = { [weak self] text in
+            guard let self else { throw StreamingCoreError.notConfigured }
+            return try self.generateChunk(text)
+        }
+        core.onStateChanged = { [weak self] state in self?.onStateChanged?(state) }
+        core.onProgress = { [weak self] progress in self?.onProgress?(progress) }
+        core.onPlayedChars = { [weak self] chars in self?.onPlayedChars?(chars) }
+        core.onFinished = { [weak self] in self?.onFinished?() }
+    }
+
+    // MARK: - SpeechEngine
+
+    func speak(_ text: String, rateMultiplier: Double) {
+        let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return }
+        guard validationResult() else {
+            Log.shared.error("PhononEngine asked to speak but no Phonon model is downloaded")
+            return
+        }
+        core.speak(text, rateMultiplier: rateMultiplier)
+    }
+
+    /// Timed validation, TTL-cached (see the property comment).
+    private func validationResult() -> Bool {
+        if let cached = lastValidationResult, cached,
+           let stamp = lastValidationAt,
+           PlaybackMetrics.seconds(since: stamp) < Self.validationTTL {
+            return true
+        }
+        let logIt = validationCalls == 0
+        validationCalls += 1
+        let filesValid = PlaybackMetrics.timedValidation(
+            prefix: core.config.logPrefix,
+            label: "play-path file validation",
+            alwaysLog: logIt
+        ) { ModelManager.phononFilesAreValid() }
+        if filesValid {
+            lastValidationResult = true
+            lastValidationAt = ContinuousClock.now
+        }
+        return filesValid
+    }
+
+    func pause() { core.pause() }
+    func resume() { core.resume() }
+    func stop() { core.stop() }
+
+    /// Core liveness — see SpeechEngine.hasLiveSession (the player's wedge
+    /// self-heal reads it).
+    var hasLiveSession: Bool { core.hasLiveSession }
+
+    // MARK: - Model loading (generateQueue)
+
+    private func loadModelIfNeeded() {
+        guard !modelLoadAttempted else { return }
+
+        let onnxDir = ModelManager.phononOnnxDirectory
+        guard FileManager.default.fileExists(atPath: onnxDir.appendingPathComponent("model.onnx").path),
+              FileManager.default.fileExists(atPath: onnxDir.appendingPathComponent("mimi_decoder.onnx").path) else {
+            Log.shared.error("PhononEngine: model files missing at \(onnxDir.path)")
+            return
+        }
+
+        do {
+            let started = Date()
+            let env = try ORTEnv(loggingLevel: .warning)
+            // Same thread policy as Kokoro: min(activeProcessorCount, 6) —
+            // the render thread needs main-thread headroom, and more than
+            // six buys nothing on a graph this small.
+            let options = try ORTSessionOptions()
+            let cores = ProcessInfo.processInfo.activeProcessorCount
+            let threadCount = benchmarkIntraOpThreads.map(Int32.init) ?? Int32(min(cores, 6))
+            try options.setIntraOpNumThreads(threadCount)
+            let flow = try ORTSession(env: env, modelPath: onnxDir.appendingPathComponent("model.onnx").path, sessionOptions: options)
+            let decode = try ORTSession(env: env, modelPath: onnxDir.appendingPathComponent("mimi_decoder.onnx").path, sessionOptions: options)
+            ortEnv = env
+            flowSession = flow
+            decodeSession = decode
+
+            let tokenizerData = try Data(contentsOf: onnxDir.appendingPathComponent("tokenizer.json"))
+            tokenizer = try PhononTokenizer(tokenizerData: tokenizerData)
+
+            Log.shared.info("PhononEngine: 2 sessions + tokenizer loaded in \(Date().timeIntervalSince(started))s (\(threadCount) of \(cores) cores)")
+            // Only latch AFTER success — a transient ORT error (memory
+            // pressure, file lock) used to brick the engine until relaunch.
+            modelLoadAttempted = true
+        } catch {
+            flowSession = nil
+            decodeSession = nil
+            tokenizer = nil
+            Log.shared.error("PhononEngine: model load failed: \(error) — will retry on next speak")
+        }
+    }
+
+    /// Voice embedding for the CURRENT voice, loaded on demand and cached.
+    /// The .bin is raw little-endian float32 in [1, 512, 125] order — the
+    /// graph takes [1, 125, 512], so this is a transpose (NOT a reshape; a
+    /// reshape silently transposes the conditioning and the voice turns to
+    /// mush — the contract-pinning round caught exactly that bug).
+    private func voiceEmbedding() throws -> [Float] {
+        if let cached = loadedVoices[voice] { return cached }
+        let path = ModelManager.phononVoiceFileURL(voice: voice).path
+        guard FileManager.default.fileExists(atPath: path) else {
+            throw PhononEngineError.voiceMissing(voice)
+        }
+        let data = try Data(contentsOf: URL(fileURLWithPath: path))
+        let count = data.count / MemoryLayout<Float>.size
+        guard count == Self.voiceDim * Self.voiceFrames else {
+            throw PhononEngineError.voiceShape(count)
+        }
+        let flat = data.withUnsafeBytes { raw in
+            Array(raw.bindMemory(to: Float.self))
+        }
+        var transposed = [Float](repeating: 0, count: count)
+        for frame in 0..<Self.voiceFrames {
+            for dim in 0..<Self.voiceDim {
+                transposed[frame * Self.voiceDim + dim] = flat[dim * Self.voiceFrames + frame]
+            }
+        }
+        // One resident voice per slot: switching voices frees the last one
+        // (26 bins resident would be ~6.7 MB — the cache is about TTFA, not
+        // capacity, but the single-slot habit keeps the footprint honest).
+        loadedVoices = [voice: transposed]
+        return transposed
+    }
+
+    // MARK: - Synthesis (generateQueue)
+
+    /// One sentence chunk: fresh KV/latent state → the pinned call loop →
+    /// windowed decode → PCM. The live speed is read per chunk from the core
+    /// (schedule sizing only — the model has no speed input).
+    private func generateChunk(_ text: String) throws -> [Float] {
+        guard let flowSession, let decodeSession, let tokenizer else {
+            throw PhononEngineError.modelUnavailable
+        }
+        let ids = try tokenizer.encode(text)
+        let T = ids.count
+        guard T > 0 else { throw PhononEngineError.emptyText }
+        let P = Self.voiceFrames + T + 1
+        let budget = Int(ceil((Double(T) / 3 + 2) * Self.frameRate))
+        let framesAfterEOS = Self.words(in: text) <= 4 ? 3 : 1
+        let voice = try voiceEmbedding()
+
+        var kv: [ORTValue] = []
+        kv.reserveCapacity(Self.flowLayers * 2)
+        for _ in 0..<(Self.flowLayers * 2) {
+            kv.append(try Self.emptyTensor(dims: [1, Self.attentionHeads, 0, Self.headDim]))
+        }
+        var pastKVCount = 0
+        var latentHistory = try Self.emptyTensor(dims: [1, 0, Self.latentDim])
+
+        var newLatents: [Float] = []
+        newLatents.reserveCapacity(budget * Self.latentDim)
+        var countdown: Int? = nil
+        var rng = SeededGenerator(seed: UInt64(Date().timeIntervalSince1970 * 1_000_000_000))
+
+        let started = Date()
+        var crossedEOS = false
+        for _ in 0..<max(1, Int(ceil(Double(budget) / Double(Self.framesPerCall)))) {
+            let total = pastKVCount + P + (Self.framesPerCall - 1)
+            let noise = (0..<(Self.framesPerCall * Self.latentDim)).map { _ -> Float in
+                Float.standardNormal(using: &rng) * sqrt(Self.temperature)
+            }
+
+            var feeds: [String: ORTValue] = [:]
+            feeds["input_ids"] = try Self.int64Tensor(values: ids.map(Int64.init), dims: [1, T])
+            feeds["audio_prompt_latents"] = try Self.floatTensor(values: voice, dims: [1, Self.voiceFrames, Self.voiceDim])
+            feeds["attention_mask"] = try Self.int64Tensor(values: [Int64](repeating: 1, count: total), dims: [1, total])
+            feeds["position_ids"] = try Self.int64Tensor(
+                values: (pastKVCount..<(pastKVCount + P + Self.framesPerCall - 1)).map(Int64.init),
+                dims: [1, P + Self.framesPerCall - 1])
+            feeds["noise"] = try Self.floatTensor(values: noise, dims: [1, Self.framesPerCall, Self.latentDim])
+            for (index, value) in kv.enumerated() {
+                feeds["past_key_values.\(index / 2).\(index % 2 == 0 ? "key" : "value")"] = value
+            }
+            feeds["past_key_values.audio_latents"] = latentHistory
+
+            let outputs = try flowSession.run(
+                withInputs: feeds,
+                outputNames: ["audio_latents", "present.audio_latents", "eos_logits"]
+                    + (0..<Self.flowLayers).flatMap { ["present.\($0).key", "present.\($0).value"] },
+                runOptions: nil)
+
+            // The flow's audio_latents is the CUMULATIVE latent history,
+            // denormalized; only the trailing 8 rows are this call's frames.
+            let cumulative = try Self.floatValues(
+                outputs["audio_latents"]!, dims: [1, pastKVCount + Self.framesPerCall, Self.latentDim])
+            newLatents.append(contentsOf: cumulative[(pastKVCount * Self.latentDim)...])
+            let eos = try Self.floatValues(outputs["eos_logits"]!, dims: [1, Self.framesPerCall])
+
+            // KV feedback: keep the latent K/Vs, drop the re-run prompt
+            // block [past_kv : past_kv + P) of each present cache — the
+            // latent history stays attended while the prompt is recomputed
+            // fresh at offset past_kv (RoPE positions stay monotonic).
+            let presentTotal = pastKVCount + P + (Self.framesPerCall - 1)
+            var newKV: [ORTValue] = []
+            newKV.reserveCapacity(Self.flowLayers * 2)
+            for index in 0..<(Self.flowLayers * 2) {
+                let name = index % 2 == 0 ? "present.\(index / 2).key" : "present.\(index / 2).value"
+                let values = try Self.floatValues(outputs[name]!, dims: [1, Self.attentionHeads, presentTotal, Self.headDim])
+                let keepHead = pastKVCount
+                let keepTail = Self.framesPerCall - 1
+                let stride = Self.attentionHeads * Self.headDim
+                var kept: [Float] = []
+                kept.reserveCapacity((keepHead + keepTail) * stride)
+                if keepHead > 0 {
+                    kept.append(contentsOf: values[0..<(keepHead * stride)])
+                }
+                let tailStart = (presentTotal - keepTail) * stride
+                kept.append(contentsOf: values[tailStart..<(tailStart + keepTail * stride)])
+                newKV.append(try Self.floatTensor(values: kept, dims: [1, Self.attentionHeads, keepHead + keepTail, Self.headDim]))
+            }
+            kv = newKV
+            pastKVCount += Self.framesPerCall - 1
+            latentHistory = outputs["present.audio_latents"]!
+
+            // EOS countdown (Python's PocketTTSEosThresholdCriteria): the
+            // frame that crossed the threshold and the tail frames are kept.
+            var done = false
+            for value in eos {
+                if countdown == nil && value > Self.eosThreshold {
+                    countdown = framesAfterEOS
+                    crossedEOS = true
+                } else if countdown != nil {
+                    countdown! -= 1
+                    done = countdown! <= 0
+                }
+            }
+            if done { break }
+        }
+        if !crossedEOS {
+            Log.shared.info("PhononEngine: frame budget reached before EOS — audio may be truncated («\(text.prefix(50))»)")
+        }
+
+        // Windowed decode (decoder rotary ceiling — see Self.decodeWindow).
+        var pcm: [Float] = []
+        let totalLatents = newLatents.count / Self.latentDim
+        var start = 0
+        while start < totalLatents {
+            let count = min(Self.decodeWindow, totalLatents - start)
+            let window = Array(newLatents[(start * Self.latentDim)..<(start * Self.latentDim + count * Self.latentDim)])
+            let output = try decodeSession.run(
+                withInputs: [
+                    "audio_latents": try Self.floatTensor(values: window, dims: [1, count, Self.latentDim]),
+                    "num_frames": try Self.int64Tensor(values: [Int64(count)], dims: [1]),
+                ],
+                outputNames: ["audio_values", "audio_lengths"],
+                runOptions: nil)
+            let lengths = try Self.int64Values(output["audio_lengths"]!, count: 1)
+            let samples = Int(lengths[0])
+            guard samples > 0 else { throw PhononEngineError.noOutput }
+            pcm.append(contentsOf: try Self.floatValues(output["audio_values"]!, dims: [1, 1, samples]))
+            start += count
+        }
+        guard !pcm.isEmpty else { throw PhononEngineError.noOutput }
+
+        let duration = Double(pcm.count) / core.sampleRate
+        Log.shared.info("PhononEngine: \(T) tokens → \(Self.frameString(duration))s audio (\(totalLatents) frames) in \(Self.frameString(Date().timeIntervalSince(started)))s (\(voiceShortName))")
+        return pcm
+    }
+
+    /// The voice currently cached (the loadedVoices single-slot rule makes
+    /// this the one voice this engine has resident).
+    private var voiceShortName: String { VoiceCatalog.shortName(for: voice, kind: .phonon) }
+
+    private static func frameString(_ seconds: TimeInterval) -> String {
+        String(format: "%.2f", seconds)
+    }
+
+    private static func words(in text: String) -> Int {
+        text.split(whereSeparator: \.isWhitespace).count
+    }
+
+    // MARK: - Benchmark (Phase 3 harness)
+
+    /// Loads the model if needed. Returns false only when the model cannot
+    /// serve (not downloaded / load failed) — the harness treats that as a
+    /// failed session, not a skipped chunk.
+    ///
+    /// The benchmark owns its engine instance EXCLUSIVELY and calls every
+    /// benchmark entry point from its own serial queue, so the usual
+    /// generateQueue confinement is satisfied by that ownership.
+    func benchmarkPrepare() -> Bool {
+        loadModelIfNeeded()
+        return flowSession != nil
+    }
+
+    /// One sustained-synthesis inference: text → samples. Returns nil tokens
+    /// (Phonon has no token-count dial to record — the frame count rides the
+    /// log line instead).
+    func benchmarkSynthesize(text: String, speed: Float) throws
+        -> (sampleCount: Int, sampleRate: Double, tokenCount: Int?)
+    {
+        core.speed = speed
+        let samples = try generateChunk(text)
+        return (samples.count, core.sampleRate, nil)
+    }
+
+    // MARK: - WAV export
+
+    func renderWAV(
+        text: String,
+        title: String? = nil,
+        onChunkProgress: ((Double) -> Void)? = nil,
+        completion: @escaping (Result<URL, Error>) -> Void
+    ) {
+        guard validationResult() else {
+            completion(.failure(PhononEngineError.modelUnavailable))
+            return
+        }
+        core.renderWAV(text: text, title: title, onChunkProgress: onChunkProgress, completion: completion)
+    }
+}
+
+/// User-facing failures for the Phonon path.
+enum PhononEngineError: LocalizedError {
+    case modelUnavailable
+    case voiceMissing(String)
+    case voiceShape(Int)
+    case noOutput
+    case emptyText
+
+    var errorDescription: String? {
+        switch self {
+        case .modelUnavailable: return "The Phonon model isn't downloaded or failed to load."
+        case .voiceMissing(let id): return "Phonon voice \(id) isn't downloaded — re-download the model."
+        case .voiceShape(let n): return "Phonon voice embedding has an unexpected size (\(n))."
+        case .noOutput: return "Phonon returned no audio for this chunk."
+        case .emptyText: return "The note is empty."
+        }
+    }
+}
+
+// MARK: - Shared tensor plumbing + seeded noise
+
+/// Deterministic SplitMix64 → Box-Muller standard normal. Shared with the
+/// CI spike (Tests/PhononSpike) so the two run the same noise recipe.
+struct SeededGenerator {
+    private var state: UInt64
+    private var hasSpare = false
+    private var spare: Float = 0
+
+    init(seed: UInt64) {
+        self.state = seed
+    }
+
+    private mutating func nextUniform() -> Float {
+        state &+= 0x9E3779B97F4A7C15
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xBF58476D1CE4E5B9
+        z = (z ^ (z >> 27)) &* 0x94D049BB133111EB
+        z = z ^ (z >> 31)
+        return Float(z >> 11) / Float(1 << 53)
+    }
+
+    mutating func next() -> Float {
+        if hasSpare {
+            hasSpare = false
+            return spare
+        }
+        let u1 = max(nextUniform(), 1e-12)
+        let u2 = nextUniform()
+        let magnitude = sqrt(-2 * log(1 - u1))
+        spare = magnitude * cos(2 * Float.pi * u2)
+        hasSpare = true
+        return magnitude * sin(2 * Float.pi * u2)
+    }
+}
+
+extension Float {
+    static func standardNormal(using generator: inout SeededGenerator) -> Float {
+        generator.next()
+    }
+}

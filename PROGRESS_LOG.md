@@ -4,6 +4,68 @@ Format: newest first. Every critique round, merge, and escalation lands here.
 
 ---
 
+**Phonon engine integration** (branch `batch-c-d-session`, 2026-11-10):
+- **The engine**: Gradium's Phonon (31M-param English streaming TTS,
+  Apache-2.0) via `onnx-community/phonon-31m-en-ONNX` — the app's 4th neural
+  engine and the smallest (~192 MB vs Kokoro's 341 MB): one fp32 flow
+  transformer (causal, KV-cached, 8 unrolled AR frames per call) + a
+  STATELESS Mimi codec decoder, Unigram tokenizer with byte fallback, and
+  precomputed voice embeddings (no audio encoder — no cloning, no G2P).
+- **The hub docs lie.** The README documents an older export (`flow_lm.onnx`
+  names, a stateful per-frame decoder, `text_ids`/`voice_latents`/`latent`
+  input names) and the transformers.js PR #1811 driver targets that OLD
+  export — PR closed, unmerged; main has no Phonon support. The current
+  tree exports `model.onnx` + external data with different input names
+  (`input_ids`, `audio_prompt_latents`, `attention_mask`, `position_ids`,
+  per-layer `past_key_values.{0..5}.{key,value}`, noise `[1,8,32]`) and the
+  contract was therefore pinned **empirically** by running the actual fp32
+  graphs with Python ORT 1.24.2 (the exact version the app vendors) before
+  any Swift: `Docs/PHONON-PORT.md` carries the full recipe. Load-bearing
+  discoveries the docs would never have given: attention_mask must be
+  `past_kv + P + 7` long (each unrolled frame slices it); the BOS latent is
+  prepended IN-GRAPH so `input_ids` is text-only; `audio_latents` out is
+  CUMULATIVE (denormalized — the decoder takes it directly) while
+  `present.audio_latents` is the normalized history fed straight back; the
+  voice `.bin` is [1,512,125] and needs a TRANSPOSE (a reshape silently
+  mangles the conditioning — the first EOS run went catatonic at −5 until
+  this was fixed); the decoder's rotary ceiling limits one decode call to
+  ~500 latents (the engine windows at 400); the KV feedback keeps the
+  latent K/Vs and drops the re-run prompt block.
+- **Validation**: with the pinned recipe the reference sentence reaches EOS
+  (logit > 4.0), decodes 24 kHz PCM, RTF ≈ 0.27 CPU on the Linux box.
+  `Tests/PhononSpike` (new CI job, informative like the others) re-runs the
+  SAME recipe in Swift against the vendored SPM binary — the com.microsoft
+  contrib ops (GroupQueryAttention, RotaryEmbedding, QuickGelu) are the
+  load-bearing question that only that binary answers.
+- **Tokenizer**: `SpeechLogic.PhononTokenizer` — the hub's 191-step
+  normalizer chain is GENERATED data (`PhononNormalizerTable.swift`, via
+  `Scripts/gen-phonon-normalizer.py`; Rust `\uXXXX` escapes translated to
+  ICU `\x{...}`), then Metaspace + a byte-lattice Unigram Viterbi (byte
+  fallback only where no piece matches — HF's lattice rule). 14/14 fixtures
+  verified against the reference `tokenizers` implementation (fixture =
+  the hub tokenizer.json, expected ids generated from it). The audio
+  control tokens (<|audio_bos|> 4/5/6) are excluded from matching so user
+  text can never inject them.
+- **App wiring**: `PhononEngine` (StreamingTTSPlaybackCore shape, per-sentence
+  fresh KV state, voice cache single-slot); `EngineKind.phonon` (picker
+  order: system, kokoro, phonon, supertonic — labeled compact English, no
+  quality claim); ModelManager Phonon set (26 curated voice bins: default +
+  12 en-us + 13 en-gb from voices.jsonl); settings/storage/voice-picker
+  surfaces; `phonon-fp32` Benchmark tier for the device RTF round. Single-
+  slot memory rule applies (sessions release on engine switch + 5-min idle
+  unload). fp32-only v1: q4 needs MatMulNBits proven on the vendored ORT;
+  fp16 stays banned (every engine's fp16 sibling has NaN'd on ORT CPU).
+  CoreML EP banned (a 6-layer KV-cache transformer is exactly the graph
+  class whose EP parity Kokoro proved broken — round-3 stands).
+- **Known limitation, documented in the settings footer**: the speed slider
+  does nothing for Phonon (the flow export baked its duration conditioning
+  into a constant — no speed input). Currency (`€5.50` reads in dollars)
+  and emails (`@` skipped) inherit the hub's documented text-prep gaps.
+  Device round: by-ear quality + RTF vs Kokoro, benchmark tier ready when
+  there is time.
+
+---
+
 **E-Ink appearance mode** (branch `batch-c-d-session`, 2026-11-10):
 - **One new mode, app-wide effects.** Settings → Appearance → Theme gains
   "E-Ink" (4th segment beside System/Light/Dark): paper white, ink black,

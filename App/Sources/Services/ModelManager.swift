@@ -19,6 +19,7 @@ final class ModelManager: ObservableObject {
     @Published private(set) var state: State
     @Published private(set) var smallState: State
     @Published private(set) var supertonicState: State
+    @Published private(set) var phononState: State
 
     /// Called on the main actor when any model becomes ready.
     var onReady: (() -> Void)?
@@ -179,6 +180,94 @@ final class ModelManager: ObservableObject {
         return true
     }
 
+    // MARK: Phonon model set (fourth neural engine)
+
+    /// Gradium phonon-31m-en — 31M-param English streaming TTS via the
+    /// onnx-community ONNX conversion (Apache-2.0). Two fp32 graphs + a
+    /// Unigram tokenizer + voice embeddings; the pinned call contract lives
+    /// in Docs/PHONON-PORT.md (pinned empirically before any Swift — the hub
+    /// README documents an older export and its file names DO NOT match the
+    /// tree; the graph protos and the spike are the truth).
+    ///
+    /// fp32-only for v1: the q4 flow variant needs MatMulNBits proven on the
+    /// vendored ORT (spike follow-up), and every fp16 sibling of every
+    /// engine so far produced NaN on ORT CPU. CPU-only (CoreML EP banned —
+    /// a 6-layer KV-cache transformer is exactly the graph class whose EP
+    /// parity Kokoro proved broken, round-3).
+    static let phononBaseURL = URL(string: "https://huggingface.co/onnx-community/phonon-31m-en-ONNX/resolve/main")!
+
+    /// Curated voice set: the hub default + every named en-us / en-gb voice
+    /// of gradium/phonon-voices (26 bins × 256 KB). Ids are the hub
+    /// voice_id — the picker's friendly names live in VoiceCatalog.
+    nonisolated static let phononVoices: [String] = [
+        "default",
+        // en-us
+        "NbpkqMVS3CJeq2j8", "NIWIOv5vTi5eRMj8", "vjFyp2BcCyTlUmYb",
+        "4SZHfMpw-p46Ywgs", "bXwrkHhURL1VFJdG", "nGzMHMPAWGaJFHOo",
+        "LMDIYE0Oa377Qh6Z", "40QrMVgAxFiUnP9f", "0zLApsZfVLLNaEGl",
+        "_6Aslh2DxfmnRLmP", "qIxlZ7Ei8KvWlyQH", "d9XCyhjo4JhkHF1d",
+        // en-gb
+        "6PWnV0Nq4wu7RVBT", "GgfEkEJtxZR7gnpy", "uem82D50GRv2Dwma",
+        "y9bQqIDnyxwqK01t", "gDT1nz7Ie36ZhL-C", "m9MxpY6IUGXtWp76",
+        "X6NceqF285Gr04gb", "YyKcxPG7iIgS3jsK", "zUCxzrOrugTSis03",
+        "JOW0vchyswkQUMDS", "dME3IWyZBvmh1n1q", "Zn7g6NxLqXlJb7Qi",
+        "gfP44RlHwr2kEwk7",
+    ]
+
+    /// (subpath under the hub root, bytes from the HF tree 2026-11-10, lower
+    /// progress bound) — downloaded in this order into Documents/Phonon/onnx.
+    nonisolated static let phononFiles: [(subpath: String, bytes: Int64, from: Double)] = [
+        ("onnx/model.onnx", 225_310, 0.00),
+        ("onnx/model.onnx_data", 121_833_472, 0.00),
+        ("onnx/mimi_decoder.onnx", 33_479, 0.65),
+        ("onnx/mimi_decoder.onnx_data", 43_670_480, 0.66),
+        ("tokenizer.json", 169_734, 0.90),
+    ]
+
+    nonisolated static let phononVoiceBinBytes: Int64 = 256_000
+
+    nonisolated static var phononDirectory: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Phonon")
+    }
+
+    nonisolated static var phononOnnxDirectory: URL {
+        phononDirectory.appendingPathComponent("onnx")
+    }
+
+    nonisolated static var phononVoicesDirectory: URL {
+        phononDirectory.appendingPathComponent("voices")
+    }
+
+    nonisolated static func phononVoiceFileURL(voice: String) -> URL {
+        phononVoicesDirectory.appendingPathComponent("\(voice).bin")
+    }
+
+    nonisolated static func phononFilesAreValid() -> Bool {
+        let fm = FileManager.default
+        func size(_ url: URL) -> Int64? {
+            (try? fm.attributesOfItem(atPath: url.path))?[.size] as? Int64
+        }
+        // The flow graph's external data is the memory gate — require the
+        // near-complete files; the small protos gate the rest.
+        guard size(phononOnnxDirectory.appendingPathComponent("model.onnx_data")) ?? 0 > 100_000_000,
+              size(phononOnnxDirectory.appendingPathComponent("model.onnx")) ?? 0 > 100_000,
+              size(phononOnnxDirectory.appendingPathComponent("mimi_decoder.onnx_data")) ?? 0 > 40_000_000,
+              size(phononOnnxDirectory.appendingPathComponent("mimi_decoder.onnx")) ?? 0 > 10_000
+        else { return false }
+        // tokenizer.json validated by parsing, not size (the Kokoro lesson:
+        // a size check once rejected every successful download).
+        guard let data = try? Data(contentsOf: phononOnnxDirectory.appendingPathComponent("tokenizer.json")),
+              let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let model = json["model"] as? [String: Any],
+              model["vocab"] != nil
+        else { return false }
+        for voice in phononVoices {
+            guard size(phononVoiceFileURL(voice: voice)) == phononVoiceBinBytes else { return false }
+        }
+        return true
+    }
+
     init() {
         Self.migrateLegacyMetalFiles()
         Self.removeQuantizedDownloads()
@@ -201,6 +290,12 @@ final class ModelManager: ObservableObject {
             Log.shared.info("ModelManager: Supertonic model already present")
         } else {
             supertonicState = .notDownloaded
+        }
+        if Self.phononFilesAreValid() {
+            phononState = .ready
+            Log.shared.info("ModelManager: Phonon model already present")
+        } else {
+            phononState = .notDownloaded
         }
     }
 
@@ -303,6 +398,99 @@ final class ModelManager: ObservableObject {
     var supertonicIsReady: Bool {
         if case .ready = supertonicState { return true }
         return false
+    }
+
+    var phononIsReady: Bool {
+        if case .ready = phononState { return true }
+        return false
+    }
+
+    /// Downloads the Phonon set (~192 MB: 2 fp32 graphs + tokenizer + 26 voice bins).
+    func startPhononDownload() {
+        if case .downloading = phononState { return }
+        guard !phononIsReady else { return }
+
+        // PocketPal lesson: estimate × ~1.5 headroom.
+        if let attrs = try? FileManager.default.attributesOfFileSystem(forPath: NSHomeDirectory()),
+           let free = attrs[.systemFreeSize] as? Int64,
+           free < 300_000_000 {
+            let message = "Not enough free space for Phonon (need ~300 MB, have \(free / 1_000_000) MB)"
+            phononState = .failed(message)
+            Log.shared.error("ModelManager: \(message)")
+            return
+        }
+
+        phononState = .downloading(progress: 0)
+        Log.shared.info("ModelManager: starting Phonon download (~192 MB)")
+
+        Task.detached { [weak self] in
+            do {
+                // Graphs + tokenizer, each mapped to its progress slice.
+                for index in 0..<Self.phononFiles.count {
+                    let file = Self.phononFiles[index]
+                    let upper = index + 1 < Self.phononFiles.count
+                        ? Self.phononFiles[index + 1].from
+                        : 0.90
+                    try await self?.download(
+                        from: Self.phononBaseURL.appendingPathComponent(file.subpath),
+                        to: Self.phononOnnxDirectory.appendingPathComponent((file.subpath as NSString).lastPathComponent),
+                        expectedBytes: file.bytes,
+                        progressRange: file.from...upper,
+                        publishingTo: { [weak self] value in self?.reportPhononProgress(value) }
+                    )
+                }
+                // All 26 voice bins (~256 KB each) share the final slice.
+                for (index, voice) in Self.phononVoices.enumerated() {
+                    let lower = 0.90 + 0.10 * Double(index) / Double(Self.phononVoices.count)
+                    let upper = 0.90 + 0.10 * Double(index + 1) / Double(Self.phononVoices.count)
+                    try await self?.download(
+                        from: Self.phononBaseURL.appendingPathComponent("voices/\(voice).bin"),
+                        to: Self.phononVoiceFileURL(voice: voice),
+                        expectedBytes: Self.phononVoiceBinBytes,
+                        progressRange: lower...upper,
+                        publishingTo: { [weak self] value in self?.reportPhononProgress(value) }
+                    )
+                }
+                await MainActor.run {
+                    guard let self else { return }
+                    if Self.phononFilesAreValid() {
+                        self.phononState = .ready
+                        Log.shared.info("ModelManager: Phonon download complete")
+                        self.onReady?()
+                    } else {
+                        self.phononState = .failed("Downloaded Phonon files failed validation")
+                        Log.shared.error("ModelManager: Phonon files failed validation after download")
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    guard let self else { return }
+                    self.phononState = .failed(error.localizedDescription)
+                    Log.shared.error("ModelManager: Phonon download failed: \(error)")
+                }
+            }
+        }
+    }
+
+    func deletePhononModels() {
+        try? FileManager.default.removeItem(at: Self.phononDirectory)
+        var cleanup: [URL] = Self.phononFiles.map {
+            Self.phononOnnxDirectory.appendingPathComponent(($0.subpath as NSString).lastPathComponent)
+        }
+        cleanup += Self.phononVoices.map { Self.phononVoiceFileURL(voice: $0) }
+        for base in cleanup {
+            try? FileManager.default.removeItem(at: base.appendingPathExtension("part"))
+            try? FileManager.default.removeItem(at: base.appendingPathExtension("resumeData"))
+            try? FileManager.default.removeItem(at: base.appendingPathExtension("resumeSource"))
+        }
+        phononState = .notDownloaded
+        Log.shared.info("ModelManager: Phonon models deleted")
+    }
+
+    private func reportPhononProgress(_ value: Double) {
+        if case .downloading = phononState {
+            phononState = .downloading(progress: value)
+        }
     }
 
     /// Downloads the Supertonic set (~399 MB total, 16 files).

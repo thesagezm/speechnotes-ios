@@ -26,6 +26,7 @@ its model once, and notes are spoken fully offline (airplane-mode tested):
 |---|---|---|---|
 | Apple (system) | 0 | all system voices | Instant, no download |
 | **Kokoro** (ONNX, CPU) | ~341 MB High (fp32) / ~92 MB Compact (int8) | 28 (US/UK, m/f) | One engine, a quality dial |
+| **Phonon** (ONNX, CPU) | ~192 MB | 27 (US/UK + default) | Compact English streaming TTS — new, no speed control yet |
 | **Supertonic** (ONNX, CPU) | ~399 MB | 10 styles × 31 languages | Multilingual — flow-matching TTS |
 
 Kokoro's Compact tier is the dynamic-int8 `model_quantized.onnx` (~92 MB) —
@@ -171,7 +172,7 @@ speechnotes-ios/
 ├── project.yml                  # XcodeGen spec (targets, pins, version)
 ├── .github/workflows/build.yml  # CI: tests + spikes + unsigned IPA
 ├── App/Sources/
-│   ├── Engine/                  # SpeechEngine protocol + 3 engines
+│   ├── Engine/                  # SpeechEngine protocol + 4 engines
 │   │   │                        #   + PlayPositionTracker (read-along sync)
 │   │   └── Supertonic/Helper.swift  # vendored upstream runner (MIT)
 │   ├── Services/                # NotesStore, NotebooksStore, BooksStore,
@@ -192,6 +193,7 @@ speechnotes-ios/
 │                                #   JoplinCrypto/Vault, JexExport/Import
 ├── Tests/KokoroSmallSpike/      # standalone ONNX contract spike
 ├── Tests/SupertonicSpike/       # standalone ONNX contract spike
+├── Tests/PhononSpike/           # standalone ONNX contract spike
 ├── Tests/EpubSpike/             # EPUB parser contract spike (real books)
 ├── Tests/PdfSpike/              # PDF chapter resolver contract spike
 ├── Scripts/                     # package-ipa.sh, watch_ci.sh, make_icon.py,
@@ -216,6 +218,7 @@ inside LiveContainer.
 ## Licenses & credits
 
 - [Kokoro](https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX) — Apache-2.0 (model), voice bank from the KokoroTestApp project
+- [Phonon](https://huggingface.co/onnx-community/phonon-31m-en-ONNX) — Gradium phonon-31m-en via the onnx-community conversion; Apache-2.0 (model, conversion, voices)
 - [supertonic-3](https://huggingface.co/Supertone/supertonic-3) — Supertone; the vendored Swift Helper is MIT
 - [epub.js](https://github.com/futurepress/epub.js) — FreeBSD, vendored under `App/Resources/epubjs/` for the offline EPUB reader
 - ONNX Runtime (MIT), XcodeGen, and Apple's AVFoundation do the heavy lifting.

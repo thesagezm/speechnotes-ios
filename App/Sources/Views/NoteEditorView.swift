@@ -216,6 +216,7 @@ struct NoteEditorView: View {
     private var voicePickerScope: VoicePickerSheet.Scope {
         switch player.engineKind {
         case .supertonic: return .supertonic
+        case .phonon: return .phonon
         default: return .kokoro
         }
     }
