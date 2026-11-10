@@ -189,8 +189,8 @@ final class PhononSpikeTests: XCTestCase {
 
             let outputs = try flowSession.run(
                 withInputs: feeds,
-                outputNames: ["audio_latents", "present.audio_latents", "eos_logits"]
-                    + (0..<flowLayers).flatMap { ["present.\($0).key", "present.\($0).value"] },
+                outputNames: Set(["audio_latents", "present.audio_latents", "eos_logits"]
+                    + (0..<flowLayers).flatMap { ["present.\($0).key", "present.\($0).value"] }),
                 runOptions: nil)
 
             // The flow's audio_latents is the CUMULATIVE latent history,
