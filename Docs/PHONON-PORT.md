@@ -54,7 +54,7 @@ Inputs (batch 1):
 | `input_ids` | int64 [1, T] | text tokens ONLY (no specials — the graph prepends the voice and BOS-latent itself) |
 | `audio_prompt_latents` | float32 [1, 125, 512] | the voice. **The `.bin` is [1, 512, 125] little-endian — transpose to [1, 125, 512]** |
 | `attention_mask` | int64 [1, past_kv + P + 7] | all ones; P = 125 + T + 1. Length is load-bearing: each unrolled frame slices it to `past + P + k` (k = 0…7), so it must cover the final frame |
-| `position_ids` | int64 [1, past_kv + P + 7] | `arange(past_kv, past_kv + P + 7)` — frame 0 slices `[0 : P]`, frames 1-7 take single positions |
+| `position_ids` | int64 [1, P + 7] | `concat(arange(0, P-1), arange(P + past_kv - 1, P + past_kv + 7))` — NON-contiguous is fine; the graph slices `[0 : P]` for the prompt block and `[P + k]` for frames 1-7 (see the positions paragraph below) |
 | `noise` | float32 [1, 8, 32] | per-frame Gaussian × √temperature (0.3; 0 = deterministic) |
 | `past_key_values.audio_latents` | float32 [1, past, 32] | the FULL latent history, normalized space (feed `present.audio_latents` straight back) |
 | `past_key_values.{0..5}.key/value` | float32 [1, 8, past_kv, 64] | 6 layers × KV cache |
@@ -71,18 +71,50 @@ Outputs:
 **KV feedback policy**: keep the latent K/Vs, drop the re-run voice+text
 block of each present cache. `present` = [fed-back latents (past_kv) |
 prompt (P) | 7 new] where the prompt block's LAST row is the CURRENT input
-latent — that row is KEPT (it is latent L_{n-1}'s position on the reference
-timeline), so the next call feeds back `[0 : past_kv) ++ [past_kv + P - 1 :]`.
+latent — that row is KEPT (it is the row that generates the call's first
+latent), so the next call feeds back `[0 : past_kv) ++ [past_kv + P - 1 :]`.
 The KV therefore grows by the same +8 frames per call as the latent history
-(`past_kv == latentHistoryCount`), and `position_ids = arange(past_kv,
-past_kv + P + 7)` places every frame query and every fed-back row at its
-exact reference-timeline offset (latent L_i is input at position P + i — the
-graph re-runs each call's input latent inside its prompt block at that same
-offset). The re-run voice+text rows sit at nearer attention distances than
-the reference's receding prompt (unavoidable: the input slot is welded to
-the prompt block's end); the reference-faithful latent geometry is what the
-model's dynamics ride on, and x86 sweeps show it clean. The cos/sin cache
-covers 8192 positions; the EOS-capped call count keeps offsets well under.
+(`past_kv == latentHistoryCount`).
+
+**Positions (reference-exact — xn-ptts)**: `position_ids` values may be
+NON-CONTIGUOUS — the graph only slices `[0 : P]` for the prompt block and
+`[P + k]` for frames 1-7, and nothing requires contiguous values. The
+recipe is `concat(arange(0, P-1), arange(P + past_kv - 1, P + past_kv + 7))`:
+
+- the re-run voice+text rows sit at their TRUE absolute positions
+  `0 .. P-2` on EVERY call — the reference prompts them into the KV once
+  with that RoPE baked and never moves them;
+- the input slot (the prompt block's last row, which generates the call's
+  first latent) sits at `P + past_kv - 1` and the 7 frames at
+  `P + past_kv … P + past_kv + 6` — the reference's next-input-row position
+  (bos at `V+T = P-1`, then +1 per latent: the row that generates latent
+  L_i sits at `P - 1 + i`).
+
+Provenance (verified against /tmp/xn-ptts): `qnn/runner/phonon.cpp` — voice
+KV baked at `0..V-1`, text prefill cached ONCE at `V..V+T-1`, then
+`*buf_.pos = pos; …; pos++` per latent row on the contiguous absolute
+timeline, cache never trimmed; `transformer.rs:736-745` — RoPE offset =
+`current_end` (FlowLm cache length), append-only (trim is Mimi-only);
+`synth.rs:1233/1319` + `flow_lm.rs:296` — `prompt_text` once per chunk,
+one `StepInput::Bos/Latent` row per step; `seq_budget = text + prompt +
+headroom` (the text is NOT re-cached per step).
+
+The first port shipped the contiguous `arange(past_kv, past_kv + P + 7)`:
+the re-run prompt rows rode the moving timeline (+8 positions per call),
+so their attention distances froze at call-1 values (the prompt appears
+adjacent forever instead of receding as the latent history grows) and
+their K/V changed every call — the device's after-~4-words artifacts
+(calls 2-3). The earlier claim that a receding prompt was "unavoidable"
+was wrong, and backwards: the reference's prompt does NOT recede out of
+the cache — it is cached once at fixed positions forever. The
+non-contiguous recipe makes the re-run prompt rows bitwise identical
+call-to-call (x86 probe: layer-0 key drift across calls 9-10 → 0.0), so
+the fed-back cache replicates the reference's baked cache; input-slot and
+frame positions are unchanged from the old form, so every fed-back row
+keeps its baked RoPE and every query sits at its exact reference
+distance. Call 1 (`past_kv = 0`) degenerates to the old contiguous form.
+The cos/sin cache covers 8192 positions; the EOS-capped call count keeps
+offsets well under.
 
 **KV LAYOUT TRAP (the device bug)**: the caches are `[1, heads, seq, dim]`
 — HEAD-major. Rows are STRIDED: position t of every head is 8 separate

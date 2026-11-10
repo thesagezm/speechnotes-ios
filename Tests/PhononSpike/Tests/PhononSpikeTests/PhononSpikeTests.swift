@@ -185,8 +185,16 @@ final class PhononSpikeTests: XCTestCase {
             feeds["input_ids"] = try int64Tensor(values: ids.map(Int64.init), dims: [1, T])
             feeds["audio_prompt_latents"] = try floatTensor(values: voice, dims: [1, voiceFrames, voiceDim])
             feeds["attention_mask"] = try int64Tensor(values: [Int64](repeating: 1, count: total), dims: [1, total])
+            // Reference-exact positions (mirror of the engine): the re-run
+            // voice+text rows at their true absolute positions 0..<P-1 on
+            // every call (the reference caches them once, RoPE baked, never
+            // moved — qnn/runner/phonon.cpp), input slot at P + pastKVCount-1
+            // then the 7 frames. Non-contiguous is fine: the graph only
+            // slices [0:P] and [P+k]. Call 1 (pastKVCount = 0) is contiguous.
+            let frameStart = P + pastKVCount - 1
             feeds["position_ids"] = try int64Tensor(
-                values: (pastKVCount..<(pastKVCount + P + framesPerCall - 1)).map(Int64.init),
+                values: (0..<(P - 1)).map(Int64.init)
+                    + (frameStart..<(frameStart + framesPerCall)).map(Int64.init),
                 dims: [1, P + framesPerCall - 1])
             feeds["noise"] = try floatTensor(values: noise, dims: [1, framesPerCall, latentDim])
             for (index, value) in kv.enumerated() {
@@ -213,8 +221,9 @@ final class PhononSpikeTests: XCTestCase {
             // KV feedback: keep the latent K/Vs, drop the re-run voice+text
             // block of each present cache. The prompt block's LAST row (the
             // current input latent) is kept too, so the KV grows by the same
-            // +8 per call as the latent history and every frame query and
-            // fed-back row sits at its exact reference-timeline offset.
+            // +8 per call as the latent history, and the position feed (above)
+            // pins the re-run prompt rows at their true absolute positions so
+            // the kept rows carry exactly the RoPE the reference baked.
             //
             // LAYOUT: the cache is [1, heads, seq, dim] — HEAD-major; rows
             // are strided, so a contiguous float prefix is NOT "the first N

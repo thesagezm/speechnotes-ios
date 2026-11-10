@@ -1,5 +1,12 @@
 # HANDOVER — Phonon TTS: the position recipe is still wrong (device: artifacts after ~4 words)
 
+> **STATUS (2026-11-11): EXECUTED.** The recipe below was verified against `/tmp/xn-ptts`
+> ground truth (`qnn/runner/phonon.cpp`, `transformer.rs`, `synth.rs` — all agree), proven in
+> `/tmp/phonon-diag/position_recipe_ab.py` (call-1 latents bit-identical; re-run prompt-row KV
+> drift across calls 9-10 → 0.0 bitwise; 8-seed renders no-regression), shipped to
+> `PhononEngine.swift` + the spike mirror, and `Docs/PHONON-PORT.md` corrected. See the
+> PROGRESS_LOG entry from this date. The "next steps" below are kept as the historical brief.
+
 Branch `batch-c-d-session`. Read this before touching `PhononEngine.swift`.
 
 ## State

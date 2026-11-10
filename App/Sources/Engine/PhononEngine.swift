@@ -319,10 +319,27 @@ final class PhononEngine: NSObject, SpeechEngine {
             feeds["input_ids"] = try Self.int64Tensor(values: ids.map(Int64.init), dims: [1, T])
             feeds["audio_prompt_latents"] = try Self.floatTensor(values: voice, dims: [1, Self.voiceFrames, Self.voiceDim])
             feeds["attention_mask"] = try Self.int64Tensor(values: [Int64](repeating: 1, count: total), dims: [1, total])
+            // Reference-exact positions (xn-ptts): the re-run voice+text rows
+            // keep their TRUE absolute positions 0..<P-1 on EVERY call — the
+            // reference prompts them into the KV once with that RoPE baked and
+            // never moves them (qnn/runner/phonon.cpp: voice KV at 0..V-1,
+            // text prefill cached once at V..V+T-1, each latent row at pos =
+            // cache length; transformer.rs: RoPE offset = current_end). Only
+            // the input slot and the 7 frames ride the moving timeline: the
+            // input slot is the row that generates the call's first latent,
+            // at P + pastKVCount - 1 (bos at V+T = P-1, then +1 per latent).
+            // position_ids may be NON-CONTIGUOUS — the graph only slices
+            // [0:P] for the prompt block and [P+k] for the frames. The old
+            // contiguous form dragged the prompt +8 positions along each
+            // call, freezing its attention distances at call-1 values (the
+            // prompt never recedes) — the after-~4-words artifacts. Call 1
+            // (pastKVCount = 0) degenerates to the old contiguous form.
             // Hoisted so the tensor call is not a range→map→dims expression
             // sandwich — this line is the one that blew the type-checker's
             // time budget in the first compile round.
-            let positionValues: [Int64] = (pastKVCount..<(pastKVCount + P + Self.framesPerCall - 1)).map(Int64.init)
+            let frameStart = P + pastKVCount - 1
+            let positionValues: [Int64] = (0..<(P - 1)).map(Int64.init)
+                + (frameStart..<(frameStart + Self.framesPerCall)).map(Int64.init)
             feeds["position_ids"] = try Self.int64Tensor(values: positionValues, dims: [1, positionValues.count])
             feeds["noise"] = try Self.floatTensor(values: noise, dims: [1, Self.framesPerCall, Self.latentDim])
             for (index, value) in kv.enumerated() {
@@ -358,9 +375,11 @@ final class PhononEngine: NSObject, SpeechEngine {
             // LAST row — that row is kept (it is latent L_{n-1}'s position on
             // the reference timeline), so per call the KV grows by the same
             // +8 as the latent history and `present` becomes
-            // [fed-back latents | input-slot row | 7 new]. Positions
-            // arange(past_kv, past_kv + P + 7) then place every frame query
-            // and every fed-back row at its exact reference offset.
+            // [fed-back latents | input-slot row | 7 new]. The position feed
+            // (above) pins the re-run voice+text rows at their true absolute
+            // positions, so the kept rows carry exactly the RoPE the
+            // reference baked into its cache — the re-run prompt rows are
+            // bitwise identical call-to-call (x86 probe: drift 9-10 → 0.0).
             //
             // LAYOUT: the cache is [1, heads, seq, dim] — HEAD-major. Rows
             // are therefore strided, NOT contiguous: copying
