@@ -880,18 +880,40 @@ func loadTextToSpeech(_ onnxDir: String, _ useGpu: Bool, _ env: ORTEnv, intraOpT
         try sessionOptions.setIntraOpNumThreads(intraOpThreads)
     }
     // Speechnotes' CoreML EP variant (Phase 5 of the hybrid CPU+ANE plan).
-    // Configuration mirrors the Phase-4 runner parity gate EXACTLY (run
-    // 42718617400, Part B): EP appended with default compute units —
-    // MLComputeUnits "All" — which passed the oracle gate at Pearson 1.0000
-    // / rel-RMS 0.0007 with CoreML active on all four sessions. Anything
-    // else (GPU pin, static shapes) would be an unmeasured configuration.
+    // The option set is the full ANE-facing configuration from the Phase-2
+    // placement plan (§5), with every value that could change math pinned to
+    // what the Phase-4 runner gate PROVED (run 42718617400, Part B PASS:
+    // Pearson 1.0000, rel-RMS 0.0007, CoreML active on all four sessions):
+    // - MLComputeUnits "All": ANE (the NPU) stays eligible; CPU/GPU take
+    //   whatever CoreML declines.
+    // - ModelFormat "MLProgram": the format the runner gate ran (the ORT
+    //   default) and the one with real ANE support — spelled out so a future
+    //   ORT default flip can't silently move the experiment.
+    // - ModelCacheDirectory: compiled CoreML specializations persist across
+    //   launches in the purgeable caches dir, so only the FIRST ever run per
+    //   input shape pays ANE compile — the TTFA lever. Pure infrastructure,
+    //   no math change; ORT keys the cache by model identity.
+    // Deliberately NOT set: RequireStaticInputShapes (these graphs have a
+    // dynamic text-length axis; static-only eligibility would SHRINK the
+    // EP's node coverage), SpecializationStrategy=FastPrediction (could
+    // trade specialization quality for compile time — an unmeasured audible
+    // risk; steady-state speed doesn't depend on it), EnableOnSubgraphs
+    // (no subgraphs in these models).
     // A failed append degrades to CPU-only rather than failing the load:
     // the EP is an experiment dial, never a load-bearing dependency.
     if useCoreML {
         do {
-            let providerOptions: [AnyHashable: Any] = ["MLComputeUnits": "All"]
+            let cacheDir = NSSearchPathForDirectoriesInDomains(.cachesDirectory, .userDomainMask, true).first
+                ?? NSTemporaryDirectory()
+            let coremlCache = cacheDir + "/ort-coreml-cache"
+            try? FileManager.default.createDirectory(atPath: coremlCache, withIntermediateDirectories: true)
+            let providerOptions: [AnyHashable: Any] = [
+                "MLComputeUnits": "All",
+                "ModelFormat": "MLProgram",
+                "ModelCacheDirectory": coremlCache,
+            ]
             try sessionOptions.appendCoreMLExecutionProvider(withOptionsV2: providerOptions)
-            print("CoreML EP: appended (MLComputeUnits=All) — shared by all 4 sessions\n")
+            print("CoreML EP: appended (MLProgram, all units, cached) — shared by all 4 sessions\n")
         } catch {
             print("CoreML EP: append failed — falling back to CPU-only: \(error)\n")
         }

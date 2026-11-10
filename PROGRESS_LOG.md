@@ -698,3 +698,15 @@ target is GATED build-only (embed: false) because LiveContainer hosts no
 app extensions; enabling embed needs the user's say-so + an LC smoke
 test. CI: manual dispatch run 42723938178 on `ed50e7a` (compile oracle;
 one round budgeted).
+
+**Phase 5 follow-up: full CoreML EP option set + compiled-model cache
+(2026-11-10, same day).** The EP variant's provider options now spell out
+the full ANE-facing config from the Phase-2 placement plan: MLProgram
+format (what the runner gate proved) + all compute units (NPU eligible) +
+ModelCacheDirectory in the purgeable caches dir — only the first-ever run
+per input shape pays ANE specialization compile. RequireStaticInputShapes
+and FastPrediction deliberately left off (documented in Helper.swift why).
+User decision this round: NO benchmark session now — they will judge the
+EP variant's speed themselves by ear/feel; the Benchmark Mode EP tiers
+remain the formal acceptance instrument for when there IS time. Kokoro
+gets no EP code (round-3 parity ban stands).
