@@ -45,6 +45,10 @@ extension EnvironmentValues {
 enum EInk {
     static let paper = Color.white
     static let ink = Color.black
+    /// UIKit twins of paper/ink for the appearance proxies (the SwiftUI
+    /// Color constants can't bridge directly into UIColor arguments).
+    static let uiPaper = UIColor.white
+    static let uiInk = UIColor.black
     /// 1pt — E-Ink renders sub-point hairlines as dithered fuzz; a full
     /// point stays a crisp line.
     static let hairline: CGFloat = 1
@@ -69,13 +73,15 @@ enum EInk {
         let tab = UITabBarAppearance()
         if enabled {
             tab.configureWithOpaqueBackground()
-            tab.backgroundColor = UIColor(paper)
-            tab.shadowImage = hairlineImage(ink)
-            tab.stackedItemAppearance.normal.iconColor = UIColor(ink)
-            tab.stackedItemAppearance.normal.titleTextAttributes = [.foregroundColor: UIColor(ink)]
-            tab.stackedItemAppearance.selected.iconColor = UIColor(ink)
-            tab.stackedItemAppearance.selected.titleTextAttributes = [
-                .foregroundColor: UIColor(ink),
+            tab.backgroundColor = uiPaper
+            tab.shadowImage = hairlineImage(uiInk)
+            // Ink tab items — the grayscale root drains the default blue,
+            // this pushes full-contrast black.
+            tab.stackedLayoutAppearance.normal.iconColor = uiInk
+            tab.stackedLayoutAppearance.normal.titleTextAttributes = [.foregroundColor: uiInk]
+            tab.stackedLayoutAppearance.selected.iconColor = uiInk
+            tab.stackedLayoutAppearance.selected.titleTextAttributes = [
+                .foregroundColor: uiInk,
                 .font: UIFont.systemFont(ofSize: 10, weight: .semibold),
             ]
         } else {
@@ -87,11 +93,12 @@ enum EInk {
         let nav = UINavigationBarAppearance()
         if enabled {
             nav.configureWithOpaqueBackground()
-            nav.backgroundColor = UIColor(paper)
-            nav.shadowImage = hairlineImage(ink)
-            nav.titleTextAttributes = [.foregroundColor: UIColor(ink)]
-            nav.largeTitleTextAttributes = [.foregroundColor: UIColor(ink)]
-            nav.buttonBarButtonItemAppearance.normal.titleTextAttributes = [.foregroundColor: UIColor(ink)]
+            nav.backgroundColor = uiPaper
+            nav.shadowImage = hairlineImage(uiInk)
+            nav.titleTextAttributes = [.foregroundColor: uiInk]
+            nav.largeTitleTextAttributes = [.foregroundColor: uiInk]
+            // Toolbar buttons need no proxy: they are SwiftUI items and
+            // inherit the root accentColor, which is ink in this mode.
         } else {
             nav.configureWithDefaultBackground()
         }
@@ -125,9 +132,11 @@ struct EInkRootModifier: ViewModifier {
             content
                 .transaction { transaction in transaction.animation = nil }
                 .grayscale(1.0)
-                // Square every bordered/prominent button app-wide —
-                // buttonBorderShape propagates through the environment.
-                .buttonBorderShape(.rectangle)
+                // Square every bordered/prominent button app-wide — there
+                // is no .rectangle constant, so a zero-radius rounded
+                // rectangle is the square. buttonBorderShape propagates
+                // through the environment.
+                .buttonBorderShape(.roundedRectangle(radius: 0))
         } else {
             content
         }
