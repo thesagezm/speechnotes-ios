@@ -176,7 +176,7 @@ public struct PhononTokenizer {
             for j in (i + 1)...upper {
                 pieceBuffer.removeAll(keepingCapacity: true)
                 pieceBuffer.append(contentsOf: bytes[i..<j])
-                guard let piece = String(bytes: pieceBuffer, encoding: UTF8.self) else { continue }
+                guard let piece = String(bytes: pieceBuffer, encoding: String.Encoding.utf8) else { continue }
                 if let entry = vocab[piece] {
                     matched = true
                     let candidate = current + entry.score
