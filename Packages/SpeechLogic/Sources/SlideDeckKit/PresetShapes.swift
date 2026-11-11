@@ -315,12 +315,12 @@ func arrow(_ d: ArrowDir, _ w: Double, _ h: Double, _ a1: Double, _ a2: Double) 
     let (l, t) = lenThick(d, w, h)
     let ss = min(l, t)
     let a1c = clamp(a1, 0.0, 100000.0) / 100000.0
-    let dx = min(ss * clamp(a2, 0.0, 100000.0 * l / ss.maximum(1e-9)) / 100000.0, l)
+    let dx = min(ss * clamp(a2, 0.0, 100000.0 * l / ss.rustMax(1e-9)) / 100000.0, l)
     let y1 = t / 2.0 - t * a1c / 2.0
     let y2 = t / 2.0 + t * a1c / 2.0
     let pts: [(Double, Double)] = [(0.0, y1), (l - dx, y1), (l - dx, 0.0), (l, t / 2.0), (l - dx, t), (l - dx, y2), (0.0, y2)]
     let oriented = orient(d, w, h, pts)
-    let tr = orient(d, w, h, [(0.0, y1), (l - dx + dx * (y1 / (t / 2.0).maximum(1e-9)), y2)])
+    let tr = orient(d, w, h, [(0.0, y1), (l - dx + dx * (y1 / (t / 2.0).rustMax(1e-9)), y2)])
     let text = DRect.fromPoints(DPoint(x: tr[0].0, y: tr[0].1), DPoint(x: tr[1].0, y: tr[1].1)).abs()
     return Geometry(paths: [fill(Pb().poly(oriented).takePath())], textRect: text)
 }
@@ -351,7 +351,7 @@ func specPts(_ pts: [(Int32, Int32)], _ w: Double, _ h: Double) -> [(Double, Dou
 func wedgeRect(_ w: Double, _ h: Double, _ a0: Double, _ a1: Double, _ rIn: Double) -> Geometry {
     let tip = DPoint(x: w / 2.0 + w * a0 / 1e5, y: h / 2.0 + h * a1 / 1e5)
     let inside = tip.x > 0.0 && tip.x < w && tip.y > 0.0 && tip.y < h
-    let (dx, dy) = ((tip.x - w / 2.0) / w.maximum(1e-9), (tip.y - h / 2.0) / h.maximum(1e-9))
+    let (dx, dy) = ((tip.x - w / 2.0) / w.rustMax(1e-9), (tip.y - h / 2.0) / h.rustMax(1e-9))
     let b = Pb()
     let r = min(min(rIn, w / 2.0), h / 2.0)
     // Walk clockwise from the top-left; insert the wedge on the edge facing the tip.
@@ -482,7 +482,7 @@ func cloud(_ name: String, _ w: Double, _ h: Double, _ a0: Double, _ a1: Double)
 /// `adj1` of the shorter side thick, the others' `adj1` of the height.
 func math(_ name: String, _ w: Double, _ h: Double, _ a0: Double, _ a1: Double, _ a2: Double) -> Geometry {
     func pin(_ lo: Double, _ v: Double, _ hi: Double) -> Double {
-        min(v.maximum(lo), hi.maximum(lo))
+        min(v.rustMax(lo), hi.rustMax(lo))
     }
     let ss = min(w, h)
     let (hc, vc) = (w / 2.0, h / 2.0)
@@ -540,7 +540,7 @@ func math(_ name: String, _ w: Double, _ h: Double, _ a0: Double, _ a1: Double, 
         text = DRect(x0: x1, y0: y1, x1: x2, y1: y4)
     case "mathDivide":
         let a = pin(1000.0, a0, 36745.0)
-        let max3 = min((73490.0 - a) / 4.0, 36745.0 * w / h.maximum(1e-9))
+        let max3 = min((73490.0 - a) / 4.0, 36745.0 * w / h.rustMax(1e-9))
         let r3 = pin(1000.0, a2, max3)
         let g = pin(0.0, a1, 73490.0 - 4.0 * r3 - a)
         let dy1 = h * a / 200000.0
@@ -756,14 +756,14 @@ public func presetBuild(_ name: String, _ w: Double, _ h: Double, _ adj: [Double
     case "rtTriangle":
         g = simple(b.poly([(0.0, 0.0), (0.0, h), (w, h)]).takePath(), DRect.new(w / 12.0, h * 7.0 / 12.0, w * 7.0 / 12.0, h * 11.0 / 12.0))
     case "parallelogram", "flowChartInputOutput":
-        let v = name == "parallelogram" ? clamp(a(0), 0.0, 100000.0 * w / ss.maximum(1e-9)) : 20000.0 * w / ss.maximum(1e-9)
+        let v = name == "parallelogram" ? clamp(a(0), 0.0, 100000.0 * w / ss.rustMax(1e-9)) : 20000.0 * w / ss.rustMax(1e-9)
         let off = ss * v / 100000.0
         g = simple(
             b.poly([(0.0, h), (off, 0.0), (w, 0.0), (w - off, h)]).takePath(),
             DRect.new(off / 2.0 + off * 0.2, h * 0.08, w - off / 2.0 - off * 0.2, h * 0.92)
         )
     case "trapezoid":
-        let v = clamp(a(0), 0.0, 50000.0 * w / ss.maximum(1e-9))
+        let v = clamp(a(0), 0.0, 50000.0 * w / ss.rustMax(1e-9))
         let off = ss * v / 100000.0
         g = simple(b.poly([(0.0, h), (off, 0.0), (w - off, 0.0), (w, h)]).takePath(), DRect.new(off * 0.66, h * 0.2, w - off * 0.66, h))
     case "flowChartManualOperation":
@@ -786,7 +786,7 @@ public func presetBuild(_ name: String, _ w: Double, _ h: Double, _ adj: [Double
     case "dodecagon":
         g = simple(b.poly(polygonRegular(12, w, h, 15.0)).takePath(), DRect.new(w * 0.13, h * 0.13, w * 0.87, h * 0.87))
     case "hexagon", "flowChartPreparation":
-        let v = name == "hexagon" ? clamp(a(0), 0.0, 50000.0 * w / ss.maximum(1e-9)) : 20000.0 * w / ss.maximum(1e-9)
+        let v = name == "hexagon" ? clamp(a(0), 0.0, 50000.0 * w / ss.rustMax(1e-9)) : 20000.0 * w / ss.rustMax(1e-9)
         let off = ss * v / 100000.0
         g = simple(
             b.poly([(0.0, h / 2.0), (off, 0.0), (w - off, 0.0), (w, h / 2.0), (w - off, h), (off, h)]).takePath(),
@@ -839,7 +839,7 @@ public func presetBuild(_ name: String, _ w: Double, _ h: Double, _ adj: [Double
         g = simple(b.takePath(), full.inset(-r * 0.7))
     case "can", "flowChartMagneticDisk":
         // The disk's ends are a third of its height (ECMA-376: ellipses of radius h/6).
-        let v = name == "can" ? clamp(a(0), 0.0, 50000.0 * h / ss.maximum(1e-9)) : 100000.0 / 3.0 * h / ss.maximum(1e-9)
+        let v = name == "can" ? clamp(a(0), 0.0, 50000.0 * h / ss.rustMax(1e-9)) : 100000.0 / 3.0 * h / ss.rustMax(1e-9)
         let eh = ss * v / 100000.0
         let r = eh / 2.0
         let body = Pb().m(0.0, r).l(0.0, h - r).arc(w / 2.0, r, 180.0, -180.0).l(w, r).arc(w / 2.0, r, 0.0, -180.0).z().takePath()
@@ -1029,7 +1029,7 @@ public func presetBuild(_ name: String, _ w: Double, _ h: Double, _ adj: [Double
         // right edge; the inner edge an arc through the corners and (adj · w, middle) of a
         // larger ellipse (rx = g18, ry = dy1) whose centre lies right of that point.
         let k = clamp(a(0), 0.0, 87500.0) / 100000.0
-        let ssf = ss.maximum(1e-9)
+        let ssf = ss.rustMax(1e-9)
         let g0 = ss * k
         let g1 = max(ss - g0, 1e-9)
         let g2 = g0 * g0 / g1
@@ -1075,7 +1075,7 @@ public func presetBuild(_ name: String, _ w: Double, _ h: Double, _ adj: [Double
         let f = cornerRect(w, h, [.round(r), .round(r), .round(r), .round(r)])
         g = Geometry(paths: [fillOnly(f), strokeOnly(l.takePath())], textRect: full.inset(-r * 1.2))
     case "leftBracket", "rightBracket":
-        let r = min(ss * clamp(a(0), 0.0, 50000.0 * h / ss.maximum(1e-9)) / 1e5, h / 2.0)
+        let r = min(ss * clamp(a(0), 0.0, 50000.0 * h / ss.rustMax(1e-9)) / 1e5, h / 2.0)
         let l = Pb()
         l.m(w, h).arc(w, r, 90.0, 90.0).l(0.0, r).arc(w, r, 180.0, 90.0)
         var path = l.takePath()
@@ -1087,7 +1087,7 @@ public func presetBuild(_ name: String, _ w: Double, _ h: Double, _ adj: [Double
         area.close()
         g = Geometry(paths: [fillOnly(area), strokeOnly(path)], textRect: full)
     case "leftBrace", "rightBrace":
-        let r = min(ss * clamp(a(0), 0.0, 25000.0 * h / ss.maximum(1e-9)) / 1e5, h / 4.0)
+        let r = min(ss * clamp(a(0), 0.0, 25000.0 * h / ss.rustMax(1e-9)) / 1e5, h / 4.0)
         let my = h * clamp(a(1), 0.0, 100000.0) / 1e5
         let hw = w / 2.0
         let l = Pb()
@@ -1131,7 +1131,7 @@ public func presetBuild(_ name: String, _ w: Double, _ h: Double, _ adj: [Double
         }
         g = ga
     case "homePlate", "chevron":
-        let v = clamp(a(0), 0.0, 100000.0 * w / ss.maximum(1e-9))
+        let v = clamp(a(0), 0.0, 100000.0 * w / ss.rustMax(1e-9))
         let d = min(ss * v / 1e5, w)
         let pts: [(Double, Double)] = name == "homePlate"
             ? [(0.0, 0.0), (w - d, 0.0), (w, h / 2.0), (w - d, h), (0.0, h)]

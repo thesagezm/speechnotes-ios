@@ -57,7 +57,7 @@ public struct DPoint: Equatable, Sendable {
     public static func - (a: DPoint, b: DPoint) -> DVec { DVec(dx: a.x - b.x, dy: a.y - b.y) }
 
     public func dist(_ o: DPoint) -> Double {
-        (self - o).hypot()
+        (self - o).hypot
     }
 }
 
@@ -80,8 +80,10 @@ public struct DVec: Equatable, Sendable {
 
     public static func + (a: DVec, b: DVec) -> DVec { DVec(dx: a.dx + b.dx, dy: a.dy + b.dy) }
     public static func - (a: DVec, b: DVec) -> DVec { DVec(dx: a.dx - b.dx, dy: a.dy - b.dy) }
-    public static func - (v: DVec) -> DVec { DVec(dx: -v.dx, dy: -v.dy) }
+    public static prefix func - (v: DVec) -> DVec { DVec(dx: -v.dx, dy: -v.dy) }
     public static func * (v: DVec, k: Double) -> DVec { DVec(dx: v.dx * k, dy: v.dy * k) }
+    /// Scalar on the left (kurbo implements `f64 * Vec2`; the arc builder uses it).
+    public static func * (k: Double, v: DVec) -> DVec { DVec(dx: k * v.dx, dy: k * v.dy) }
     public static func / (v: DVec, k: Double) -> DVec { DVec(dx: v.dx / k, dy: v.dy / k) }
 
     public var hypot2: Double { dx * dx + dy * dy }
@@ -435,6 +437,8 @@ private func sampleEllipse(_ rx: Double, _ ry: Double, _ angle: Double) -> DVec 
 /// 0.13.1's `Arc::to_cubic_beziers(tolerance)` does: segment count from the
 /// error formula, arm length from the segment angle's tangent quarter.
 func arcToCubics(center: DPoint, rx: Double, ry: Double, startAngle: Double, sweepAngle: Double, tolerance: Double, into path: inout GeomPath) {
+    // Kurbo would emit NaN geometry; a viewer skips instead.
+    guard rx.isFinite, ry.isFinite, startAngle.isFinite, sweepAngle.isFinite else { return }
     let sign: Double = sweepAngle < 0 ? -1.0 : 1.0
     let scaledErr = max(rx, ry) / tolerance
     // Number of subdivisions per ellipse based on error tolerance (kurbo:
@@ -549,5 +553,18 @@ func clamp(_ v: Double, _ lo: Double, _ hi: Double) -> Double {
 /// Rust's `rem_euclid`: the remainder in 0..<m for m > 0.
 func remEuclid(_ a: Double, _ m: Double) -> Double {
     let r = a.truncatingRemainder(dividingBy: m)
-    return r < 0 ? r + m.abs() : r
+    return r < 0 ? r + abs(m) : r
+}
+
+extension Double {
+    /// Rust's `f64::max`: a NaN argument yields the other operand (Swift's
+    /// comparison-based `max` would propagate NaN instead).
+    func rustMax(_ other: Double) -> Double {
+        isNaN ? other : max(self, other)
+    }
+
+    /// Rust's `f64::min`.
+    func rustMin(_ other: Double) -> Double {
+        isNaN ? other : min(self, other)
+    }
 }

@@ -19,7 +19,7 @@ func presetBuildExtra(_ name: String, _ w: Double, _ h: Double, _ a: (Int) -> Do
         let l = b.m(0.0, h).l(w, 0.0).takePath()
         g = Geometry(paths: [strokeOnly(l)], textRect: full)
     case "nonIsoscelesTrapezoid":
-        let maxV = 50000.0 * w / ss.maximum(1e-9)
+        let maxV = 50000.0 * w / ss.rustMax(1e-9)
         let (v1, v2) = (clamp(a(0), 0.0, maxV), clamp(a(1), 0.0, maxV))
         let (d1, d2) = (ss * v1 / 1e5, ss * v2 / 1e5)
         g = simple(b.poly([(0.0, h), (d1, 0.0), (w - d2, 0.0), (w, h)]).takePath(), DRect.new(d1 * 0.66, h * 0.2, w - d2 * 0.66, h))
@@ -279,7 +279,7 @@ func gear(_ n: Int, _ w: Double, _ h: Double, _ a0: Double, _ a1: Double) -> Geo
     let ss = min(w, h)
     let th = ss * clamp(a0, 0.0, 20000.0) / 1e5 // tooth height
     let leanMax = n == 6 ? 5380.0 : 2730.0
-    let l = ss * clamp(a1, 0.0, clamp(a0, 0.0, 20000.0).minimum(leanMax)) / 1e5 // flank lean
+    let l = ss * clamp(a1, 0.0, clamp(a0, 0.0, 20000.0).rustMin(leanMax)) / 1e5 // flank lean
     let (cx, cy) = (w / 2.0, h / 2.0)
     let (rx, ry) = (max(cx - th, 0.0), max(cy - th, 0.0))
     let r = max(ss / 2.0 - th, 1e-9)
