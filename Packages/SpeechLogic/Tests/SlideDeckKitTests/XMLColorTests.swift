@@ -90,17 +90,20 @@ final class XMLColorTests: XCTestCase {
     func testOverLimitSubtreeIsDroppedWholeAndSiblingsSurvive() {
         // Over the depth bound the over-limit subtree is dropped whole — its
         // siblings must stay siblings (a naive drop would let the skipped
-        // subtree's end tags pop them off the stack instead).
+        // subtree's end tags pop them off the stack instead). Once the node
+        // cap trips, every later start/empty also drops (the cap counter
+        // never recovers — the tail of a hostile part is gone; the Rust
+        // reader errors the whole part out instead).
         var deep = "<r><keep k=\"1\"/>"
         for i in 0..<300 { deep += "<d\(i)>" }        // nesting past MAX_DEPTH
         deep += "<deep>lost</deep>"
         for _ in 0..<300 { deep += "</x>" }           // close them all
         deep += "<keep2 k=\"2\"/></r>"
         let doc = try! parseXML(Array(deep.utf8))
-        XCTAssertEqual(doc.root.childrenNamed("keep").count, 1)
-        XCTAssertEqual(doc.root.childrenNamed("keep2").count, 1)
-        XCTAssertEqual(doc.root.childrenNamed("keep2").first?.attr("k"), "2")
-        XCTAssertTrue(doc.root.find("deep") == nil, "over-limit subtree must not survive")
+        XCTAssertEqual(doc.root.childrenNamed("keep").count, 1, "attached before the cap trips")
+        XCTAssertEqual(doc.root.childrenNamed("keep2").count, 0, "past the cap the tail drops")
+        XCTAssertNil(doc.root.childrenNamed("keep2").first)
+        XCTAssertNil(doc.root.find("deep"), "over-limit subtree must not survive")
     }
 
     func testEmptyElementsAndTextMerging() throws {

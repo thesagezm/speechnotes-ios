@@ -4,6 +4,70 @@ Format: newest first. Every critique round, merge, and escalation lands here.
 
 ---
 
+**Slide-deck port M1 started: SlideDeckKit (XML + colors + full preset geometry) lands green** (branch `batch-c-d-session`, 2026-11-11):
+- **New package target `SlideDeckKit`** (Package.swift: product + target, zero
+  dependencies — the deck stack must not drag COpus/cmark into its importers)
+  carrying the DeckCraft port (github.com/storytold/deckcraft @ a0eeb34,
+  MIT/Apache-2.0) approved in HANDOVER-SLIDE-DECKS.md. Three commits: XML DOM +
+  colours (`42254fe`, CI run 43084191092), preset geometry (`676f4a5`, CI run
+  43097929997).
+- **XML.swift** — the bounded XML DOM from pptx/src/xml.rs, with the scanner
+  hand-rolled over UTF-8 bytes because quick-xml semantics must hold exactly: a
+  literal CR/CRLF folds to LF while a `&#13;` reference stays a CR (XML 1.0
+  §2.11 — the reason Foundation's XMLParser was rejected), attribute values
+  normalize literal whitespace but keep reference-resolved whitespace,
+  attributes match by local name (xmlns decls never match), depth 256 / 4M
+  nodes bounded, truncated docs fold up, bare `&` is literal text. XNode is
+  deliberately NOT `indirect`: recursion passes only through XEl.children
+  (an Array, heap-backed) — the exact shape of the Rust `Vec<Node>`, no per-node
+  boxing; CI confirmed it compiles as written.
+- **First-draft bugs caught by re-reading against the Rust before CI** (this
+  repo has no local toolchain; CI is the loop): missing Foundation imports;
+  CDATA/comment detection compared the needle at the `!` byte instead of the
+  `<` and could never match; `attach`/`pushText` mutated `stack.last` through
+  an immutable binding (XEl is a struct — index-based mutation instead); a
+  start element dropped for hitting a limit let its end tag pop its PARENT off
+  the stack and re-parent siblings — the over-limit subtree is now skipped
+  whole via a skip-depth counter, matching the Rust reader's all-or-nothing
+  intent. CI found only two test-file slips (Rust-style `u8` literal suffixes,
+  an XEl comparison); the library itself compiled first pass on both runs.
+- **Color.swift** — sRGB `Rgba`, the twelve scheme slots + phClr, the DrawingML
+  transform set (linear-light tint/shade, HSL lum/sat/hue mod+off, alpha
+  family, comp/inv/gray, channel mods), preset colour names. Editor surface
+  (picker grid, standard-colour rows, 190-name preset enumeration) not ported.
+- **Preset geometry, the full read-path surface** — Geom.swift (kurbo
+  stand-ins DPoint/DVec/DRect/DAffine, GeomPath with `toSVG()` byte-matching
+  kurbo's format — shortest round-trip, plain decimal, Rust `Display` rules;
+  adaptive flattening for bounds/area/point-distance; EMU↔pt; Xfrm; kurbo
+  0.13.1's Arc→cubic approximation ported bit-for-bit so arc-heavy shapes emit
+  the reference's exact control points), PresetCatalog.swift (184-entry
+  CATALOG + defaults, mitredByDefault, isLineLike), PresetShapes.swift (Pb
+  builder + the whole build() switch: corner rects, stars, pie/chord/arc, sun/
+  moon, cloud arcTo tables, equation shapes, block arrows, flowcharts incl.
+  multidocument's outline-where-visible, ribbons, scrolls, action buttons,
+  connectors), PresetShapesExtra.swift (callouts, curved/circular arrows,
+  ellipse ribbons, gears, funnel, swoosh). Handles and glue sites dropped
+  (editor-only, per the approved decision). The viewer renders preset shapes
+  as ONE `outline().toSVG()` — verified against sn-doc's shape_svg consumer.
+- **Tests ported from the Rust geometry suites** (PresetTests.swift): every
+  catalog preset builds within bounds at five sizes; hostile adjusts
+  (NaN/inf/±1e12/±Double.max ×8) never break a build; ECMA-376 fixed-shape
+  coordinates; PowerPoint-outline reference points for ~30 shapes (equation
+  shapes, sun, waves, stars, moon, cloud, braces, callouts, curved/circular
+  arrows, gears, swoosh, ribbons) — distances over a 1e-4 flattened outline;
+  arc-spec direction semantics (the DrawingML visual→parametric mapping);
+  areas; EMU roundtrip; Rust-Display number formatting. XMLColorTests pins the
+  scanner contract (CR distinction, attribute normalization, local-name
+  lookup, bounds, truncation folding, UTF-16 parts) and the colour math.
+- **Next (M1 continues):** model types + resolve.rs port (`Model.swift`,
+  `Resolve.swift`, `Theme.swift`, `Style.swift`, `DMLText.swift`, `Table.swift`,
+  `ChartModel.swift`, `Defaults.swift`, `NumFmt.swift`) → Zip.swift (own copy
+  of the zip reader, per decision) → pptx read (OPC/CFB sniffer/read modules)
+  → ODP → slides.rs resolution → in-memory pptx/odp fixtures. Nothing from the
+  app target touched yet.
+
+---
+
 **Web import: flat-paragraph root cause found + fixed, bypass on every import, hang-proof pipeline** (branch `batch-c-d-session`, 2026-11-10):
 - **Why EVERY article imported flat (no headings/links/images):** the
   vendored Readability 0.5.0 returns `parsed.content` as an HTML STRING

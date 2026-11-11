@@ -360,9 +360,11 @@ private final class XDOMBuilder {
         guard rest0 < bytes.count else { throw XError.malformed("dangling '<'") }
         let b = bytes[rest0]
         if b == 0x21 { // '!' — comment, CDATA or DOCTYPE
-            // The needles start at the '<' itself, i.e. at pos, not rest0.
+            // The needles start at the '<' itself, i.e. at pos, not rest0, and
+            // the skip must consume the whole construct through its closer.
             if has(pos, "<![CDATA[") {
-                let start = rest0 + 9
+                // "<![CDATA[" is 9 bytes (pos..pos+8); content starts at pos+9.
+                let start = pos + 9
                 var end = start
                 while end + 2 < bytes.count, !(bytes[end] == 0x5D && bytes[end + 1] == 0x5D && bytes[end + 2] == 0x3E) {
                     end += 1
@@ -372,15 +374,31 @@ private final class XDOMBuilder {
                 return .cdata(String(decoding: body, as: UTF8.self))
             }
             if has(pos, "<!--") {
-                pos = findSequence(rest0 + 4, "-->") ?? bytes.count
+                // Search from the content start (pos+4) so an empty comment
+                // matches, then step past the "-->".
+                pos = (findSequence(pos + 4, "-->") ?? bytes.count) + 3
                 return nil
             }
-            // DOCTYPE and the rest of the <!…> family: skip to '>'.
-            pos = findByte(rest0 + 2, 0x3E) ?? bytes.count
+            // DOCTYPE and the rest of the <!…> family: skip to '>', honouring
+            // an internal subset (a '[' defers the close to its matching ']').
+            var j = rest0 + 1
+            var inSubset = false
+            while j < bytes.count {
+                let c = bytes[j]
+                if c == 0x5B { // '['
+                    inSubset = true
+                } else if c == 0x5D { // ']'
+                    inSubset = false
+                } else if c == 0x3E, !inSubset { // '>'
+                    break
+                }
+                j += 1
+            }
+            pos = min(j + 1, bytes.count)
             return nil
         }
-        if b == 0x3F { // '?' — processing instruction
-            pos = findSequence(rest0 + 1, "?>") ?? bytes.count
+        if b == 0x3F { // '?' — processing instruction: skip through "?>"
+            pos = (findSequence(rest0 + 1, "?>") ?? bytes.count) + 2
             return nil
         }
         if b == 0x2F { // '/' — end tag
@@ -474,7 +492,8 @@ private final class XDOMBuilder {
                 else if hex && b >= 0x41 && b <= 0x46 { d = Int(b - 0x41) + 10 }
                 else if hex && b >= 0x61 && b <= 0x66 { d = Int(b - 0x61) + 10 }
                 else { break }
-                value = value &* 16 &+ d
+                // Decimal refs accumulate base 10; only `&#x…` is base 16.
+                value = hex ? value &* 16 &+ d : value &* 10 &+ d
                 digits += 1
                 i += 1
             }
@@ -538,7 +557,7 @@ private final class XDOMBuilder {
                 else if hex && b >= 0x41 && b <= 0x46 { d = Int(b - 0x41) + 10 }
                 else if hex && b >= 0x61 && b <= 0x66 { d = Int(b - 0x61) + 10 }
                 else { break }
-                value = value &* 16 &+ d
+                value = hex ? value &* 16 &+ d : value &* 10 &+ d
                 digits += 1
                 j += 1
             }
