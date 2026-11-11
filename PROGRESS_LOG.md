@@ -4,33 +4,45 @@ Format: newest first. Every critique round, merge, and escalation lands here.
 
 ---
 
-**Slide-deck port M1 started: SlideDeckKit (XML + colors + full preset geometry) lands green** (branch `batch-c-d-session`, 2026-11-11):
+**Slide-deck port M1 started: SlideDeckKit (XML + colors + full preset geometry) lands green** (branch `batch-c-d-session`, 2026-11-11/12):
 - **New package target `SlideDeckKit`** (Package.swift: product + target, zero
   dependencies — the deck stack must not drag COpus/cmark into its importers)
   carrying the DeckCraft port (github.com/storytold/deckcraft @ a0eeb34,
-  MIT/Apache-2.0) approved in HANDOVER-SLIDE-DECKS.md. Three commits: XML DOM +
-  colours (`42254fe`, CI run 43084191092), preset geometry (`676f4a5`, CI run
-  43097929997).
-- **XML.swift** — the bounded XML DOM from pptx/src/xml.rs, with the scanner
-  hand-rolled over UTF-8 bytes because quick-xml semantics must hold exactly: a
-  literal CR/CRLF folds to LF while a `&#13;` reference stays a CR (XML 1.0
-  §2.11 — the reason Foundation's XMLParser was rejected), attribute values
-  normalize literal whitespace but keep reference-resolved whitespace,
-  attributes match by local name (xmlns decls never match), depth 256 / 4M
-  nodes bounded, truncated docs fold up, bare `&` is literal text. XNode is
-  deliberately NOT `indirect`: recursion passes only through XEl.children
-  (an Array, heap-backed) — the exact shape of the Rust `Vec<Node>`, no per-node
-  boxing; CI confirmed it compiles as written.
-- **First-draft bugs caught by re-reading against the Rust before CI** (this
-  repo has no local toolchain; CI is the loop): missing Foundation imports;
-  CDATA/comment detection compared the needle at the `!` byte instead of the
-  `<` and could never match; `attach`/`pushText` mutated `stack.last` through
-  an immutable binding (XEl is a struct — index-based mutation instead); a
-  start element dropped for hitting a limit let its end tag pop its PARENT off
-  the stack and re-parent siblings — the over-limit subtree is now skipped
-  whole via a skip-depth counter, matching the Rust reader's all-or-nothing
-  intent. CI found only two test-file slips (Rust-style `u8` literal suffixes,
-  an XEl comparison); the library itself compiled first pass on both runs.
+  MIT/Apache-2.0) approved in HANDOVER-SLIDE-DECKS.md. Five commits, five CI
+  rounds, final green run **43108442304** on `416baac` (all 7 jobs OK incl.
+  logic tests): XML DOM + colours `42254fe`, preset geometry `676f4a5`,
+  operator/IEEE-max syntax fixes `52aa0f9`, scanner declaration-skip fixes
+  `de6b75d`, test-helper sub-path semantics `416baac`.
+- **XML.swift** — the bounded XML DOM from pptx/src/xml.rs, scanner hand-rolled
+  over UTF-8 bytes because quick-xml semantics must hold exactly: a literal
+  CR/CRLF folds to LF while a `&#13;` reference stays a CR (XML 1.0 §2.11 —
+  the reason Foundation's XMLParser was rejected), attribute values normalize
+  literal whitespace but keep reference-resolved whitespace, attributes match
+  by local name (xmlns decls never match), depth 256 / 4M nodes bounded,
+  truncated docs fold up, bare `&` is literal text. XNode deliberately NOT
+  `indirect`: recursion passes only through XEl.children (an Array, heap
+  -backed) — the exact shape of the Rust `Vec<Node>`, no per-node boxing.
+- **Bugs the CI loop caught (no local toolchain — every round's failures were
+  diagnosed against a byte-faithful Python simulation of the scanner before
+  the next push):** pre-CI re-reading caught missing Foundation imports, CDATA
+  /comment needles compared at the `!` byte instead of `<`, `stack.last`
+  mutation through an immutable struct binding, and a dropped start letting
+  its end tag pop its PARENT (over-limit subtrees now skip whole via a
+  skip-depth counter). CI rounds then found: Rust-style `u8` literal suffixes
+  and an XEl Equatable comparison in tests (round 1); `static prefix func -`
+  required for unary minus, `.hypot`/`abs` are not Double instance members,
+  kurbo's `f64 * Vec2` needed a scalar-on-left `*` overload, and
+  `.maximum`/`.minimum` are STATIC members on this toolchain — replaced with
+  rustMax/rustMin implementing Rust's f64::max/min NaN semantics (round 2);
+  **decimal character references accumulated base 16** (`&#10;` → U+0010,
+  `&#65;` → 'e'), the comment skip pointed pos AT the `-->` instead of past it
+  (every `-->` leaked into text), CDATA content start off by one, and PI/
+  DOCTYPE skips never consumed their closers (both leaked `?>`/`>` as text;
+  DOCTYPE now honours an internal subset) (round 3); and the preset test
+  helper measured only paths[0] where the Rust `on_path` checks ANY sub-path
+  (the magnetic disk's checked point lives on its top ellipse, paths[1]) —
+  the ported geometry itself was correct, proven at distance 0 in the
+  simulation (round 4).
 - **Color.swift** — sRGB `Rgba`, the twelve scheme slots + phClr, the DrawingML
   transform set (linear-light tint/shade, HSL lum/sat/hue mod+off, alpha
   family, comp/inv/gray, channel mods), preset colour names. Editor surface
@@ -54,11 +66,14 @@ Format: newest first. Every critique round, merge, and escalation lands here.
   (NaN/inf/±1e12/±Double.max ×8) never break a build; ECMA-376 fixed-shape
   coordinates; PowerPoint-outline reference points for ~30 shapes (equation
   shapes, sun, waves, stars, moon, cloud, braces, callouts, curved/circular
-  arrows, gears, swoosh, ribbons) — distances over a 1e-4 flattened outline;
-  arc-spec direction semantics (the DrawingML visual→parametric mapping);
-  areas; EMU roundtrip; Rust-Display number formatting. XMLColorTests pins the
-  scanner contract (CR distinction, attribute normalization, local-name
-  lookup, bounds, truncation folding, UTF-16 parts) and the colour math.
+  arrows, gears, swoosh, ribbons) — distances over a 1e-4 flattened outline
+  across all sub-paths; arc-spec direction semantics (the DrawingML
+  visual→parametric mapping); areas; EMU roundtrip; Rust-Display number
+  formatting. XMLColorTests pins the scanner contract (CR distinction,
+  attribute normalization, local-name lookup, entity bases, bounds, truncation
+  folding, UTF-16 parts) and the colour math. Once the 4M-node cap trips the
+  counter never recovers, so post-cap elements drop — documented and pinned by
+  test (the Rust reader errors the whole part instead).
 - **Next (M1 continues):** model types + resolve.rs port (`Model.swift`,
   `Resolve.swift`, `Theme.swift`, `Style.swift`, `DMLText.swift`, `Table.swift`,
   `ChartModel.swift`, `Defaults.swift`, `NumFmt.swift`) → Zip.swift (own copy
