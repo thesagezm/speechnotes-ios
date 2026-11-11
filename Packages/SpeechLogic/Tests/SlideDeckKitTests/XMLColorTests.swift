@@ -154,7 +154,7 @@ final class XMLColorTests: XCTestCase {
         XCTAssertEqual(doc.root.findAll("t").map { $0.text() }, ["1", "2", "3"])
         XCTAssertEqual(doc.root.child("b")?.text(), "3", "child() is direct children only")
         XCTAssertEqual(doc.root.childVal("b"), nil)
-        XCTAssertEqual(doc.root.path(["a", "missing"]), nil)
+        XCTAssertNil(doc.root.path(["a", "missing"]))
     }
 
     func testUTF16Part() throws {
@@ -198,7 +198,8 @@ final class XMLColorTests: XCTestCase {
     }
 
     func testHSLRoundTrip() {
-        for (r, g, b) in [(255u8, 0u8, 0u8), (0, 255, 0), (0, 0, 255), (128, 128, 128), (255, 255, 0), (10, 200, 130)] {
+        let samples: [(UInt8, UInt8, UInt8)] = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (128, 128, 128), (255, 255, 0), (10, 200, 130)]
+        for (r, g, b) in samples {
             let c = Rgba(r: r, g: g, b: b)
             let (h, s, l) = c.toHSL()
             let back = Rgba.fromHSL(h, s, l, 255)
