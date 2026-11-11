@@ -34,6 +34,12 @@ final class PresetTests: XCTestCase {
         return best
     }
 
+    /// Distance from `p` to the nearest point of ANY sub-path (the Rust tests'
+    /// `on_path` semantics — e.g. the disk's top ellipse is `paths[1]`).
+    private func dist(_ g: Geometry, _ p: DPoint) -> Double {
+        g.paths.map { dist($0.path, p) }.min() ?? Double.greatestFiniteMagnitude
+    }
+
     /// Asserts every point lies within 1pt of the outline.
     private func on(_ name: String, _ w: Double, _ h: Double, _ adj: [Double], _ pts: [(Double, Double)],
                     file: StaticString = #filePath, line: UInt = #line) {
@@ -106,43 +112,43 @@ final class PresetTests: XCTestCase {
         func at(_ x: Double, _ y: Double) -> DPoint { DPoint(x: w * x / 21600.0, y: h * y / 21600.0) }
         var g = presetBuild("lightningBolt", w, h, [])!
         for (x, y) in [(8472.0, 0.0), (16577.0, 12007.0), (21600.0, 21600.0), (0.0, 3890.0)] {
-            XCTAssertLessThan(dist(g.paths[0].path, at(x, y)), 1e-6, "lightningBolt (\(x), \(y))")
+            XCTAssertLessThan(dist(g, at(x, y)), 1e-6, "lightningBolt (\(x), \(y))")
         }
         g = presetBuild("irregularSeal1", w, h, [])!
-        XCTAssertLessThan(dist(g.paths[0].path, at(14522.0, 0.0)), 1e-6)
-        XCTAssertLessThan(dist(g.paths[0].path, at(8485.0, 21600.0)), 1e-6)
+        XCTAssertLessThan(dist(g, at(14522.0, 0.0)), 1e-6)
+        XCTAssertLessThan(dist(g, at(8485.0, 21600.0)), 1e-6)
         g = presetBuild("irregularSeal2", w, h, [])!
-        XCTAssertLessThan(dist(g.paths[0].path, at(14790.0, 0.0)), 1e-6)
-        XCTAssertLessThan(dist(g.paths[0].path, at(4917.0, 21600.0)), 1e-6)
+        XCTAssertLessThan(dist(g, at(14790.0, 0.0)), 1e-6)
+        XCTAssertLessThan(dist(g, at(4917.0, 21600.0)), 1e-6)
         // The heart's point is the middle of the bottom edge, its notch a quarter down.
         g = presetBuild("heart", w, h, [])!
-        XCTAssertLessThan(dist(g.paths[0].path, DPoint(x: w / 2.0, y: h)), 1e-6)
-        XCTAssertLessThan(dist(g.paths[0].path, DPoint(x: w / 2.0, y: h / 4.0)), 1e-6)
+        XCTAssertLessThan(dist(g, DPoint(x: w / 2.0, y: h)), 1e-6)
+        XCTAssertLessThan(dist(g, DPoint(x: w / 2.0, y: h / 4.0)), 1e-6)
         g = presetBuild("flowChartDocument", w, h, [])!
-        XCTAssertLessThan(dist(g.paths[0].path, at(21600.0, 17322.0)), 1e-6)
-        XCTAssertLessThan(dist(g.paths[0].path, at(0.0, 20172.0)), 1e-6)
+        XCTAssertLessThan(dist(g, at(21600.0, 17322.0)), 1e-6)
+        XCTAssertLessThan(dist(g, at(0.0, 20172.0)), 1e-6)
         // Punched tape: the top edge dips to a fifth of the height a quarter of the way along.
         g = presetBuild("flowChartPunchedTape", w, h, [])!
-        XCTAssertLessThan(dist(g.paths[0].path, DPoint(x: w / 4.0, y: h / 5.0)), 1e-3)
-        XCTAssertLessThan(dist(g.paths[0].path, DPoint(x: w * 0.75, y: 0.0)), 1e-3)
+        XCTAssertLessThan(dist(g, DPoint(x: w / 4.0, y: h / 5.0)), 1e-3)
+        XCTAssertLessThan(dist(g, DPoint(x: w * 0.75, y: 0.0)), 1e-3)
         g = presetBuild("flowChartMultidocument", w, h, [])!
-        XCTAssertLessThan(dist(g.paths[0].path, at(2972.0, 0.0)), 1e-6)
-        XCTAssertLessThan(dist(g.paths[0].path, at(18595.0, 18022.0)), 1e-6)
+        XCTAssertLessThan(dist(g, at(2972.0, 0.0)), 1e-6)
+        XCTAssertLessThan(dist(g, at(18595.0, 18022.0)), 1e-6)
     }
 
     func testEquationShapesMatchPowerPointsOutlines() {
         // Corners read off PowerPoint's own outlines of the presets at their default adjusts.
         var g = presetBuild("mathMultiply", 216.0, 216.0, [])!
         for (x, y) in [(0.32333, 0.15702), (0.5, 0.33369), (0.84298, 0.32333), (0.66631, 0.5), (0.33369, 0.5)] {
-            XCTAssertLessThan(dist(g.paths[0].path, DPoint(x: 216.0 * x, y: 216.0 * y)), 0.01, "multiply (\(x), \(y))")
+            XCTAssertLessThan(dist(g, DPoint(x: 216.0 * x, y: 216.0 * y)), 0.01, "multiply (\(x), \(y))")
         }
         g = presetBuild("mathEqual", 300.0, 120.0, [])!
         for (x, y) in [(0.13255, 0.5588), (0.86745, 0.794), (0.13255, 0.206), (0.86745, 0.4412)] {
-            XCTAssertLessThan(dist(g.paths[0].path, DPoint(x: 300.0 * x, y: 120.0 * y)), 0.01, "equal (\(x), \(y))")
+            XCTAssertLessThan(dist(g, DPoint(x: 300.0 * x, y: 120.0 * y)), 0.01, "equal (\(x), \(y))")
         }
         g = presetBuild("mathPlus", 216.0, 216.0, [])!
-        XCTAssertLessThan(dist(g.paths[0].path, DPoint(x: 216.0 * 0.3824, y: 216.0 * 0.13255)), 0.01)
-        XCTAssertLessThan(dist(g.paths[0].path, DPoint(x: 216.0 * 0.86745, y: 216.0 * 0.6176)), 0.01)
+        XCTAssertLessThan(dist(g, DPoint(x: 216.0 * 0.3824, y: 216.0 * 0.13255)), 0.01)
+        XCTAssertLessThan(dist(g, DPoint(x: 216.0 * 0.86745, y: 216.0 * 0.6176)), 0.01)
         // A tall "not equal": its slash, leaning at the default 110° from top to bottom, reaches
         // past the box's sides exactly as far as PowerPoint's (-22.242 to 122.242).
         g = presetBuild("mathNotEqual", 100.0, 260.0, [])!
@@ -159,16 +165,16 @@ final class PresetTests: XCTestCase {
         var g = presetBuild("sun", k, k, [])!
         for (x, y) in [(0.85352, 0.14644), (0.76161, 0.33987), (0.66013, 0.23839), (0.42825, 0.79823),
                        (0.20177, 0.57175), (0.75, 0.5), (0.5, 0.25)] {
-            XCTAssertLessThan(dist(g.paths[0].path, DPoint(x: k * x, y: k * y)), 0.02, "sun (\(x), \(y))")
+            XCTAssertLessThan(dist(g, DPoint(x: k * x, y: k * y)), 0.02, "sun (\(x), \(y))")
         }
         g = presetBuild("wave", k, k, [])!
         for (x, y) in [(0.21875, 0.00484), (1.0, 0.125), (1.0, 0.875), (0.0, 0.875)] {
-            XCTAssertLessThan(dist(g.paths[0].path, DPoint(x: k * x, y: k * y)), 0.05, "wave (\(x), \(y))")
+            XCTAssertLessThan(dist(g, DPoint(x: k * x, y: k * y)), 0.05, "wave (\(x), \(y))")
         }
         // Shifted: a wave of 300 × 120 with adj (20000, 8000) starts 0.16 of the width in.
         g = presetBuild("wave", 300.0, 120.0, [20000.0, 8000.0])!
         for (x, y) in [(0.18375, 0.00774), (0.84, 0.2), (1.0, 0.8), (0.16, 0.8)] {
-            XCTAssertLessThan(dist(g.paths[0].path, DPoint(x: 300.0 * x, y: 120.0 * y)), 0.05, "shifted wave (\(x), \(y))")
+            XCTAssertLessThan(dist(g, DPoint(x: 300.0 * x, y: 120.0 * y)), 0.05, "shifted wave (\(x), \(y))")
         }
     }
 
@@ -194,8 +200,8 @@ final class PresetTests: XCTestCase {
         var g = presetBuild("star5", k, k, [])!
         let (rx, ry, cy) = (k / 2.0 * 1.05146, k / 2.0 * 1.10557, k / 2.0 * 1.10557)
         let a = (18.0).toRadians
-        XCTAssertLessThan(dist(g.paths[0].path, DPoint(x: k / 2.0, y: 0.0)), 1e-6)
-        XCTAssertLessThan(dist(g.paths[0].path, DPoint(x: k / 2.0 + rx * cos(a), y: cy - ry * sin(a))), 1e-6)
+        XCTAssertLessThan(dist(g, DPoint(x: k / 2.0, y: 0.0)), 1e-6)
+        XCTAssertLessThan(dist(g, DPoint(x: k / 2.0 + rx * cos(a), y: cy - ry * sin(a))), 1e-6)
         var bb = g.paths[0].path.boundingBox()
         XCTAssertEqual(bb.x0, 0.0, accuracy: 0.5)
         XCTAssertEqual(bb.x1, k, accuracy: 0.5)
@@ -212,18 +218,18 @@ final class PresetTests: XCTestCase {
         // Moon, default: the inner edge runs through (0.5, 0.5) and (0.625, 0.2266) of the box.
         var g = presetBuild("moon", k, k, [])!
         for (x, y) in [(0.5, 0.5), (0.626, 0.2266), (0.0, 0.5), (1.0, 0.0)] {
-            XCTAssertLessThan(dist(g.paths[0].path, DPoint(x: k * x, y: k * y)), 0.5, "moon (\(x), \(y))")
+            XCTAssertLessThan(dist(g, DPoint(x: k * x, y: k * y)), 0.5, "moon (\(x), \(y))")
         }
         // 300 × 120 at 30%: its inner edge reaches 30% of the width in.
         g = presetBuild("moon", 300.0, 120.0, [30000.0])!
-        XCTAssertLessThan(dist(g.paths[0].path, DPoint(x: 90.0, y: 60.0)), 0.5)
+        XCTAssertLessThan(dist(g, DPoint(x: 90.0, y: 60.0)), 0.5)
         // Magnetic disk ends are ellipses h/6 high, drum ends w/6 across.
         g = presetBuild("flowChartMagneticDisk", k, k, [])!
-        XCTAssertLessThan(dist(g.paths[0].path, DPoint(x: k, y: k / 6.0)), 0.01)
-        XCTAssertLessThan(dist(g.paths[0].path, DPoint(x: k / 2.0, y: k / 3.0)), 0.5)
+        XCTAssertLessThan(dist(g, DPoint(x: k, y: k / 6.0)), 0.01)
+        XCTAssertLessThan(dist(g, DPoint(x: k / 2.0, y: k / 3.0)), 0.5)
         g = presetBuild("flowChartMagneticDrum", k, k, [])!
-        XCTAssertLessThan(dist(g.paths[0].path, DPoint(x: k / 6.0, y: 0.0)), 0.01)
-        XCTAssertLessThan(dist(g.paths[0].path, DPoint(x: 0.0, y: k / 2.0)), 0.01)
+        XCTAssertLessThan(dist(g, DPoint(x: k / 6.0, y: 0.0)), 0.01)
+        XCTAssertLessThan(dist(g, DPoint(x: 0.0, y: k / 2.0)), 0.01)
     }
 
     func testCloudFillsItsBoxAtAnyAspectAndHasCreases() {
