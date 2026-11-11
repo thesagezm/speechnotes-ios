@@ -41,23 +41,27 @@ actually a different-precision graph (22.5 MB, contradicting the README's
 Kokoro fp16 spike proved fatal (CI 34008548349). A compact q4 tier is a
 follow-up behind the spike proving MatMulNBits on the vendored ORT.
 
-## Flow graph contract (`model.onnx`, one call = 1 prefill + 7 AR frames)
+## Flow graph contract (`model.onnx`, one prefill call + empty-prompt continuations)
 
 The graph unrolls 8 autoregressive frames per call (frame = 80 ms = 1/12.5 s
-= 1920 samples). Frame 0 of each call re-runs the whole prompt; frames 1-7
-are single-position steps.
+= 1920 samples). **Call 0 (prefill)** runs the whole prompt against an empty
+cache; **calls 1+ feed an EMPTY prompt** (`input_ids [1,0]`,
+`audio_prompt_latents [1,0,512]`) and carry only the input slot + 7 frame
+rows. The prefill's K/V are fed back whole and FROZEN — see "KV feedback
+policy" and "The prompt-requery defect" below for why the prompt must never
+be re-run.
 
 Inputs (batch 1):
 
 | Input | Shape | Value |
 |---|---|---|
-| `input_ids` | int64 [1, T] | text tokens ONLY (no specials — the graph prepends the voice and BOS-latent itself) |
-| `audio_prompt_latents` | float32 [1, 125, 512] | the voice. **The `.bin` is [1, 512, 125] little-endian — transpose to [1, 125, 512]** |
-| `attention_mask` | int64 [1, past_kv + P + 7] | all ones; P = 125 + T + 1. Length is load-bearing: each unrolled frame slices it to `past + P + k` (k = 0…7), so it must cover the final frame |
-| `position_ids` | int64 [1, P + 7] | `concat(arange(0, P-1), arange(P + past_kv - 1, P + past_kv + 7))` — NON-contiguous is fine; the graph slices `[0 : P]` for the prompt block and `[P + k]` for frames 1-7 (see the positions paragraph below) |
+| `input_ids` | int64 [1, T] (prefill) / [1, 0] (continuation) | text tokens ONLY (no specials — the graph prepends the voice and BOS-latent itself). ORT accepts the zero-size tensors; empty Swift arrays must skip `withUnsafeBufferPointer` (nil baseAddress) |
+| `audio_prompt_latents` | float32 [1, 125, 512] (prefill) / [1, 0, 512] (continuation) | the voice. **The `.bin` is [1, 512, 125] little-endian — transpose to [1, 125, 512]** |
+| `attention_mask` | int64 [1, kv_rows + new_rows] | all ones; prefill: kv_rows=0, new_rows = P + 7 (P = 125 + T + 1); continuation: new_rows = 8 |
+| `position_ids` | int64 [1, new_rows] | prefill: `concat(arange(0, P-1), arange(P-1, P+7))`; continuation: `arange(kv_rows, kv_rows + 8)` (see the positions paragraph below) |
 | `noise` | float32 [1, 8, 32] | per-frame Gaussian × √temperature (0.3; 0 = deterministic) |
 | `past_key_values.audio_latents` | float32 [1, past, 32] | the FULL latent history, normalized space (feed `present.audio_latents` straight back) |
-| `past_key_values.{0..5}.key/value` | float32 [1, 8, past_kv, 64] | 6 layers × KV cache |
+| `past_key_values.{0..5}.key/value` | float32 [1, 8, kv_rows, 64] | 6 layers × KV cache |
 
 Outputs:
 
@@ -66,29 +70,33 @@ Outputs:
 | `audio_latents` | float32 [1, past+8, 32] | **cumulative** latent history, denormalized (× std + mean folded in). Per call, only the LAST 8 rows are new |
 | `present.audio_latents` | float32 [1, past+8, 32] | same, normalized — feed back as `past_key_values.audio_latents` |
 | `eos_logits` | float32 [1, 8] | end-of-speech logits for the 8 NEW frames |
-| `present.{0..5}.key/value` | float32 [1, 8, past+P+7, 64] | KV cache = fed-back cache + re-run prompt (P) + 7 new latent positions |
+| `present.{0..5}.key/value` | float32 [1, 8, kv_rows + new_rows, 64] | KV cache = fed-back cache + this call's new rows (prompt block on prefill, 8 latent rows otherwise) |
 
-**KV feedback policy**: keep the latent K/Vs, drop the re-run voice+text
-block of each present cache. `present` = [fed-back latents (past_kv) |
-prompt (P) | 7 new] where the prompt block's LAST row is the CURRENT input
-latent — that row is KEPT (it is the row that generates the call's first
-latent), so the next call feeds back `[0 : past_kv) ++ [past_kv + P - 1 :]`.
-The KV therefore grows by the same +8 frames per call as the latent history
-(`past_kv == latentHistoryCount`).
+**KV feedback policy**: feed the WHOLE `present.*` back as the next
+`past_key_values.*` — the model card's own driver convention ("feed every
+output back under its `past` name on the next call"). The prefill call
+computes the voice+text K/V against an EMPTY cache (exactly the reference
+prefill, RoPE baked at `0..P-2`), and from then on those rows are never
+recomputed: they sit in the fed-back cache bitwise unchanged for the rest
+of the chunk. The ORTValues can pass straight through — no copy, and the
+whole class of head-major striding bugs (below) disappears with the copy.
+Two counters: `kv_rows` (P + 7 after prefill, +8 per continuation call)
+drives attention_mask/position_ids; the latent history (+8 every call)
+drives the frame slice.
 
 **Positions (reference-exact — xn-ptts)**: `position_ids` values may be
-NON-CONTIGUOUS — the graph only slices `[0 : P]` for the prompt block and
-`[P + k]` for frames 1-7, and nothing requires contiguous values. The
-recipe is `concat(arange(0, P-1), arange(P + past_kv - 1, P + past_kv + 7))`:
+NON-CONTIGUOUS — the graph slices `[0 : P]` for the prompt block and
+`[P + k]` for frames 1-7, and nothing requires contiguous values.
 
-- the re-run voice+text rows sit at their TRUE absolute positions
-  `0 .. P-2` on EVERY call — the reference prompts them into the KV once
-  with that RoPE baked and never moves them;
-- the input slot (the prompt block's last row, which generates the call's
-  first latent) sits at `P + past_kv - 1` and the 7 frames at
-  `P + past_kv … P + past_kv + 6` — the reference's next-input-row position
-  (bos at `V+T = P-1`, then +1 per latent: the row that generates latent
-  L_i sits at `P - 1 + i`).
+- **Prefill** (one call, empty cache): the voice+text rows sit at their
+  true absolute positions `0 .. P-2`, the input slot (the prompt block's
+  last row, which generates the call's first latent) at `P - 1`, the 7
+  frames at `P .. P + 6` — the reference prompts the voice+text KV in once
+  with that RoPE baked and never moves or recomputes it.
+- **Continuation**: latent L_i sits at `P - 1 + i` (bos at `V+T = P-1`,
+  then +1 per latent). Since the fed-back cache holds exactly `P - 1 + i`
+  rows when L_i is the next row to generate, the 8 new rows take positions
+  `kv_rows .. kv_rows + 7` — the recipe collapses to one arange.
 
 Provenance (verified against /tmp/xn-ptts): `qnn/runner/phonon.cpp` — voice
 KV baked at `0..V-1`, text prefill cached ONCE at `V..V+T-1`, then
@@ -99,22 +107,48 @@ timeline, cache never trimmed; `transformer.rs:736-745` — RoPE offset =
 one `StepInput::Bos/Latent` row per step; `seq_budget = text + prompt +
 headroom` (the text is NOT re-cached per step).
 
-The first port shipped the contiguous `arange(past_kv, past_kv + P + 7)`:
-the re-run prompt rows rode the moving timeline (+8 positions per call),
-so their attention distances froze at call-1 values (the prompt appears
-adjacent forever instead of receding as the latent history grows) and
-their K/V changed every call — the device's after-~4-words artifacts
-(calls 2-3). The earlier claim that a receding prompt was "unavoidable"
-was wrong, and backwards: the reference's prompt does NOT recede out of
-the cache — it is cached once at fixed positions forever. The
-non-contiguous recipe makes the re-run prompt rows bitwise identical
-call-to-call (x86 probe: layer-0 key drift across calls 9-10 → 0.0), so
-the fed-back cache replicates the reference's baked cache; input-slot and
-frame positions are unchanged from the old form, so every fed-back row
-keeps its baked RoPE and every query sits at its exact reference
-distance. Call 1 (`past_kv = 0`) degenerates to the old contiguous form.
-The cos/sin cache covers 8192 positions; the EOS-capped call count keeps
-offsets well under.
+The pre-prefill-once port re-fed the prompt every call with the
+non-contiguous recipe below; that is documented in "The prompt-requery
+defect". An even earlier port shipped the contiguous
+`arange(past_kv, past_kv + P + 7)`: the re-run prompt rows rode the moving
+timeline (+8 positions per call), so their attention distances froze at
+call-1 values and their K/V changed every call — the device's
+after-~4-words artifacts (calls 2-3). The cos/sin cache covers 8192
+positions; the EOS-capped call count keeps offsets well under.
+
+**The prompt-requery defect (found + fixed 2026-11-11)**: the previous
+recipe re-ran the voice+text block through the graph on EVERY call with
+positions pinned at `0..P-2`. Because attention is causal only WITHIN the
+new block (the mask reaching the GQA is a shared additive column bias over
+the total sequence — per-query-row masking is not expressible), the re-run
+prompt rows at layers 1–5 attended to the growing fed-back LATENT cache —
+something that never happens in the reference (its prompt rows only ever
+saw earlier prompt rows at prefill). The text K/V the latent queries read
+therefore MUTATED on every call: x86 probe (30 calls, 163 prompt rows) —
+layer-0 K/V drift exactly 0.0 (embedding+position only; the earlier
+"bitwise identical call-to-call" claim in this doc was measured at layer 0
+ONLY and is trivially true there, proving nothing about the deeper
+layers), while layers 1–5 drifted every call without ever settling (value
+cosine down to 0.13–0.43, K max|Δ| up to ~3.0; last-pair drift 0.23–0.33).
+Same drift on healthy and degenerate seeds — a drifting,
+out-of-distribution text representation that mostly survives but
+occasionally tips the EOS decision: chunks over-generate at the sentence
+end (long tail, occasional verbatim frame repeats — cos 0.997 between
+consecutive calls — eos climbing to ~2 but never crossing 4.0, inflated
+3.5–4.4 chars/s vs 7–14.7 healthy). Voice-dependent (the drift interacts
+with the voice embedding) but not seed-deterministic.
+
+**Fix (shipped)**: prefill-once + empty-prompt continuations + whole-present
+feedback, i.e. the model card's own driver convention. The graph accepts
+zero-size `input_ids`/`audio_prompt_latents` (verified x86 ORT 1.24.2 numpy
+and OrtValue paths; the CI spike re-proves the ORT C API path). The fed-back
+prompt K/V are bitwise stable by construction (drift 0.0 at every layer,
+verified). x86 A/B sweep (4 texts × 5 device voices × 6 seeds, full audio
+render + self-similarity): old recipe 8/120 degenerate runs (7 never
+crossed EOS; worst cell 3/6; one 36.5 s run) → prefill-once 0/120, healthy
+eos spikes intact, per-cell max frames ≈ median (EOS timing tightened),
+12–17 chars/s everywhere. Continuation calls also got ~20× cheaper (8 new
+rows vs 171). KV memory +~3 MB per chunk (the P prompt rows ride along).
 
 **KV LAYOUT TRAP (the device bug)**: the caches are `[1, heads, seq, dim]`
 — HEAD-major. Rows are STRIDED: position t of every head is 8 separate
@@ -134,12 +168,18 @@ problem. The feedback copy must walk the heads explicitly.
 **EOS stop rule** (generation_config + preprocessor_config): first frame
 whose logit > 4.0 starts a countdown of `frames_after_eos` (1 frame; 3 for
 text ≤ 4 words) — stop when it runs out. Frame budget:
-`ceil((T/3 + 2) * 12.5)`. A healthy run's logits sit deep negative
-(-5…-9) while speaking and SPIKE past +4 at the sentence end; the engine
-logs the per-chunk eos peak + the call it peaked at. A gradual climb, a
-never-crossing run within budget, or a non-finite latent is the
-degenerate/corrupt-context signal (see the KV layout trap above), not
-noise variance.
+`ceil((T/3 + 2) * 12.5 * 1.5)` (the hub's ×1.5 — it costs nothing when EOS
+crosses normally, and bounds the rare late crosser). **Soft-EOS safety
+net**: two consecutive CALLS whose per-call eos PEAK exceeds 1.0 without a
+real crossing also stop the chunk ("soft-EOS stop", clean head kept).
+Healthy runs sit deep negative (-5…-9) until the final spike and only ever
+dip to ~+0.5 mid-run (x86 sweep: zero sustained-plateau runs), while a
+degenerate context hovers just under the threshold (~1–2, never crossing)
+— the sustained plateau is the discriminator, and the two-call window is
+what keeps single-call dips from clipping healthy chunks. The engine logs
+the per-chunk eos peak + the call it peaked at; a never-crossing run
+within budget, a soft-EOS stop, or a non-finite latent is the
+degenerate/corrupt-context signal, not noise variance.
 
 ## Mimi decoder contract (`mimi_decoder.onnx` — STATELESS)
 
@@ -207,8 +247,12 @@ Single-slot memory rule: sessions unload on engine switch like Supertonic's.
 ## Spike
 
 `Tests/PhononSpike` downloads the fp32 set in CI and runs the pinned recipe
-on the vendored ORT 1.24.2 (macOS runner): asserts sessions load (the com.microsoft
-contrib ops — GroupQueryAttention, RotaryEmbedding, QuickGelu — are the
-load-bearing question), EOS crosses 4.0 within budget, PCM is non-silent at
-24 kHz, prints RTF/RSS. Informative/non-blocking like the other spikes;
-the phone is the real bench.
+(prefill-once + empty-prompt continuations, mirroring
+`PhononEngine.generateChunk`) on the vendored ORT 1.24.2 (macOS runner):
+asserts sessions load (the com.microsoft contrib ops — GroupQueryAttention,
+RotaryEmbedding, QuickGelu — are the load-bearing question), zero-size
+prompt tensors are accepted, EOS crosses 4.0 within budget, PCM is
+non-silent at 24 kHz, prints RTF/RSS. Informative/non-blocking like the
+other spikes; the phone is the real bench. The x86 Python harness
+(`/tmp/phonon-tail`, ORT 1.24.2 + tokenizers) is where audio-quality
+regressions get caught — the spike only scores shapes/EOS/non-silence.

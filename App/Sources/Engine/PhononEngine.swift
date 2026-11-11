@@ -53,6 +53,11 @@ final class PhononEngine: NSObject, SpeechEngine {
     private static let voiceFrames = 125
     private static let frameRate = 12.5
     private static let eosThreshold: Float = 4.0
+    /// Soft-EOS safety net: two consecutive calls with their per-call eos
+    /// peak above this, without a real crossing, stop the chunk (see the
+    /// countdown block in generateChunk). Below every healthy x86 sweep
+    /// trajectory, which only ever dips to ~+0.5 mid-run.
+    private static let softEOSThreshold: Float = 1.0
     private static let temperature: Float = 0.3
     private static let attentionHeads = 8
     private static let headDim = 64
@@ -285,14 +290,15 @@ final class PhononEngine: NSObject, SpeechEngine {
         for _ in 0..<(Self.flowLayers * 2) {
             kv.append(try Self.emptyTensor(dims: [1, Self.attentionHeads, 0, Self.headDim]))
         }
-        var pastKVCount = 0
+        // TWO books, because the prompt K/V live in the fed-back cache from
+        // the prefill on (see the KV feedback below): `kvRows` is the fed-back
+        // KV row count (P + 7 after prefill, +8 per continuation call) and
+        // drives attention_mask/position_ids; `latentCount` is the cumulative
+        // audio_latents row count (+8 every call) and drives the latent
+        // history + this call's frame slice.
+        var kvRows = 0
+        var latentCount = 0
         var latentHistory = try Self.emptyTensor(dims: [1, 0, Self.latentDim])
-        // One counter for BOTH books: with the input-slot row kept (see the
-        // KV feedback below) the KV grows by the same +8 frames per call as
-        // the latent history, so `pastKVCount` is simultaneously the fed-back
-        // KV row count, the cumulative audio_latents row count, and the
-        // reference-timeline position offset. (The old +7/+8 two-counter
-        // split is gone.)
 
         var newLatents: [Float] = []
         newLatents.reserveCapacity(budget * Self.latentDim)
@@ -308,38 +314,60 @@ final class PhononEngine: NSObject, SpeechEngine {
 
         let started = Date()
         var crossedEOS = false
+        var softEOS = false
         var callIndex = 0
+        // Soft-EOS safety net (see the countdown block below).
+        var softStreak = 0
         for _ in 0..<max(1, Int(ceil(Double(budget) / Double(Self.framesPerCall)))) {
-            let total = pastKVCount + P + (Self.framesPerCall - 1)
+            // PREFILL-ONCE (the export's own convention, per the model card's
+            // driver): call 0 runs voice+text through the graph against an
+            // EMPTY cache — their K/V are computed exactly like the reference
+            // prefill — and every present.* output is fed back whole, so the
+            // prompt K/V then sit in the cache FROZEN forever. Calls 1+ feed
+            // an EMPTY prompt (input_ids [1,0], voice [1,0,512]): the graph
+            // re-runs nothing but the input slot + 7 frame rows.
+            //
+            // Why not re-feed the prompt every call (the previous recipe):
+            // the re-run block attends to the growing latent cache at layers
+            // 1–5, so the text K/V the frame queries read MUTATED on every
+            // call (x86 probe: prompt-row value cosine down to 0.13–0.43,
+            // never settling) — an out-of-distribution, drifting text
+            // representation that degraded the EOS decision. Symptom: chunks
+            // over-generated at the sentence end (long tail, occasional
+            // repetition, eos climbing to ~2 but never crossing 4.0). The
+            // frozen-prompt recipe took the x86 sweep from 8/120 degenerate
+            // runs to 0/120 with healthy spikes intact.
+            let prefill = callIndex == 0
+            let newRows = prefill ? P + Self.framesPerCall - 1 : Self.framesPerCall
+            let total = kvRows + newRows
             let noise = (0..<(Self.framesPerCall * Self.latentDim)).map { _ -> Float in
                 Float.standardNormal(using: &rng) * sqrt(Self.temperature)
             }
 
             var feeds: [String: ORTValue] = [:]
-            feeds["input_ids"] = try Self.int64Tensor(values: ids.map(Int64.init), dims: [1, T])
-            feeds["audio_prompt_latents"] = try Self.floatTensor(values: voice, dims: [1, Self.voiceFrames, Self.voiceDim])
+            // Continuation calls carry an EMPTY text/voice prompt — see the
+            // prefill note above. ORT accepts zero-size tensors (the CI spike
+            // re-proves this on the vendored runtime).
+            feeds["input_ids"] = try prefill
+                ? Self.int64Tensor(values: ids.map(Int64.init), dims: [1, T])
+                : Self.int64Tensor(values: [], dims: [1, 0])
+            feeds["audio_prompt_latents"] = try prefill
+                ? Self.floatTensor(values: voice, dims: [1, Self.voiceFrames, Self.voiceDim])
+                : Self.floatTensor(values: [], dims: [1, 0, Self.voiceDim])
             feeds["attention_mask"] = try Self.int64Tensor(values: [Int64](repeating: 1, count: total), dims: [1, total])
-            // Reference-exact positions (xn-ptts): the re-run voice+text rows
-            // keep their TRUE absolute positions 0..<P-1 on EVERY call — the
-            // reference prompts them into the KV once with that RoPE baked and
-            // never moves them (qnn/runner/phonon.cpp: voice KV at 0..V-1,
-            // text prefill cached once at V..V+T-1, each latent row at pos =
-            // cache length; transformer.rs: RoPE offset = current_end). Only
-            // the input slot and the 7 frames ride the moving timeline: the
-            // input slot is the row that generates the call's first latent,
-            // at P + pastKVCount - 1 (bos at V+T = P-1, then +1 per latent).
-            // position_ids may be NON-CONTIGUOUS — the graph only slices
-            // [0:P] for the prompt block and [P+k] for the frames. The old
-            // contiguous form dragged the prompt +8 positions along each
-            // call, freezing its attention distances at call-1 values (the
-            // prompt never recedes) — the after-~4-words artifacts. Call 1
-            // (pastKVCount = 0) degenerates to the old contiguous form.
-            // Hoisted so the tensor call is not a range→map→dims expression
-            // sandwich — this line is the one that blew the type-checker's
-            // time budget in the first compile round.
-            let frameStart = P + pastKVCount - 1
-            let positionValues: [Int64] = (0..<(P - 1)).map(Int64.init)
-                + (frameStart..<(frameStart + Self.framesPerCall)).map(Int64.init)
+            // Positions: prefill pins the voice+text rows at their true
+            // absolute positions 0..<P-1 (RoPE baked exactly like the
+            // reference prefill, qnn/runner/phonon.cpp) with the input slot
+            // at P-1 and the 7 frames after. Continuation rows ride the same
+            // timeline: latent n sits at position P-1+n, and since the
+            // fed-back cache holds kvRows = P-1+n rows at call n, the next 8
+            // rows are simply [kvRows, kvRows+8). Non-contiguous is fine —
+            // the graph only slices [0:P] for the prompt block and [P+k] for
+            // the frames (the prompt-block slice is empty on continuation).
+            let positionValues: [Int64] = prefill
+                ? (0..<(P - 1)).map(Int64.init)
+                    + ((P - 1)..<(P + Self.framesPerCall - 1)).map(Int64.init)
+                : (kvRows..<(kvRows + Self.framesPerCall)).map(Int64.init)
             feeds["position_ids"] = try Self.int64Tensor(values: positionValues, dims: [1, positionValues.count])
             feeds["noise"] = try Self.floatTensor(values: noise, dims: [1, Self.framesPerCall, Self.latentDim])
             for (index, value) in kv.enumerated() {
@@ -356,8 +384,8 @@ final class PhononEngine: NSObject, SpeechEngine {
             // The flow's audio_latents is the CUMULATIVE latent history,
             // denormalized; only the trailing 8 rows are this call's frames.
             let cumulative = try Self.floatValues(
-                outputs["audio_latents"]!, dims: [1, pastKVCount + Self.framesPerCall, Self.latentDim])
-            let frameValues = cumulative[(pastKVCount * Self.latentDim)...]
+                outputs["audio_latents"]!, dims: [1, latentCount + Self.framesPerCall, Self.latentDim])
+            let frameValues = cumulative[(latentCount * Self.latentDim)...]
             if frameValues.contains(where: { !$0.isFinite }) {
                 throw PhononEngineError.corruptLatents(call: callIndex)
             }
@@ -369,59 +397,41 @@ final class PhononEngine: NSObject, SpeechEngine {
                 eosPeakCall = callIndex
             }
 
-            // KV feedback: keep the latent K/Vs, drop the re-run voice+text
-            // block of each present cache. The prompt block is
-            // [past_kv : past_kv + P) with the CURRENT input latent in its
-            // LAST row — that row is kept (it is latent L_{n-1}'s position on
-            // the reference timeline), so per call the KV grows by the same
-            // +8 as the latent history and `present` becomes
-            // [fed-back latents | input-slot row | 7 new]. The position feed
-            // (above) pins the re-run voice+text rows at their true absolute
-            // positions, so the kept rows carry exactly the RoPE the
-            // reference baked into its cache — the re-run prompt rows are
-            // bitwise identical call-to-call (x86 probe: drift 9-10 → 0.0).
-            //
-            // LAYOUT: the cache is [1, heads, seq, dim] — HEAD-major. Rows
-            // are therefore strided, NOT contiguous: copying
-            // `values[firstRow * heads * dim ...]` grabs head 0's rows and
-            // calls it every head's. The first port did exactly that — call 1
-            // fed back garbage-aligned rows (one head only), call 2+ attended
-            // poisoned context, and the audio degenerated into the repeat
-            // spiral the device round reported, while shape-only CI stayed
-            // green. The copy below walks the heads.
-            let presentTotal = pastKVCount + P + (Self.framesPerCall - 1)
-            let keepHead = pastKVCount
-            let keepTail = Self.framesPerCall
-            let headFloats = presentTotal * Self.headDim
-            let newHeadFloats = (keepHead + keepTail) * Self.headDim
+            // KV feedback: feed the WHOLE present back as the next past —
+            // the model card's driver convention ("feed every output back
+            // under its past name"). The prefill call's present carries the
+            // voice+text K/V computed against an empty cache (reference
+            // prefill semantics), and from then on they are never recomputed:
+            // fed back bitwise unchanged forever. (The previous recipe
+            // dropped the prompt rows and re-ran them every call — the
+            // re-run block attended to the growing latent cache at layers
+            // 1–5 and the text K/V drifted call-to-call; see the loop-head
+            // comment.) Whole-present feedback also lets the ORTValues pass
+            // straight through — no per-head copy, and the whole class of
+            // head-major striding bugs this loop used to defend against is
+            // gone.
             var newKV: [ORTValue] = []
             newKV.reserveCapacity(Self.flowLayers * 2)
             for index in 0..<(Self.flowLayers * 2) {
                 let name = index % 2 == 0 ? "present.\(index / 2).key" : "present.\(index / 2).value"
-                let values = try Self.floatValues(outputs[name]!, dims: [1, Self.attentionHeads, presentTotal, Self.headDim])
-                var kept = [Float](repeating: 0, count: Self.attentionHeads * newHeadFloats)
-                for head in 0..<Self.attentionHeads {
-                    let source = head * headFloats
-                    var destination = head * newHeadFloats
-                    if keepHead > 0 {
-                        kept.replaceSubrange(destination..<destination + keepHead * Self.headDim,
-                                             with: values[source..<source + keepHead * Self.headDim])
-                        destination += keepHead * Self.headDim
-                    }
-                    // [past+P-1, presentTotal) = the input-slot row + the 7
-                    // frame rows, contiguous per head.
-                    let tail = source + (presentTotal - keepTail) * Self.headDim
-                    kept.replaceSubrange(destination..<destination + keepTail * Self.headDim,
-                                         with: values[tail..<tail + keepTail * Self.headDim])
-                }
-                newKV.append(try Self.floatTensor(values: kept, dims: [1, Self.attentionHeads, keepHead + keepTail, Self.headDim]))
+                newKV.append(outputs[name]!)
             }
             kv = newKV
-            pastKVCount += Self.framesPerCall
+            kvRows += newRows
+            latentCount += Self.framesPerCall
             latentHistory = outputs["present.audio_latents"]!
 
             // EOS countdown (Python's PocketTTSEosThresholdCriteria): the
             // frame that crossed the threshold and the tail frames are kept.
+            //
+            // SOFT-EOS SAFETY NET: healthy runs sit deep negative (-5…-9)
+            // until the final spike, but a degenerate context can leave the
+            // eos logit hovering just under the threshold (~1–2, never
+            // crossing 4.0) — the device saw 20–45 s tails of that. Two
+            // consecutive CALLS with their per-call peak above softThreshold
+            // without a real crossing = stop and keep the clean head. The
+            // two-call window is load-bearing: healthy runs show single-call
+            // dips up to ~+0.5 (x86 sweep), never a sustained plateau.
             var done = false
             for value in eos {
                 if countdown == nil && value > Self.eosThreshold {
@@ -432,10 +442,19 @@ final class PhononEngine: NSObject, SpeechEngine {
                     done = countdown! <= 0
                 }
             }
+            if countdown == nil {
+                softStreak = callPeak > Self.softEOSThreshold ? softStreak + 1 : 0
+                if softStreak >= 2 {
+                    softEOS = true
+                    done = true
+                }
+            }
             callIndex += 1
             if done { break }
         }
-        if !crossedEOS {
+        if softEOS {
+            Log.shared.info("PhononEngine: soft-EOS stop (sustained eos > \(Self.softEOSThreshold), never crossed \(Self.eosThreshold)) — kept clean head («\(text.prefix(50))»)")
+        } else if !crossedEOS {
             Log.shared.info("PhononEngine: frame budget reached before EOS — audio may be truncated («\(text.prefix(50))»)")
         }
 
@@ -555,6 +574,12 @@ extension PhononEngine {
     }
 
     static func int64Tensor(values: [Int64], dims: [Int]) throws -> ORTValue {
+        // Empty tensors (the continuation calls' [1,0] input_ids) must take
+        // this path: an empty Swift array's buffer baseAddress is nil.
+        guard !values.isEmpty else {
+            return try ORTValue(tensorData: NSMutableData(data: Data()), elementType: .int64,
+                                shape: dims.map { NSNumber(value: $0) })
+        }
         var littleEndian = values
         for index in littleEndian.indices { littleEndian[index] = values[index].littleEndian }
         let data = littleEndian.withUnsafeBufferPointer { buffer in
@@ -565,6 +590,10 @@ extension PhononEngine {
     }
 
     static func floatTensor(values: [Float], dims: [Int]) throws -> ORTValue {
+        guard !values.isEmpty else {
+            return try ORTValue(tensorData: NSMutableData(data: Data()), elementType: .float,
+                                shape: dims.map { NSNumber(value: $0) })
+        }
         let data = values.withUnsafeBufferPointer { buffer in
             Data(bytes: buffer.baseAddress!, count: buffer.count * MemoryLayout<Float>.size)
         }
