@@ -15,6 +15,10 @@ let package = Package(
         .library(
             name: "SpeechLogic",
             targets: ["SpeechLogic"]
+        ),
+        .library(
+            name: "SlideDeckKit",
+            targets: ["SlideDeckKit"]
         )
     ],
     dependencies: [
@@ -94,6 +98,17 @@ let package = Package(
             ],
             path: "Sources/SpeechLogic"
         ),
+        // The slide-deck reader: a Swift port of DeckCraft's ECMA-376 pptx
+        // reader (github.com/storytold/deckcraft @ a0eeb34, MIT/Apache-2.0)
+        // plus the Linux app's ODF reader and slide resolution layer
+        // (sn-doc/src/slides.rs + odp.rs). Standalone on purpose — the deck
+        // parsers need only a zip reader and an XML pull parser, both of
+        // which live here, so the deck stack does not drag COpus/cmark into
+        // every importer of it.
+        .target(
+            name: "SlideDeckKit",
+            path: "Sources/SlideDeckKit"
+        ),
         .testTarget(
             name: "SpeechLogicTests",
             dependencies: ["SpeechLogic"],
@@ -102,6 +117,11 @@ let package = Package(
                 // EPUB test fixtures (real ZIP bytes) for ZipReader/EpubInfo.
                 .copy("Fixtures")
             ]
+        ),
+        .testTarget(
+            name: "SlideDeckKitTests",
+            dependencies: ["SlideDeckKit"],
+            path: "Tests/SlideDeckKitTests"
         )
     ]
 )
