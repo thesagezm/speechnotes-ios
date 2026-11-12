@@ -313,7 +313,7 @@ public enum DeckSlides {
         // does not exist on iOS, so the raw letters would show. Map to the
         // Unicode shapes the fallback font can draw.
         let mapped = mapSymbolText(text, family)
-        Run(
+        return Run(
             text: mapped,
             size: max(resolved.size ?? 18.0, 4.0) * scale,
             bold: resolved.bold ?? false,
