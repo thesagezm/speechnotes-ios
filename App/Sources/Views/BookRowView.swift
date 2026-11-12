@@ -46,6 +46,10 @@ struct BookRowView: View {
                 let hours = minutes / 60
                 parts.append(hours > 0 ? "\(hours)h \(minutes % 60)m" : "\(minutes) min")
             }
+        case .slides:
+            if let count = book.spineCount, count > 0 {
+                parts.append("\(count) slide\(count == 1 ? "" : "s")")
+            }
         }
         return parts.joined(separator: " · ")
     }
@@ -108,5 +112,6 @@ private func glyph(for format: BookFormat) -> String {
     case .epub: return "book.closed"
     case .pdf: return "doc.richtext"
     case .audio: return "speaker.wave.2"
+    case .slides: return "rectangle.on.rectangle"
     }
 }

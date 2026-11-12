@@ -4,6 +4,50 @@ Format: newest first. Every critique round, merge, and escalation lands here.
 
 ---
 
+**Slide decks become a real book format — the read path is ported and locally green; app wiring awaits CI** (branch `batch-c-d-session`, 2026-11-12):
+- **The complaint:** "the slides work you did has not worked — they are
+  still being converted to epub." True: the M1 port was foundation-only
+  (XML + colours + preset geometry, "nothing from the app target touched
+  yet"), so a .pptx import still went through `DocumentBook.parse` →
+  `DocumentEpubConverter` and opened as an EPUB. The fix, this round:
+  **decks are decks** — `BookFormat.slides(ext)` keeps `original.pptx`
+  whole, a SlideDeckKit read path (the deckcraft reader + the Linux app's
+  slides.rs resolution, ported) resolves every slide to absolutely
+  positioned items, and a new deck reader renders them as the Linux reader
+  does (one HTML document in a webview, media over a scheme handler, one
+  slide = one speech chapter with byte spans).
+- **SlideDeckKit grew the reader (7 new files, zero dependencies):**
+  Zip.swift (own zip reader with a PURE-SWIFT DEFLATE decoder — `import
+  Compression` doesn't exist on Linux, and the local docker loop is how
+  this port is verified), Ooxml.swift (OPC parts/rels/content types),
+  DeckTypes.swift (the read model; read-model types are `PptxSlide` and
+  `BulletSpec` because the resolved model owns `Slide`/`Bullet`),
+  DmlRead.swift, PptxRead.swift, DeckResolve.swift (the full placeholder →
+  layout → master → theme inheritance), DeckSlides.swift (shape → item
+  resolution + assembleText spans), DeckHTML.swift (document.rs +
+  script.rs port, `deck://media/N` URLs, `__snslides` API). 66 tests green
+  locally (docker swift:6.0, scratch package at /tmp/deckpkg via
+  /tmp/deckpkg/run.sh) against an in-memory pptx fixture built byte-by-byte
+  (stored entries + a hand-encoded fixed-Huffman DEFLATE block).
+- **App wiring (written, NOT yet CI-verified — no iOS toolchain here):**
+  BookFormat is no longer a raw-String enum (`slides(String)` with custom
+  Codable so Linux-written "pptx"/"odp" manifests decode and ours encode
+  back); BooksStore routes the deck family to a whole-file copy + one deck
+  parse for slide count/TOC/title (spine "slide-N", byte-compatible with
+  the Linux `import_slides`); BookPlaybackController speaks per-slide text;
+  BookSlidesView renders the deck (WKWebView + scheme handler + slide
+  stepper + TOC + position + read-along swap, all modelled on the EPUB
+  reader's chrome); every exhaustive switch gained `.slides`; project.yml
+  links the SlideDeckKit product. **Full state + first-CI-round checklist:
+  Docs/HANDOVER-SLIDE-DECKS-IOS.md.**
+- **Known degradations (documented, honest):** ODP has no ODF reader yet
+  (odp.rs is unported — a local .odp import keeps its file but cannot
+  render yet); charts/SmartArt render as labelled frames; legacy .ppt is
+  refused (stays on the old path); placeholder SVG-geometry inheritance is
+  simplified to the rect default; no zoom stepper/present mode yet.
+
+---
+
 **Slide-deck port M1 started: SlideDeckKit (XML + colors + full preset geometry) lands green** (branch `batch-c-d-session`, 2026-11-11/12):
 - **New package target `SlideDeckKit`** (Package.swift: product + target, zero
   dependencies — the deck stack must not drag COpus/cmark into its importers)

@@ -88,7 +88,7 @@ struct BooksRecycleBinView: View {
                 Text(book.title)
                     .font(.subheadline.weight(.medium))
                     .lineLimit(1)
-                Text("\(book.format.rawValue.uppercased()) · removed \(daysAgo(book.deletedAt))")
+                Text("\(book.authorOrFormat.uppercased()) · removed \(daysAgo(book.deletedAt))")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }

@@ -264,6 +264,7 @@ final class BookPlaybackController: ObservableObject {
         case .epub: return book.spine?.count ?? 0
         case .pdf: return book.pdfChapters?.count ?? 0
         case .audio: return book.audioChapters?.count ?? 0
+        case .slides: return book.spine?.count ?? book.spineCount ?? 0
         }
     }
 
@@ -426,6 +427,24 @@ final class BookPlaybackController: ObservableObject {
             // chapter label and any export the user asks for.
             guard let chapters = book.audioChapters, chapterIndex < chapters.count else { return nil }
             extracted = (chapters[chapterIndex].title, nil as [PdfPageOffset]?)
+        case .slides(let ext):
+            // One slide = one chapter: the deck is parsed (SlideDeckKit) and
+            // the slide's speakable text — shape text in z-order, then the
+            // speaker notes — is what the voice reads. The parse is the
+            // expensive part, so it runs off main like every other chapter
+            // extraction; the cache below makes it once-per-book.
+            guard chapterIndex >= 0 else { return nil }
+            let archiveURL = BooksStore.originalFileURL(book)
+            let text = await Task.detached(priority: .userInitiated) { () -> String? in
+                guard let data = try? Data(contentsOf: archiveURL, options: .mappedIfSafe) else { return nil }
+                guard let deck = try? DeckParser.parse(data) else {
+                    Log.shared.error("BookPlayback: \(ext) deck of \(book.title) could not be parsed")
+                    return nil
+                }
+                let (slideText, _) = DeckSlides.slideText(deck, chapterIndex)
+                return slideText.isEmpty ? nil : slideText
+            }.value
+            extracted = (text ?? "", nil as [PdfPageOffset]?)
         }
         guard let rawText = extracted?.text, !rawText.isEmpty else { return nil }
         // Sanitised at this boundary, before the cache write, so the chapter

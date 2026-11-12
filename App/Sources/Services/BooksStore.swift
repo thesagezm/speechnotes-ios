@@ -42,7 +42,7 @@ final class BooksStore: ObservableObject {
     }
 
     nonisolated static func originalFileURL(_ book: Book) -> URL {
-        bookDirectory(book.id).appendingPathComponent("original.\(book.format.rawValue)")
+        bookDirectory(book.id).appendingPathComponent("original.\(book.format.fileExtension)")
     }
 
     /// The audio book's file, resolved to whatever name it actually carries.
@@ -452,6 +452,14 @@ final class BooksStore: ObservableObject {
                         try? tile.write(to: dir.appendingPathComponent("cover.jpg"), options: .atomic)
                         book.hasCover = true
                     }
+                case .slides:
+                    // A deck's manifest comes complete from the import; one
+                    // re-look gives a cover-less deck its synthesized tile.
+                    if !book.hasCover, Self.isOfficeDocument(book.originalFileName),
+                       let tile = Self.synthesizeDocCover(title: book.title, fileName: book.originalFileName) {
+                        try? tile.write(to: dir.appendingPathComponent("cover.jpg"), options: .atomic)
+                        book.hasCover = true
+                    }
                 }
                 if let manifest = try? JSONEncoder().encode(book) {
                     try? manifest.write(to: BooksStore.manifestURL(book.id), options: .atomic)
@@ -488,6 +496,11 @@ final class BooksStore: ObservableObject {
         // Books / Libby hand out when a store book has no DRM-less M4B, and
         // refusing them was a "the importer skipped my book" report.
         case "m4b", "m4a", "mp4", "mp3", "opus", "ogg", "oga": format = .audio
+        // Slide decks are DECKS, not documents: the file is kept whole
+        // (original.pptx) and the deck reader opens it — the same rule the
+        // Linux reader follows ("the deck is shown as the deck, never
+        // converted"). The deck family rides BookFormat.deckExtensions.
+        case _ where BookFormat.deckExtensions.contains(ext): format = .slides(ext)
         // Everything else that normalizes to EPUB at import
         // (DocumentBook): the office formats, the mobipocket/Kindle family,
         // FictionBook, RTF, HTML/HTMLZ and plain text/Markdown. The reader,
@@ -511,9 +524,20 @@ final class BooksStore: ObservableObject {
             // largely by extension, and a file named .audio made every
             // metadata/chapter/cover read come back empty (while AVAudioPlayer,
             // which sniffs content, kept playing fine — hiding the damage).
-            let destinationExtension = format == .audio ? ext : format.rawValue
+            let destinationExtension = format.fileExtension
             let destination = dir.appendingPathComponent("original.\(destinationExtension)")
-            if DocumentBook.canNormalize(ext) {
+            if format.isSlides {
+                // A deck keeps its file WHOLE — no EPUB conversion. The
+                // manifest build below parses the deck once for the slide
+                // count, the per-slide TOC and the deck's own title/author.
+                do {
+                    try FileManager.default.copyItem(at: sourceURL, to: destination)
+                } catch {
+                    importError = "Could not copy \"\(sourceURL.lastPathComponent)\": \(error.localizedDescription)"
+                    try? FileManager.default.removeItem(at: dir)
+                    return nil
+                }
+            } else if DocumentBook.canNormalize(ext) {
                 // Normalize-to-EPUB: parse the document into chapters and emit
                 // a real EPUB the reader + TTS pipeline already speak. One
                 // dispatch for every format (DocumentBook) — the office set
@@ -684,7 +708,58 @@ final class BooksStore: ObservableObject {
             }
         case .audio:
             book = Self.buildAudioManifest(book: book, directory: directory)
+        case .slides(let ext):
+            book = Self.buildSlidesManifest(book: book, extension: ext, directory: directory, fallbackTitle: fallbackTitle)
         }
+        return book
+    }
+
+    /// A deck's manifest: the deck is parsed ONCE (SlideDeckKit) for its
+    /// slide count, per-slide titles and its own metadata; the file itself
+    /// stays untouched as `original.<ext>`. The spine entries ("slide-0",
+    /// …) and one TOC row per slide are the exact shape the Linux app
+    /// writes, so a deck imported here opens there and vice versa.
+    nonisolated private static func buildSlidesManifest(book: Book, extension ext: String, directory: URL, fallbackTitle: String) -> Book {
+        var book = book
+        guard let data = try? Data(contentsOf: directory.appendingPathComponent("original.\(ext)"), options: .mappedIfSafe) else {
+            book.importError = "The \(ext.uppercased()) file could not be read."
+            return book
+        }
+        let deck: SlideDeck
+        do {
+            deck = try DeckParser.parse(data)
+        } catch SlideError.encrypted {
+            book.importError = "This deck is password-protected — can't be read."
+            return book
+        } catch {
+            book.importError = "This \(ext.uppercased()) could not be opened as a slide deck: \(error)"
+            return book
+        }
+        guard !deck.slides.isEmpty else {
+            book.importError = "The deck has no slides."
+            return book
+        }
+        if !deck.title.isEmpty { book.title = deck.title }
+        if !deck.author.isEmpty { book.author = deck.author }
+        book.spineCount = deck.slides.count
+        book.spine = (0..<deck.slides.count).map { "slide-\($0)" }
+        book.toc = deck.slides.enumerated().map { index, slide in
+            let label = slide.title.isEmpty ? "Slide \(index + 1)" : slide.title
+            return BookTocEntry(label: label, href: "slide-\(index + 1)", spineIndex: index, depth: 0)
+        }
+        // A deck ships no cover image of its own in general — the shelf's
+        // synthesized tile keeps the row deliberate (and the first slide
+        // picture becomes the real cover when one exists, via the reader's
+        // cover pass in a later milestone).
+        if !book.hasCover, Self.isOfficeDocument(book.originalFileName),
+           let tile = Self.synthesizeDocCover(title: book.title, fileName: book.originalFileName) {
+            try? tile.write(to: directory.appendingPathComponent("cover.jpg"), options: .atomic)
+            book.hasCover = true
+        }
+        Log.shared.info(
+            "BooksStore: imported deck «\(book.title)» — \(deck.slides.count) slide(s), "
+                + "\(deck.media.count) image(s)"
+        )
         return book
     }
 

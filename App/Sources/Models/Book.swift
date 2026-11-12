@@ -1,7 +1,14 @@
 import Foundation
 import SpeechLogic
 
-enum BookFormat: String, Codable {
+/// One book format. Slide decks are their own format (`original.pptx` /
+/// `original.odp` is kept and the deck reader opens it) — the manifest
+/// spells them with the file's OWN extension ("pptx", "odp", …), which is
+/// what the Linux app's `is_slides()` reads, so a deck imported on one
+/// platform opens as a deck on the other. Everything the enum encodes is
+/// therefore the manifest's `format` string; the old raw-Value spellings
+/// ("epub", "pdf", "audio") are unchanged.
+enum BookFormat: Hashable, Codable {
     case epub
     case pdf
     /// A finished audiobook file (M4B / M4A / MP4 with a chpl atom, or MP3 with
@@ -9,6 +16,64 @@ enum BookFormat: String, Codable {
     /// keeps the chapter list for navigation and lock-screen controls, instead
     /// of synthesizing anything.
     case audio
+    /// A slide deck: `original.<ext>` is kept whole and the deck reader
+    /// renders the slides. `ext` is the deck's own lowercase extension
+    /// ("pptx", "ppsx", "potx", "odp") — the manifest's format string.
+    case slides(String)
+
+    /// The deck extensions this app treats as decks (not EPUB normalizations).
+    /// Legacy `.ppt` (a compound file, not a zip) is not in the set: the deck
+    /// reader cannot open it and the import reports that honestly.
+    static let deckExtensions: Set<String> = ["pptx", "ppsx", "potx", "odp"]
+
+    private enum Raw: String {
+        case epub, pdf, audio
+    }
+
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        switch raw {
+        case "epub": self = .epub
+        case "pdf": self = .pdf
+        case "audio": self = .audio
+        default:
+            if Self.deckExtensions.contains(raw.lowercased()) {
+                self = .slides(raw.lowercased())
+            } else {
+                throw DecodingError.dataCorrupted(
+                    DecodingError.Context(
+                        codingPath: decoder.codingPath,
+                        debugDescription: "unknown book format \(raw)"
+                    )
+                )
+            }
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .epub: try container.encode(Raw.epub.rawValue)
+        case .pdf: try container.encode(Raw.pdf.rawValue)
+        case .audio: try container.encode(Raw.audio.rawValue)
+        case .slides(let ext): try container.encode(ext)
+        }
+    }
+
+    /// The extension the book's `original.<ext>` file carries.
+    var fileExtension: String {
+        switch self {
+        case .epub: return "epub"
+        case .pdf: return "pdf"
+        case .audio: return "audio"
+        case .slides(let ext): return ext
+        }
+    }
+
+    var isSlides: Bool {
+        if case .slides = self { return true }
+        return false
+    }
 }
 
 /// Where the reader left off. EPUB: spine index + scroll fraction inside the
@@ -172,21 +237,33 @@ extension Book {
         case .epub: return docKindLabel ?? "EPUB"
         case .pdf: return "PDF"
         case .audio: return "Audiobook"
+        case .slides(let ext): return Self.deckLabel(forExtension: ext) ?? ext.uppercased()
+        }
+    }
+
+    /// The shelf label for a deck extension ("Slides" for pptx-family, "ODP").
+    static func deckLabel(forExtension ext: String) -> String? {
+        switch ext {
+        case "pptx", "ppsx", "potx": return "Slides"
+        case "odp": return "ODP"
+        default: return nil
         }
     }
 
     /// What kind of document a shelf item really is, from the ORIGINAL file
-    /// extension (every document format normalizes to EPUB at import, so the
-    /// plain format read "EPUB" for a Word doc — and for a Kindle book).
-    /// nil for genuine EPUBs.
+    /// extension. Every DOCUMENT format normalizes to EPUB at import, so the
+    /// plain format read "EPUB" for a Word doc — and for a Kindle book —
+    /// except the deck family, which keeps its own file and says so. nil for
+    /// genuine EPUBs.
     var docKindLabel: String? {
+        if case .slides(let ext) = format {
+            return Self.deckLabel(forExtension: ext)
+        }
         guard format == .epub else { return nil }
         switch (originalFileName as NSString).pathExtension.lowercased() {
         case "docx": return "Word"
         case "doc": return "Word 97"
         case "odt": return "ODT"
-        case "pptx": return "Slides"
-        case "odp": return "ODP"
         case "mobi": return "Mobipocket"
         case "azw", "azw3": return "Kindle"
         case "prc": return "PalmDoc"

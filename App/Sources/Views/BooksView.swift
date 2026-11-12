@@ -146,6 +146,7 @@ struct BooksView: View {
                 case .epub: BookReaderView(book: book, store: store)
                 case .pdf: BookPDFReaderView(book: book, store: store)
                 case .audio: BookAudioReaderView(book: book, store: store)
+                case .slides: BookSlidesView(book: book, store: store)
                 }
             }
             .navigationDestination(isPresented: $showingRecycleBin) {
@@ -410,6 +411,10 @@ private struct BookGridCard: View {
             }
             if let duration = book.audioDuration, duration > 0 {
                 parts.append("\(Int(duration / 60)) min")
+            }
+        case .slides:
+            if let count = book.spineCount, count > 0 {
+                parts.append("\(count) slides")
             }
         }
         return parts.joined(separator: " · ")

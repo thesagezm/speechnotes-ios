@@ -165,6 +165,11 @@ enum GoalMath {
             let span = max(1, chapter.endSeconds - chapter.startSeconds)
             let elapsed = chapter.startSeconds + position.chapterFraction * span
             return min(1, max(0, elapsed / duration))
+        case .slides:
+            // Slides are chapters — the spine shape again.
+            guard let count = book.spineCount, count > 0 else { return nil }
+            if position.chapterIndex >= count - 1 { return 1 }
+            return min(1, max(0, (Double(position.chapterIndex) + position.chapterFraction) / Double(count)))
         }
     }
 
@@ -185,6 +190,9 @@ enum GoalMath {
             let chapter = chapters[position.chapterIndex]
             let span = max(1, chapter.endSeconds - chapter.startSeconds)
             return "\(clock(chapter.startSeconds + position.chapterFraction * span)) of \(clock(duration))"
+        case .slides:
+            guard let count = book.spineCount, count > 0 else { return nil }
+            return "Slide \(min(position.chapterIndex + 1, count)) of \(count)"
         }
     }
 

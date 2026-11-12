@@ -31,6 +31,10 @@ targets:
       - App/Resources
     dependencies:
       - package: SpeechLogic
+      # The slide-deck reader: decks are their own book format now
+      # (BookFormat.slides), so the app target links the deck stack directly.
+      - package: SpeechLogic
+        product: SlideDeckKit
       - package: MisakiSwift
         product: MisakiSwift
       - package: OnnxRuntime

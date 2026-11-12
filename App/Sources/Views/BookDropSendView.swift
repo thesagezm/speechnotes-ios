@@ -556,7 +556,7 @@ struct BookDropSendView: View {
                     ? BooksStore.resolveAudioOriginalURL(book: book)
                     : BooksStore.originalFileURL(book)
                 let extensionName = source.pathExtension.isEmpty
-                    ? book.format.rawValue
+                    ? book.format.fileExtension
                     : source.pathExtension.lowercased()
                 let fileName = "\(sanitizedTitle(book.title)).\(extensionName)"
                 let target = try stage(url: source, fileName: fileName, reason: "Could not read that book's file.")
