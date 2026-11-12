@@ -36,15 +36,15 @@ public func mapSymbolBullet(_ c: String, _ font: String?) -> String {
 public func mapSymbolText(_ text: String, _ font: String) -> String {
     let f = font.lowercased()
     if f.hasPrefix("webdings") {
-        return String(text.map { webdingsShape($0) })
+        return text.map { webdingsShape($0) }.joined()
     }
     if f.contains("wingdings") || f.contains("monotype sorts") {
-        return String(text.map { wingdingsShape($0) })
+        return text.map { wingdingsShape($0) }.joined()
     }
     // The Adobe Symbol font ALONE — "Segoe UI Symbol" and friends carry real
     // Unicode glyphs and must pass through untouched.
     if f == "symbol" {
-        return String(text.map { symbolGreek($0) })
+        return text.map { symbolGreek($0) }.joined()
     }
     return text
 }

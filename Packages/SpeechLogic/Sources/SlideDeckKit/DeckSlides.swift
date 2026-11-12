@@ -721,11 +721,13 @@ public enum DeckSlides {
         // Visual order, stable on ties (the file order wins within a band).
         // A 2pt band keeps near-tied boxes (a kicker and its page number on
         // one line) reading left→right instead of splitting on rounding.
-        let order = slide.items.enumerated().map { ($0.offset, $0.element) }.sorted { a, b in
-            if abs(a.element.y - b.element.y) > 2 { return a.element.y < b.element.y }
-            if abs(a.element.x - b.element.x) > 2 { return a.element.x < b.element.x }
-            return a.offset < b.offset
-        }
+        let order = slide.items.enumerated()
+            .map { (index: $0.offset, item: $0.element) }
+            .sorted { (a: (index: Int, item: Item), b: (index: Int, item: Item)) in
+                if abs(a.item.y - b.item.y) > 2 { return a.item.y < b.item.y }
+                if abs(a.item.x - b.item.x) > 2 { return a.item.x < b.item.x }
+                return a.index < b.index
+            }
         var text = ""
         var spans: [TextSpan] = []
         var spoken = Set<String>()
