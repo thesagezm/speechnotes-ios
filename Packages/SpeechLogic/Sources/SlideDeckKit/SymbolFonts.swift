@@ -69,7 +69,7 @@ private func isPUAGlyph(_ c: Character) -> Bool {
 }
 
 private func webdingsShape(_ c: Character) -> String {
-    switch byte(c) {
+    switch byte(c) ?? -1 {
     case 0x6e: return "●"
     case 0x67: return "■"
     case 0x61: return "✓"
@@ -85,7 +85,7 @@ private func webdingsShape(_ c: Character) -> String {
 /// The bullet table: Wingdings/Wingdings 2/Wingdings 3 codes, from
 /// deckcraft-text. Monotype Sorts rides the plain-Wingdings branch.
 private func symbolBullet(_ c: Character, font: String) -> String {
-    let code = byte(c)
+    let code = byte(c) ?? -1
     if font.hasPrefix("wingdings 2") {
         switch code {
         case 0x97, 0x98: return "●"
@@ -112,7 +112,7 @@ private func symbolBullet(_ c: Character, font: String) -> String {
 
 /// Plain Wingdings shapes (and Monotype Sorts' common ones).
 private func wingdingsShape(_ c: Character) -> String {
-    switch byte(c) {
+    switch byte(c) ?? -1 {
     case 0x6c: return "●"
     case 0x6e: return "■"
     case 0x75: return "◆"
