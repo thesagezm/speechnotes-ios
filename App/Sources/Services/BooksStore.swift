@@ -3,6 +3,7 @@ import UIKit
 import PDFKit
 import AVFoundation
 import SpeechLogic
+import SlideDeckKit
 
 /// The Books library. Each book is a self-contained directory under
 /// Documents/Books/<uuid>/ holding the original file, a manifest.json, a

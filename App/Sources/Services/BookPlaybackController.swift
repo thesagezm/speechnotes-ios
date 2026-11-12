@@ -1,6 +1,7 @@
 import Foundation
 import UIKit
 import SpeechLogic
+import SlideDeckKit
 
 /// Drives TTS for books on top of the note playback machinery: ONE chapter
 /// per speak call (engines chunk internally; chapter-sized units keep the

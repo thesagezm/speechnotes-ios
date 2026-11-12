@@ -478,6 +478,15 @@ private struct DeckWebView: UIViewRepresentable {
 
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
             guard message.name == "snslides", let body = message.body as? String else { return }
+            // The delegate callback is not MainActor — bridge into one, like
+            // BookWebView's coordinator does, so the view-state closures run
+            // on the main actor.
+            Task { @MainActor [weak self] in
+                self?.handleMessage(body)
+            }
+        }
+
+        @MainActor private func handleMessage(_ body: String) {
             if body.hasPrefix("slidechanged:") {
                 let index = Int(body.dropFirst("slidechanged:".count)) ?? -1
                 callbacks.onSlideChanged(index)
