@@ -4,6 +4,83 @@ Format: newest first. Every critique round, merge, and escalation lands here.
 
 ---
 
+**Slide decks: the app side is CI-verified — first IPA build compiles green; manifest contract pinned by tests; ODP decided** (branch `batch-c-d-session`, 2026-11-12):
+- **CI is green on the deck round:** run **43269262140** on `e23fce6`:
+  **Build unsigned IPA = success** (the first compile of the blind-written
+  app side — BookSlidesView, BookFormat.slides, the BooksStore deck import,
+  the per-slide playback all compile against the real SDK), **Logic tests =
+  success** (the whole SpeechLogic suite incl. the 5 new manifest round-trip
+  tests, on macOS), spike jobs green except
+  kokoro-small-spike, which a runner-capacity cancellation cut mid-run
+  (informative/continue-on-error by design; rerun dispatched). Two earlier
+  runs bracket this one: 43265659195 failed Logic tests on the bug below;
+  43267588908 was cancelled by the workflow's `cancel-in-progress: true`
+  when the next dispatch landed — the discipline from here is one push =
+  one run.
+- **Round-1 fixes (`0e53a9d`) — what the first CI round caught:**
+  DeckTests.swift carried a duplicated `littleBytes` extension pair that had
+  been pasted in AFTER the last local docker run (the scratch loop never
+  saw it — the repo file and the scratch copy had drifted), plus the
+  print-only `testZZDebugDump` scaffolding riding along with it; both
+  dropped (deck suite 66 → 65, all green). BooksStore and
+  BookPlaybackController used `DeckParser`/`SlideDeck`/`DeckSlides` without
+  `import SlideDeckKit` (SpeechLogic does not re-export the module);
+  BookSlidesView's script-message coordinator now bridges into the view
+  closures through `Task { @MainActor }` — the exact pattern BookWebView's
+  coordinator already used. Everything else in the blind-written app side
+  compiled first try: the PlaybackRail.Action / BookPlayerBar / ReadAlongView
+  shapes copied from BookReaderView were exact, and all the `.slides`
+  switch arms were sound.
+- **The manifest contract is now tested (`e23fce6`):** `BookFormat` moved
+  from the app into the SpeechLogic package (public + Sendable, pure
+  Foundation) — it IS the cross-platform manifest contract, and it lived
+  where no CI job could reach it. New `BookFormatManifestTests` pin the
+  round-trip at the exact boundary: a Linux-written `"pptx"` manifest
+  decodes to `.slides("pptx")`, iOS re-encodes it as `"pptx"` (never a
+  Swift-only spelling — the Linux `is_slides()` must match the bytes), the
+  ppsx/potx/odp family rides along, uppercase normalizes down on read,
+  and an unknown format fails the decode loudly instead of shelving a
+  husk. Verified locally before pushing: the docker scratch loop
+  (/tmp/deckpkg/run.sh) grew a SpeechLogic shim target that compiles the
+  exact repo files under the module name CI uses — **70 tests green**
+  (65 deck + 5 manifest) on Linux swift:6.0.3.
+- **Device-facing sanity pass of the read-path logic:** the JS contract
+  between the reader and the deck script checked line by line —
+  `__snslides.show/setFit`, the `slidechanged:<n>` and `chromeTap:0`
+  message spellings, the `snslides` message-handler name, and the
+  `deck://media/<index>/<name>` URL shape (host = `media`, so the scheme
+  handler's path split lands on the index) all agree between DeckHTML.swift
+  and BookSlidesView's coordinator + scheme handler. What
+  CI proves is COMPILATION; runtime behaviour on a device (webview
+  rendering, media fetch, speech on a real deck file) is still unexercised
+  — that needs the next device sync, not another CI round.
+- **ODP DECIDED — keep `"odp"` in `BookFormat.deckExtensions`; the next
+  milestone is porting sn-doc/src/odp.rs into SlideDeckKit. Not dropping
+  ODP back to the EPUB path.** Why: (1) the rule the user set is "the deck
+  is shown as the deck, never converted" — dropping `odp` would put it
+  back through `OdpParser` → `DocumentEpubConverter`, the exact
+  text-flattening this whole round exists to stop, for one more format;
+  (2) the Linux app reads ODP as a deck (odp.rs feeds the same SlideDeck
+  model), so an iOS-written `"epub"` manifest for an .odp would disagree
+  with Linux's byte contract; (3) the interim failure is honest, not
+  silent: the import stamps `importError` ("This ODP could not be opened
+  as a slide deck"), the shelf explains it, the reader alerts. (4) The
+  port is well-scoped: 1,582 lines / 48 functions, and per its own header
+  Impress writes explicit geometry — no placeholder→layout→master chain to
+  chase, one-level automatic-style resolution — landing in the same
+  SlideDeck model, so DeckSlides/DeckHTML/the reader/speech need zero
+  changes when it arrives. The existing SpeechLogic `OdpParser` (text +
+  images as EPUB chapters) stays for the normalize path; it carries no
+  geometry and is not a shortcut to the deck viewer.
+- **Still open (unchanged from the handover):** charts/SmartArt render as
+  labelled frames; legacy .ppt refused (not in deckExtensions); SVG-shape
+  placeholder geometry simplified to the rect default; no zoom stepper /
+  present mode yet; ODP rendering itself until the port lands. Handover
+  doc updated to match reality:
+  Docs/HANDOVER-SLIDE-DECKS-IOS.md.
+
+---
+
 **Slide decks become a real book format — the read path is ported and locally green; app wiring awaits CI** (branch `batch-c-d-session`, 2026-11-12):
 - **The complaint:** "the slides work you did has not worked — they are
   still being converted to epub." True: the M1 port was foundation-only
