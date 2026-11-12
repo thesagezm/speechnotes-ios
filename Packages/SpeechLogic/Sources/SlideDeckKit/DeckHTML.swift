@@ -407,7 +407,11 @@ public enum DeckHTML {
     /// The slide script: `window.__snslides` — show, current, fit, highlight —
     /// plus the scroll reporting. The iOS cut of the Linux script: no GTK
     /// device-scale split (WebKit's viewport is the truth here), no
-    /// presentation mode yet.
+    /// presentation mode yet. The GTK viewer re-pushed the fit from a tick
+    /// callback on every allocation change (slideview.rs); here the page
+    /// re-fits ITSELF on the webview's resize event — same trigger, one
+    /// hop shorter: rotation, the landscape rail minimizing and chrome
+    /// hide/show all resize the webview, and the zoom must follow.
     static let slidesScript = """
     (function () {
         if (window.__snslides) { return; }
@@ -425,6 +429,20 @@ public enum DeckHTML {
             }
             return Math.max(Math.min(byW, 8.0), 0.05);
         }
+
+        // The fit always derives from the CURRENT viewport: recompute and
+        // re-publish on every size change (the GTK tick callback's job).
+        // A manual zoom (fit 'none') is the user's own decision and must
+        // survive a resize, exactly like the Linux reader's skip.
+        function applyFit() {
+            cfg.zoom = fitZoom(cfg.fit, cfg.manual);
+            document.documentElement.style.setProperty('--zoom', cfg.zoom);
+        }
+
+        window.addEventListener('resize', function () {
+            if (cfg.fit === 'none') { return; }
+            applyFit();
+        });
 
         function post(msg) {
             try { window.webkit.messageHandlers.snslides.postMessage(msg); } catch (e) {}
@@ -488,8 +506,7 @@ public enum DeckHTML {
             current: nearest,
             setFit: function (mode, manual) {
                 cfg.fit = mode; cfg.manual = +manual || 1;
-                cfg.zoom = fitZoom(mode, cfg.manual);
-                document.documentElement.style.setProperty('--zoom', cfg.zoom);
+                applyFit();
             },
             highlight: function (s, e) {
                 clearHighlight();

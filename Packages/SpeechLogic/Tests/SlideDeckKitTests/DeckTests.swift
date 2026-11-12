@@ -635,15 +635,18 @@ final class DeckTests: XCTestCase {
     func testSpeakableTextAndSpans() throws {
         let deck = try fixtureDeck()
         let (text, spans) = DeckSlides.slideText(deck, 0)
-        // z-order: title, box, pill (silent), picture (silent), table,
-        // caption, connector (silent) — then the notes tail.
-        XCTAssertTrue(text.hasPrefix("Hello Deck\nBoxed\nA1, B1, C1\nA2, C2\nBold caption"))
+        // Visual reading order (top→bottom, x on ties): the caption sits at
+        // y=28.8pt, the title at 72pt, then the bottom row (y=360pt) left→
+        // right — box, pill (silent), picture (silent), table — then notes.
+        // Z-order is the PAINT order and stays render-only (the fixture's
+        // caption paints last but reads first).
+        XCTAssertTrue(text.hasPrefix("Bold caption\nHello Deck\nBoxed\nA1, B1, C1\nA2, C2"))
         XCTAssertTrue(text.hasSuffix("Speaker says hello"))
-        XCTAssertEqual(spans.count, 6, "title, box, two table rows, caption, notes")
-        XCTAssertEqual(spans[0].item, 0)
+        XCTAssertEqual(spans.count, 6, "caption, title, box, two table rows, notes")
+        XCTAssertEqual(spans[0].item, 5, "spans keep the ITEM (z-order) index for highlighting")
         XCTAssertEqual(spans[0].para, 0)
         let head = String(decoding: Array(text.utf8)[spans[0].start..<spans[0].end], as: UTF8.self)
-        XCTAssertEqual(head, "Hello Deck")
+        XCTAssertEqual(head, "Bold caption")
         let notes = spans.last!
         XCTAssertEqual(notes.item, Int.max)
         let tail = String(decoding: Array(text.utf8)[notes.start..<notes.end], as: UTF8.self)
@@ -655,7 +658,8 @@ final class DeckTests: XCTestCase {
         let html = DeckHTML.deckHTML(deck)
         XCTAssertTrue(html.contains(#"data-w="720""#))
         XCTAssertTrue(html.contains(#"class="slide" id="s0""#))
-        XCTAssertTrue(html.contains(#"id="i0p0" data-s="0""#), "the first paragraph is highlight target zero")
+        XCTAssertTrue(html.contains(#"id="i5p0" data-s="0""#), "the first SPOKEN paragraph (the caption, topmost) is highlight target zero")
+        XCTAssertTrue(html.contains(#"id="i0p0" data-s="13""#), "the title highlights at its visual-order byte offset")
         XCTAssertTrue(html.contains("left:36pt;top:72pt;width:648pt;height:72pt"), "the inherited title box")
         XCTAssertTrue(html.contains("background:#FF0000"), "the accent1 box")
         XCTAssertTrue(html.contains("border:1.5pt dashed #000000"))
@@ -673,6 +677,178 @@ final class DeckTests: XCTestCase {
         XCTAssertEqual(text2, "Second Slide")
         XCTAssertEqual(spans2.count, 1, "slide 2's title is its only speakable text")
         XCTAssertEqual(DeckSlides.slideText(deck, 99).0, "", "an out-of-range index speaks nothing")
+    }
+
+    // MARK: - The device-report fixes
+
+    /// A minimal one-slide deck: a text-less preset shape (the generated
+    /// decks' rule lines and arrows), a Wingdings bullet with a Symbol-font
+    /// run, a header echoed by a footer (the "title reads last" chrome), and
+    /// a PowerPoint "Linear Down" gradient.
+    func deviceDeck() throws -> SlideDeck {
+        let pres = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <p:presentation xmlns:a="\(aNS)" xmlns:r="\(rNS)" xmlns:p="\(pNS)">
+          <sldMasterIdLst><sldMasterId id="2147483648" r:id="rId1"/></sldMasterIdLst>
+          <sldIdLst><sldId id="256" r:id="rId2"/></sldIdLst>
+          <sldSz cx="9144000" cy="5143500"/>
+        </p:presentation>
+        """
+        let presRels = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+          <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="slideMasters/slideMaster1.xml"/>
+          <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/>
+        </Relationships>
+        """
+        let master = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <p:sldMaster xmlns:a="\(aNS)" xmlns:r="\(rNS)" xmlns:p="\(pNS)">
+          <p:cSld><p:spTree>
+            <p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+            <p:grpSpPr><a:xfrm/></p:grpSpPr>
+          </p:spTree></p:cSld>
+          <p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>
+          <p:sldLayoutIdLst><p:sldLayoutId id="2147483649" r:id="rId1"/></p:sldLayoutIdLst>
+        </p:sldMaster>
+        """
+        let masterRels = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+          <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>
+        </Relationships>
+        """
+        let layout = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <p:sldLayout xmlns:a="\(aNS)" xmlns:r="\(rNS)" xmlns:p="\(pNS)">
+          <p:cSld><p:spTree>
+            <p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+            <p:grpSpPr><a:xfrm/></p:grpSpPr>
+          </p:spTree></p:cSld>
+          <p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>
+        </p:sldLayout>
+        """
+        let layoutRels = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+          <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="../slideMasters/slideMaster1.xml"/>
+        </Relationships>
+        """
+        let slide = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <p:sld xmlns:a="\(aNS)" xmlns:r="\(rNS)" xmlns:p="\(pNS)">
+          <p:cSld><p:spTree>
+            <p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+            <p:grpSpPr><a:xfrm/></p:grpSpPr>
+            <p:sp>
+              <p:nvSpPr><p:cNvPr id="2" name="Rule"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+              <p:spPr>
+                <a:xfrm><a:off x="457200" y="365760"/><a:ext cx="8229600" cy="0"/></a:xfrm>
+                <a:prstGeom prst="line"><a:avLst/></a:prstGeom>
+                <a:noFill/>
+                <a:ln w="7144"><a:solidFill><a:srgbClr val="E1E8EE"/></a:solidFill></a:ln>
+              </p:spPr>
+            </p:sp>
+            <p:sp>
+              <p:nvSpPr><p:cNvPr id="3" name="Arrow"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+              <p:spPr>
+                <a:xfrm><a:off x="457200" y="914400"/><a:ext cx="914400" cy="914400"/></a:xfrm>
+                <a:prstGeom prst="upArrow"><a:avLst/></a:prstGeom>
+                <a:solidFill><a:srgbClr val="FF0000"/></a:solidFill>
+              </p:spPr>
+            </p:sp>
+            <p:sp>
+              <p:nvSpPr><p:cNvPr id="4" name="Header"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>
+              <p:spPr><a:xfrm><a:off x="457200" y="1828800"/><a:ext cx="8229600" cy="457200"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+              <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>The Title</a:t></a:r></a:p></p:txBody>
+            </p:sp>
+            <p:sp>
+              <p:nvSpPr><p:cNvPr id="5" name="Echo"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>
+              <p:spPr><a:xfrm><a:off x="457200" y="4572000"/><a:ext cx="8229600" cy="457200"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+              <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>the title</a:t></a:r></a:p></p:txBody>
+            </p:sp>
+            <p:sp>
+              <p:nvSpPr><p:cNvPr id="6" name="Bullets"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+              <p:spPr><a:xfrm><a:off x="457200" y="2286000"/><a:ext cx="8229600" cy="914400"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+              <p:txBody><a:bodyPr/><a:lstStyle/>
+                <a:p><a:pPr><a:buChar char="l"/><a:buFont typeface="Wingdings"/></a:pPr><a:r><a:rPr lang="en-US"/><a:t>First</a:t></a:r></a:p>
+                <a:p><a:pPr><a:buNone/></a:pPr><a:r><a:rPr lang="en-US"><a:latin typeface="Symbol"/></a:rPr><a:t>ab</a:t></a:r></a:p>
+              </p:txBody>
+            </p:sp>
+            <p:sp>
+              <p:nvSpPr><p:cNvPr id="7" name="Grad"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+              <p:spPr>
+                <a:xfrm><a:off x="457200" y="3352800"/><a:ext cx="8229600" cy="914400"/></a:xfrm>
+                <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+                <a:gradFill><a:gsLst>
+                  <a:gs pos="0"><a:srgbClr val="CEB966"/></a:gs>
+                  <a:gs pos="100000"><a:srgbClr val="FFFFFF"/></a:gs>
+                </a:gsLst><a:lin ang="5400000" scaled="0"/></a:gradFill>
+              </p:spPr>
+              <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:endParaRPr lang="en-US"/></a:p></p:txBody>
+            </p:sp>
+          </p:spTree></p:cSld>
+          <p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>
+        </p:sld>
+        """
+        let slideRels = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+          <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>
+        </Relationships>
+        """
+        let contentTypes = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+          <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+          <Default Extension="xml" ContentType="application/xml"/>
+          <Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>
+        </Types>
+        """
+        let rootRels = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+          <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/>
+        </Relationships>
+        """
+        let zip = zipBytes([
+            ("[Content_Types].xml", Data(contentTypes.utf8)),
+            ("_rels/.rels", Data(rootRels.utf8)),
+            ("ppt/presentation.xml", Data(pres.utf8)),
+            ("ppt/_rels/presentation.xml.rels", Data(presRels.utf8)),
+            ("ppt/slideMasters/slideMaster1.xml", Data(master.utf8)),
+            ("ppt/slideMasters/_rels/slideMaster1.xml.rels", Data(masterRels.utf8)),
+            ("ppt/slideLayouts/slideLayout1.xml", Data(layout.utf8)),
+            ("ppt/slideLayouts/_rels/slideLayout1.xml.rels", Data(layoutRels.utf8)),
+            ("ppt/slides/slide1.xml", Data(slide.utf8)),
+            ("ppt/slides/_rels/slide1.xml.rels", Data(slideRels.utf8)),
+        ])
+        return try DeckParser.parse(zip)
+    }
+
+    func testBarePresetsAndSymbolsAndOrder() throws {
+        let deck = try deviceDeck()
+        let slide = deck.slides[0]
+        // Presets without a text body paint: the rule line and the arrow are
+        // items with SVG bodies (the reference dropped them entirely).
+        XCTAssertTrue(slide.items.contains { $0.svg?.stroke == "#E1E8EE" }, "the text-less rule line strokes")
+        XCTAssertTrue(slide.items.contains { $0.svg?.fill == "#FF0000" }, "the text-less upArrow fills")
+        // Symbol bullets and runs map to Unicode the web can show.
+        let bullets = slide.items.compactMap { item -> [Bullet]? in
+            if case .text(let paras, _, _, _) = item.content { return paras.compactMap(\.bullet) }
+            return nil
+        }.flatMap { $0 }
+        XCTAssertTrue(bullets.contains { $0.char == "●" }, "Wingdings 'l' bullets ●")
+        let html = DeckHTML.deckHTML(deck)
+        XCTAssertTrue(html.contains("αβ"), "the Symbol-font run maps to Greek")
+        // The speech reads visually: the header first; the footer echo of it
+        // once only; the silent shapes say nothing.
+        let (text, _) = DeckSlides.slideText(deck, 0)
+        XCTAssertTrue(text.hasPrefix("The Title"), "visual order speaks the header first")
+        XCTAssertEqual(text.components(separatedBy: "\n").filter { $0.lowercased() == "the title" }.count, 1, "the echo speaks once")
+        XCTAssertTrue(text.contains("First"), "the bulleted body speaks")
+        // PowerPoint "Linear Down" (ang 5400000 = 90°) points at CSS 180deg.
+        XCTAssertTrue(html.contains("linear-gradient(180.0deg,"), "pptx+90° conversion")
     }
 }
 

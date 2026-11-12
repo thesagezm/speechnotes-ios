@@ -316,6 +316,12 @@ enum Dml {
             case "buChar":
                 let ch = (e.attr("char") ?? "•").prefix(4)
                 pp.bullet = .char(String(ch))
+            case "buFont":
+                // The glyph font of the bullet: Wingdings and friends encode
+                // shapes on ASCII, so the viewer maps the char to the Unicode
+                // shape (SymbolFonts.swift). Segoe UI Symbol and real-Unicode
+                // bullets pass through unmapped.
+                if let t = e.attr("typeface"), !t.isEmpty { pp.bulletFont = String(t.prefix(128)) }
             case "buAutoNum":
                 pp.bullet = .autoNum(scheme: e.attr("type") ?? "arabicPeriod", startAt: Int(min(e.u32("startAt") ?? 1, 32767)))
             case "buBlip":

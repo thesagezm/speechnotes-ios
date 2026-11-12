@@ -251,6 +251,10 @@ public struct ParaProps {
     public var spaceBefore: Spacing?
     public var spaceAfter: Spacing?
     public var bullet: BulletSpec?
+    /// The bullet glyph's font (`a:buFont` typeface): Wingdings and friends
+    /// encode shapes on ASCII code points, and the glyph must be mapped to
+    /// the Unicode shape the web can show (see `mapSymbolBullet`).
+    public var bulletFont: String?
     public var bulletColor: ColorRef?
     public var bulletSize: Double?
 
@@ -265,6 +269,7 @@ public struct ParaProps {
         if spaceBefore == nil { spaceBefore = o.spaceBefore }
         if spaceAfter == nil { spaceAfter = o.spaceAfter }
         if bullet == nil { bullet = o.bullet }
+        if bulletFont == nil { bulletFont = o.bulletFont }
         if bulletColor == nil { bulletColor = o.bulletColor }
         if bulletSize == nil { bulletSize = o.bulletSize }
     }

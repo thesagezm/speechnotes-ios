@@ -5,6 +5,15 @@
 // reference's chart SVG and diagram outlines are the documented follow-up);
 // everything else — text, pictures, tables, connectors, preset geometry,
 // fills, gradients, borders and shadows — resolves as the reference does.
+//
+// Deliberate deviations from the reference, each answering a device report:
+// bare shapes (no text body) paint instead of vanishing (the reference's
+// "geometry only" return dropped the rule lines and arrows generated decks
+// are built from); bullets and runs in symbol fonts map to Unicode shapes
+// (the fonts don't exist on iOS — see SymbolFonts.swift); gradient angles
+// convert pptx+90° instead of the reference's mirrored 90−angle; and the
+// SPEECH text reads in visual order with repeated chrome deduped
+// (assembleText) while the render order stays z-order.
 
 import Foundation
 
@@ -163,8 +172,13 @@ public enum DeckSlides {
         let content: Content
         switch shape.kind {
         case .plain:
-            guard let text = shape.text else { return } // a bare shape with no text: geometry only
-            content = textItem(ctx, shape, text)
+            // A bare shape (no text body) still paints: its fill, border,
+            // radius and preset SVG ARE the design — the rule lines, arrows
+            // and decorative shapes a generated deck is built from. The
+            // reference drops these ("geometry only"), which hollowed out
+            // exactly those decks; empty paragraphs say nothing and speak
+            // nothing.
+            content = textItem(ctx, shape, shape.text ?? TextBody())
         case .picture(let pic):
             guard let m = mediaIndex[pic.media] else {
                 content = Content.frame(label: shape.name, media: nil)
@@ -214,9 +228,10 @@ public enum DeckSlides {
             let level = min(para.level, 8)
             let style = DeckResolve.levelStyle(ctx, shape, level)
             let bullet: Bullet?
+            let bulletFont = (props.bullet != nil ? props.bulletFont : nil) ?? style.para.bulletFont
             switch props.bullet ?? style.para.bullet {
             case .some(.char(let c)):
-                bullet = Bullet(char: c, media: nil)
+                bullet = Bullet(char: mapSymbolBullet(c, bulletFont), media: nil)
             case .some(.autoNum(let _, let startAt)):
                 // The scheme's numbering restarts per shape in practice; a
                 // "1." shape is what nearly every deck uses.
@@ -292,15 +307,21 @@ public enum DeckSlides {
     }
 
     static func makeRun(_ ctx: DeckResolve.Ctx, _ text: String, _ resolved: RunProps, _ scale: Double) -> Run {
+        let family = DeckResolve.fontFamily(ctx, resolved)
+        // A run set in a symbol font (Wingdings, the Adobe Symbol font…)
+        // carries shapes and Greek letters on ASCII code points; the font
+        // does not exist on iOS, so the raw letters would show. Map to the
+        // Unicode shapes the fallback font can draw.
+        let mapped = mapSymbolText(text, family)
         Run(
-            text: text,
+            text: mapped,
             size: max(resolved.size ?? 18.0, 4.0) * scale,
             bold: resolved.bold ?? false,
             italic: resolved.italic ?? false,
             underline: resolved.underline.map { $0 != "none" } ?? false,
             strike: !(resolved.strike == nil || resolved.strike == "noStrike"),
             color: runColor(ctx, resolved),
-            font: DeckResolve.fontFamily(ctx, resolved),
+            font: family,
             spacing: resolved.spacing ?? 0,
             baseline: resolved.baseline ?? 0,
             highlight: resolved.highlight.map { css(ctx.color($0, nil)) }
@@ -608,9 +629,14 @@ public enum DeckSlides {
         let list = stops.joined(separator: ", ")
         switch g.shape {
         case .linear(let angle, _):
-            // PowerPoint's angle runs clockwise from left→right; CSS runs
-            // clockwise from bottom→top.
-            var cssAngle = (90 - angle).truncatingRemainder(dividingBy: 360)
+            // PowerPoint's angle is clockwise from the direction pointing
+            // right (and the screen's y grows downward), so 90° — PowerPoint's
+            // "Linear Down" — is top→bottom. CSS angles are clockwise from
+            // "up": the matching CSS angle is pptx + 90 (90° → 180deg = to
+            // bottom, 0° → 90deg = to right). The reference carried `90 −
+            // angle`, which mirrors every non-horizontal gradient onto its
+            // opposite direction; this port deviates deliberately.
+            var cssAngle = (angle + 90).truncatingRemainder(dividingBy: 360)
             if cssAngle < 0 { cssAngle += 360 }
             return String(format: "linear-gradient(%.1fdeg, %@)", cssAngle, list)
         case .path(let path, _):
@@ -674,13 +700,36 @@ public enum DeckSlides {
     // The speakable text and its spans
     // -----------------------------------------------------------------------
 
-    /// Build `Slide.text` from the items, in the order they were added
-    /// (z-order — PowerPoint's own reading order), recording a byte span per
-    /// paragraph. Runs on after the last rebuild of the geometry.
+    /// Build `Slide.text` from the items, in VISUAL reading order — top to
+    /// bottom, left to right on ties — recording a byte span per paragraph.
+    /// The RENDER order stays z-order (paint order); only the speech order
+    /// follows the eye. Z-order was the reference's reading order too, but it
+    /// is the PAINT order, and decks (especially generated ones) paint their
+    /// footer last: the trailing echo of the section name made TTS read "the
+    /// title" at the end of every slide. Speaking in the order the slide
+    /// LOOKS puts the header first, the content next, the footer last — the
+    /// way a person reads it.
+    ///
+    /// Text that repeats on one slide (the footer echoing the header) speaks
+    /// once, from its first position: hearing "HIV · Staging & Classification"
+    /// at both ends of every slide is noise, not content.
+    ///
+    /// Idempotent: `spans` are rebuilt from the items each run (slideText
+    /// re-assembles a copy of a slide that was already assembled at build
+    /// time), and items are never reordered.
     public static func assembleText(_ slide: inout Slide) {
+        // Visual order, stable on ties (the file order wins within a band).
+        // A 2pt band keeps near-tied boxes (a kicker and its page number on
+        // one line) reading left→right instead of splitting on rounding.
+        let order = slide.items.enumerated().map { ($0.offset, $0.element) }.sorted { a, b in
+            if abs(a.element.y - b.element.y) > 2 { return a.element.y < b.element.y }
+            if abs(a.element.x - b.element.x) > 2 { return a.element.x < b.element.x }
+            return a.offset < b.offset
+        }
         var text = ""
         var spans: [TextSpan] = []
-        for (index, item) in slide.items.enumerated() {
+        var spoken = Set<String>()
+        for (index, item) in order {
             switch item.content {
             case .text(let paras, _, _, _):
                 for (para, p) in paras.enumerated() {
@@ -690,6 +739,10 @@ public enum DeckSlides {
                     }
                     let trimmed = joined.trimmingCharacters(in: .whitespacesAndNewlines)
                     if trimmed.isEmpty { continue }
+                    // Chrome echo: the same line twice on one slide (a footer
+                    // repeating the header) speaks once.
+                    let key = trimmed.lowercased()
+                    if !spoken.insert(key).inserted { continue }
                     if !text.isEmpty { text.append("\n") }
                     let start = text.utf8.count
                     text += trimmed
