@@ -1,4 +1,5 @@
 import SwiftUI
+import SpeechLogic
 
 /// One reading goal: a book, a start date, and a finish-by deadline. The
 /// progress is never stored — it is derived live from the book's own

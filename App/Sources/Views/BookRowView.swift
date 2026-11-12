@@ -1,4 +1,5 @@
 import SwiftUI
+import SpeechLogic
 
 /// One library row: cover thumbnail + title + metadata line. Takes the value
 /// + precomputed metadata so it renders without touching the disk (the same
