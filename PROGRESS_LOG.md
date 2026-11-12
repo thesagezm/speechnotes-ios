@@ -10,9 +10,9 @@ Format: newest first. Every critique round, merge, and escalation lands here.
   app side — BookSlidesView, BookFormat.slides, the BooksStore deck import,
   the per-slide playback all compile against the real SDK), **Logic tests =
   success** (the whole SpeechLogic suite incl. the 5 new manifest round-trip
-  tests, on macOS), spike jobs green except
-  kokoro-small-spike, which a runner-capacity cancellation cut mid-run
-  (informative/continue-on-error by design; rerun dispatched). Two earlier
+  tests, on macOS), all spike jobs green — kokoro-small-spike needed two
+  reruns (runner capacity cancelled it mid-run once and in-queue once; it
+  is informative/continue-on-error by design), then passed. Two earlier
   runs bracket this one: 43265659195 failed Logic tests on the bug below;
   43267588908 was cancelled by the workflow's `cancel-in-progress: true`
   when the next dispatch landed — the discipline from here is one push =

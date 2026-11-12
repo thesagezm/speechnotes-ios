@@ -6,10 +6,10 @@ compile-verified** (no iOS toolchain on this box) and **CI has not run**.
 The next agent picks up at "Verify the app target in CI" below.
 
 > **UPDATE, same day, later:** the CI verification below HAPPENED and is
-> green — run **43269262140** on `e23fce6` has Build unsigned IPA = success
-> and Logic tests = success (kokoro-small-spike cut by a runner-capacity
-> cancellation; informative/continue-on-error by design). The app side IS
-> compile-verified now. What CI proves is compilation; device behaviour
+> green — run **43269262140** on `e23fce6`: ALL seven jobs success
+> (Build unsigned IPA, Logic tests, all spikes; kokoro-small-spike needed
+> two capacity-reruns, then passed). The app side IS compile-verified
+> now. What CI proves is compilation; device behaviour
 > (webview rendering, media fetch, speech on a real deck) is still
 > unexercised. The sections below are kept as the record of how the app
 > side was verified; the "first action" is DONE. The ODP question in
