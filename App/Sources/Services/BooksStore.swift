@@ -515,6 +515,12 @@ final class BooksStore: ObservableObject {
                         try? tile.write(to: dir.appendingPathComponent("cover.jpg"), options: .atomic)
                         book.hasCover = true
                     }
+                case .document:
+                    // A native document's manifest comes complete from the
+                    // import (the parse wrote the spine, the TOC and the
+                    // cover in one pass) — there is nothing a backfill could
+                    // add, and the parse is not re-run lazily.
+                    break
                 }
                 if let manifest = try? JSONEncoder().encode(book) {
                     try? manifest.write(to: BooksStore.manifestURL(book.id), options: .atomic)

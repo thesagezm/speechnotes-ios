@@ -228,7 +228,7 @@ struct BookWebView: UIViewRepresentable {
                     if parts.count == 2, parts[1] == "original.epub" {
                         let fileURL = BooksStore.bookDirectory(bookID).appendingPathComponent("original.epub")
                         let handle = try FileHandle(forReadingFrom: fileURL)
-                        let size = try handle.seekToEnd()
+                        let size = Int64(try handle.seekToEnd())
                         try handle.seek(toOffset: 0)
                         source = .stream(handle, size, "application/epub+zip")
                     } else {
@@ -238,7 +238,7 @@ struct BookWebView: UIViewRepresentable {
                             throw URLError(.fileDoesNotExist)
                         }
                         let handle = try FileHandle(forReadingFrom: fileURL)
-                        let size = try handle.seekToEnd()
+                        let size = Int64(try handle.seekToEnd())
                         try handle.seek(toOffset: 0)
                         source = .stream(handle, size, mime)
                     }
