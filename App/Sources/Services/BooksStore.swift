@@ -46,6 +46,54 @@ final class BooksStore: ObservableObject {
         bookDirectory(book.id).appendingPathComponent("original.\(book.format.fileExtension)")
     }
 
+    /// The file a NATIVE document's virtual spine name answers from — the
+    /// import-persisted parse under the book's own `doc/` directory:
+    /// `cover` → `doc/cover.html`, `chapter-N` → `doc/chapter-N.html`,
+    /// `img/<name>` → `doc/img/<name>`. These are the names the reader's
+    /// scheme handler serves (`bookscheme://book/<uuid>/<name>`) and the
+    /// names the manifest's spine and TOC hrefs carry, exactly like the
+    /// Linux reader's `ServedBookDoc::read`. nil for anything else, and a
+    /// name that tries to climb out of `doc/` (`..`, absolute) is refused —
+    /// the names come from book content and the handler trusts nothing.
+    nonisolated static func documentFileURL(_ bookID: UUID, virtualName: String) -> URL? {
+        let doc = bookDirectory(bookID).appendingPathComponent("doc", isDirectory: true)
+        let components = virtualName.split(separator: "/")
+        guard !components.isEmpty,
+              components.allSatisfy({ $0 != "." && $0 != ".." && $0 != "" }) else { return nil }
+        if virtualName == "cover" {
+            return doc.appendingPathComponent("cover.html")
+        }
+        if components.count == 2, components[0] == "img" {
+            return doc.appendingPathComponent("img/\(components[1])")
+        }
+        if virtualName.hasPrefix("chapter-"), components.count == 1,
+           let index = Int(String(components[0].dropFirst("chapter-".count))), index >= 0 {
+            return doc.appendingPathComponent("chapter-\(index).html")
+        }
+        return nil
+    }
+
+    /// The content type a native document's virtual name carries: the image
+    /// file's own from its extension, `application/xhtml+xml` for the page
+    /// shapes, nothing for a name that answers no file.
+    nonisolated static func documentMime(forVirtualName virtualName: String) -> String? {
+        if virtualName.hasPrefix("img/") {
+            switch (virtualName as NSString).pathExtension.lowercased() {
+            case "png": return "image/png"
+            case "jpg", "jpeg": return "image/jpeg"
+            case "gif": return "image/gif"
+            case "bmp", "dib": return "image/bmp"
+            case "webp": return "image/webp"
+            case "svg": return "image/svg+xml"
+            default: return "application/octet-stream"
+            }
+        }
+        if virtualName == "cover" || virtualName.hasPrefix("chapter-") {
+            return "application/xhtml+xml"
+        }
+        return nil
+    }
+
     /// The audio book's file, resolved to whatever name it actually carries.
     /// New imports store `original.<true extension>` (AVURLAsset needs a real
     /// container extension to read metadata/chapters/covers); books imported
@@ -508,12 +556,16 @@ final class BooksStore: ObservableObject {
         // Linux reader follows ("the deck is shown as the deck, never
         // converted"). The deck family rides BookFormat.deckExtensions.
         case _ where BookFormat.deckExtensions.contains(ext): format = .slides(ext)
-        // Everything else that normalizes to EPUB at import
-        // (DocumentBook): the office formats, the mobipocket/Kindle family,
-        // FictionBook, RTF, HTML/HTMLZ and plain text/Markdown. The reader,
-        // the TOC and the TTS spine pipeline all consume the generated EPUB
-        // unchanged, so downstream nothing ever knows the difference.
-        case _ where DocumentBook.canNormalize(ext): format = .epub
+        // The headless documents (DocumentBook) split by family. The OFFICE
+        // set still normalizes to EPUB at import (DocumentEpubConverter) —
+        // the reader, the TOC and the TTS spine pipeline all consume the
+        // generated EPUB unchanged. The mobipocket/Kindle family,
+        // FictionBook, RTF, HTML/HTMLZ and plain-text/Markdown instead KEEP
+        // their file whole (original.<ext>) and persist the parse — the
+        // Linux reader's native pipeline (ServedBookDoc): the scheme
+        // handler serves doc/chapter-N.html pages, nothing becomes an EPUB.
+        case _ where DocumentBook.canNormalize(ext):
+            format = BookFormat.documentExtensions.contains(ext) ? .document(ext) : .epub
         default:
             format = nil
         }
@@ -524,6 +576,12 @@ final class BooksStore: ObservableObject {
 
         let id = UUID()
         let dir = Self.bookDirectory(id)
+        // What a NATIVE document import hands the manifest builder below:
+        // the spine, the TOC snapshot, the cover stamp and the parse's own
+        // title/author. Everything the parse determines that buildManifest
+        // cannot re-derive from the disk layout alone (the toc labels come
+        // from the parse, not the doc/ file list).
+        var documentImport: DocumentImportBits?
         do {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             // Audio books keep their TRUE extension (original.m4b, not
@@ -531,6 +589,9 @@ final class BooksStore: ObservableObject {
             // largely by extension, and a file named .audio made every
             // metadata/chapter/cover read come back empty (while AVAudioPlayer,
             // which sniffs content, kept playing fine — hiding the damage).
+            // Headless documents need the same rule for the same reason: the
+            // reader's scheme handler and the TTS chapter reader both resolve
+            // original.<format.fileExtension>.
             let destinationExtension = format.fileExtension
             let destination = dir.appendingPathComponent("original.\(destinationExtension)")
             if format.isSlides {
@@ -544,16 +605,103 @@ final class BooksStore: ObservableObject {
                     try? FileManager.default.removeItem(at: dir)
                     return nil
                 }
+            } else if case .document(let docExt) = format {
+                // A headless document keeps its file WHOLE (original.<ext>)
+                // and the import persists the parse: doc/chapter-N.html
+                // standalone pages, the images they reference and the cover.
+                // The reader's scheme handler serves those pages directly —
+                // the Linux reader's ServedBookDoc model. Nothing here is
+                // EPUB and nothing becomes one.
+                try FileManager.default.copyItem(at: sourceURL, to: destination)
+                do {
+                    // Read + parse OFF the main actor. A 50 MB `.azw3` spends
+                    // real seconds decompressing, and this used to run inline
+                    // on the main actor — the "the app freezes while importing
+                    // a book" report.
+                    documentImport = try await Task.detached(priority: .userInitiated) { () -> DocumentImportBits in
+                        let sourceData = try Data(contentsOf: sourceURL, options: .mappedIfSafe)
+                        let result = try DocumentBook.parse(fileExtension: docExt, data: sourceData)
+                        guard !result.chapters.isEmpty else {
+                            throw DocumentParseError.malformed("the document has no readable chapters")
+                        }
+                        // Persist the parse under doc/. The cover ALSO rides
+                        // as the shelf's cover.jpg (bytes are bytes — the
+                        // shelf decodes them however the source mime spells
+                        // them) and as doc/img/cover.<ext> for the reader's
+                        // cover page.
+                        let docDir = dir.appendingPathComponent("doc", isDirectory: true)
+                        try FileManager.default.createDirectory(at: docDir, withIntermediateDirectories: true)
+                        for file in DocumentPages.files(
+                            chapters: result.chapters, images: result.images, cover: result.cover
+                        ) {
+                            let target = docDir.appendingPathComponent(file.path)
+                            try FileManager.default.createDirectory(
+                                at: target.deletingLastPathComponent(), withIntermediateDirectories: true
+                            )
+                            try file.data.write(to: target, options: .atomic)
+                        }
+                        var hasCover = false
+                        if let coverData = result.cover?.data {
+                            try? coverData.write(to: dir.appendingPathComponent("cover.jpg"), options: .atomic)
+                            hasCover = true
+                        }
+                        // The document's own title/author beat the filename
+                        // when the format carries them (every family member
+                        // does). A cover-less book gets the same synthesized
+                        // shelf tile the EPUB path gives its office kin.
+                        let meta = DocumentBook.metadata(fileExtension: docExt, data: sourceData)
+                        let fallback = (sourceURL.lastPathComponent as NSString).deletingPathExtension
+                            .replacingOccurrences(of: "_", with: " ")
+                        let title = meta?.title?.isEmpty == false ? meta!.title! : fallback
+                        let author = meta?.author?.isEmpty == false ? meta!.author : nil
+                        if !hasCover, let tile = Self.synthesizeDocCover(title: title, fileName: sourceURL.lastPathComponent) {
+                            try? tile.write(to: dir.appendingPathComponent("cover.jpg"), options: .atomic)
+                            hasCover = true
+                        }
+                        // The spine: the cover page first (opening a book
+                        // starts on its cover — the converted-EPUB pipeline's
+                        // behavior, kept), then one entry per chapter
+                        // ("chapter-0", … — the Linux spine's names, 0-based).
+                        // The TTS pipeline skips the cover: an image-only
+                        // page extracts to no speakable text.
+                        let spine = (result.cover != nil ? ["cover"] : [])
+                            + (0..<result.chapters.count).map { "chapter-\($0)" }
+                        let chapterOffset = result.cover != nil ? 1 : 0
+                        let toc = result.chapters.enumerated().map { index, chapter -> BookTocEntry in
+                            let label = chapter.title?.isEmpty == false
+                                ? chapter.title!
+                                : "Chapter \(index + 1)"
+                            return BookTocEntry(
+                                label: label,
+                                href: "chapter-\(index)",
+                                spineIndex: index + chapterOffset,
+                                depth: nil
+                            )
+                        }
+                        Log.shared.info(
+                            "BooksStore: parsed .\(docExt) natively — \(result.chapters.count) chapter(s), "
+                                + "\(result.images.count) image(s), cover \(hasCover ? "yes" : "none")"
+                        )
+                        return DocumentImportBits(
+                            title: title, author: author,
+                            spine: spine, toc: toc, hasCover: hasCover
+                        )
+                    }.value
+                } catch {
+                    importError = "Could not read the \(docExt.uppercased()) document: \(error.localizedDescription)"
+                    try? FileManager.default.removeItem(at: dir)
+                    return nil
+                }
             } else if DocumentBook.canNormalize(ext) {
                 // Normalize-to-EPUB: parse the document into chapters and emit
                 // a real EPUB the reader + TTS pipeline already speak. One
                 // dispatch for every format (DocumentBook) — the office set
-                // plus the mobipocket/Kindle, FictionBook, RTF, HTML/HTMLZ and
-                // plain-text readers. The parse carries the document's images
-                // and tables too: images are packaged into the EPUB (rendered
-                // full-width by the reader), tables become real bordered HTML
-                // tables, and a cover (embedded thumbnail, the book's own art,
-                // or the first image) rides along as the shelf cover.
+                // (docx/doc/odt; the headless family above now goes native).
+                // The parse carries the document's images and tables too:
+                // images are packaged into the EPUB (rendered full-width by
+                // the reader), tables become real bordered HTML tables, and
+                // a cover (embedded thumbnail, the book's own art, or the
+                // first image) rides along as the shelf cover.
                 do {
                     // Read + parse OFF the main actor. A 50 MB `.azw3` spends
                     // real seconds decompressing, and this used to run inline
@@ -597,9 +745,23 @@ final class BooksStore: ObservableObject {
         }
 
         let fileName = sourceURL.lastPathComponent
-        let parsed = await Task.detached(priority: .userInitiated) { () -> Book in
+        var parsed = await Task.detached(priority: .userInitiated) { () -> Book in
             Self.buildManifest(id: id, format: format, originalFileName: fileName, directory: dir)
         }.value
+        // A native document's parse already ran in the import task above —
+        // its spine, TOC, cover stamp and own title/author land here, where
+        // the EPUB path's equivalents come out of buildManifest's zip read.
+        if let bits = documentImport {
+            if let title = bits.title, !title.isEmpty { parsed.title = title }
+            if let author = bits.author, !author.isEmpty { parsed.author = author }
+            parsed.spine = bits.spine
+            parsed.spineCount = bits.spine.isEmpty ? nil : bits.spine.count
+            parsed.toc = bits.toc
+            parsed.hasCover = bits.hasCover
+            if bits.spine.isEmpty {
+                parsed.importError = "The document has no readable chapters."
+            }
+        }
 
         do {
             let data = try JSONEncoder().encode(parsed)
@@ -611,6 +773,18 @@ final class BooksStore: ObservableObject {
         }
         refresh()
         return parsed
+    }
+
+    /// What a native document import hands the manifest: the parse-derived
+    /// spine (cover page first, then `chapter-N`), the TOC snapshot and the
+    /// cover stamp, plus the document's own title/author. Filled by the
+    /// detached import task, merged into the Book after buildManifest.
+    private struct DocumentImportBits {
+        var title: String?
+        var author: String?
+        var spine: [String]
+        var toc: [BookTocEntry]
+        var hasCover: Bool
     }
 
     /// Runs off-main. Reads only a few zip entries (epub) or the lazy
@@ -718,6 +892,12 @@ final class BooksStore: ObservableObject {
             }
         case .audio:
             book = Self.buildAudioManifest(book: book, directory: directory)
+        case .document:
+            // The parse already ran in the import task (it persisted doc/,
+            // the cover and the parse's own metadata) — its spine, TOC and
+            // cover stamp are merged into the book by the caller, so there
+            // is nothing to re-read here. The original file stays whole.
+            break
         case .slides(let ext):
             book = Self.buildSlidesManifest(book: book, extension: ext, directory: directory, fallbackTitle: fallbackTitle)
         }

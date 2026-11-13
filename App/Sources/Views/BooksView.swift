@@ -143,7 +143,10 @@ struct BooksView: View {
             }
             .navigationDestination(for: Book.self) { book in
                 switch book.format {
-                case .epub: BookReaderView(book: book, store: store)
+                // A native document opens in the same reader as an EPUB —
+                // BookWebView swaps the epub.js shell for the document's own
+                // pages; the chrome, TOC, position and TTS wiring are shared.
+                case .epub, .document: BookReaderView(book: book, store: store)
                 case .pdf: BookPDFReaderView(book: book, store: store)
                 case .audio: BookAudioReaderView(book: book, store: store)
                 case .slides: BookSlidesView(book: book, store: store)
@@ -385,7 +388,7 @@ private struct BookGridCard: View {
         }
         var parts = [book.authorOrFormat]
         switch book.format {
-        case .epub:
+        case .epub, .document:
             if let chapters = book.spineCount {
                 parts.append("\(chapters) ch")
             }

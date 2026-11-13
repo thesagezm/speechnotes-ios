@@ -26,7 +26,7 @@ struct BookRowView: View {
     private var metaLine: String {
         var parts = [book.authorOrFormat]
         switch book.format {
-        case .epub:
+        case .epub, .document:
             if let chapters = book.spineCount {
                 parts.append("\(chapters) chapter\(chapters == 1 ? "" : "s")")
             }
@@ -110,7 +110,7 @@ struct BookCoverView: View {
 /// rather than a book — the shelf should say what kind of thing it is.
 private func glyph(for format: BookFormat) -> String {
     switch format {
-    case .epub: return "book.closed"
+    case .epub, .document: return "book.closed"
     case .pdf: return "doc.richtext"
     case .audio: return "speaker.wave.2"
     case .slides: return "rectangle.on.rectangle"

@@ -8,6 +8,16 @@ import Foundation
 /// therefore the manifest's `format` string; the old raw-Value spellings
 /// ("epub", "pdf", "audio") are unchanged.
 ///
+/// The headless documents (the Mobipocket/Kindle family, FictionBook, RTF,
+/// HTML, plain text — the Linux `DocFamily` set plus Markdown) are their own
+/// family the same way: the manifest's format string is the file's own
+/// extension, `original.<ext>` is kept WHOLE, and the reader serves the
+/// parse (`doc/chapter-N.html` + images) straight into the webview — the
+/// Linux app's exact pipeline (`bookdoc.rs` + `ServedBookDoc`), which never
+/// becomes an EPUB. Office formats (docx/doc/odt) are NOT in the family:
+/// they still normalize to EPUB at import, so their manifest spelling stays
+/// "epub" and the decode set below never sees them.
+///
 /// Lives in the logic package because it IS the cross-platform contract:
 /// the manifest is written by Linux and read here (and the other way
 /// round), and the round-trip ("pptx" decodes, re-encodes as "pptx") is
@@ -24,11 +34,30 @@ public enum BookFormat: Hashable, Codable, Sendable {
     /// renders the slides. `ext` is the deck's own lowercase extension
     /// ("pptx", "ppsx", "potx", "odp") — the manifest's format string.
     case slides(String)
+    /// A headless document: `original.<ext>` is kept whole, the import
+    /// persists the parse (`doc/chapter-N.html`, images, cover) and the
+    /// reader serves those pages directly. `ext` is the file's own lowercase
+    /// extension — the manifest's format string, matching what the Linux
+    /// app's import_document stamps.
+    case document(String)
 
     /// The deck extensions this app treats as decks (not EPUB normalizations).
     /// Legacy `.ppt` (a compound file, not a zip) is not in the set: the deck
     /// reader cannot open it and the import reports that honestly.
     public static let deckExtensions: Set<String> = ["pptx", "ppsx", "potx", "odp"]
+
+    /// The extensions that decode as `.document` — the Linux DocFamily set
+    /// plus the two Markdown spellings iOS reads. Read by the import path's
+    /// format routing (one table, the same one-list discipline the Linux
+    /// `DocFamily::from_extension` keeps).
+    public static let documentExtensions: Set<String> = [
+        "mobi", "azw", "azw3", "prc", "pdb",
+        "fb2",
+        "rtf",
+        "html", "htm", "htmlz",
+        "txt", "text",
+        "md", "markdown",
+    ]
 
     private enum Raw: String {
         case epub, pdf, audio
@@ -41,8 +70,11 @@ public enum BookFormat: Hashable, Codable, Sendable {
         case "pdf": self = .pdf
         case "audio": self = .audio
         default:
-            if Self.deckExtensions.contains(raw.lowercased()) {
-                self = .slides(raw.lowercased())
+            let lower = raw.lowercased()
+            if Self.deckExtensions.contains(lower) {
+                self = .slides(lower)
+            } else if Self.documentExtensions.contains(lower) {
+                self = .document(lower)
             } else {
                 throw DecodingError.dataCorrupted(
                     DecodingError.Context(
@@ -61,6 +93,7 @@ public enum BookFormat: Hashable, Codable, Sendable {
         case .pdf: try container.encode(Raw.pdf.rawValue)
         case .audio: try container.encode(Raw.audio.rawValue)
         case .slides(let ext): try container.encode(ext)
+        case .document(let ext): try container.encode(ext)
         }
     }
 
@@ -71,11 +104,19 @@ public enum BookFormat: Hashable, Codable, Sendable {
         case .pdf: return "pdf"
         case .audio: return "audio"
         case .slides(let ext): return ext
+        case .document(let ext): return ext
         }
     }
 
     public var isSlides: Bool {
         if case .slides = self { return true }
+        return false
+    }
+
+    /// True for the headless document family — the formats the reader
+    /// serves from the persisted parse instead of an EPUB archive.
+    public var isDocument: Bool {
+        if case .document = self { return true }
         return false
     }
 }

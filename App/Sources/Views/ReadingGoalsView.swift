@@ -131,7 +131,9 @@ enum GoalMath {
     static func fraction(of book: Book) -> Double? {
         guard let position = book.position else { return nil }
         switch book.format {
-        case .epub:
+        // A native document's position is the spine's (cover page first),
+        // the same shape an EPUB's is.
+        case .epub, .document:
             guard let count = book.spineCount, count > 0 else { return nil }
             // The position's chapterIndex is the SPINE index (0-based) and
             // the fraction is the position WITHIN that chapter.
@@ -178,7 +180,7 @@ enum GoalMath {
     static func unitLabel(for book: Book) -> String? {
         guard let position = book.position else { return nil }
         switch book.format {
-        case .epub:
+        case .epub, .document:
             guard let count = book.spineCount, count > 0 else { return nil }
             return "Chapter \(min(position.chapterIndex + 1, count)) of \(count)"
         case .pdf:

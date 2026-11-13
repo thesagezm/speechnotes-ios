@@ -165,6 +165,7 @@ extension Book {
         if let author, !author.isEmpty { return author }
         switch format {
         case .epub: return docKindLabel ?? "EPUB"
+        case .document: return docKindLabel ?? format.fileExtension.uppercased()
         case .pdf: return "PDF"
         case .audio: return "Audiobook"
         case .slides(let ext): return Self.deckLabel(forExtension: ext) ?? ext.uppercased()
@@ -181,15 +182,16 @@ extension Book {
     }
 
     /// What kind of document a shelf item really is, from the ORIGINAL file
-    /// extension. Every DOCUMENT format normalizes to EPUB at import, so the
-    /// plain format read "EPUB" for a Word doc — and for a Kindle book —
+    /// extension. Every DOCUMENT format either normalizes to EPUB at import
+    /// (the office set) or renders natively as `.document` — the plain
+    /// format read "EPUB" for a Word doc and for a Kindle book alike,
     /// except the deck family, which keeps its own file and says so. nil for
     /// genuine EPUBs.
     var docKindLabel: String? {
         if case .slides(let ext) = format {
             return Self.deckLabel(forExtension: ext)
         }
-        guard format == .epub else { return nil }
+        guard format == .epub || format.isDocument else { return nil }
         switch (originalFileName as NSString).pathExtension.lowercased() {
         case "docx": return "Word"
         case "doc": return "Word 97"

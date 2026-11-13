@@ -1,19 +1,27 @@
 import Foundation
 
-/// One dispatch table for the normalize-to-EPUB formats: everything that is
-/// not EPUB/PDF/audio but becomes a book through `DocumentEpubConverter`.
+/// One dispatch table for the headless book formats: everything that is
+/// not EPUB/PDF/audio/decks but becomes a book through this pipeline.
 ///
-/// The office formats (docx/odt/pptx/odp/doc) already went through this
-/// pipeline with their switches inlined at each call site — `BooksStore`
-/// `.importBook` and `ImportService.importText` both grew a copy. The five new
-/// readers (mobipocket, FictionBook, RTF, HTML/HTMLZ, plain text/Markdown)
-/// would have made that five copies, so the dispatch lives here once and every
-/// caller asks this type.
+/// The office formats (docx/odt/pptx/odp/doc) normalize to EPUB at import —
+/// `DocumentEpubConverter` emits a real EPUB the reader, the TOC and the TTS
+/// spine pipeline already speak, so downstream nothing ever knows the
+/// difference. The headless family (mobipocket, FictionBook, RTF,
+/// HTML/HTMLZ, plain text/Markdown) instead keeps the file whole and the
+/// import persists the parse — `DocumentPages` writes the standalone
+/// chapter pages and images the reader's scheme handler serves directly
+/// (the Linux app's native pipeline); `BookFormat.documentExtensions` is
+/// the set the import routes to `.document`.
+///
+/// Both families share this one parse dispatch (the office parsers' switches
+/// used to be inlined at each call site — `BooksStore.importBook` and
+/// `ImportService.importText` each grew a copy; the five headless readers
+/// would have made that five copies, so the dispatch lives here once and
+/// every caller asks this type).
 ///
 /// Each parser reduces its format to `DocumentParseResult` (chapters +
-/// images + cover); the converter then emits a real EPUB the reader, the TOC
-/// and the TTS spine pipeline already speak, so downstream nothing ever knows
-/// the difference.
+/// images + cover); the caller decides whether the converter packages it
+/// into an EPUB (office) or the page writer serves it as-is (headless).
 public enum DocumentBook {
 
     /// Every extension this pipeline normalizes to EPUB, lowercase, without

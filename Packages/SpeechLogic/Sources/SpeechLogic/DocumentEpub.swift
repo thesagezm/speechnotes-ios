@@ -1509,7 +1509,8 @@ public enum DocumentEpubConverter {
     /// The book's cover as the first spine item — a full-page image, no
     /// chrome, so opening a book starts on its cover the way a reader app
     /// does. The class is what `chapterCSS` sizes to the full content width.
-    private static func coverPageXHTML(href: String) -> String {
+    /// Internal so `DocumentPages` (the native reader's page set) reuses it.
+    static func coverPageXHTML(href: String) -> String {
         """
         <?xml version="1.0" encoding="utf-8"?>
         <!DOCTYPE html>
@@ -1522,7 +1523,9 @@ public enum DocumentEpubConverter {
         """
     }
 
-    private static func chapterXHTML(_ chapter: DocumentChapter, index: Int, imageHREFs: [String], imageClasses: [String]) -> String {
+    /// Internal so `DocumentPages` (the native reader's page set) reuses it —
+    /// the native chapter pages are the same serializers with `img/` hrefs.
+    static func chapterXHTML(_ chapter: DocumentChapter, index: Int, imageHREFs: [String], imageClasses: [String]) -> String {
         var body = ""
         // The chapter title as a heading — UNLESS the chapter's own markup
         // already opens with the same heading (mobi/KF8 chapters carry their
@@ -1752,5 +1755,71 @@ public enum DocumentEpubConverter {
             .unicodeScalars.filter { !$0.properties.isDeprecated && ($0.value > 0x1F || $0 == "\t" || $0 == "\n" || $0 == "\r") }
             .map(String.init)
             .joined()
+    }
+}
+
+// MARK: - Native reader pages
+
+/// The parsed document as the NATIVE reader serves it — the Linux app's
+/// `ServedBookDoc` model: standalone chapter pages and the images they
+/// reference, written loose under the book's `doc/` directory. Nothing here
+/// is EPUB and nothing becomes one; the same serializers the EPUB converter
+/// uses produce the pages, only the image hrefs differ (`img/<n>.<ext>` —
+/// relative to the chapter page, so `bookscheme://book/<uuid>/img/…` serves
+/// the bytes).
+///
+/// The cover page comes first in the reader's spine (the converted-EPUB
+/// pipeline's behavior — opening a book starts on its cover), so the cover
+/// also rides as `img/cover.<ext>` beside the chapter images.
+public enum DocumentPages {
+    /// One file to write under the book's `doc/` directory. `path` is
+    /// relative to it and pre-sanitized (letters, digits, `-`, `_`, `.`).
+    public struct File {
+        public let path: String
+        public let data: Data
+
+        public init(path: String, data: Data) {
+            self.path = path
+            self.data = data
+        }
+    }
+
+    /// The whole page set: one standalone XHTML page per chapter, one image
+    /// file per pool entry, and the cover page + image when the parse
+    /// carried a cover.
+    public static func files(
+        chapters: [DocumentChapter],
+        images: [DocumentImage],
+        cover: DocumentImage?
+    ) -> [File] {
+        // The hrefs chapters reference the images by, and their reader CSS
+        // classes — the same size rule the EPUB converter applies (real
+        // figures run full width, small icons keep size).
+        let imageHREFs = images.enumerated().map { index, image -> String in
+            "img/\(index).\(DocumentMedia.fileExtension(forMime: image.mime))"
+        }
+        let imageClasses = images.map { image -> String in
+            let size = DocumentMedia.pixelSize(of: image.data)
+            return size?.width ?? 0 >= 320 && size?.height ?? 0 >= 320 ? "doc-image" : "doc-image-inline"
+        }
+
+        var out: [File] = []
+        for (index, chapter) in chapters.enumerated() {
+            let html = DocumentEpubConverter.chapterXHTML(
+                chapter, index: index + 1,
+                imageHREFs: imageHREFs, imageClasses: imageClasses
+            )
+            out.append(File(path: "chapter-\(index).html", data: Data(html.utf8)))
+        }
+        for (index, image) in images.enumerated() {
+            out.append(File(path: "\(imageHREFs[index])", data: image.data))
+        }
+        if let cover {
+            let ext = DocumentMedia.fileExtension(forMime: cover.mime)
+            out.append(File(path: "img/cover.\(ext)", data: cover.data))
+            let page = DocumentEpubConverter.coverPageXHTML(href: "img/cover.\(ext)")
+            out.append(File(path: "cover.html", data: Data(page.utf8)))
+        }
+        return out
     }
 }

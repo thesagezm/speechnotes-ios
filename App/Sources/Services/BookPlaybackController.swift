@@ -263,6 +263,10 @@ final class BookPlaybackController: ObservableObject {
     static func chapterCount(of book: Book) -> Int {
         switch book.format {
         case .epub: return book.spine?.count ?? 0
+        // A native document speaks the same units it renders: the spine's
+        // pages ("cover", "chapter-N") — the cover extracts to no speakable
+        // text and is skipped like any image-only spine item.
+        case .document: return book.spine?.count ?? 0
         case .pdf: return book.pdfChapters?.count ?? 0
         case .audio: return book.audioChapters?.count ?? 0
         case .slides: return book.spine?.count ?? book.spineCount ?? 0
@@ -412,6 +416,25 @@ final class BookPlaybackController: ObservableObject {
             // A parse that aborted mid-document (rare after the entity
             // pre-pass, still possible) must NOT be cached — the truncated
             // text would replay on every future play/resume with no error.
+            if let result, !result.parseCompleted {
+                suspectParse = true
+                Log.shared.error("BookPlayback: ch\(chapterIndex) of \(book.title) — XML parse aborted near char \(result.text.utf16.count); NOT caching")
+            }
+            extracted = result.map { (text: $0.text, pageOffsets: nil as [PdfPageOffset]?) }
+        case .document:
+            // A native document's speech text is the persisted parse: the
+            // reader's scheme handler serves doc/<spine name> to the webview
+            // and the TTS chapter reader extracts the very same file. The
+            // extract runs off-main like every chapter read; the cache below
+            // makes it once-per-book.
+            guard let spine = book.spine, chapterIndex >= 0, chapterIndex < spine.count else { return nil }
+            let pageURL = BooksStore.documentFileURL(book.id, virtualName: spine[chapterIndex])
+            let result = await Task.detached(priority: .userInitiated) { () -> (text: String, parseCompleted: Bool)? in
+                guard let url = pageURL,
+                      let html = try? Data(contentsOf: url) else { return nil }
+                let extraction = XhtmlText.extract(from: html)
+                return extraction.text.isEmpty ? nil : (extraction.text, extraction.parseCompleted)
+            }.value
             if let result, !result.parseCompleted {
                 suspectParse = true
                 Log.shared.error("BookPlayback: ch\(chapterIndex) of \(book.title) — XML parse aborted near char \(result.text.utf16.count); NOT caching")
