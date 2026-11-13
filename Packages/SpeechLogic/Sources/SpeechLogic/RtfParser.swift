@@ -184,11 +184,17 @@ private final class RtfReader {
                 emit(finished)
             } else {
                 // Keep accumulating into the parent: this group was a
-                // formatting scope, not a paragraph.
+                // formatting scope, not a paragraph. isMarked merges too —
+                // the bold-scope convention (`{\b Title}\par`, WordPad and
+                // calibre both write it) sets the flag INSIDE the group, and
+                // dropping it here turned every bold standalone title into a
+                // plain paragraph: no headings, no chapter split.
                 if let last = stack.indices.last {
                     stack[last].builder.text += finished.text
                     stack[last].builder.emphasized =
                         stack[last].builder.emphasized || finished.emphasized
+                    stack[last].builder.isMarked =
+                        stack[last].builder.isMarked || finished.isMarked
                 }
             }
         }
@@ -271,13 +277,18 @@ private final class RtfReader {
             infoBytes = []
 
         case "b":
-            builder.isBold = parameter != 0
+            // Toggle words are ON when they carry NO parameter (the spec's
+            // own rule: `\b` = on, `\b0` = off). Treating the missing
+            // parameter as zero turned every bare `\b` OFF — emphasis never
+            // latched, isMarked never set, and no RTF book ever split at its
+            // bold/italic titles.
+            builder.isBold = hasParameter ? parameter != 0 : true
             if builder.isBold { builder.isMarked = true }
         case "i":
-            builder.isItalic = parameter != 0
+            builder.isItalic = hasParameter ? parameter != 0 : true
             if builder.isItalic { builder.isMarked = true }
         case "ul", "ulw", "uld", "uldb":
-            builder.isUnderlined = parameter != 0
+            builder.isUnderlined = hasParameter ? parameter != 0 : true
             if builder.isUnderlined { builder.isMarked = true }
         case "ulnone":
             builder.isUnderlined = false

@@ -444,8 +444,14 @@ final class BooksStore: ObservableObject {
                     if book.toc?.contains(where: { $0.depth != nil }) != true, !info.toc.isEmpty {
                         let indexByHref = Dictionary(info.spine.enumerated().map { ($1, $0) },
                                                      uniquingKeysWith: { first, _ in first })
+                        // depth rides along: without it this rewrite never
+                        // satisfied the flat-toc condition above (it re-parsed
+                        // EVERY launch forever) and the reader's drop-down TOC
+                        // tree never rendered — the manifest was the one place
+                        // the nesting was lost.
                         book.toc = info.toc.map { entry in
-                            BookTocEntry(label: entry.label, href: entry.href, spineIndex: indexByHref[entry.href])
+                            BookTocEntry(label: entry.label, href: entry.href,
+                                         spineIndex: indexByHref[entry.href], depth: entry.depth)
                         }
                     }
                     if !book.hasCover, Self.isOfficeDocument(book.originalFileName),
@@ -660,12 +666,15 @@ final class BooksStore: ObservableObject {
             }
             // Snapshot the TOC with spine indices so the reader can navigate
             // without a webview. Anchors whose href missed the spine are kept
-            // but unlinked.
+            // but unlinked. depth rides along — the reader's drop-down TOC
+            // tree reads it, and the reader already prefers this snapshot
+            // over the webview's flat toc BECAUSE of it.
             if !info.toc.isEmpty {
                 let indexByHref = Dictionary(info.spine.enumerated().map { ($1, $0) },
                                              uniquingKeysWith: { first, _ in first })
                 book.toc = info.toc.map { entry in
-                    BookTocEntry(label: entry.label, href: entry.href, spineIndex: indexByHref[entry.href])
+                    BookTocEntry(label: entry.label, href: entry.href,
+                                 spineIndex: indexByHref[entry.href], depth: entry.depth)
                 }
             }
         case .pdf:

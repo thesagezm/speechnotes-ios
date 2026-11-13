@@ -713,16 +713,44 @@ public enum MobiParser {
     /// all (older conversions, the `.doc`-style fixture set) chunks into
     /// ~12 000-character spans of paragraphs.
     ///
-    /// The index path comes FIRST when the book carries a CNCX with two or
-    /// more entries: the publisher's own contents page is the authority on
-    /// where chapters start and what they are called, and the heading rule
-    /// cannot see it (that is the "TOC and Introduction in one chapter, named
-    /// Chapter 7" report — a contents page rendered as links into one long
-    /// section has no headings at all).
+    /// The index path comes first when the book carries a chapter index with
+    /// two or more entries: the publisher's own contents page is the
+    /// authority on where chapters start and what they are called, and the
+    /// heading rule cannot see it (that is the "TOC and Introduction in one
+    /// chapter, named Chapter 7" report — a contents page rendered as links
+    /// into one long section has no headings at all). For MOBI6 the index's
+    /// offsets cut the text directly. For KF8 the verified flow cut stays in
+    /// charge of the boundaries and takes the publisher's LABELS when the
+    /// index has exactly one entry per flow; when it names more structure,
+    /// the offsets cut instead — gated on flow starts so a misread index can
+    /// never chop the book mid-flow.
     static func chapters(from html: String, variant: String, toc: [MobiTOCEntry] = []) -> [MobiChapter] {
         if toc.count >= 2 {
-            let tocChapters = tocChapters(from: html, toc: toc)
-            if !tocChapters.isEmpty { return tocChapters }
+            if variant == "kf8" {
+                let flows = kf8FlowChapters(from: html)
+                if flows.count >= 2 {
+                    // One index entry per flow: the flow cut IS the book's
+                    // own chapter structure (device-verified), so keep the
+                    // cut and take the publisher's labels — the contents-page
+                    // words beat an h1 echo, the same rule tocChapters applies.
+                    if flows.count == toc.count {
+                        return zip(flows, toc).map { flow, entry in
+                            MobiChapter(title: entry.label, paragraphs: flow.paragraphs, html: flow.html)
+                        }
+                    }
+                    // The index names MORE structure than the flows found:
+                    // cut at the index's own offsets, gated on flow starts
+                    // (a misread KF8 index must not chop the book mid-flow —
+                    // see tocChapters' requireFlowStarts).
+                    let tocChapters = tocChapters(from: html, toc: toc, requireFlowStarts: true)
+                    if !tocChapters.isEmpty { return tocChapters }
+                }
+                // A failing or too-thin index leaves the flow cut in charge.
+                if !flows.isEmpty { return flows }
+            } else {
+                let tocChapters = tocChapters(from: html, toc: toc)
+                if !tocChapters.isEmpty { return tocChapters }
+            }
         }
         if variant == "kf8" {
             let flowChapters = kf8FlowChapters(from: html)
@@ -736,9 +764,20 @@ public enum MobiParser {
     /// inside a tag are snapped forward to the next tag boundary, so a
     /// chapter never opens mid-tag; entries whose offset cannot be placed
     /// (record-only writers) are dropped rather than guessed at.
-    static func tocChapters(from html: String, toc: [MobiTOCEntry]) -> [MobiChapter] {
-        let prepared = prepare(html)
-        let bytes = Array(prepared.utf8)
+    ///
+    /// `requireFlowStarts` (KF8 only) gates the whole cut: every segment
+    /// must open a flow (`<html` within its first bytes), because a KF8
+    /// chapter index whose offsets were misread (chunk-relative garbage)
+    /// would otherwise chop the book mid-flow — worse than the fallback it
+    /// replaces. A real index's entries sit exactly on flow starts.
+    static func tocChapters(from html: String, toc: [MobiTOCEntry], requireFlowStarts: Bool = false) -> [MobiChapter] {
+        // The cut happens on the RAW decompressed bytes — the index's offsets
+        // are coordinates in that stream. (Cutting the PREPARED text at raw
+        // offsets was the first draft's drift bug: prepare collapses
+        // `<mbp:pagebreak>` to two newlines and strips skipped elements, so
+        // every offset after the first pagebreak lands in the previous
+        // chapter's tail.)
+        let bytes = Array(html.utf8)
         // Placeable offsets only, in document order, deduplicated.
         var cuts: [(label: String, start: Int)] = []
         for entry in toc where entry.offset >= 0 {
@@ -752,13 +791,38 @@ public enum MobiParser {
             cuts.append((entry.label, snapped))
         }
         guard cuts.count >= 2 else { return [] }
+        if requireFlowStarts {
+            // Every real KF8 chapter index offset lands on (or immediately
+            // before, past the XML declaration) a flow's `<html` open —
+            // within a short window. A misread index (chunk-relative or
+            // otherwise wrong offsets) lands mid-flow, where no `<html`
+            // follows: reject the whole cut and let the flow path rule.
+            for (index, cut) in cuts.enumerated() {
+                let end = index + 1 < cuts.count ? cuts[index + 1].start : bytes.count
+                let window = String(
+                    decoding: bytes[cut.start..<min(end, cut.start + 64)],
+                    as: UTF8.self
+                ).lowercased()
+                guard window.contains("<html") else { return [] }
+            }
+        }
 
         var result: [MobiChapter] = []
         for (index, cut) in cuts.enumerated() where result.count < maxChapters {
             let end = index + 1 < cuts.count ? cuts[index + 1].start : bytes.count
             guard end > cut.start else { continue }
+            // The segment is RAW markup — the index's coordinates — and is
+            // prepared per segment. (The previous draft cut the PREPARED text
+            // at raw offsets: prepare collapses `<mbp:pagebreak>` to two
+            // newlines and strips skipped elements, so every offset after the
+            // first pagebreak drifted left and the cut landed in the previous
+            // chapter's tail.)
             let segment = String(decoding: bytes[cut.start..<end], as: UTF8.self)
-            let items = Self.items(from: segment)
+            // KF8 segments carry their own `<html>…</html>` wrapper; stripped
+            // per segment so the generated EPUB chapter stays renderable (see
+            // stripKF8Wrapper). MOBI6 segments are body markup already.
+            let prepared = requireFlowStarts ? prepare(stripKF8Wrapper(segment)) : prepare(segment)
+            let items = Self.items(from: prepared)
             var title: String?
             var paragraphs: [String] = []
             for item in items {
@@ -775,7 +839,7 @@ public enum MobiParser {
             let resolvedTitle = cut.label
             // A label the text itself opens with must not be echoed as prose.
             if let title, title == resolvedTitle { paragraphs.removeFirst() }
-            result.append(MobiChapter(title: resolvedTitle, paragraphs: paragraphs, html: segment))
+            result.append(MobiChapter(title: resolvedTitle, paragraphs: paragraphs, html: prepared))
         }
         return result
     }
@@ -998,230 +1062,248 @@ public enum MobiParser {
 
     // MARK: - Table of contents (INDX / TAGX / FCIC / CNCX)
 
-    /// The book's own table of contents, read from its index records.
-    ///
-    /// The chain, in the format's own order:
-    ///
-    /// 1. **INDX** — the index record (resource record 0 for both flavours).
-    ///    Its `TAGX` block is a tag table mapping tag names to (byte offset,
-    ///    byte count) pairs inside every indexed record, plus the control
-    ///    bytes that say how many values each tag carries.
-    /// 2. **TAGX's "CNCX" entry** — names the record number holding the
-    ///    navigation control, which is where the contents lives.
-    /// 3. **CNCX** — a tree of the same indexed-record shape whose leaves are
-    ///    the TOC entries: each carries the entry's byte offset into the
-    ///    decompressed text and its label, nested to the index's depth.
-    ///
-    /// Every step is optional in the wild (writers omit the index, point TAGX
-    /// at nothing, or ship an empty CNCX), so each reader returns empty rather
-    /// than throwing — the caller falls back to the heading paths and the
-    /// book still imports.
-    static func tableOfContents(pdb: PalmDatabase, header: MobiHeader) -> [MobiTOCEntry] {
-        // The index sits among the records after the text; firstContentRecord
-        // (KF8) is the base when the writer set it, otherwise the record
-        // after the text.
-        let indexBase = header.firstContentRecord > 0
-            ? header.firstContentRecord
-            : 1 + header.textRecordCount
-        guard indexBase > 0, indexBase < pdb.recordCount,
-              let index = pdb.record(indexBase),
-              index.count > 4, String(decoding: index[0..<4], as: UTF8.self) == "INDX"
-        else { return [] }
-        guard let tagx = tagxBlock(in: index) else { return [] }
-        guard let cncxRecord = cncxRecordNumber(tagx: tagx, pdb: pdb, header: header),
-              let cncx = pdb.record(cncxRecord),
-              cncx.count > 4, String(decoding: cncx[0..<4], as: UTF8.self) == "CNCX"
-        else { return [] }
-        return cncxEntries(in: cncx, tagx: tagx)
+    // MARK: - The book's own table of contents (the real index layout)
+    //
+    // The MOBI/KF8 chapter index is a numeric-tag format, and the first draft
+    // of this reader parsed an invented one: it read TAGX entries as
+    // name-length-prefixed STRINGS ("CNCX", "position", "label") where the
+    // format actually encodes [tag code u8][values count u8] pairs with small
+    // INTEGER codes (1 = the entry's filepos + length, 2/3/0xFF the rest), and
+    // it treated the CNCX as fixed-slot records where the format encodes
+    // [VWI length][label bytes] runs. On every real book the names never
+    // matched, `tableOfContents` returned [], and the publisher's contents
+    // page was silently lost — every mobi/azw3 fell back to h1/flow titles
+    // ("Chapter N" for books that style their headings instead of marking
+    // them). That is the "mobi/azw3 fails to keep the table of contents and
+    // separate chapters accurately" report. This block implements the layout
+    // the format actually ships (KindleUnpack/mobiunpack's mobi_index; the
+    // fixture tests below build the bytes exactly as the spec describes).
+    //
+    // Every reader here returns empty/nil rather than throwing — a book
+    // without an index (older conversions) or with an unparseable one falls
+    // back to the heading/flow paths, which is the pre-fix behavior, never
+    // worse.
+
+    /// One TAGX tag: its numeric code and how many VWI values each entry
+    /// carries for it.
+    struct IndexTag: Equatable {
+        let code: Int
+        let values: Int
     }
 
-    /// The TAGX block inside an INDX: its own header (identifier, the number
-    /// of tags, the control-byte offsets) plus one entry per tag.
+    /// The TAGX section of an INDX: the tag table and the byte offset where
+    /// the record's own entries begin.
     ///
-    /// Layout: `TAGX` magic, u8 tag count, u32 control bytes per entry, then
-    /// per tag a u8 name length, the name bytes, and a variable control-byte
-    /// sequence whose meaning (values count, mask, shifts) the index header's
-    /// `TAGX` offsets describe. Only the name and its "values count" are
-    /// needed here — the offset and label tags are read structurally below.
-    struct Tagx {
-        /// tag name → number of values it carries.
-        let valuesByTag: [String: Int]
-    }
-
-    static func tagxBlock(in index: Data) -> Tagx? {
-        // TAGX starts at INDX offset 0x10 (after the 0x10-byte index header),
-        // and the index header's own length sits at offset 4.
-        let indexHeaderLength = Int(u32(index, 4))
-        let start = max(0x10, indexHeaderLength)
-        guard start + 8 <= index.count,
-              String(decoding: index[start..<(start + 4)], as: UTF8.self) == "TAGX"
+    /// Real layout: the `INDX` header — its length sits at 0x04 (0x18 for
+    /// every chapter index; the KF8 SKELETON's is much longer, its entries
+    /// are chunk sizes rather than TOC rows, and this width check is what
+    /// skips it) — then `TAGX`: magic, u8 tag count, u8 control byte count,
+    /// then one [code u8][values u8] pair per tag. Entries follow the TAGX
+    /// section; their count sits at 0x10 in the INDX header.
+    static func indexTagx(in record: Data) -> (controlByteCount: Int, tags: [IndexTag], entriesStart: Int)? {
+        let headerLength = Int(u32(record, 4))
+        guard headerLength >= 0x18, headerLength <= 0x40, record.count > headerLength + 6
         else { return nil }
-        let tagCount = Int(index[index.startIndex + start + 4])
-        var cursor = start + 5
-        var values: [String: Int] = [:]
-        for _ in 0..<min(tagCount, 64) {
-            guard cursor + 1 <= index.count else { break }
-            let nameLength = Int(index[index.startIndex + cursor])
-            cursor += 1
-            guard cursor + nameLength <= index.count, nameLength > 0 else { break }
-            let name = String(decoding: index[(index.startIndex + cursor)..<(index.startIndex + cursor + nameLength)], as: UTF8.self)
-            cursor += nameLength
-            // One control byte per value: bit 7 = "more values follow",
-            // bits 0-4 = the value's byte width. A tag with no control bytes
-            // carries no values.
-            var count = 0
-            while cursor < index.count {
-                let control = index[index.startIndex + cursor]
-                cursor += 1
-                count += 1
-                if control & 0x80 == 0 { break }
-            }
-            values[name] = count
+        let start = headerLength
+        guard String(decoding: record[start..<(start + 4)], as: UTF8.self) == "TAGX" else { return nil }
+        let tagCount = Int(record[record.startIndex + start + 4])
+        let controlByteCount = Int(record[record.startIndex + start + 5])
+        guard tagCount > 0, tagCount <= 32, controlByteCount >= 0, controlByteCount <= 8
+        else { return nil }
+        var cursor = start + 6
+        var tags: [IndexTag] = []
+        tags.reserveCapacity(tagCount)
+        for _ in 0..<tagCount {
+            guard cursor + 2 <= record.count else { return nil }
+            tags.append(IndexTag(
+                code: Int(record[record.startIndex + cursor]),
+                values: Int(record[record.startIndex + cursor + 1])
+            ))
+            cursor += 2
         }
-        return values.isEmpty ? nil : Tagx(valuesByTag: values)
+        return (controlByteCount, tags, cursor)
     }
 
-    /// The record number the TAGX's "CNCX" tag names, resolved through the
-    /// index record's own tag values (the value is a u32 at the offset TAGX
-    /// assigns the tag, read straight out of the INDX record).
-    static func cncxRecordNumber(tagx: Tagx, pdb: PalmDatabase, header: MobiHeader) -> Int? {
-        guard let count = tagx.valuesByTag["CNCX"], count > 0 else { return nil }
-        let indexBase = header.firstContentRecord > 0
-            ? header.firstContentRecord
-            : 1 + header.textRecordCount
-        guard let index = pdb.record(indexBase) else { return nil }
-        // The value's offset inside the record is not stored in TAGX itself;
-        // it follows the index header. Walk the record's own tag entries and
-        // read the u32 that stands where the CNCX tag does.
-        guard let offset = cncxValueOffset(in: index, tagx: tagx) else { return nil }
-        let record = Int(u32(index, offset))
-        return record > 0 && record < pdb.recordCount ? record : nil
-    }
-
-    /// Byte offset of the CNCX tag's value inside the INDX record.
-    ///
-    /// TAGX assigns each tag a slot; the slot's position is described by the
-    /// control bytes' widths, walked in tag order from the end of the index
-    /// header. The CNCX tag's own width is 4 (a record number), which is what
-    /// the control byte's low bits say.
-    static func cncxValueOffset(in index: Data, tagx: Tagx) -> Int? {
-        let indexHeaderLength = Int(u32(index, 4))
-        let start = max(0x10, indexHeaderLength)
-        guard start + 8 <= index.count,
-              String(decoding: index[start..<(start + 4)], as: UTF8.self) == "TAGX"
-        else { return nil }
-        let tagCount = Int(index[index.startIndex + start + 4])
-        var cursor = start + 5
-        // Values start after the tag table; walk the tags in order summing
-        // each one's value widths until the CNCX slot.
-        var valueCursor: Int? = nil
-        for _ in 0..<min(tagCount, 64) {
-            guard cursor + 1 <= index.count else { break }
-            let nameLength = Int(index[index.startIndex + cursor])
-            cursor += 1
-            guard cursor + nameLength <= index.count, nameLength > 0 else { break }
-            let name = String(decoding: index[(index.startIndex + cursor)..<(index.startIndex + cursor + nameLength)], as: UTF8.self)
-            cursor += nameLength
-            if valueCursor == nil { valueCursor = cursor }
-            var width = 0
-            while cursor < index.count {
-                let control = index[index.startIndex + cursor]
-                cursor += 1
-                width += Int(control & 0x0F) + 1
-                if control & 0x80 == 0 { break }
-            }
-            if name == "CNCX" { return valueCursor }
-            guard let from = valueCursor else { break }
-            valueCursor = from + width
+    /// A variable-width integer: 7 bits per byte, big-endian, terminated by
+    /// the byte whose high bit is set (the format's own encoding). Bounded to
+    /// five bytes so a corrupt stream cannot spin the walk.
+    static func vwi(_ data: Data, at cursor: Int) -> (value: Int, next: Int)? {
+        var value = 0
+        var index = cursor
+        for _ in 0..<5 {
+            guard index < data.count else { return nil }
+            let byte = data[data.startIndex + index]
+            index += 1
+            value = (value << 7) | Int(byte & 0x7F)
+            if byte & 0x80 != 0 { return (value, index) }
         }
         return nil
     }
 
-    /// The CNCX's TOC entries: leaves of the nested-record tree, each with
-    /// its byte offset into the decompressed text and its label.
+    /// The index's entries, in document order, as [tag code → values] maps.
     ///
-    /// A CNCX record is the same indexed shape as the INDX (header, then
-    /// tag-defined values), so the reader walks its TAGX slots the same way:
-    /// the tag named "position" (a u32, sometimes u64) is the text offset,
-    /// the tag named "filepos" is the fallback offset, and the tag named
-    /// "label" is the label — whose length varies, so its value is read by
-    /// its own control bytes. Nesting depth is not in the record; entries
-    /// arrive flat and in document order, which is all the reader needs.
-    static func cncxEntries(in cncx: Data, tagx: Tagx) -> [MobiTOCEntry] {
-        guard let slots = tagSlots(in: cncx, tagx: tagx) else { return [] }
-        let offsetWidth = slots.first(where: { $0.name == "position" || $0.name == "filepos" })?.width ?? 4
-        guard let labelSlot = slots.first(where: { $0.name == "label" }),
-              let offsetSlot = slots.first(where: { $0.name == "position" })
-                ?? slots.first(where: { $0.name == "filepos" })
-        else { return [] }
-        let entrySize = slots.reduce(0) { $0 + $1.width }
-        guard entrySize > 0 else { return [] }
-
-        var entries: [MobiTOCEntry] = []
-        var cursor = slotsStart(in: cncx)
-        while cursor + entrySize <= cncx.count, entries.count < maxChapters {
-            let labelBytes = cncx[(cncx.startIndex + cursor + labelSlot.offset)..<(cncx.startIndex + cursor + labelSlot.offset + labelSlot.width)]
-            let label = String(decoding: labelBytes, as: UTF8.self)
-                .trimmingCharacters(in: CharacterSet(charactersIn: "\u{0}"))
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            let raw = u32(cncx, cursor + offsetSlot.offset)
-            let offset = offsetWidth >= 8
-                ? Int(u64(cncx, cursor + offsetSlot.offset))
-                : Int(raw)
-            if !label.isEmpty {
-                entries.append(MobiTOCEntry(label: label, offset: offset))
-            }
-            cursor += entrySize
-        }
-        return entries
-    }
-
-    /// The tag slots of an indexed record: name, byte offset within an entry,
-    /// and byte width — the same walk TAGX describes, resolved against the
-    /// record's own control bytes.
-    struct TagSlot {
-        let name: String
-        let offset: Int
-        let width: Int
-    }
-
-    static func slotsStart(in record: Data) -> Int {
-        // After the record's own header: 0x10 bytes, or its declared length
-        // when the writer set one.
-        let declared = Int(u32(record, 4))
-        return declared >= 0x10 && declared <= record.count ? declared : 0x10
-    }
-
-    static func tagSlots(in record: Data, tagx: Tagx) -> [TagSlot]? {
-        let start = slotsStart(in: record)
-        guard start + 8 <= record.count else { return nil }
-        let tagCount = Int(record[record.startIndex + start + 4])
-        guard tagCount > 0, tagCount <= 64 else { return nil }
-        var cursor = start + 5
-        var slots: [TagSlot] = []
-        var offset = 0
-        for _ in 0..<tagCount {
-            guard cursor + 1 <= record.count else { return nil }
-            let nameLength = Int(record[record.startIndex + cursor])
-            cursor += 1
-            guard cursor + nameLength <= record.count, nameLength > 0 else { return nil }
-            let name = String(decoding: record[(record.startIndex + cursor)..<(record.startIndex + cursor + nameLength)], as: UTF8.self)
-            cursor += nameLength
-            var width = 0
-            while cursor < record.count {
-                let control = record[record.startIndex + cursor]
+    /// Each entry is `controlByteCount` bytes (a bitmask of which tags apply —
+    /// chapter indexes apply them ALL to every entry, so the bytes are zero; a
+    /// nonzero mask is a structure this reader does not model and rejects
+    /// rather than misreads) followed by each tag's VWI values in tag order.
+    /// The entry count comes from the INDX header at 0x10, capped at the
+    /// chapter ceiling.
+    static func indexEntries(
+        in record: Data,
+        controlByteCount: Int,
+        tags: [IndexTag],
+        entriesStart: Int
+    ) -> [[Int: [Int]]]? {
+        let count = Int(u32(record, 0x10))
+        guard count >= 2, count <= maxChapters else { return nil }
+        var cursor = entriesStart
+        var out: [[Int: [Int]]] = []
+        out.reserveCapacity(count)
+        for _ in 0..<count {
+            for _ in 0..<controlByteCount {
+                guard cursor < record.count else { return out.isEmpty ? nil : out }
+                guard record[record.startIndex + cursor] == 0 else { return nil }
                 cursor += 1
-                width += Int(control & 0x0F) + 1
-                if control & 0x80 == 0 { break }
             }
-            guard width > 0 else { return nil }
-            // A tag TAGX does not describe is not part of this record's
-            // entries; keep the walk honest by trusting the record's own
-            // control bytes and filtering by name afterwards.
-            slots.append(TagSlot(name: name, offset: offset, width: width))
-            offset += width
+            var entry: [Int: [Int]] = [:]
+            for tag in tags {
+                var values: [Int] = []
+                values.reserveCapacity(tag.values)
+                for _ in 0..<tag.values {
+                    guard let (value, next) = vwi(record, at: cursor) else {
+                        return out.isEmpty ? nil : out
+                    }
+                    values.append(value)
+                    cursor = next
+                }
+                entry[tag.code] = values
+            }
+            out.append(entry)
         }
-        return slots.isEmpty ? nil : slots.filter { tagx.valuesByTag[$0.name] != nil }
+        return out
+    }
+
+    /// The labels that trail an INDX: the CNCX records that follow it in the
+    /// file, each a run of [VWI length][label bytes] pairs after the `CNCX`
+    /// magic. Stops at the first record that is not CNCX, at a nonsensical
+    /// length, or at the scan cap (a very large book's labels can span many
+    /// records; each record is one scan step and a non-CNCX record ends the
+    /// run, so the cap only bounds pathological files).
+    static func cncxLabels(from recordNumber: Int, pdb: PalmDatabase) -> [String] {
+        var labels: [String] = []
+        var cursor = recordNumber
+        for _ in 0..<32 {
+            guard cursor < pdb.recordCount, let record = pdb.record(cursor),
+                  record.count > 4,
+                  String(decoding: record[0..<4], as: UTF8.self) == "CNCX"
+            else { break }
+            var position = 4
+            while position < record.count {
+                guard let (length, next) = vwi(record, at: position),
+                      length > 0, length <= 2048,
+                      next + length <= record.count
+                else { break }
+                let bytes = record[(record.startIndex + next)..<(record.startIndex + next + length)]
+                labels.append(String(decoding: bytes, as: UTF8.self))
+                position = next + length
+            }
+            cursor += 1
+        }
+        return labels
+    }
+
+    /// A label that reads as text — the gate that keeps a misparsed CNCX from
+    /// shipping binary garbage as chapter names: bounded length, and at most
+    /// 20% control characters.
+    static func labelLooksLikeText(_ label: String) -> Bool {
+        guard !label.isEmpty, label.count <= 512 else { return false }
+        let control = label.unicodeScalars.filter {
+            ($0.value < 0x20 && $0 != "\t" && $0 != "\n") || $0.value == 0x7F
+        }.count
+        return control * 5 <= label.count
+    }
+
+    /// One candidate INDX → the publisher's TOC, when the record genuinely is
+    /// the chapter index and its pieces line up:
+    ///
+    /// * a position tag — code 1, the chapter index's own (filepos, length)
+    ///   pair where value 1 is the chapter's byte offset into the decompressed
+    ///   text; a writer that numbered differently gets the first multi-value
+    ///   tag;
+    /// * the CNCX labels, exactly one per entry, in document order;
+    /// * offsets that never move backward and stay inside the book;
+    /// * labels that read as text.
+    ///
+    /// Any gate failing returns nil — the caller falls back to the heading
+    /// and flow paths.
+    static func chapterTOC(recordNumber: Int, pdb: PalmDatabase, textLimit: Int) -> [MobiTOCEntry]? {
+        guard recordNumber < pdb.recordCount, let record = pdb.record(recordNumber),
+              record.count > 0x18,
+              String(decoding: record[0..<4], as: UTF8.self) == "INDX"
+        else { return nil }
+        guard let (controlByteCount, tags, entriesStart) = indexTagx(in: record),
+              let entries = indexEntries(
+                in: record,
+                controlByteCount: controlByteCount,
+                tags: tags,
+                entriesStart: entriesStart
+              )
+        else { return nil }
+        let positionTag = tags.first { $0.code == 1 }
+            ?? tags.first { $0.values >= 2 }
+        guard let positionTag else { return nil }
+        var offsets: [Int] = []
+        offsets.reserveCapacity(entries.count)
+        for entry in entries {
+            guard let values = entry[positionTag.code], let first = values.first else { return nil }
+            offsets.append(first)
+        }
+        let labels = cncxLabels(from: recordNumber + 1, pdb: pdb)
+        guard labels.count == entries.count else { return nil }
+        guard zip(offsets, labels).allSatisfy({ _, label in labelLooksLikeText(label) })
+        else { return nil }
+        var previous = -1
+        var result: [MobiTOCEntry] = []
+        result.reserveCapacity(entries.count)
+        for (offset, label) in zip(offsets, labels) {
+            guard offset >= 0, offset < textLimit, offset >= previous else { return nil }
+            previous = offset
+            result.append(MobiTOCEntry(label: label, offset: offset, depth: 0))
+        }
+        return result.count >= 2 ? result : nil
+    }
+
+    /// The book's own table of contents, read from its index records with the
+    /// real-format reader above.
+    ///
+    /// The records after the text are the file's index block: for MOBI6 the
+    /// chapter INDX itself, for KF8 the FDST table and the skeleton before
+    /// the orthogonal chapter index. The scan walks forward over the non-INDX
+    /// records (FDST, resource records) and tries every INDX in order until
+    /// one passes the chapter-TOC gates. The standard base (the record after
+    /// the text) is tried first — the header's own first-content pointer is
+    /// the fallback, because writers disagree about what it names. Empty when
+    /// the book carries no index at all (older conversions), which the
+    /// chapter paths work around as they always have.
+    static func tableOfContents(pdb: PalmDatabase, header: MobiHeader) -> [MobiTOCEntry] {
+        let standardBase = 1 + header.textRecordCount
+        var bases: [Int] = [standardBase]
+        if header.firstContentRecord > 0, header.firstContentRecord != standardBase {
+            bases.append(header.firstContentRecord)
+        }
+        for base in bases {
+            guard base > 0, base < pdb.recordCount else { continue }
+            let scanEnd = min(base + 24, pdb.recordCount)
+            for recordNumber in base..<scanEnd {
+                guard let record = pdb.record(recordNumber), record.count >= 4,
+                      String(decoding: record[0..<4], as: UTF8.self) == "INDX"
+                else { continue }
+                if let toc = chapterTOC(recordNumber: recordNumber, pdb: pdb, textLimit: header.textLength) {
+                    return toc
+                }
+            }
+        }
+        return []
     }
 
     // MARK: - Inline images
@@ -1500,17 +1582,6 @@ public enum MobiParser {
         var value: UInt32 = 0
         for index in 0..<4 {
             value = (value << 8) | UInt32(data[data.startIndex + offset + index])
-        }
-        return value
-    }
-
-    /// Big-endian 64-bit, for the index writers that declare a u64 position
-    /// slot (rare, but real: the control byte's width is read, not assumed).
-    static func u64(_ data: Data, _ offset: Int) -> UInt64 {
-        guard offset + 8 <= data.count else { return 0 }
-        var value: UInt64 = 0
-        for index in 0..<8 {
-            value = (value << 8) | UInt64(data[data.startIndex + offset + index])
         }
         return value
     }

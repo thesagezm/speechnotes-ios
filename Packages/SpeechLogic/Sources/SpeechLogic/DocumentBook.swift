@@ -85,22 +85,15 @@ public enum DocumentBook {
             // each mobi section as its own HTML file; here each chapter is
             // one EPUB XHTML file.
             //
-            // When the book carries a CNCX, `book.toc` is the publisher's
-            // own contents page: its labels and its text-stream offsets. A
-            // TOC that names MORE structure than the chapter cut found (a
-            // contents page whose entries point into one long section — the
-            // "TOC and Introduction in one chapter" report) supplies the
-            // chapter split instead, so the reader's contents list and the
-            // pages agree.
-            let chapters = book.chapters
-            let tocSplit = book.toc.count > chapters.count
-                ? MobiParser.chapters(
-                    from: book.toc.isEmpty ? "" : Self.mobiHTML(from: book),
-                    variant: book.variant,
-                    toc: book.toc
-                )
-                : []
-            let resolved = tocSplit.isEmpty ? chapters : tocSplit
+            // The publisher's contents page is consumed INSIDE the parser
+            // now (MobiParser.chapters: the real-format index read cuts the
+            // chapters at the index's own offsets and titles them with the
+            // publisher's labels), so the emitted EPUB's nav IS the
+            // publisher's TOC. The old CNCX re-split here is gone with it:
+            // it re-cut the chapters' STRIPPED markup at raw-stream offsets,
+            // coordinates that no longer exist once prepare() collapsed the
+            // pagebreaks — a cut that could only land mid-paragraph.
+            let resolved = book.chapters
             return DocumentParseResult(
                 chapters: resolved.map { chapter in
                     chapter.html.isEmpty
@@ -187,13 +180,5 @@ public enum DocumentBook {
         text.components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
-    }
-
-    /// Rebuilds a mobi book's whole markup from its chapters so a CNCX-driven
-    /// re-split can cut the same bytes the parser walked. The chapters' own
-    /// HTML is the verbatim markup (the headless fallback has none, and then
-    /// the CNCX path is skipped by the caller).
-    static func mobiHTML(from book: MobiParser.MobiBook) -> String {
-        book.chapters.map(\.html).joined(separator: "\n")
     }
 }

@@ -265,7 +265,17 @@ final class StreamingTTSPlaybackCore: NSObject {
     /// memory/system kill, which CrashMarker + the memory vitals name. The
     /// bridge's job is the one death the audio layer owns: the drained
     /// queue.
-    private static let bridgeSilenceSeconds: Double = 0.5
+    /// 0.2 s, not longer, because the bridge buffer's length is an ADDED-
+    /// LATENCY CAP, not just keepalive: a real chunk that lands while a
+    /// bridge buffer sits on the node queues BEHIND it (scheduleBuffer has
+    /// no insert-at-head), so the listener waits out the remaining bridge
+    /// audio before the next sentence sounds. At 0.5 s every post-drain
+    /// resume carried up to half a second of dead air after the chunk was
+    /// already synthesized — the "slight delay before the next chunk
+    /// resumes" report. 0.2 s still outlives the producer's wakeup plus a
+    /// main-queue hop (the gap it exists to cover), and its completion
+    /// re-arms within the same second while the producer is still working.
+    private static let bridgeSilenceSeconds: Double = 0.2
     /// True while a bridge buffer is queued on the node (at most one at a
     /// time; its completion re-arms while the queue is still dry).
     private var bridgeArmed = false
@@ -1045,7 +1055,12 @@ final class StreamingTTSPlaybackCore: NSObject {
                 // text that will not sound.
                 do {
                     let generationStart = PlaybackMetrics.monotonicNow()
-                    let samples = try self.generateChunk(chunk.text)
+                    // Boundary fades before the buffer exists — see
+                    // boundaryFaded's doc (the end-of-chunk click).
+                    let samples = Self.boundaryFaded(
+                        try self.generateChunk(chunk.text),
+                        sampleRate: self.sampleRate
+                    )
                     let outputRate = self.sampleRate
                     let buffer = Self.makeMonoBuffer(samples: samples, sampleRate: outputRate)
                     // Wall time the listener actually waits for this chunk —
@@ -1657,7 +1672,12 @@ final class StreamingTTSPlaybackCore: NSObject {
                         ))
                     }
                     do {
-                        try writer.append(try self.generateChunk(chunk.text))
+                        // Same boundary fades as playback, so an exported WAV
+                        // does not carry the click its live twin no longer has.
+                        try writer.append(Self.boundaryFaded(
+                            try self.generateChunk(chunk.text),
+                            sampleRate: self.sampleRate
+                        ))
                     } catch {
                         // Same policy as playback: one attempt, then move on.
                         // The export stays a single pass over the chapter; a
@@ -1697,6 +1717,53 @@ final class StreamingTTSPlaybackCore: NSObject {
             partial.append(char.isLetter || char.isNumber ? char : "_")
         }
         return cleaned.isEmpty ? "Note" : cleaned
+    }
+
+    // MARK: - Chunk boundary fades
+
+    /// Raised-cosine fades on every chunk's first and last few milliseconds.
+    ///
+    /// Every engine cuts a chunk's PCM at a synthesis boundary — Phonon's EOS
+    /// countdown keeps one 80 ms frame past the threshold crossing, Kokoro
+    /// and Supertonic end at their own step counts — and every chunk starts
+    /// from a FRESH model state, so the outgoing chunk's final amplitude and
+    /// the incoming chunk's first amplitude are unrelated samples. Played
+    /// back-to-back on one node, the step between them is a broadband
+    /// transient: the audible click at the end of every chunk (the Phonon
+    /// report). A few milliseconds of raised-cosine ramp on both ends turns
+    /// each step into a slope; at sentence boundaries the shaped audio is
+    /// far below what speech perception notices, and the engines' own
+    /// natural decay keeps sounding through the ramp.
+    ///
+    /// Applied at the core's two chunk sinks — the playback producer (before
+    /// `makeMonoBuffer`) and the WAV export writer — so live playback and
+    /// exports get identical boundaries. The bridge's silence buffers pass
+    /// through `makeMonoBuffer` untouched (a fade of zeros is a no-op).
+    ///
+    /// The copy is free: `generateChunk` returns a uniquely-referenced array,
+    /// so the `var out = samples` binding mutates in place under COW — one
+    /// extra pass over samples a synthesis already outspent by orders of
+    /// magnitude. Fade lengths clamp to half the chunk so a degenerate
+    /// one-frame buffer cannot overlap itself.
+    static func boundaryFaded(_ samples: [Float], sampleRate: Double) -> [Float] {
+        guard sampleRate > 0, !samples.isEmpty else { return samples }
+        var out = samples
+        let fadeInFrames = min(out.count / 2, Int(sampleRate * 0.005))
+        let fadeOutFrames = min(out.count / 2, Int(sampleRate * 0.012))
+        if fadeInFrames > 0 {
+            for index in 0..<fadeInFrames {
+                let t = Double(index) / Double(fadeInFrames)
+                out[index] *= Float(0.5 * (1 - cos(.pi * t)))
+            }
+        }
+        if fadeOutFrames > 0 {
+            let start = out.count - fadeOutFrames
+            for index in 0..<fadeOutFrames {
+                let t = Double(index) / Double(fadeOutFrames)
+                out[start + index] *= Float(0.5 * (1 + cos(.pi * t)))
+            }
+        }
+        return out
     }
 
     // MARK: - Buffers
