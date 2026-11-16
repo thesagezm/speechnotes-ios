@@ -681,7 +681,11 @@ final class BooksStore: ObservableObject {
                                 label: label,
                                 href: "chapter-\(index)",
                                 spineIndex: index + chapterOffset,
-                                depth: nil
+                                // The parse's own nesting depth (the mobi
+                                // index's CNCX tag 4); the Linux manifest
+                                // derives 0 rows for the depth-less formats,
+                                // and nil renders identically to 0 here.
+                                depth: chapter.tocDepth
                             )
                         }
                         Log.shared.info(

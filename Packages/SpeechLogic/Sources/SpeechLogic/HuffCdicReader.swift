@@ -17,12 +17,17 @@ import Foundation
 ///    until the code falls inside `[mincode[codelen], maxcode[codelen]]`.
 ///    The phrase index is `maxcode − code`, right-shifted back to the
 ///    codelen's scale.
-/// 2. **The CDIC records hold the phrase dictionary.** Entry headers are u16
-///    at `16 + 2·i`: payload length in bits 0–14, "still compressed" in bit
-///    15; the payload sits at `18 + 2·i`. A compressed entry recursively
-///    expands through the same bitstream — the real book this was validated
-///    on (a 7.6 MB LWW `Pocket Pediatrics` `.azw3`, 6052 dictionary entries)
-///    carries dozens that need the second pass.
+/// 2. **The CDIC records hold the phrase dictionary.** After the 16-byte
+///    header sits a table of one u16 per phrase — cumulative byte offsets
+///    (from the table itself) to each entry's `[length][payload]` pair, the
+///    length's bit 15 marking "already expanded" (set on every plain text
+///    entry, clear on the ones that need the second pass). A compressed
+///    entry recursively expands through the same bitstream — the real book
+///    this layout was validated on (a 7.6 MB LWW `Pocket Pediatrics`
+///    `.azw3`, 6052 dictionary entries) carries dozens that need the second
+///    pass. (The fixed-stride read this used to carry — lengths at
+///    `16 + 2·i`, payloads at `18 + 2·i`, bit 15 inverted — decodes every
+///    real book as garbage; KindleUnpack's `getslice` settles the layout.)
 ///
 /// One instance per book: the dictionary is shared and lazily expanded across
 /// all of that book's text records, exactly like KindleUnpack's reader.
@@ -102,15 +107,27 @@ struct HuffCdicReader {
             let already = entries.count
             let declared = min(1 << bits, max(0, phrases - already))
             let count = min(declared, remainingPhrases)
-            guard 18 + 2 * count <= cdic.count else { throw HuffError.badCdicHeader }
+            // The offset table: one u16 per entry, cumulative from the
+            // table's own start (so the first offset is 2·count — the
+            // table's end). Each entry is `[length u16][payload]` at its
+            // offset; bit 15 of the length marks it still compressed.
+            let tableEnd = 16 + 2 * count
+            guard tableEnd <= cdic.count else { throw HuffError.badCdicHeader }
             for index in 0..<count {
-                let header = MobiParser.u16(cdic, 16 + 2 * index)
+                let entryOffset = 16 + Int(MobiParser.u16(cdic, 16 + 2 * index))
+                guard entryOffset + 2 <= cdic.count else { throw HuffError.badCdicHeader }
+                let header = MobiParser.u16(cdic, entryOffset)
                 let length = Int(header & 0x7FFF)
-                let entryOffset = 18 + 2 * index
-                guard entryOffset + length <= cdic.count else { throw HuffError.badCdicHeader }
+                let payloadOffset = entryOffset + 2
+                guard payloadOffset + length <= cdic.count else { throw HuffError.badCdicHeader }
+                // Bit 15 SET is a plain entry; clear means the payload is
+                // itself a bitstream and expands on first use. (KindleUnpack:
+                // `if not flag: slice = self.unpack(slice)` — the inverted
+                // read this used to carry decoded every real book as
+                // garbage.)
                 entries.append((
-                    [UInt8](cdic[entryOffset..<(entryOffset + length)]),
-                    header & 0x8000 == 0
+                    [UInt8](cdic[payloadOffset..<(payloadOffset + length)]),
+                    header & 0x8000 != 0
                 ))
             }
             remainingPhrases -= count

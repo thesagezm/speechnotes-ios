@@ -61,15 +61,23 @@ public enum DocumentBlock: Equatable {
 public struct DocumentChapter: Equatable {
     public var title: String?
     public var blocks: [DocumentBlock]
+    /// The chapter's contents-page nesting depth (0 = top level) — the
+    /// manifest's TOC row indents by it, the Linux manifest's `depth` field
+    /// exactly. nil for the parsers whose formats carry no per-chapter
+    /// depth; the import reads it as 0, the same row the Linux manifest
+    /// derives from a depth-less book's chapter titles.
+    public var tocDepth: Int?
 
     public init(title: String?, paragraphs: [String]) {
         self.title = title
         self.blocks = paragraphs.map { .paragraph($0) }
+        self.tocDepth = nil
     }
 
-    public init(title: String?, blocks: [DocumentBlock]) {
+    public init(title: String?, blocks: [DocumentBlock], tocDepth: Int? = nil) {
         self.title = title
         self.blocks = blocks
+        self.tocDepth = tocDepth
     }
 
     /// The chapter's plain paragraph text — the historical API shape.

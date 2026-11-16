@@ -107,6 +107,9 @@ private final class RtfReader {
     /// Codepage from `\ansicpg`. CP1252 is the spec's floor for an RTF that
     /// doesn't declare one.
     private var codepage = 1252
+    /// The ANSI fallback byte count the `\uN` escapes skip (set by `\ucN`,
+    /// spec default 1).
+    private var unicodeFallback = 1
     /// Single-byte text accumulated in the current group, decoded at flush.
     private var byteBuffer: [UInt8] = []
 
@@ -237,6 +240,7 @@ private final class RtfReader {
                 parameter = parameter * 10 + Int(bytes[index] - 48)
                 index += 1
             }
+            parameter = -parameter
         } else if index < bytes.count, bytes[index] >= 48, bytes[index] <= 57 {
             hasParameter = true
             while index < bytes.count, bytes[index] >= 48, bytes[index] <= 57 {
@@ -313,28 +317,37 @@ private final class RtfReader {
             flushParagraph()
 
         case "u" where hasParameter:
-            // The Unicode escape's optional replacement character follows as
-            // `?` or a space, which must be swallowed.
-            if index < bytes.count,
-               bytes[index] == UInt8(ascii: "?") || bytes[index] == UInt8(ascii: " ") {
-                index += 1
+            // RTF writes a 16-bit value; values over 32767 arrive as negative
+            // numbers, which is the same bits re-read as i16. (The low-32
+            // read this used to do turned every negative escape into an
+            // invalid scalar and silently dropped the character — CJK text
+            // above all.)
+            let scalar = UInt32(UInt16(truncatingIfNeeded: Int16(truncatingIfNeeded: parameter)))
+            if let unicode = Unicode.Scalar(scalar) {
+                appendText(String(Character(unicode)))
             }
-            if let scalar = Unicode.Scalar(UInt32(truncatingIfNeeded: parameter)) {
-                appendText(String(Character(scalar)))
-            }
-
-        case "uc" where hasParameter:
-            // Skipped count after `\uN`: consume that many characters.
-            let count = max(0, parameter)
+            // The escape is followed by up to `\ucN` bytes of the ANSI
+            // fallback (usually the `?` a writer emits) — those bytes are
+            // the fallback, not text, and are skipped. The skip stops at
+            // syntax: a fallback that never ends must not eat the rest of
+            // the document.
             var skipped = 0
-            while skipped < count, index < bytes.count {
+            while skipped < unicodeFallback, index < bytes.count {
                 let byte = bytes[index]
-                if byte == UInt8(ascii: "\\") || byte == UInt8(ascii: "{") || byte == UInt8(ascii: "}") {
+                if byte == UInt8(ascii: "\\") || byte == UInt8(ascii: "{")
+                    || byte == UInt8(ascii: "}") || byte == UInt8(ascii: "\r")
+                    || byte == UInt8(ascii: "\n") {
                     break
                 }
                 index += 1
                 skipped += 1
             }
+
+        case "uc" where hasParameter:
+            // `\ucN` SETS the fallback count the `\uN` escapes use.
+            // (Consuming the bytes immediately here ate the text after a
+            // bare `\uc1 `.)
+            unicodeFallback = max(0, parameter)
 
         case "emdash":
             appendText("\u{2014}")
@@ -502,6 +515,15 @@ private func chapterize(_ items: [DocumentItem]) -> [DocumentChapter] {
         currentBlocks = []
     }
 
+    // The chunk bound: the section title carries onto the continuation
+    // chapter so the contents list never shows "Chapter N" mid-section —
+    // the Linux chapterize's exact rule.
+    func flushChunk() {
+        let carried = currentTitle
+        flush()
+        currentTitle = carried
+    }
+
     for item in items {
         switch item {
         case .heading(let text, _):
@@ -509,13 +531,13 @@ private func chapterize(_ items: [DocumentItem]) -> [DocumentChapter] {
             currentTitle = text
         case .paragraph(let text):
             currentBlocks.append(.paragraph(text))
-            if currentBlocks.count >= 150 { flush() }
+            if currentBlocks.count >= 150 { flushChunk() }
         case .image(let index):
             currentBlocks.append(.image(index))
-            if currentBlocks.count >= 150 { flush() }
+            if currentBlocks.count >= 150 { flushChunk() }
         case .table(let rows):
             currentBlocks.append(.table(rows))
-            if currentBlocks.count >= 150 { flush() }
+            if currentBlocks.count >= 150 { flushChunk() }
         }
     }
     flush()

@@ -651,17 +651,21 @@ extension BookWebView {
 
       // A resize (rotation, chrome show/hide, the rail's collapse) re-zooms
       // nothing here but the columns re-flow — re-land on the page the
-      // reader stood on, the Linux reader's resize-drift fix.
+      // reader stood on, the Linux reader's resize-drift fix. A paged book's
+      // page IS a column of the OLD width, so the pre-burst width is kept
+      // until the burst of resize events settles: overwriting it per event
+      // (as this used to do) makes oldVw the NEW width and the re-land
+      // pages away from where the reader stood.
       var lastVw = window.innerWidth || 0;
       var resizeTimer = null;
       window.addEventListener("resize", function () {
-        lastVw = window.innerWidth || 0;
-        if (STATE.flow !== "paginated") { return; }
+        if (STATE.flow !== "paginated") { lastVw = window.innerWidth || 0; return; }
         if (resizeTimer) { clearTimeout(resizeTimer); }
         resizeTimer = setTimeout(function () {
           resizeTimer = null;
           var oldVw = lastVw || window.innerWidth || 1;
           var vw = window.innerWidth || 1;
+          lastVw = vw;
           var page = Math.floor((window.scrollX || 0) / oldVw);
           var max = Math.max(0, document.documentElement.scrollWidth - vw);
           var x = Math.min(max, Math.max(0, page * vw));

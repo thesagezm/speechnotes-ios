@@ -66,20 +66,27 @@ public enum MobiParser {
         /// keep). Image references are `data-pool-index="N"` tokens into
         /// `MobiBook.inlineImages`.
         public let html: String
+        /// The chapter's contents-page nesting depth — the index's own (0 =
+        /// top level) when the cut came from the index, 0 for chapters the
+        /// heading or flow cut found. The manifest's TOC indents by it, the
+        /// Linux `BookToc.depth` field exactly.
+        public let tocDepth: Int
         /// The same paragraphs joined for callers that want prose as a
         /// string (shelf summaries, tests).
         public var text: String { paragraphs.joined(separator: "\n\n") }
 
-        public init(title: String?, paragraphs: [String], html: String = "") {
+        public init(title: String?, paragraphs: [String], html: String = "", tocDepth: Int = 0) {
             self.title = title
             self.paragraphs = paragraphs
             self.html = html
+            self.tocDepth = tocDepth
         }
 
         public init(title: String?, text: String) {
             self.title = title
             self.paragraphs = text.isEmpty ? [] : [text]
             self.html = ""
+            self.tocDepth = 0
         }
     }
 
@@ -735,7 +742,10 @@ public enum MobiParser {
                     // words beat an h1 echo, the same rule tocChapters applies.
                     if flows.count == toc.count {
                         return zip(flows, toc).map { flow, entry in
-                            MobiChapter(title: entry.label, paragraphs: flow.paragraphs, html: flow.html)
+                            MobiChapter(
+                                title: entry.label, paragraphs: flow.paragraphs, html: flow.html,
+                                tocDepth: entry.depth
+                            )
                         }
                     }
                     // The index names MORE structure than the flows found:
@@ -779,7 +789,7 @@ public enum MobiParser {
         // chapter's tail.)
         let bytes = Array(html.utf8)
         // Placeable offsets only, in document order, deduplicated.
-        var cuts: [(label: String, start: Int)] = []
+        var cuts: [(label: String, start: Int, depth: Int)] = []
         for entry in toc where entry.offset >= 0 {
             guard let snapped = snapOffset(entry.offset, in: bytes) else { continue }
             if let last = cuts.last, last.start == snapped {
@@ -788,7 +798,7 @@ public enum MobiParser {
                 // contents page shows.
                 continue
             }
-            cuts.append((entry.label, snapped))
+            cuts.append((entry.label, snapped, entry.depth))
         }
         guard cuts.count >= 2 else { return [] }
         if requireFlowStarts {
@@ -839,7 +849,9 @@ public enum MobiParser {
             let resolvedTitle = cut.label
             // A label the text itself opens with must not be echoed as prose.
             if let title, title == resolvedTitle { paragraphs.removeFirst() }
-            result.append(MobiChapter(title: resolvedTitle, paragraphs: paragraphs, html: prepared))
+            result.append(MobiChapter(
+                title: resolvedTitle, paragraphs: paragraphs, html: prepared, tocDepth: cut.depth
+            ))
         }
         return result
     }
@@ -1232,7 +1244,8 @@ public enum MobiParser {
     ///   tag;
     /// * the CNCX labels, exactly one per entry, in document order;
     /// * offsets that never move backward and stay inside the book;
-    /// * labels that read as text.
+    /// * labels that read as text;
+    /// * each entry's nesting depth from tag 4 (0 when the index omits it).
     ///
     /// Any gate failing returns nil — the caller falls back to the heading
     /// and flow paths.
@@ -1265,10 +1278,17 @@ public enum MobiParser {
         var previous = -1
         var result: [MobiTOCEntry] = []
         result.reserveCapacity(entries.count)
-        for (offset, label) in zip(offsets, labels) {
+        for index in 0..<entries.count {
+            let entry = entries[index]
+            let offset = offsets[index]
+            let label = labels[index]
             guard offset >= 0, offset < textLimit, offset >= previous else { return nil }
             previous = offset
-            result.append(MobiTOCEntry(label: label, offset: offset, depth: 0))
+            // The entry's nesting depth rides tag 4 when the index carries
+            // it (0 otherwise) — the manifest's contents rows indent by it,
+            // the Linux BookToc.depth field exactly.
+            let depth = entry[4]?.first ?? 0
+            result.append(MobiTOCEntry(label: label, offset: offset, depth: depth))
         }
         return result.count >= 2 ? result : nil
     }

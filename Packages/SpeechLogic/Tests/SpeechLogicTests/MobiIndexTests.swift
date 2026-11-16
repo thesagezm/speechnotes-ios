@@ -109,8 +109,9 @@ final class MobiIndexTests: XCTestCase {
 
     /// A real-format chapter INDX: 0x18-byte header, TAGX with numeric
     /// [code][values] pairs (tag 1 = the entry's filepos + length, tag 2 =
-    /// one value), then `entries` — each as (offset, length) into the text.
-    private func makeINDX(entries: [(offset: Int, length: Int)]) -> Data {
+    /// one value, tag 4 = the nesting depth when `depths` is given), then
+    /// `entries` — each as (offset, length) into the text.
+    private func makeINDX(entries: [(offset: Int, length: Int)], depths: [Int]? = nil) -> Data {
         var record = Data("INDX".utf8)
         func append(_ value: UInt32) {
             record.append(contentsOf: withUnsafeBytes(of: value.bigEndian) { Data($0) })
@@ -123,17 +124,24 @@ final class MobiIndexTests: XCTestCase {
         append(UInt32(entries.count))
         append(UInt32(1252))
         while record.count < 0x18 { record.append(0) }
-        // TAGX: 2 tags, 1 control byte per entry, then [01 02][02 01].
+        // TAGX: 2 tags (3 with depths), 1 control byte per entry, then
+        // [01 02][02 01] (+ [04 01]).
         record.append(contentsOf: Data("TAGX".utf8))
-        record.append(2)                                                 // tag count
+        record.append(depths == nil ? 2 : 3)                             // tag count
         record.append(1)                                                 // control byte count
         record.append(contentsOf: [0x01, 0x02, 0x02, 0x01])
+        if depths != nil {
+            record.append(contentsOf: [0x04, 0x01])
+        }
         // Entries: control byte (all tags apply — zero) + tag values.
-        for entry in entries {
+        for (index, entry) in entries.enumerated() {
             record.append(0x00)
             record.append(contentsOf: vwiBytes(entry.offset))
             record.append(contentsOf: vwiBytes(entry.length))
             record.append(contentsOf: vwiBytes(entry.length))            // tag 2: any value
+            if let depths {
+                record.append(contentsOf: vwiBytes(depths[index]))
+            }
         }
         return record
     }
@@ -151,11 +159,14 @@ final class MobiIndexTests: XCTestCase {
     }
 
     /// A MOBI6 book whose text is `text` (single record) and whose chapter
-    /// index names `labels` at the given raw offsets.
-    private func makeIndexedBook(text: String, labels: [String], offsets: [Int]) -> Data {
+    /// index names `labels` at the given raw offsets (`depths` adds each
+    /// entry's tag-4 nesting depth).
+    private func makeIndexedBook(
+        text: String, labels: [String], offsets: [Int], depths: [Int]? = nil
+    ) -> Data {
         let header = makeHeaderRecord(textLength: text.utf8.count, textRecordCount: 1, version: 6)
         let stream = palmdocEncode(text)
-        let index = makeINDX(entries: offsets.map { ($0, 10) })
+        let index = makeINDX(entries: offsets.map { ($0, 10) }, depths: depths)
         let cncx = makeCNCX(labels: labels)
         return makePDB(records: [header, stream, index, cncx])
     }
@@ -236,6 +247,22 @@ final class MobiIndexTests: XCTestCase {
         // offsets (the cut is on the raw stream's coordinates).
         XCTAssertEqual(book.chapters.map(\.title), labels)
         XCTAssertEqual(book.chapters.map(\.text), ["Alpha prose.", "Beta prose.", "Gamma prose."])
+    }
+
+    func testIndexDepthsRideToTheTOCAndTheChapters() throws {
+        // The index's nesting depth (tag 4) rides to the manifest's contents
+        // rows — the Linux BookToc.depth field, tag for tag — and the
+        // chapters cut at the index's offsets carry it for the import's TOC
+        // build. A depth-less index keeps 0.
+        let labels = ["Dawn", "Noon", "Dusk"]
+        let offsets = chapterOffsets
+        XCTAssertEqual(offsets.count, 3)
+        let book = try MobiParser.parse(book: makeIndexedBook(
+            text: chapterText, labels: labels, offsets: offsets, depths: [0, 1, 1]
+        ))
+        XCTAssertEqual(book.toc.map(\.depth), [0, 1, 1])
+        XCTAssertEqual(book.chapters.map(\.tocDepth), [0, 1, 1])
+        XCTAssertEqual(book.chapters.map(\.title), labels)
     }
 
     func testGarbageLabelsFallBackToHeadings() throws {

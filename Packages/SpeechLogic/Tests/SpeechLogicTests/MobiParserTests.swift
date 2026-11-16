@@ -589,54 +589,107 @@ final class MobiParserTests: XCTestCase {
 
     // MARK: - Huff/CDIC
 
-    /// A minimal but REAL Huff/CDIC table pair: a canonical Huffman code
-    /// where every top byte is a terminal 8-bit entry, and a CDIC dictionary
-    /// of 256 identical phrases. Codes 0x00 decode through dict1[0] to
-    /// dictionary index (maxcode − code) >> 24 = 255 — proving the whole
-    /// path: HUFF table parse, CDIC dictionary parse, terminal lookup, output.
-    func testHuffCDICDecodesATerminalLiteralBook() throws {
-        func be32(_ v: UInt32) -> Data {
-            withUnsafeBytes(of: v.bigEndian) { Data($0) }
-        }
-        func be16(_ v: UInt16) -> Data {
-            withUnsafeBytes(of: v.bigEndian) { Data($0) }
-        }
+    private func be32(_ v: UInt32) -> Data {
+        withUnsafeBytes(of: v.bigEndian) { Data($0) }
+    }
+    private func be16(_ v: UInt16) -> Data {
+        withUnsafeBytes(of: v.bigEndian) { Data($0) }
+    }
 
-        // HUFF: magic, header length 0x18, off1 = 24, off2 = 24 + 4·256.
-        // off1 counts from the record's START, so the 24-byte header is
-        // magic(4) + length(4) + off1(4) + off2(4) + 8 bytes of padding —
-        // the real book's layout has two more u32s in there.
+    /// A HUFF table whose every top byte is a terminal 8-bit entry: codelen 8
+    /// (bits 0–4), terminal (bit 7), maxcode byte 0xFF — value 0xFF88 →
+    /// maxcode = ((0xFF + 1) << 24) − 1 = 0xFFFFFFFF, so code 0x00 resolves to
+    /// dictionary index 255. dict2 is 64 zero u32s — terminal entries never
+    /// walk it, zeros parse.
+    private func terminalHuff() -> Data {
         var huff = Data("HUFF".utf8)
-        huff.append(be32(0x18))
+        huff.append(be32(0x18))                    // header length
         huff.append(be32(24))                      // off1
         huff.append(be32(24 + 4 * 256))            // off2
         huff.append(contentsOf: Data(repeating: 0, count: 8))
         for _ in 0..<256 {
-            // codelen 8 (bits 0–4), terminal (bit 7), maxcode byte 0xFF:
-            // value 0xFF88 → maxcode = ((0xFF + 1) << 24) − 1 = 0xFFFFFFFF,
-            // so code 0x00 resolves to dictionary index 255.
             huff.append(be32(0xFF88))
         }
-        // dict2: 64 zero u32s — terminal entries never walk it, zeros parse.
         huff.append(contentsOf: Data(repeating: 0, count: 4 * 64))
+        return huff
+    }
 
-        // CDIC: 256 phrases (index bits 8 → 1<<8 = 256), all "Hi ".
-        let phrase = Data("Hi ".utf8)
+    /// A CDIC record built the way real writers lay it out: the 16-byte
+    /// header, the cumulative offset table (the first offset is 2·n — the
+    /// table's own end), then `[length][payload]` entries at their offsets; a
+    /// `true` flag marks an entry still compressed (bit 15 CLEAR).
+    private func buildCdic(entries: [(payload: Data, compressed: Bool)]) -> Data {
         var cdic = Data("CDIC".utf8)
         cdic.append(be32(0x10))                    // header length
-        cdic.append(be32(256))                     // phrase count
+        cdic.append(be32(UInt32(entries.count)))   // phrase count
         cdic.append(be32(8))                       // index bits: 1<<8 = 256
-        for _ in 0..<256 {
-            cdic.append(be16(UInt16(phrase.count)))  // length, bit 15 clear = expanded
+        var offset = UInt16(2 * entries.count)
+        for (payload, _) in entries {
+            cdic.append(be16(offset))
+            offset += UInt16(2 + payload.count)
         }
-        for _ in 0..<256 {
-            cdic.append(phrase)
+        for (payload, compressed) in entries {
+            let header = UInt16(payload.count) | (compressed ? UInt16(0) : UInt16(0x8000))
+            cdic.append(be16(header))
+            cdic.append(payload)
         }
+        return cdic
+    }
 
+    private func terminalEntries() -> [(payload: Data, compressed: Bool)] {
+        (0..<256).map { _ in (payload: Data("Hi ".utf8), compressed: false) }
+    }
+
+    /// A minimal but REAL Huff/CDIC table pair: a canonical Huffman code
+    /// where every top byte is a terminal 8-bit entry, and a CDIC dictionary
+    /// of 256 identical phrases. Codes 0x00 decode through dict1[0] to
+    /// dictionary index (maxcode − code) >> 24 = 255 — proving the whole
+    /// path: HUFF table parse, CDIC dictionary parse (the offset table),
+    /// terminal lookup, output. End-to-end through the parser.
+    func testHuffCDICDecodesATerminalLiteralBook() throws {
         let payload = Data([0x00, 0x00, 0x00])     // 3 codes → "Hi Hi Hi "
         let header = makeHeaderRecord(compression: 17480, textLength: 9, textRecordCount: 1)
-        let pdb = makePDB(records: [header, payload, huff, cdic])
+        let pdb = makePDB(records: [header, payload, terminalHuff(), buildCdic(entries: terminalEntries())])
         let book = try MobiParser.parse(book: pdb)
         XCTAssertEqual(book.summary, "Hi Hi Hi")
+    }
+
+    func testHuffCDICCompressedDictionaryEntryExpandsOnFirstUse() throws {
+        // The same fixture, but phrase 254 is still compressed (bit 15
+        // clear): its payload is itself a bitstream of three 0x00 codes,
+        // which resolve through the dictionary — to phrase 255. Real store
+        // books carry dozens of entries like this (the validation book, a
+        // 6052-entry LWW dictionary, needed the second pass often).
+        var entries = terminalEntries()
+        entries[254] = (Data([0x00, 0x00, 0x00]), true)
+        var reader = try HuffCdicReader(huff: terminalHuff(), cdics: [buildCdic(entries: entries)])
+        // Code 0x01000000 (top byte 0x01) → phrase 254 → its payload decodes
+        // to 3 × phrase; the three 0x00 codes after it → phrase 255 each.
+        let out = reader.unpack(Data([0x01, 0x00, 0x00, 0x00]))
+        XCTAssertEqual(out, Data("Hi Hi Hi Hi Hi Hi ".utf8))
+        // The expansion is cached: a second pass reuses it.
+        let again = reader.unpack(Data([0x01, 0x00, 0x00, 0x00]))
+        XCTAssertEqual(again, Data("Hi Hi Hi Hi Hi Hi ".utf8))
+    }
+
+    func testHuffCDICCorruptTablesAreErrors() {
+        let huff = terminalHuff()
+        let cdic = buildCdic(entries: terminalEntries())
+        // Wrong magic, truncated tables, a zero codelen — all refused.
+        XCTAssertThrowsError(try HuffCdicReader(huff: Data("nope".utf8), cdics: [cdic]))
+        XCTAssertThrowsError(try HuffCdicReader(huff: huff.prefix(10), cdics: [cdic]))
+        var zeroCodelen = huff
+        zeroCodelen.replaceSubrange(24..<28, with: be32(0xFF00))   // codelen 0
+        XCTAssertThrowsError(try HuffCdicReader(huff: zeroCodelen, cdics: [cdic]))
+        XCTAssertThrowsError(try HuffCdicReader(huff: huff, cdics: []))
+        XCTAssertThrowsError(try HuffCdicReader(huff: huff, cdics: [Data("xxxx".utf8)]))
+    }
+
+    func testHuffCDICTruncatedBitstreamStopsCleanly() throws {
+        var reader = try HuffCdicReader(huff: terminalHuff(), cdics: [buildCdic(entries: terminalEntries())])
+        // A payload shorter than the bits it claims still decodes the whole
+        // codes it has and stops — the padding keeps the lookahead in bounds.
+        XCTAssertEqual(reader.unpack(Data([0x00])), Data("Hi ".utf8))
+        XCTAssertEqual(reader.unpack(Data()), Data())
     }
 }

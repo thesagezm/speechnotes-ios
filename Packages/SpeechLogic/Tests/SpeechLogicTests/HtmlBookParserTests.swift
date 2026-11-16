@@ -116,4 +116,73 @@ final class HtmlBookParserTests: XCTestCase {
         XCTAssertThrowsError(try HtmlBookParser.parse(html: Data()))
         XCTAssertThrowsError(try HtmlBookParser.parse(html: Data("   ".utf8)))
     }
+
+    // MARK: - HTMLZ images (the Linux resolver's two tiers)
+
+    private func pngFixture() -> Data {
+        Data([0x89, 0x50, 0x4E, 0x47]) + Data(repeating: 7, count: 20)
+    }
+
+    func testHTMLZImagesResolveByExactPathThenByBasename() throws {
+        // Both srcs name the same entry — the first through its own path
+        // (the exact tier), the second through its file name alone (the
+        // basename tier, for mirrors that kept the site's tree). Each
+        // occurrence joins the pool, the chapter block points at it.
+        let html = """
+        <html><body>
+        <h1>Pictures</h1>
+        <p>Before.</p>
+        <img src="site/assets/fig.png" alt="a figure">
+        <img src="fig.png">
+        <p>After.</p>
+        </body></html>
+        """
+        let fig = pngFixture()
+        let archive = ZipWriter.archive(entries: [
+            ("index.html", Data(html.utf8)),
+            ("site/assets/fig.png", fig),
+        ])
+        let result = try HtmlBookParser.parseFull(archive: archive)
+        XCTAssertEqual(result.images.count, 2)
+        XCTAssertEqual(result.images[0].mime, "image/png")
+        XCTAssertEqual(result.images[0].data, fig)
+        XCTAssertEqual(result.images[1].data, fig)
+        let blocks = result.chapters[0].blocks
+        let imageIndexes = blocks.compactMap { block -> Int? in
+            if case .image(let index) = block { return index }
+            return nil
+        }
+        XCTAssertEqual(imageIndexes, [0, 1])
+        // The prose keeps its order around the images.
+        XCTAssertEqual(result.chapters[0].paragraphs, ["Before.", "After."])
+    }
+
+    func testHTMLZUnresolvableSrcsDropTheirTag() throws {
+        // An src the archive does not hold (an absolute URL, a file the
+        // mirror lost) loses its image — a broken image icon helps nobody.
+        let html = """
+        <html><body>
+        <p>Prose.</p>
+        <img src="https://example.org/remote.png">
+        <img src="missing.jpg">
+        <img src="">
+        <p>More prose.</p>
+        </body></html>
+        """
+        let archive = ZipWriter.archive(entries: [
+            ("index.html", Data(html.utf8)),
+            ("cover.jpg", Data([0xFF, 0xD8, 0xFF, 0xE0])),
+        ])
+        let result = try HtmlBookParser.parseFull(archive: archive)
+        XCTAssertTrue(result.images.isEmpty)
+        let imageBlocks = result.chapters.flatMap { $0.blocks }.filter {
+            if case .image = $0 { return true }
+            return false
+        }
+        XCTAssertTrue(imageBlocks.isEmpty)
+        XCTAssertEqual(result.chapters[0].paragraphs, ["Prose.", "More prose."])
+        // The cover convention is separate: the first image ENTRY rides as
+        // the shelf cover regardless of what the HTML references.
+        XCTAssertEqual(result.cover?.mime, "image/jpeg")
+    }
 }

@@ -86,32 +86,34 @@ public enum DocumentBook {
         case "mobi", "azw", "azw3", "prc", "pdb":
             let book = try MobiParser.parse(book: data)
             // The book's own markup IS the chapter: italics, headings and
-            // the recindex illustrations survive into the EPUB. Chapters
-            // without markup (the headless fallback) keep the paragraph
-            // blocks that read as one paragraph each. This is the same
-            // model readest/Koodo/Anx use — the foliate-js family renders
-            // each mobi section as its own HTML file; here each chapter is
-            // one EPUB XHTML file.
+            // the recindex illustrations survive into the persisted pages.
+            // Chapters without markup (the headless fallback) keep the
+            // paragraph blocks that read as one paragraph each. This is the
+            // same model readest/Koodo/Anx use — the foliate-js family
+            // renders each mobi section as its own HTML file; here each
+            // chapter is one doc/chapter-N.html page.
             //
             // The publisher's contents page is consumed INSIDE the parser
             // now (MobiParser.chapters: the real-format index read cuts the
             // chapters at the index's own offsets and titles them with the
-            // publisher's labels), so the emitted EPUB's nav IS the
-            // publisher's TOC. The old CNCX re-split here is gone with it:
-            // it re-cut the chapters' STRIPPED markup at raw-stream offsets,
-            // coordinates that no longer exist once prepare() collapsed the
-            // pagebreaks — a cut that could only land mid-paragraph.
+            // publisher's labels), so the manifest's TOC IS the publisher's
+            // TOC. The old CNCX re-split here is gone with it: it re-cut the
+            // chapters' STRIPPED markup at raw-stream offsets, coordinates
+            // that no longer exist once prepare() collapsed the pagebreaks —
+            // a cut that could only land mid-paragraph.
             let resolved = book.chapters
             return DocumentParseResult(
                 chapters: resolved.map { chapter in
                     chapter.html.isEmpty
                         ? DocumentChapter(
                             title: chapter.title,
-                            blocks: chapter.paragraphs.map { .paragraph($0) }
+                            blocks: chapter.paragraphs.map { .paragraph($0) },
+                            tocDepth: chapter.tocDepth
                         )
                         : DocumentChapter(
                             title: chapter.title,
-                            blocks: [.html(chapter.html)]
+                            blocks: [.html(chapter.html)],
+                            tocDepth: chapter.tocDepth
                         )
                 },
                 images: book.inlineImages.map { image in

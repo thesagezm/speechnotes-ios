@@ -10,10 +10,10 @@ import Foundation
 /// - `<body>` sections. A `<title>` with `<level>1` or `<level>2` opens a
 ///   chapter; deeper levels stay inside as prose. `<subtitle>` joins its title.
 /// - `<table>` becomes a real `DocumentTableCell` table, exactly as the office
-///   parsers' tables do, so the generated EPUB renders it as a table and the
+///   parsers' tables do, so the persisted pages render it as a table and the
 ///   TTS extractor reads it row by row.
 /// - `<binary>` images referenced by `<image l:href="#id">` become
-///   `DocumentImage`s and package into the EPUB; the one named inside
+///   `DocumentImage`s and persist beside the pages; the one named inside
 ///   `<coverpage>` rides along as the shelf cover.
 /// - Verse (`<v>`), epigraphs and citations.
 ///
@@ -423,7 +423,7 @@ private final class Fb2Delegate: NSObject, XMLParserDelegate {
     }
 
     /// A mime type UIImage can decode, or nil — SVG and unknown payloads are
-    /// dropped rather than packaged into an EPUB that would show a broken icon.
+    /// dropped rather than shipped as an image that renders nothing.
     static func displayableMime(for mime: String) -> String? {
         switch mime.lowercased() {
         case "image/jpeg", "image/jpg": return "image/jpeg"
@@ -453,6 +453,15 @@ private func chapterize(_ items: [DocumentItem]) -> [DocumentChapter] {
         currentBlocks = []
     }
 
+    // The chunk bound: the section title carries onto the continuation
+    // chapter so the contents list never shows "Chapter N" mid-section —
+    // the Linux chapterize's exact rule.
+    func flushChunk() {
+        let carried = currentTitle
+        flush()
+        currentTitle = carried
+    }
+
     for item in items {
         switch item {
         case .heading(let text, let level):
@@ -464,13 +473,13 @@ private func chapterize(_ items: [DocumentItem]) -> [DocumentChapter] {
             }
         case .paragraph(let text):
             currentBlocks.append(.paragraph(text))
-            if currentBlocks.count >= 150 { flush() }
+            if currentBlocks.count >= 150 { flushChunk() }
         case .image(let index):
             currentBlocks.append(.image(index))
-            if currentBlocks.count >= 150 { flush() }
+            if currentBlocks.count >= 150 { flushChunk() }
         case .table(let rows):
             currentBlocks.append(.table(rows))
-            if currentBlocks.count >= 150 { flush() }
+            if currentBlocks.count >= 150 { flushChunk() }
         }
     }
     flush()

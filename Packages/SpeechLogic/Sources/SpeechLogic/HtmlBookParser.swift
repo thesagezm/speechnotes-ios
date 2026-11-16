@@ -29,6 +29,21 @@ public enum HtmlBookParser {
     // MARK: - Standalone HTML
 
     public static func parse(html data: Data) throws -> [DocumentChapter] {
+        try chapters(from: data, keepImages: false)
+    }
+
+    /// The decode → tokenize → chapterize pipeline both entry points share.
+    /// `keepImages` decides whether an `<img>` joins the book: yes for an
+    /// archive whose images travel with it (htmlz), no for a standalone page
+    /// whose images live somewhere the reader cannot reach — the Linux
+    /// `parse_inner` split exactly. The resolver maps a src to its pool
+    /// index; a src it cannot answer drops the image, a broken image icon
+    /// helps nobody.
+    private static func chapters(
+        from data: Data,
+        keepImages: Bool,
+        resolveImage: ((String) -> Int?)? = nil
+    ) throws -> [DocumentChapter] {
         let text = decode(data)
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw DocumentParseError.malformed("the file has no readable text")
@@ -38,7 +53,9 @@ public enum HtmlBookParser {
         guard !reader.items.isEmpty else {
             throw DocumentParseError.malformed("no readable text in the HTML document")
         }
-        return chapterize(reader.items, wholeText: text)
+        return chapterize(
+            reader.items, wholeText: text, keepImages: keepImages, resolveImage: resolveImage
+        )
     }
 
     /// `<title>` and the Open Graph / Dublin-Core meta tags, for the shelf
@@ -53,7 +70,8 @@ public enum HtmlBookParser {
 
     /// A `.htmlz` is a ZIP with `index.html`, `metadata.opf` and the images.
     /// `ZipReader` does the container work; the OPF supplies title/author/cover
-    /// exactly as an EPUB's does.
+    /// exactly as an EPUB's does, and the images the HTML references join the
+    /// book's pool — the Linux reader ships every resolvable illustration.
     public static func parseFull(archive: Data) throws -> DocumentParseResult {
         guard let indexEntry = try? ZipReader.entries(in: archive) else {
             throw DocumentParseError.malformed("not an HTML archive")
@@ -66,7 +84,15 @@ public enum HtmlBookParser {
             throw DocumentParseError.missingEntry("index.html")
         }
         let htmlData = try ZipReader.readEntry(htmlName, in: archive)
-        let chapters = try parse(html: htmlData)
+
+        var images: [DocumentImage] = []
+        let chapters = try chapters(from: htmlData, keepImages: true) { src in
+            guard let image = htmlzImage(forSrc: src, entries: indexEntry, archive: archive) else {
+                return nil
+            }
+            images.append(image)
+            return images.count - 1
+        }
 
         var cover: DocumentImage?
         if let opfEntry = indexEntry.first(where: { $0.name.lowercased().hasSuffix(".opf") })?.name,
@@ -85,7 +111,7 @@ public enum HtmlBookParser {
             let mime = coverEntry.lowercased().hasSuffix(".png") ? "image/png" : "image/jpeg"
             cover = DocumentImage(data: coverData, mime: mime, alt: "Cover")
         }
-        return DocumentParseResult(chapters: chapters, images: [], cover: cover)
+        return DocumentParseResult(chapters: chapters, images: images, cover: cover)
     }
 
     /// Dublin-Core fields out of an OPF, reusing the EPUB parser's delegates.
@@ -130,7 +156,12 @@ public enum HtmlBookParser {
     /// way a heading-less DOCX does.
     public static let chapterBlockLimit = 150
 
-    static func chapterize(_ items: [HtmlReader.Item], wholeText: String) -> [DocumentChapter] {
+    static func chapterize(
+        _ items: [HtmlReader.Item],
+        wholeText: String,
+        keepImages: Bool = false,
+        resolveImage: ((String) -> Int?)? = nil
+    ) -> [DocumentChapter] {
         var chapters: [DocumentChapter] = []
         var title: String?
         var paragraphs: [String] = []
@@ -160,6 +191,13 @@ public enum HtmlBookParser {
                 paragraphs.append(text)
             case .table(let rows):
                 blocks.append(.table(rows))
+            case .image(let src, _):
+                // The archive path keeps the image (the resolver joined it
+                // to the pool and the block points at it); a standalone
+                // page's src resolves to nothing and the tag drops.
+                if keepImages, let resolveImage, let poolIndex = resolveImage(src) {
+                    blocks.append(.image(poolIndex))
+                }
             }
             if paragraphs.count >= chapterBlockLimit {
                 // Carry the section title onto the continuation chapter so the
@@ -179,6 +217,53 @@ public enum HtmlBookParser {
             return [DocumentChapter(title: nil, blocks: fallback.isEmpty ? [] : [.paragraph(fallback)])]
         }
         return chapters
+    }
+
+    /// The archive image an `<img src>` names — the exact entry first, then
+    /// the entry whose file NAME matches (htmlz mirrors keep differing
+    /// amounts of the original site's directory tree). `nil` loses the tag:
+    /// an src the archive does not hold (an absolute URL, a file the mirror
+    /// lost) must not render as a missing-file icon. The Linux resolver's
+    /// two-tier lookup, mime rules included.
+    static func htmlzImage(
+        forSrc src: String,
+        entries: [ZipReader.Entry],
+        archive: Data
+    ) -> DocumentImage? {
+        let name = src.removingPercentEncoding ?? src
+        let entryName: String?
+        if entries.contains(where: { $0.name == name }) {
+            entryName = name
+        } else if let base = name.split(separator: "/").last.map(String.init),
+                  isImageEntryName(base) {
+            entryName = entries
+                .first(where: { $0.name.split(separator: "/").last.map(String.init) == base })?
+                .name
+        } else {
+            entryName = nil
+        }
+        guard let entryName,
+              let data = try? ZipReader.readEntry(entryName, in: archive),
+              !data.isEmpty else {
+            return nil
+        }
+        return DocumentImage(data: data, mime: imageMime(forEntryName: entryName), alt: "")
+    }
+
+    /// Whether a file NAME is one of the image extensions an `<img>` can
+    /// reference (the fallback tier only resolves these).
+    private static func isImageEntryName(_ base: String) -> Bool {
+        let lower = base.lowercased()
+        return lower.hasSuffix(".jpg") || lower.hasSuffix(".jpeg")
+            || lower.hasSuffix(".png") || lower.hasSuffix(".gif")
+    }
+
+    /// The mime an entry's extension carries — png, gif, jpeg as the floor.
+    private static func imageMime(forEntryName name: String) -> String {
+        let lower = name.lowercased()
+        if lower.hasSuffix(".png") { return "image/png" }
+        if lower.hasSuffix(".gif") { return "image/gif" }
+        return "image/jpeg"
     }
 }
 
@@ -236,6 +321,11 @@ final class HtmlReader {
         case heading(String, level: Int)
         case paragraph(String)
         case table([[DocumentTableCell]])
+        /// An `<img src alt>` the source carries. Only the archive path
+        /// (htmlz) keeps these — a standalone page's images live somewhere
+        /// the reader cannot reach, so they drop (the Linux reader's
+        /// `keep_images` split).
+        case image(src: String, alt: String?)
     }
 
     private(set) var items: [Item] = []
@@ -556,6 +646,11 @@ final class HtmlReader {
             // An image is a boundary even without a close tag — an alt-less
             // image must not glue two words together.
             flushText()
+            let src = tidy(attributes["src"] ?? "")
+            if !isClosing, !src.isEmpty {
+                let alt = attributes["alt"].map { tidy($0) }
+                items.append(.image(src: src, alt: alt))
+            }
         case "td", "th":
             if isClosing {
                 if inCell {
