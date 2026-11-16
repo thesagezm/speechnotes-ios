@@ -317,12 +317,17 @@ jobs:
         uses: actions/checkout@v4
 
       # curl -I verified 2026-09-06: all three return 200 application/epub+zip.
-      # Content-addressed cache URLs — stable for years.
+      # Content-addressed cache URLs — stable for years. --max-time bounds
+      # each transfer: gutenberg.org can hang a runner's connection (twice
+      # on 2026-11-16 it ate the whole 15-minute job budget and cancelled
+      # the run). A failed download lands in the job's continue-on-error and
+      # skips the spike test — the informative job degrades to an annotation
+      # instead of eating the timeout.
       - name: Download real EPUBs (Project Gutenberg)
         run: |
           mkdir -p ~/epub-spike
           for id in 1342 11 84; do
-            curl -L --retry 3 --progress-bar \
+            curl -L --retry 3 --retry-delay 2 --connect-timeout 20 --max-time 90 \
               -o ~/epub-spike/pg$id.epub \
               "https://www.gutenberg.org/cache/epub/$id/pg$id.epub"
           done
