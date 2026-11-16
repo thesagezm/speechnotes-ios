@@ -665,10 +665,10 @@ final class MobiParserTests: XCTestCase {
         var reader = try HuffCdicReader(huff: terminalHuff(), cdics: [buildCdic(entries: entries)])
         // Code 0x01000000 (top byte 0x01) → phrase 254 → its payload decodes
         // to 3 × phrase; the three 0x00 codes after it → phrase 255 each.
-        let out = reader.unpack(Data([0x01, 0x00, 0x00, 0x00]))
+        let out = Data(reader.unpack(Data([0x01, 0x00, 0x00, 0x00])))
         XCTAssertEqual(out, Data("Hi Hi Hi Hi Hi Hi ".utf8))
         // The expansion is cached: a second pass reuses it.
-        let again = reader.unpack(Data([0x01, 0x00, 0x00, 0x00]))
+        let again = Data(reader.unpack(Data([0x01, 0x00, 0x00, 0x00])))
         XCTAssertEqual(again, Data("Hi Hi Hi Hi Hi Hi ".utf8))
     }
 
@@ -689,7 +689,7 @@ final class MobiParserTests: XCTestCase {
         var reader = try HuffCdicReader(huff: terminalHuff(), cdics: [buildCdic(entries: terminalEntries())])
         // A payload shorter than the bits it claims still decodes the whole
         // codes it has and stops — the padding keeps the lookahead in bounds.
-        XCTAssertEqual(reader.unpack(Data([0x00])), Data("Hi ".utf8))
-        XCTAssertEqual(reader.unpack(Data()), Data())
+        XCTAssertEqual(Data(reader.unpack(Data([0x00]))), Data("Hi ".utf8))
+        XCTAssertEqual(Data(reader.unpack(Data())), Data())
     }
 }
