@@ -92,12 +92,12 @@ final class NanoEdgeSpikeTests: XCTestCase {
         let short = "həloʊ fɹʌm ðə nano tɪɹ."
         let long = "ðə dɪkɑdəɹ ðæt mɛɪd ðɪs ɪz ə tɪni wʌn, ænd ðə tɛkst saɪd ɪz ðə wʌn ðə æp ɔlɹɛdi ɹʌnz, soʊ ə lɑŋ sɛntəns ænd ə ʃɔɹt wʌn tɹævəl ðə seɪm tuː ɡɹæfs wɪð ðə fɹeɪm kaʊnt æz ðə oʊnli θɪŋ ðæt muːvz bətwiːn ðɛm."
         let shortStarted = Date()
-        let shortSamples = try speak(
+        let shortSamples = try Self.speak(
             phonemes: short, vocab: vocab, spaceID: spaceID, voiceBank: voiceBank,
             textSession: textSession, decoderSession: decoderSession)
         let shortElapsed = Date().timeIntervalSince(shortStarted)
         let longStarted = Date()
-        let longSamples = try speak(
+        let longSamples = try Self.speak(
             phonemes: long, vocab: vocab, spaceID: spaceID, voiceBank: voiceBank,
             textSession: textSession, decoderSession: decoderSession)
         let longElapsed = Date().timeIntervalSince(longStarted)
@@ -224,9 +224,27 @@ final class NanoEdgeSpikeTests: XCTestCase {
         }
     }
 
+    /// Hand-rolled 44-byte RIFF writer — the same one PhononSpike ships
+    /// (SpeechLogic's StreamingWriter is nested inside WAVWriter and the
+    /// spike has no business reaching into it).
     static func writeWAV(samples: [Float], to path: String) throws {
-        let writer = try StreamingWriter(url: URL(fileURLWithPath: path), sampleRate: sampleRate)
-        try writer.append(samples)
-        try writer.close()
+        var pcm16 = [Int16](repeating: 0, count: samples.count)
+        for index in pcm16.indices {
+            pcm16[index] = Int16(max(-32768, min(32767, Int(samples[index] * 32767))))
+        }
+        let rate = UInt32(sampleRate)
+        var data = Data()
+        func append(_ value: UInt32) { withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) } }
+        func append16(_ value: UInt16) { withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) } }
+        data.append("RIFF".data(using: .ascii)!)
+        append(UInt32(36 + pcm16.count * 2))
+        data.append("WAVE".data(using: .ascii)!)
+        data.append("fmt ".data(using: .ascii)!)
+        append(16); append16(1); append16(1)
+        append(rate); append(rate * 2); append16(2); append16(16)
+        data.append("data".data(using: .ascii)!)
+        append(UInt32(pcm16.count * 2))
+        pcm16.withUnsafeBytes { data.append(contentsOf: $0) }
+        try data.write(to: URL(fileURLWithPath: path))
     }
 }
