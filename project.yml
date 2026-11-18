@@ -14,7 +14,14 @@ packages:
     url: https://github.com/mlalma/MisakiSwift.git
     exactVersion: "1.0.6"
   OnnxRuntime:
-    url: https://github.com/microsoft/onnxruntime-swift-package-manager
+    # Mirror of microsoft/onnxruntime-swift-package-manager, which Microsoft
+    # pulled from GitHub (2026-11-17, repo 404s; HN 50539610) — every ORT
+    # engine in this app resolves through it. Tag 1.24.2 = b7fb7f7, the
+    # revision 176+ public Package.resolved records pin; the xcframework
+    # binary still downloads from download.onnxruntime.ai (the manifest's
+    # own URL, untouched by the takedown). If Microsoft restores the
+    # original, swap this back.
+    url: https://github.com/thesagezm/onnxruntime-swift-package-manager
     exactVersion: "1.24.2"
   MLX:
     url: https://github.com/ml-explore/mlx-swift

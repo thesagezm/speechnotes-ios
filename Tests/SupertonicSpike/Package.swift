@@ -5,7 +5,7 @@ let package = Package(
     name: "SupertonicSpike",
     platforms: [.macOS(.v14)],
     dependencies: [
-        .package(url: "https://github.com/microsoft/onnxruntime-swift-package-manager", exact: "1.24.2"),
+        .package(url: "https://github.com/thesagezm/onnxruntime-swift-package-manager", exact: "1.24.2"),
         .package(path: "../../Packages/SpeechLogic")
     ],
     targets: [
