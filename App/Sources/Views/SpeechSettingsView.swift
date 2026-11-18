@@ -64,7 +64,7 @@ struct SpeechSettingsView: View {
     }
 
     private var neuralEngineIsActive: Bool {
-        (player.engineKind == .kokoro || player.engineKind == .phonon || player.engineKind == .supertonic)
+        (player.engineKind == .kokoro || player.engineKind == .nanoEdge || player.engineKind == .phonon || player.engineKind == .supertonic)
             && !player.usingSystemFallback
     }
 
@@ -72,6 +72,7 @@ struct SpeechSettingsView: View {
         switch player.engineKind {
         case .supertonic: return player.supertonicVoice
         case .phonon: return player.phononVoice
+        case .nanoEdge: return player.nanoEdgeVoice
         default: return player.voice
         }
     }
@@ -79,6 +80,7 @@ struct SpeechSettingsView: View {
     private var neuralModelMissing: Bool {
         switch player.engineKind {
         case .kokoro: return !models.isReady && !models.smallIsReady
+        case .nanoEdge: return !models.nanoIsReady
         case .phonon: return !models.phononIsReady
         case .supertonic: return !models.supertonicIsReady
         default: return false
@@ -89,6 +91,7 @@ struct SpeechSettingsView: View {
         switch player.engineKind {
         case .supertonic: return .supertonic
         case .phonon: return .phonon
+        case .nanoEdge: return .nanoEdge
         default: return .kokoro
         }
     }
@@ -97,6 +100,7 @@ struct SpeechSettingsView: View {
         switch player.engineKind {
         case .supertonic: return "Supertonic voice"
         case .phonon: return "Phonon voice"
+        case .nanoEdge: return "Nano Edge voice"
         default: return "Kokoro voice"
         }
     }
@@ -127,7 +131,7 @@ struct SpeechSettingsView: View {
             } header: {
                 Text("Speech engine")
             } footer: {
-                Text("Listed smallest to largest. Kokoro runs on-device with 28 voices (High/Compact download choice in the Kokoro quality section below). Phonon is the compact English engine — 26 voices, no speed control. Supertonic sounds the best (10 voice styles, 31 languages).")
+                Text("Kokoro runs on-device with 28 voices (High/Compact download choice in the Kokoro quality section below). Nano Edge is Kokoro's distilled decoder — the same 28 English voices at about a quarter of Kokoro's footprint. Phonon is the compact English engine — 26 voices, no speed control. Supertonic sounds the best (10 voice styles, 31 languages).")
             }
 
             // Kokoro's quality dial — the tier choice (fp32/int8), shown
@@ -162,6 +166,8 @@ struct SpeechSettingsView: View {
                     Text("10 voice styles, all fluent in 31 languages — pick the language in the voice picker. Tap a voice to hear a sample.")
                 case .phonon:
                     Text("The hub default voice plus 26 American and British voices — every voice speaks English. Tap a voice to hear a sample.")
+                case .nanoEdge:
+                    Text("The same 28 American and British voices Kokoro names — the distilled decoder was trained on their banks, so Heart sounds like Heart. Tap a voice to hear a sample.")
                 default:
                     Text("Friendly names with codenames — e.g. Heart is af_heart, American female. Tap a voice to hear a sample.")
                 }
@@ -266,7 +272,27 @@ struct SpeechSettingsView: View {
                     Button("Delete Phonon model (frees ~192 MB)", role: .destructive) { models.deletePhononModels() }
                 }
             } header: { Text("Phonon model") } footer: {
-                Text("Gradium Phonon — a 31M-parameter English streaming TTS, the smallest neural engine in the app: two fp32 graphs, a tokenizer and 27 voices (~192 MB). English only; speed slider has no effect (the model has no speed input); no Core ML experiment. Kokoro covers more voices and both stay fully offline.")
+                Text("Gradium Phonon — a 31M-parameter English streaming TTS: two fp32 graphs, a tokenizer and 27 voices (~192 MB). English only; speed slider has no effect (the model has no speed input); no Core ML experiment. Kokoro covers more voices and both stay fully offline.")
+            }
+
+            Section {
+                switch models.nanoEdgeState {
+                case .notDownloaded:
+                    Button { models.startNanoEdgeDownload() } label: {
+                        Label("Download Nano Edge model (~157 MB)", systemImage: "arrow.down.circle")
+                    }
+                case .downloading(let progress):
+                    ProgressView(value: progress) { Text("Downloading Nano Edge… \(Int(progress*100))%") }
+                case .failed(let message):
+                    Label("Nano Edge download failed: \(message)", systemImage: "exclamationmark.triangle")
+                        .font(.footnote)
+                    Button("Retry") { models.startNanoEdgeDownload() }
+                case .ready:
+                    Label("Nano Edge model ready", systemImage: "checkmark.circle")
+                    Button("Delete Nano Edge model (frees ~157 MB)", role: .destructive) { models.deleteNanoEdgeModels() }
+                }
+            } header: { Text("Nano Edge model") } footer: {
+                Text("nano-edge-tts — Kokoro's text encoder with its waveform decoder replaced by a distilled 1.75M-parameter one: the same 28 English voices at about a quarter of Kokoro's fp32 footprint, with native speed control and fully offline speech.")
             }
 
             Section {

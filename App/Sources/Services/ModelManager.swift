@@ -20,6 +20,7 @@ final class ModelManager: ObservableObject {
     @Published private(set) var smallState: State
     @Published private(set) var supertonicState: State
     @Published private(set) var phononState: State
+    @Published private(set) var nanoEdgeState: State
 
     /// Called on the main actor when any model becomes ready.
     var onReady: (() -> Void)?
@@ -268,6 +269,80 @@ final class ModelManager: ObservableObject {
         return true
     }
 
+    // MARK: Nano Edge model set (fourth neural engine)
+
+    /// nano-edge-tts: Kokoro's text side + drmhse's 1.75M-param distilled
+    /// decoder (Apache-2.0), the ONNX export the Linux app's sn-tts
+    /// produces. Two graphs (112.1 MB text side + 30.4 MB decoder — the
+    /// decoder's external-data blob is inlined into the one file) + the
+    /// kokoro tokenizer + the 28 English voice banks of the kokoro set
+    /// (the set the distilled decoder was trained on; `af.bin` is an
+    /// aggregate row, not a voice, and is excluded). ≈ 157 MB total. The
+    /// pinned contract lives in Docs/NANO-EDGE-PORT.md; the sha256 pins
+    /// are the Linux app's (sn-tts/src/manager.rs).
+    static let nanoEdgeBaseURL = URL(string: "https://huggingface.co/thesagezm/speechnotes-models/resolve/main/nano-edge-tts")!
+    /// The tokenizer and the voice banks are kokoro's own files, fetched
+    /// from kokoro's repo — the same pins the kokoro set uses, so one
+    /// voice code is one speaker in both engines.
+    static let nanoEdgeKokoroBaseURL = URL(string: "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main")!
+
+    /// The 28 English voice banks the distilled decoder was trained on —
+    /// exactly `knownVoices` (af/am/bf/bm; the Linux catalog filters the
+    /// same prefixes out of kokoro's 55). A shared constant, not a copy,
+    /// so the two engines can never disagree on a voice code.
+    nonisolated static let nanoEdgeVoices: [String] = knownVoices
+
+    /// (file name under the hub root, bytes from the HF tree 2026-11-18,
+    /// lower progress bound) — downloaded in this order into
+    /// Documents/NanoEdge.
+    nonisolated static let nanoEdgeGraphFiles: [(name: String, bytes: Int64, from: Double)] = [
+        ("text-side.onnx", 112_134_174, 0.00),
+        ("nano-decoder.onnx", 30_420_126, 0.72),
+        ("tokenizer.json", 3_497, 0.90),
+    ]
+
+    /// A full bank is 510 rows × 256 floats = 522 240 bytes — that is the
+    /// floor for every English bank (the Linux catalog's `af.bin` caveat
+    /// does not apply: the aggregate row is excluded from this set).
+    nonisolated static let nanoEdgeVoiceBinBytes: Int64 = 522_240
+
+    nonisolated static var nanoEdgeDirectory: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("NanoEdge")
+    }
+
+    nonisolated static var nanoEdgeVoicesDirectory: URL {
+        nanoEdgeDirectory.appendingPathComponent("voices")
+    }
+
+    nonisolated static func nanoEdgeVoiceFileURL(voice: String) -> URL {
+        nanoEdgeVoicesDirectory.appendingPathComponent("\(voice).bin")
+    }
+
+    nonisolated static func nanoEdgeFilesAreValid() -> Bool {
+        let fm = FileManager.default
+        func size(_ url: URL) -> Int64? {
+            (try? fm.attributesOfItem(atPath: url.path))?[.size] as? Int64
+        }
+        // Floors sit just under the exported graphs' landed sizes (112.1 MB
+        // / 30.4 MB) so a half-transfer never reads as installed — the
+        // Linux catalog's pins.
+        guard size(nanoEdgeDirectory.appendingPathComponent("text-side.onnx")) ?? 0 > 110_000_000,
+              size(nanoEdgeDirectory.appendingPathComponent("nano-decoder.onnx")) ?? 0 > 30_000_000
+        else { return false }
+        // tokenizer.json validated by parsing, not size (the Kokoro lesson:
+        // a size check once rejected every successful download).
+        guard let data = try? Data(contentsOf: nanoEdgeDirectory.appendingPathComponent("tokenizer.json")),
+              let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let model = json["model"] as? [String: Any],
+              (model["vocab"] as? [String: Int])?.count ?? 0 > 100
+        else { return false }
+        for voice in nanoEdgeVoices {
+            guard (size(nanoEdgeVoiceFileURL(voice: voice)) ?? 0) >= nanoEdgeVoiceBinBytes else { return false }
+        }
+        return true
+    }
+
     init() {
         Self.migrateLegacyMetalFiles()
         Self.removeQuantizedDownloads()
@@ -296,6 +371,12 @@ final class ModelManager: ObservableObject {
             Log.shared.info("ModelManager: Phonon model already present")
         } else {
             phononState = .notDownloaded
+        }
+        if Self.nanoEdgeFilesAreValid() {
+            nanoEdgeState = .ready
+            Log.shared.info("ModelManager: Nano Edge model already present")
+        } else {
+            nanoEdgeState = .notDownloaded
         }
     }
 
@@ -405,6 +486,11 @@ final class ModelManager: ObservableObject {
         return false
     }
 
+    var nanoIsReady: Bool {
+        if case .ready = nanoEdgeState { return true }
+        return false
+    }
+
     /// Downloads the Phonon set (~192 MB: 2 fp32 graphs + tokenizer + 26 voice bins).
     func startPhononDownload() {
         if case .downloading = phononState { return }
@@ -490,6 +576,98 @@ final class ModelManager: ObservableObject {
     private func reportPhononProgress(_ value: Double) {
         if case .downloading = phononState {
             phononState = .downloading(progress: value)
+        }
+    }
+
+    /// Downloads the Nano Edge set (~157 MB: 2 graphs + tokenizer + 28
+    /// English voice banks).
+    func startNanoEdgeDownload() {
+        if case .downloading = nanoEdgeState { return }
+        guard !nanoIsReady else { return }
+
+        // PocketPal lesson: estimate × ~1.5 headroom.
+        if let attrs = try? FileManager.default.attributesOfFileSystem(forPath: NSHomeDirectory()),
+           let free = attrs[.systemFreeSize] as? Int64,
+           free < 250_000_000 {
+            let message = "Not enough free space for Nano Edge (need ~250 MB, have \(free / 1_000_000) MB)"
+            nanoEdgeState = .failed(message)
+            Log.shared.error("ModelManager: \(message)")
+            return
+        }
+
+        nanoEdgeState = .downloading(progress: 0)
+        Log.shared.info("ModelManager: starting Nano Edge download (~157 MB)")
+
+        Task.detached { [weak self] in
+            do {
+                // Graphs + tokenizer, each mapped to its progress slice.
+                for index in 0..<Self.nanoEdgeGraphFiles.count {
+                    let file = Self.nanoEdgeGraphFiles[index]
+                    let upper = index + 1 < Self.nanoEdgeGraphFiles.count
+                        ? Self.nanoEdgeGraphFiles[index + 1].from
+                        : 0.92
+                    let source = file.name == "tokenizer.json"
+                        ? Self.nanoEdgeKokoroBaseURL.appendingPathComponent(file.name)
+                        : Self.nanoEdgeBaseURL.appendingPathComponent(file.name)
+                    try await self?.download(
+                        from: source,
+                        to: Self.nanoEdgeDirectory.appendingPathComponent(file.name),
+                        expectedBytes: file.bytes,
+                        progressRange: file.from...upper,
+                        publishingTo: { [weak self] value in self?.reportNanoEdgeProgress(value) }
+                    )
+                }
+                // All 28 voice banks (~522 KB each) share the final slice.
+                for (index, voice) in Self.nanoEdgeVoices.enumerated() {
+                    let lower = 0.92 + 0.08 * Double(index) / Double(Self.nanoEdgeVoices.count)
+                    let upper = 0.92 + 0.08 * Double(index + 1) / Double(Self.nanoEdgeVoices.count)
+                    try await self?.download(
+                        from: Self.nanoEdgeKokoroBaseURL.appendingPathComponent("voices/\(voice).bin"),
+                        to: Self.nanoEdgeVoiceFileURL(voice: voice),
+                        expectedBytes: Self.nanoEdgeVoiceBinBytes,
+                        progressRange: lower...upper,
+                        publishingTo: { [weak self] value in self?.reportNanoEdgeProgress(value) }
+                    )
+                }
+                await MainActor.run {
+                    guard let self else { return }
+                    if Self.nanoEdgeFilesAreValid() {
+                        self.nanoEdgeState = .ready
+                        Log.shared.info("ModelManager: Nano Edge download complete")
+                        self.onReady?()
+                    } else {
+                        self.nanoEdgeState = .failed("Downloaded Nano Edge files failed validation")
+                        Log.shared.error("ModelManager: Nano Edge files failed validation after download")
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    guard let self else { return }
+                    self.nanoEdgeState = .failed(error.localizedDescription)
+                    Log.shared.error("ModelManager: Nano Edge download failed: \(error)")
+                }
+            }
+        }
+    }
+
+    func deleteNanoEdgeModels() {
+        try? FileManager.default.removeItem(at: Self.nanoEdgeDirectory)
+        var cleanup: [URL] = Self.nanoEdgeGraphFiles.map {
+            Self.nanoEdgeDirectory.appendingPathComponent($0.name)
+        }
+        cleanup += Self.nanoEdgeVoices.map { Self.nanoEdgeVoiceFileURL(voice: $0) }
+        for base in cleanup {
+            try? FileManager.default.removeItem(at: base.appendingPathExtension("part"))
+            try? FileManager.default.removeItem(at: base.appendingPathExtension("resumeData"))
+            try? FileManager.default.removeItem(at: base.appendingPathExtension("resumeSource"))
+        }
+        nanoEdgeState = .notDownloaded
+        Log.shared.info("ModelManager: Nano Edge models deleted")
+    }
+
+    private func reportNanoEdgeProgress(_ value: Double) {
+        if case .downloading = nanoEdgeState {
+            nanoEdgeState = .downloading(progress: value)
         }
     }
 

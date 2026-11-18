@@ -217,6 +217,7 @@ struct NoteEditorView: View {
         switch player.engineKind {
         case .supertonic: return .supertonic
         case .phonon: return .phonon
+        case .nanoEdge: return .nanoEdge
         default: return .kokoro
         }
     }

@@ -138,6 +138,7 @@ final class BenchmarkSession {
     private var kokoro: OnnxKokoroEngine?
     private var supertonic: SupertonicEngine?
     private var phonon: PhononEngine?
+    private var nanoEdge: NanoEdgeEngine?
 
     init(config: BenchmarkConfig) {
         self.config = config
@@ -228,6 +229,10 @@ final class BenchmarkSession {
                 let engine = PhononEngine()
                 engine.benchmarkIntraOpThreads = config.intraOpThreads
                 phonon = engine
+            case .nanoEdge:
+                let engine = NanoEdgeEngine()
+                engine.benchmarkIntraOpThreads = config.intraOpThreads
+                nanoEdge = engine
             }
 
             // 2. Model load — COLD by construction: every session builds a
@@ -243,6 +248,8 @@ final class BenchmarkSession {
                 prepared = supertonic?.benchmarkPrepare() ?? false
             case .phononFP32:
                 prepared = phonon?.benchmarkPrepare() ?? false
+            case .nanoEdge:
+                prepared = nanoEdge?.benchmarkPrepare() ?? false
             }
             guard prepared else {
                 throw BenchmarkError.modelNotAvailable(config.tier)
@@ -400,6 +407,9 @@ final class BenchmarkSession {
         case .phononFP32:
             guard let phonon else { throw BenchmarkError.modelNotAvailable(config.tier) }
             return try phonon.benchmarkSynthesize(text: text, speed: config.speed)
+        case .nanoEdge:
+            guard let nanoEdge else { throw BenchmarkError.modelNotAvailable(config.tier) }
+            return try nanoEdge.benchmarkSynthesize(text: text, speed: config.speed)
         }
     }
 

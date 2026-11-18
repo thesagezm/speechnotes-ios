@@ -17,6 +17,7 @@ final class SpeechPlayer: ObservableObject {
         // only the engines that are genuinely different machines.
         case system
         case kokoro
+        case nanoEdge
         case phonon
         case supertonic
 
@@ -26,6 +27,7 @@ final class SpeechPlayer: ObservableObject {
             switch self {
             case .system: return "Apple system voice"
             case .kokoro: return "Kokoro — on-device neural, 28 voices"
+            case .nanoEdge: return "Nano Edge — distilled Kokoro, 28 voices (English)"
             case .phonon: return "Phonon — compact on-device neural (English)"
             case .supertonic: return "Supertonic — best quality, multilingual"
             }
@@ -83,6 +85,16 @@ final class SpeechPlayer: ObservableObject {
         didSet {
             UserDefaults.standard.set(phononVoice, forKey: "phononVoice")
             phononEngine?.voice = phononVoice
+        }
+    }
+    /// Nano Edge voice code — one of ModelManager.nanoEdgeVoices, the same
+    /// 28 English banks the Kokoro picker names (one voice code is one
+    /// speaker in both engines; the preference stays per-engine so a
+    /// Kokoro pick never silently re-speaks Nano Edge).
+    @Published var nanoEdgeVoice: String {
+        didSet {
+            UserDefaults.standard.set(nanoEdgeVoice, forKey: "nanoEdgeVoice")
+            nanoEngine?.voice = nanoEdgeVoice
         }
     }
     @Published var supertonicLang: String {
@@ -664,6 +676,10 @@ final class SpeechPlayer: ObservableObject {
             return usingSystemFallback
                 ? "Apple voice (model missing)"
                 : VoiceCatalog.subtitle(for: voice, kind: .kokoro)
+        case .nanoEdge:
+            return usingSystemFallback
+                ? "Apple voice (model missing)"
+                : VoiceCatalog.subtitle(for: nanoEdgeVoice, kind: .nanoEdge)
         case .phonon:
             return usingSystemFallback
                 ? "Apple voice (model missing)"
@@ -679,6 +695,7 @@ final class SpeechPlayer: ObservableObject {
     private var onnxEngine: OnnxKokoroEngine?
     private var supertonicEngine: SupertonicEngine?
     private var phononEngine: PhononEngine?
+    private var nanoEngine: NanoEdgeEngine?
     private var systemEngine: SystemEngine?
 
     init() {
@@ -717,6 +734,8 @@ final class SpeechPlayer: ObservableObject {
         supertonicVoice = defaults.string(forKey: "supertonicVoice") ?? "M1"
         supertonicLang = defaults.string(forKey: "supertonicLang") ?? "en"
         phononVoice = defaults.string(forKey: "phononVoice") ?? "default"
+        // The Linux catalog's default voice for nano-edge-tts.
+        nanoEdgeVoice = defaults.string(forKey: "nanoEdgeVoice") ?? "af_heart"
         systemVoiceIdentifier = defaults.string(forKey: "systemVoiceIdentifier")
     }
 
@@ -917,6 +936,27 @@ final class SpeechPlayer: ObservableObject {
         }
     }
 
+    /// Nano Edge joins the same single-slot idle-unload group: two fp32 ORT
+    /// sessions (~142 MB of graph weights) stay resident after the user
+    /// switches away. Reload-on-next-use is transparent (and logged).
+    private var nanoIdleUnloadTask: Task<Void, Never>?
+    private func scheduleNanoIdleUnload() {
+        nanoIdleUnloadTask?.cancel()
+        guard engineKind == .nanoEdge, nanoEngine != nil else { return }
+        nanoIdleUnloadTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 5 * 60 * 1_000_000_000)
+            guard !Task.isCancelled, let self else { return }
+            guard self.engineKind == .nanoEdge else { return }
+            guard self.state == .idle, !self.isExporting else { return }
+            guard self.nanoEngine?.hasLoadedModel == true else { return }
+            Log.shared.info("SpeechPlayer: unloading idle Nano Edge sessions")
+            let keepVoice = self.nanoEdgeVoice
+            self.nanoEngine = nil
+            self.rebuildEngine()
+            self.nanoEngine?.voice = keepVoice
+        }
+    }
+
     /// Which model file the cached OnnxKokoroEngine instance points at —
     /// the fp32 and compact tiers share one slot, so a tier switch must
     /// rebuild it rather than reuse the other tier's session.
@@ -1044,6 +1084,7 @@ final class SpeechPlayer: ObservableObject {
         scheduleSupertonicIdleUnload()
         scheduleKokoroIdleUnload()
         schedulePhononIdleUnload()
+        scheduleNanoIdleUnload()
 
         // The Supertonic set is ~399 MB of resident sessions — release it as
         // soon as another engine takes over (single-slot rule, PocketPal
@@ -1067,6 +1108,9 @@ final class SpeechPlayer: ObservableObject {
         }
         if engineKind != .phonon {
             phononEngine = nil
+        }
+        if engineKind != .nanoEdge {
+            nanoEngine = nil
         }
         if engineKind == .supertonic, ModelManager.shared.supertonicIsReady {
             // The warm-engine guard reconciles the VARIANT too: a same-kind
@@ -1102,6 +1146,25 @@ final class SpeechPlayer: ObservableObject {
                 engine = systemEngine
                 usingSystemFallback = true
                 Log.shared.info("SpeechPlayer: Phonon selected but model missing — system voice in use")
+            }
+        } else if engineKind == .nanoEdge {
+            if ModelManager.shared.nanoIsReady {
+                if nanoEngine == nil {
+                    let nano = NanoEdgeEngine()
+                    nano.voice = nanoEdgeVoice
+                    nanoEngine = nano
+                }
+                engine = nanoEngine
+                usingSystemFallback = false
+                Log.shared.info("SpeechPlayer: engine → Nano Edge (\(nanoEdgeVoice))")
+            } else {
+                if systemEngine == nil {
+                    systemEngine = SystemEngine()
+                }
+                systemEngine?.voiceIdentifier = systemVoiceIdentifier
+                engine = systemEngine
+                usingSystemFallback = true
+                Log.shared.info("SpeechPlayer: Nano Edge selected but model missing — system voice in use")
             }
         } else if engineKind == .kokoro {
             // The tier the DIAL asks for, falling back to whichever Kokoro
@@ -1628,11 +1691,17 @@ final class SpeechPlayer: ObservableObject {
         // Resolve the codename to its engine kind — a Supertonic style code
         // auditioned while Kokoro is active would play through the wrong
         // engine. Kokoro codenames keep the CURRENT tier (the dial's choice).
+        // Nano Edge shares Kokoro's codenames (same banks, same speaker),
+        // so the Nano picker can only resolve while Nano is the active
+        // kind — otherwise every nano audition would silently rebuild the
+        // Kokoro engine.
         let targetKind: EngineKind
         if ModelManager.supertonicVoices.contains(codename) {
             targetKind = .supertonic
         } else if ModelManager.phononVoices.contains(codename) {
             targetKind = .phonon
+        } else if engineKind == .nanoEdge, ModelManager.nanoEdgeVoices.contains(codename) {
+            targetKind = .nanoEdge
         } else if ModelManager.knownVoices.contains(codename) {
             targetKind = .kokoro
         } else {
@@ -1651,17 +1720,21 @@ final class SpeechPlayer: ObservableObject {
             modelReady = ModelManager.shared.isReady || ModelManager.shared.smallIsReady
         case .supertonic: modelReady = ModelManager.shared.supertonicIsReady
         case .phonon: modelReady = ModelManager.shared.phononIsReady
+        case .nanoEdge: modelReady = ModelManager.shared.nanoIsReady
         case .system: modelReady = false
         }
         guard modelReady else { return }
 
         if preAuditionState == nil, !commit {
             preAuditionState = (engineKind, voice,
-                                engineKind == .phonon ? phononVoice : supertonicVoice)
+                                engineKind == .phonon ? phononVoice
+                                    : engineKind == .nanoEdge ? nanoEdgeVoice
+                                    : supertonicVoice)
         }
         switch targetKind {
         case .supertonic: supertonicVoice = codename
         case .phonon: phononVoice = codename
+        case .nanoEdge: nanoEdgeVoice = codename
         case .kokoro: voice = codename
         case .system: break // single-voice engines need no assignment
         }
@@ -1686,6 +1759,7 @@ final class SpeechPlayer: ObservableObject {
     private func recentKey(for kind: EngineKind) -> String {
         switch kind {
         case .kokoro: return "recentKokoroVoices"
+        case .nanoEdge: return "recentNanoEdgeVoices"
         case .supertonic: return "recentSupertonicVoices"
         case .phonon: return "recentPhononVoices"
         case .system: return "recentSystemVoices"
@@ -1718,6 +1792,8 @@ final class SpeechPlayer: ObservableObject {
                 supertonicVoice = saved.secondaryVoice
             case .phonon:
                 phononVoice = saved.secondaryVoice
+            case .nanoEdge:
+                nanoEdgeVoice = saved.secondaryVoice
             case .system:
                 break
             }
@@ -1769,6 +1845,10 @@ final class SpeechPlayer: ObservableObject {
 
         if engineKind == .supertonic, let supertonicEngine {
             supertonicEngine.renderWAV(text: text, title: title, onChunkProgress: progress, completion: finish)
+        } else if engineKind == .nanoEdge, let nanoEngine {
+            nanoEngine.renderWAV(text: text, title: title, onChunkProgress: progress, completion: finish)
+        } else if engineKind == .phonon, let phononEngine {
+            phononEngine.renderWAV(text: text, title: title, onChunkProgress: progress, completion: finish)
         } else if let onnxEngine {
             onnxEngine.renderWAV(text: text, title: title, onChunkProgress: progress, completion: finish)
         } else {

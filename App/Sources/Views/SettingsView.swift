@@ -15,7 +15,7 @@ struct SettingsView: View {
     /// Any neural engine is selected AND its model is ready — the system
     /// engine (and so the system voice) is not in the playback path.
     private var neuralEngineIsActive: Bool {
-        (player.engineKind == .kokoro || player.engineKind == .phonon || player.engineKind == .supertonic)
+        (player.engineKind == .kokoro || player.engineKind == .nanoEdge || player.engineKind == .phonon || player.engineKind == .supertonic)
             && !player.usingSystemFallback
     }
 
@@ -24,6 +24,7 @@ struct SettingsView: View {
         switch player.engineKind {
         case .supertonic: return player.supertonicVoice
         case .phonon: return player.phononVoice
+        case .nanoEdge: return player.nanoEdgeVoice
         default: return player.voice
         }
     }
@@ -31,6 +32,7 @@ struct SettingsView: View {
     private var neuralModelMissing: Bool {
         switch player.engineKind {
         case .kokoro: return !models.isReady && !models.smallIsReady
+        case .nanoEdge: return !models.nanoIsReady
         case .phonon: return !models.phononIsReady
         case .supertonic: return !models.supertonicIsReady
         default: return false
@@ -41,6 +43,7 @@ struct SettingsView: View {
         switch player.engineKind {
         case .supertonic: return .supertonic
         case .phonon: return .phonon
+        case .nanoEdge: return .nanoEdge
         default: return .kokoro
         }
     }
@@ -49,6 +52,7 @@ struct SettingsView: View {
         switch player.engineKind {
         case .supertonic: return "Supertonic voice"
         case .phonon: return "Phonon voice"
+        case .nanoEdge: return "Nano Edge voice"
         default: return "Kokoro voice"
         }
     }
@@ -83,7 +87,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Speech engine")
                 } footer: {
-                    Text("Listed smallest to largest. Kokoro Compact (~92 MB) is the lightweight tier; Kokoro fp32 is the solid default; Phonon (~192 MB) is the compact English engine. Supertonic sounds the best. All fully offline.")
+                    Text("Listed smallest to largest. Kokoro Compact (~92 MB) is the lightweight tier; Kokoro fp32 is the solid default; Nano Edge (~157 MB) is the distilled-Kokoro engine with the same 28 English voices; Phonon (~192 MB) is the compact English engine. Supertonic sounds the best. All fully offline.")
                 }
 
                 Section {

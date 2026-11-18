@@ -9,6 +9,7 @@ struct VoicePickerSheet: View {
     /// (either tier plays the same 28 voices).
     enum Scope {
         case kokoro
+        case nanoEdge
         case phonon
         case supertonic
 
@@ -16,6 +17,7 @@ struct VoicePickerSheet: View {
             switch self {
             case .supertonic: return .supertonic
             case .phonon: return .phonon
+            case .nanoEdge: return .nanoEdge
             case .kokoro: return .kokoro
             }
         }
@@ -24,6 +26,7 @@ struct VoicePickerSheet: View {
             switch self {
             case .supertonic: return "Supertonic voice"
             case .phonon: return "Phonon voice"
+            case .nanoEdge: return "Nano Edge voice"
             case .kokoro: return "Kokoro voice"
             }
         }
@@ -43,6 +46,7 @@ struct VoicePickerSheet: View {
     private var selectedVoice: String {
         switch scope {
         case .kokoro: return player.voice
+        case .nanoEdge: return player.nanoEdgeVoice
         case .phonon: return player.phononVoice
         case .supertonic: return player.supertonicVoice
         }
@@ -51,6 +55,7 @@ struct VoicePickerSheet: View {
     private var modelReady: Bool {
         switch scope {
         case .kokoro: return models.isReady || models.smallIsReady
+        case .nanoEdge: return models.nanoIsReady
         case .phonon: return models.phononIsReady
         case .supertonic: return models.supertonicIsReady
         }
@@ -76,6 +81,7 @@ struct VoicePickerSheet: View {
         switch scope {
         case .supertonic: return "recentSupertonicVoices"
         case .phonon: return "recentPhononVoices"
+        case .nanoEdge: return "recentNanoEdgeVoices"
         case .kokoro: return "recentKokoroVoices"
         }
     }
@@ -260,6 +266,7 @@ struct VoicePickerSheet: View {
         Haptics.tap()
         switch scope {
         case .kokoro: player.voice = descriptor.id
+        case .nanoEdge: player.nanoEdgeVoice = descriptor.id
         case .phonon: player.phononVoice = descriptor.id
         case .supertonic: player.supertonicVoice = descriptor.id
         }

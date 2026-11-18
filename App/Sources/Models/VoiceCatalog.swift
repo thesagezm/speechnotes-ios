@@ -108,6 +108,7 @@ enum VoiceCatalog {
         switch kind {
         case .supertonic: return supertonic
         case .phonon: return phonon
+        case .nanoEdge: return kokoro
         default: return kokoro
         }
     }

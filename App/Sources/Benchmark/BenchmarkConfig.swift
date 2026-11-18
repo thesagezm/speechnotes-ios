@@ -25,6 +25,9 @@ enum BenchmarkTier: String, Codable, CaseIterable, Identifiable {
     /// Phonon fp32 (flow + decoder, ~166 MB of weights) — the compact
     /// English engine's device numbers.
     case phononFP32 = "phonon-fp32"
+    /// nano-edge-tts (text side + distilled decoder, ~142 MB of weights) —
+    /// the "kokoro pronunciation at a fraction of the work" tier.
+    case nanoEdge = "nano-edge"
 
     var id: String { rawValue }
 
@@ -37,6 +40,7 @@ enum BenchmarkTier: String, Codable, CaseIterable, Identifiable {
         case .supertonicHighCoreML: return "Supertonic High · 8 steps (Core ML EP)"
         case .supertonicBalancedCoreML: return "Supertonic Balanced · 6 steps (Core ML EP)"
         case .phononFP32: return "Phonon fp32 (CPU)"
+        case .nanoEdge: return "Nano Edge (CPU)"
         }
     }
 
@@ -54,7 +58,7 @@ enum BenchmarkTier: String, Codable, CaseIterable, Identifiable {
     /// same values for the two neural engines).
     var firstChunkChars: Int {
         switch self {
-        case .kokoroFP32, .kokoroCompact: return 100
+        case .kokoroFP32, .kokoroCompact, .nanoEdge: return 100
         case .phononFP32: return 80
         case .supertonicHigh, .supertonicBalanced, .supertonicHighCoreML, .supertonicBalancedCoreML: return 60
         }
@@ -62,7 +66,7 @@ enum BenchmarkTier: String, Codable, CaseIterable, Identifiable {
 
     var batchChunkChars: Int {
         switch self {
-        case .kokoroFP32, .kokoroCompact: return 160
+        case .kokoroFP32, .kokoroCompact, .nanoEdge: return 160
         case .phononFP32: return 180
         case .supertonicHigh, .supertonicBalanced, .supertonicHighCoreML, .supertonicBalancedCoreML: return 200
         }

@@ -304,6 +304,76 @@ jobs:
           path: phonon-spike.log
           if-no-files-found: warn
 
+  nano-edge-spike:
+    name: Nano Edge spike (validates two-graph contract on vendored ORT)
+    runs-on: macos-latest
+    timeout-minutes: 20
+    # Informative and non-blocking by design (matches the other spikes; the
+    # phone is the real bench). This one proves the two-graph handoff — the
+    # text side's dynamo export keeps the frame axis symbolic, so a short
+    # and a long phoneme stream must travel the SAME sessions with only the
+    # frame count moving between them (Docs/NANO-EDGE-PORT.md).
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # --http1.1 + --retry-all-errors: the HF CDN flakes HTTP/2 streams on
+      # big files (observed 2026-11-10; exit 92 mid-transfer).
+      - name: Download nano-edge-tts model set (~145 MB)
+        run: |
+          mkdir -p ~/nano-edge-spike/voices
+          BASE="https://huggingface.co/thesagezm/speechnotes-models/resolve/main/nano-edge-tts"
+          KOKORO="https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main"
+          curl --http1.1 -sL --retry 5 --retry-all-errors --retry-delay 2 -o ~/nano-edge-spike/text-side.onnx "$BASE/text-side.onnx"
+          curl --http1.1 -sL --retry 5 --retry-all-errors --retry-delay 2 -o ~/nano-edge-spike/nano-decoder.onnx "$BASE/nano-decoder.onnx"
+          curl --http1.1 -sL --retry 5 --retry-all-errors --retry-delay 2 -o ~/nano-edge-spike/tokenizer.json "$KOKORO/tokenizer.json"
+          # af_heart: the same published bank the kokoro set ships — the
+          # distilled decoder was trained on these English banks.
+          curl --http1.1 -sL --retry 5 --retry-all-errors --retry-delay 2 -o ~/nano-edge-spike/voices/af_heart.bin "$KOKORO/voices/af_heart.bin"
+          # Size gates (bytes from the hub tree, 2026-11-18) — a truncated
+          # transfer must fail here, not inside the graph.
+          test "$(stat -f%z ~/nano-edge-spike/text-side.onnx)" -eq 112134174
+          test "$(stat -f%z ~/nano-edge-spike/nano-decoder.onnx)" -eq 30420126
+          test "$(stat -f%z ~/nano-edge-spike/voices/af_heart.bin)" -eq 522240
+          ls -lh ~/nano-edge-spike
+
+      - name: Run Nano Edge spike test
+        id: test
+        run: |
+          set -o pipefail
+          cd Tests/NanoEdgeSpike
+          swift test 2>&1 | tee ../../nano-edge-spike.log
+
+      - name: Show failure summary
+        if: always()
+        run: |
+          grep -E "NANO-EDGE-SPIKE|error:|failed|Fatal|Crash|unexpected exit|Executed" nano-edge-spike.log \
+            | grep -vE "warning:" \
+            | tail -n 40 > nano-edge-summary.txt || true
+          echo "----- NANO EDGE SPIKE SUMMARY -----"
+          cat nano-edge-summary.txt
+          echo "----------------------------------"
+          if [ -s nano-edge-summary.txt ] && [ "${{ steps.test.outcome }}" = "failure" ]; then
+            python3 -c "import pathlib; t = pathlib.Path('nano-edge-summary.txt').read_text()[:5500]; print('::error title=Nano Edge spike failure::' + t.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A'))"
+          fi
+
+      - name: Upload sample audio
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nano-edge-sample
+          path: ~/nano-edge-spike/sample.wav
+          if-no-files-found: error
+
+      - name: Upload spike log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nano-edge-spike-log
+          path: nano-edge-spike.log
+          if-no-files-found: warn
+
   epub-spike:
     name: EPUB spike (ZipReader/EpubInfo vs real books)
     runs-on: macos-latest
