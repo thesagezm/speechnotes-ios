@@ -14,7 +14,13 @@ let package = Package(
         .testTarget(
             name: "EpubSpikeTests",
             dependencies: ["SpeechLogic"],
-            path: "Tests/EpubSpikeTests"
+            path: "Tests/EpubSpikeTests",
+            resources: [
+                // Vendored Gutenberg books (Wayback snapshots of the same
+                // URLs the CI job fetches) — the fallback tier when
+                // Gutenberg 503s the runner. See EpubSpikeTests' doc comment.
+                .copy("Fixtures")
+            ]
         )
     ]
 )

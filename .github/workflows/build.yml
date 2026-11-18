@@ -386,27 +386,34 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # curl -I verified 2026-09-06: all three return 200 application/epub+zip.
-      # Content-addressed cache URLs — stable for years.
+      # Optional FRESHNESS layer: the tests run against the vendored
+      # Fixtures/ (Wayback snapshots of these exact URLs, 2026-11-09/15)
+      # whenever this step fails, so a Gutenberg 503 can no longer turn
+      # the job red — 2026-11-18 the site 503'd every file on every run
+      # (cloud-runner IPs are throttled; www.gutenberg.org asks automated
+      # fetches to use mirrors, but the spike's point is Gutenberg's own
+      # toolchain). When the fetch DOES succeed, today's emits win.
       #
       # The perl alarm wrapper is the REAL bound: macOS curl's --max-time
       # does not fire while the system resolver stalls (twice on 2026-11-16
       # a hung download ate the whole 15-minute job budget and cancelled the
       # run), so the timers curl carries cannot be trusted here. SIGALRM
-      # kills curl whatever it is stuck in; a failed download skips the
-      # spike test into the job's continue-on-error and the run goes green
-      # with the annotation. Worst case: 3 × 120s, half the job budget.
-      - name: Download real EPUBs (Project Gutenberg)
+      # kills curl whatever it is stuck in. Writes to .part and renames on
+      # success — the test's per-file existence check must never see a
+      # partial transfer.
+      - name: Download real EPUBs (Project Gutenberg, optional refresh)
         run: |
           mkdir -p ~/epub-spike
           for id in 1342 11 84; do
             if perl -e 'alarm shift @ARGV; exec @ARGV' 120 \
                 curl -sSfL --connect-timeout 15 --max-time 60 \
-                -o "$HOME/epub-spike/pg$id.epub" \
+                -o "$HOME/epub-spike/pg$id.epub.part" \
                 "https://www.gutenberg.org/cache/epub/$id/pg$id.epub"; then
-              echo "pg$id: $(wc -c < "$HOME/epub-spike/pg$id.epub") bytes"
+              mv "$HOME/epub-spike/pg$id.epub.part" "$HOME/epub-spike/pg$id.epub"
+              echo "pg$id: fresh download, $(wc -c < "$HOME/epub-spike/pg$id.epub") bytes"
             else
-              echo "pg$id: download failed — the spike degrades to its annotation" >&2
+              rm -f "$HOME/epub-spike/pg$id.epub.part"
+              echo "pg$id: fetch failed — testing the vendored fixtures instead" >&2
             fi
           done
           ls -lh ~/epub-spike

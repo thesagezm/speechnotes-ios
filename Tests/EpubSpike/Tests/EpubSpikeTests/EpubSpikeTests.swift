@@ -4,15 +4,37 @@ import SpeechLogic
 /// EPUB spike — the CI contract test for ZipReader + EpubInfo against REAL
 /// books (the fixture-based unit tests in SpeechLogic cover the synthetic
 /// cases; this covers whatever Project Gutenberg's toolchain actually emits).
-/// Books are downloaded by the `epub-spike` CI job into ~/epub-spike
-/// (override with EPUB_SPIKE_DIR); marker lines "EPUB-SPIKE ..." are grepped
-/// by the job's failure-summary step.
+///
+/// Two input tiers, by design:
+///
+/// 1. FRESH — the `epub-spike` CI job downloads the books into ~/epub-spike
+///    (override with EPUB_SPIKE_DIR). When Gutenberg serves, today's emits
+///    are what get tested.
+/// 2. VENDORED — Fixtures/pg*.epub, Wayback snapshots of the same URLs
+///    (2026-11-09/15, byte-faithful). Gutenberg 503s cloud-runner IPs
+///    arbitrarily (2026-11-18: every file, both runs), so a missing fresh
+///    book can never again turn the job red — the tests always run.
+///
+/// Marker lines "EPUB-SPIKE ..." are grepped by the job's failure-summary
+/// step.
 final class EpubSpikeTests: XCTestCase {
 
     private func book(_ filename: String) throws -> Data {
-        let dir = ProcessInfo.processInfo.environment["EPUB_SPIKE_DIR"]
-            ?? NSHomeDirectory() + "/epub-spike"
-        let url = URL(fileURLWithPath: dir).appendingPathComponent(filename)
+        // Fresh first, per file: a partial-fetch leaves the other books
+        // untouched, and a book Gutenberg didn't serve must fall back
+        // instead of failing the test.
+        if let dir = ProcessInfo.processInfo.environment["EPUB_SPIKE_DIR"]
+            ?? (FileManager.default.fileExists(atPath: NSHomeDirectory() + "/epub-spike")
+                ? NSHomeDirectory() + "/epub-spike" : nil),
+           FileManager.default.fileExists(atPath: dir + "/" + filename) {
+            return try Data(contentsOf: URL(fileURLWithPath: dir + "/" + filename),
+                            options: .mappedIfSafe)
+        }
+        let url = try XCTUnwrap(
+            Bundle.module.url(forResource: (filename as NSString).deletingPathExtension,
+                              withExtension: "epub",
+                              subdirectory: "Fixtures"),
+            "vendored fixture \(filename) missing from the test bundle")
         return try Data(contentsOf: url, options: .mappedIfSafe)
     }
 
