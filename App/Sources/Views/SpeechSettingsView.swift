@@ -1,11 +1,19 @@
 import SwiftUI
 import AVFoundation
 
+/// Speech settings — Android SpeechSettingsScreen parity: an engine radio
+/// list with factual subtitles, one Voice section, per-engine quality dials
+/// shown only while that engine is active, and ONE "Models" section holding
+/// every download (sorted smallest-first, largest last). The old screen's
+/// per-model sections each repeated a Download/Retry/Delete button plus a
+/// footer essay; footers are gone — the nav-bar info button carries the
+/// consolidated engine facts instead.
 struct SpeechSettingsView: View {
     @EnvironmentObject private var player: SpeechPlayer
     @ObservedObject private var models = ModelManager.shared
     @State private var systemVoices: [AVSpeechSynthesisVoice] = []
     @State private var showingVoicePicker = false
+    @State private var showingInfo = false
     /// Supertonic's quality-vs-speed dial — read per chunk by the engine
     /// (`SupertonicEngine.RenderQuality`), so a change applies from the
     /// next chunk with no restart.
@@ -24,31 +32,6 @@ struct SpeechSettingsView: View {
     /// never moved until something else re-rendered the section (2026-10-25
     /// device feedback). @AppStorage observes the defaults store directly.
     @AppStorage("kokoroTier") private var kokoroTier = "high"
-
-    /// Kokoro's quality dial (2026-10-08 device feedback: the Engine picker
-    /// had TWO Kokoro rows AND a separate quality picker — three ways to say
-    /// the same thing). Now the Engine picker has ONE Kokoro row and this
-    /// section is the tier choice. Kokoro has no step parameter; its quality
-    /// knob IS the model tier (fp32 vs int8), stored under `kokoroTier` and
-    /// read by `SpeechPlayer.kokoroWantsBigModel` — the one kind maps onto
-    /// whichever tier this dial picks.
-    ///
-    /// Extracted into its own View-builder member: as an inline Section the
-    /// whole `body` Form grew past the type-checker's patience (the CI
-    /// "unable to type-check in reasonable time" round).
-    private var kokoroQualitySection: some View {
-        Section {
-            Picker("Kokoro quality", selection: kokoroQuality) {
-                Text("High (~341 MB)").tag("high")
-                Text("Compact (~92 MB)").tag("compact")
-            }
-            .pickerStyle(.inline)
-        } header: {
-            Text("Kokoro quality")
-        } footer: {
-            Text("Kokoro's quality setting is its model tier: High is the full-precision model, Compact is the smaller int8-quantized build — same 28 voices, about a quarter of the size, a small quality step down. The tier in use downloads from its section below; switching takes effect immediately.")
-        }
-    }
 
     private var kokoroQuality: Binding<String> {
         Binding(
@@ -96,240 +79,38 @@ struct SpeechSettingsView: View {
         }
     }
 
-    private var voiceSectionHeader: String {
-        switch player.engineKind {
-        case .supertonic: return "Supertonic voice"
-        case .phonon: return "Phonon voice"
-        case .nanoEdge: return "Nano Edge voice"
-        default: return "Kokoro voice"
-        }
-    }
-
     var body: some View {
         Form {
-            // (Render Markdown moved to Appearance — it is a reading-appearance
-            // preference, not a speech one. The speech engine follows the
-            // note's CURRENT view state: reading preview → clean rendered
-            // text, edit mode → raw text.)
+            engineSection
+            voiceSection
 
-            Section {
-                Picker("Engine", selection: $player.engineKind) {
-                    ForEach(SpeechPlayer.EngineKind.allCases) { kind in
-                        Text(kind.label).tag(kind)
-                    }
-                }
-                .pickerStyle(.inline)
-
-                if neuralModelMissing {
-                    Label(
-                        "Neural engine selected, but its model isn't downloaded yet — the system voice is used in the meantime.",
-                        systemImage: "info.circle"
-                    )
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                }
-            } header: {
-                Text("Speech engine")
-            } footer: {
-                Text("Kokoro runs on-device with 28 voices (High/Compact download choice in the Kokoro quality section below). Nano Edge is Kokoro's distilled decoder — the same 28 English voices at about a quarter of Kokoro's footprint. Phonon is the compact English engine — 26 voices, no speed control. Supertonic sounds the best (10 voice styles, 31 languages).")
-            }
-
-            // Kokoro's quality dial — the tier choice (fp32/int8), shown
-            // while the one Kokoro engine is active. See the property's
-            /// comment for why it is a separate member.
+            // Kokoro's tier choice (fp32/int8) — shown while the one Kokoro
+            // engine is active.
             if player.engineKind == .kokoro {
                 kokoroQualitySection
             }
 
-            Section {
-                Button {
-                    showingVoicePicker = true
-                } label: {
-                    HStack {
-                        Text("Voice")
-                        Spacer()
-                        Text(VoiceCatalog.subtitle(for: activeVoiceCodename, kind: player.engineKind))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                        Image(systemName: "chevron.up.chevron.down")
-                            .font(.caption2.weight(.medium))
-                            .foregroundStyle(.tertiary)
-                    }
-                }
-                .tint(.primary)
-            } header: {
-                Text(voiceSectionHeader)
-            } footer: {
-                switch player.engineKind {
-                case .supertonic:
-                    Text("10 voice styles, all fluent in 31 languages — pick the language in the voice picker. Tap a voice to hear a sample.")
-                case .phonon:
-                    Text("The hub default voice plus 26 American and British voices — every voice speaks English. Tap a voice to hear a sample.")
-                case .nanoEdge:
-                    Text("The same 28 American and British voices Kokoro names — the distilled decoder was trained on their banks, so Heart sounds like Heart. Tap a voice to hear a sample.")
-                default:
-                    Text("Friendly names with codenames — e.g. Heart is af_heart, American female. Tap a voice to hear a sample.")
-                }
-            }
-
-            Section {
-                Menu {
-                    systemVoiceRow(title: "Default (English)", identifier: nil)
-                    ForEach(systemVoices, id: \.identifier) { voice in
-                        systemVoiceRow(title: systemVoiceTitle(voice), identifier: voice.identifier)
-                    }
-                } label: {
-                    HStack {
-                        Text("Voice")
-                        Spacer()
-                        Text(selectedSystemVoiceTitle)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                        Image(systemName: "chevron.up.chevron.down")
-                            .font(.caption2.weight(.medium))
-                            .foregroundStyle(.tertiary)
-                    }
-                }
-                .disabled(neuralEngineIsActive)
-
-                if neuralEngineIsActive {
-                    Label(
-                        "A neural engine is active — the system voice only applies when Apple (system) is selected, or while a neural model is missing.",
-                        systemImage: "info.circle"
-                    )
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                }
-            } header: {
-                Text("System voice")
-            } footer: {
-                Text("Used by Apple's built-in speech. Enhanced and premium voices sound richer; download them under Settings → Accessibility → Spoken Content → Voices.")
-            }
-
-            Section {
-                switch models.supertonicState {
-                case .notDownloaded:
-                    Button { models.startSupertonicDownload() } label: {
-                        Label("Download Supertonic model (~399 MB)", systemImage: "arrow.down.circle")
-                    }
-                case .downloading(let progress):
-                    ProgressView(value: progress) { Text("Downloading Supertonic… \(Int(progress*100))%") }
-                case .failed(let message):
-                    Label("Supertonic download failed: \(message)", systemImage: "exclamationmark.triangle")
-                        .font(.footnote)
-                    Button("Retry") { models.startSupertonicDownload() }
-                case .ready:
-                    Label("Supertonic model ready", systemImage: "checkmark.circle")
-                    Button("Delete Supertonic model (frees ~399 MB)", role: .destructive) { models.deleteSupertonicModels() }
-                }
-            } header: { Text("Supertonic model") } footer: {
-                Text("Supertone supertonic-3 — flow-matching TTS with 31 languages and 10 voice styles. Large (~399 MB) and CPU-based; keep it as the optional multilingual engine alongside Kokoro.")
-            }
-
             if player.engineKind == .supertonic {
-                Section {
-                    Picker("Supertonic quality", selection: $supertonicRenderQuality) {
-                        Text("High — always full").tag("high")
-                        Text("Balanced — middle step").tag("balanced")
-                        Text("Automatic — sheds when very hot").tag("automatic")
-                        Text("Fast — lowest quality").tag("fast")
-                    }
-                    .pickerStyle(.inline)
-                } header: {
-                    Text("Supertonic quality")
-                } footer: {
-                    Text("High renders every chunk with the full 8 denoising steps — the best sound, roughly twice the generation work (still faster than playback). Balanced is the middle step: 6 steps, most of High's quality at ~3/4 of its time. Automatic drops to 4 steps only when the phone runs critically hot. Fast always uses 4 steps: quickest, with audible artifacts. Applies from the next chunk — no restart needed.")
-                }
-                Section {
-                    Toggle("Render with Core ML (experimental)", isOn: $supertonicUseCoreML)
-                        .onChange(of: supertonicUseCoreML) { _ in
-                            player.rebuildSupertonicEngineVariant()
-                        }
-                } header: {
-                    Text("Core ML experiment")
-                } footer: {
-                    Text("Routes Supertonic's four ONNX sessions through Apple's Core ML execution provider (Apple Neural Engine / GPU where they fit) instead of pure CPU. Off by default — lab-proven numerically identical, but the on-device speed, battery and heat comparison is still pending. Toggling it rebuilds the engine; any playing speech stops at the next sentence boundary. Use Benchmark Mode to measure EP vs CPU back-to-back.")
-                }
+                supertonicQualitySection
+                coreMLSection
             }
 
-
-            Section {
-                switch models.phononState {
-                case .notDownloaded:
-                    Button { models.startPhononDownload() } label: {
-                        Label("Download Phonon model (~192 MB)", systemImage: "arrow.down.circle")
-                    }
-                case .downloading(let progress):
-                    ProgressView(value: progress) { Text("Downloading Phonon… \(Int(progress*100))%") }
-                case .failed(let message):
-                    Label("Phonon download failed: \(message)", systemImage: "exclamationmark.triangle")
-                        .font(.footnote)
-                    Button("Retry") { models.startPhononDownload() }
-                case .ready:
-                    Label("Phonon model ready", systemImage: "checkmark.circle")
-                    Button("Delete Phonon model (frees ~192 MB)", role: .destructive) { models.deletePhononModels() }
-                }
-            } header: { Text("Phonon model") } footer: {
-                Text("Gradium Phonon — a 31M-parameter English streaming TTS: two fp32 graphs, a tokenizer and 27 voices (~192 MB). English only; speed slider has no effect (the model has no speed input); no Core ML experiment. Kokoro covers more voices and both stay fully offline.")
-            }
-
-            Section {
-                switch models.nanoEdgeState {
-                case .notDownloaded:
-                    Button { models.startNanoEdgeDownload() } label: {
-                        Label("Download Nano Edge model (~157 MB)", systemImage: "arrow.down.circle")
-                    }
-                case .downloading(let progress):
-                    ProgressView(value: progress) { Text("Downloading Nano Edge… \(Int(progress*100))%") }
-                case .failed(let message):
-                    Label("Nano Edge download failed: \(message)", systemImage: "exclamationmark.triangle")
-                        .font(.footnote)
-                    Button("Retry") { models.startNanoEdgeDownload() }
-                case .ready:
-                    Label("Nano Edge model ready", systemImage: "checkmark.circle")
-                    Button("Delete Nano Edge model (frees ~157 MB)", role: .destructive) { models.deleteNanoEdgeModels() }
-                }
-            } header: { Text("Nano Edge model") } footer: {
-                Text("nano-edge-tts — Kokoro's text encoder with its waveform decoder replaced by a distilled 1.75M-parameter one: the same 28 English voices at about a quarter of Kokoro's fp32 footprint, with native speed control and fully offline speech.")
-            }
-
-            Section {
-                switch models.state {
-                case .notDownloaded:
-                    Button { models.startDownload() } label: { Label("Download Kokoro model (~341 MB)", systemImage: "arrow.down.circle") }
-                case .downloading(let progress):
-                    ProgressView(value: progress) { Text("Downloading… \(Int(progress*100))%") }
-                case .failed(let message):
-                    Label("Download failed: \(message)", systemImage: "exclamationmark.triangle").font(.footnote)
-                    Button("Retry") { models.startDownload() }
-                case .ready:
-                    Label("Model ready — fully offline", systemImage: "checkmark.circle")
-                    Button("Delete model (frees ~341 MB)", role: .destructive) { models.deleteModels() }
-                }
-            } header: { Text("Kokoro model") } footer: {
-                Text("One-time download, stored inside the app: the fp32-quality model, all 28 voices, and the tokenizer. All speech generation stays on your device.")
-            }
-
-            Section {
-                switch models.smallState {
-                case .notDownloaded:
-                    Button { models.startSmallDownload() } label: { Label("Download Kokoro small model (~92 MB)", systemImage: "arrow.down.circle") }
-                case .downloading(let progress):
-                    ProgressView(value: progress) { Text("Downloading Kokoro small… \(Int(progress*100))%") }
-                case .failed(let message):
-                    Label("Download failed: \(message)", systemImage: "exclamationmark.triangle").font(.footnote)
-                    Button("Retry") { models.startSmallDownload() }
-                case .ready:
-                    Label("Small model ready — fully offline", systemImage: "checkmark.circle")
-                    Button("Delete small model (frees ~92 MB)", role: .destructive) { models.deleteSmallModel() }
-                }
-            } header: { Text("Kokoro small model") } footer: {
-                Text("The int8-quantized build of the same Kokoro graph — about a quarter of the footprint of fp32 with a small quality step down. Shares the 28-voice catalog, tokenizer and voice bank with the model above.")
-            }
+            modelsSection
         }
         .navigationTitle("Speech Settings")
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button {
+                    showingInfo = true
+                } label: {
+                    Image(systemName: "info.circle")
+                }
+                .accessibilityLabel("About the engines")
+            }
+        }
+        .sheet(isPresented: $showingInfo) {
+            SpeechInfoSheet()
+        }
         .sheet(isPresented: $showingVoicePicker) {
             VoicePickerSheet(scope: voicePickerScope).environmentObject(player)
         }
@@ -339,6 +120,218 @@ struct SpeechSettingsView: View {
                 .sorted { $0.language != $1.language ? $0.language < $1.language : $0.name < $1.name }
         }
     }
+
+    // MARK: - Engine
+
+    /// Engine radio list. Rows carry the name plus its factual subtitle in
+    /// the smaller secondary font (2026-11-19 device feedback: quality
+    /// rankings go stale, "on-device neural" said nothing — rows state only
+    /// languages, voice counts and sizes).
+    private var engineSection: some View {
+        Section("Speech engine") {
+            Picker("Engine", selection: $player.engineKind) {
+                ForEach(SpeechPlayer.EngineKind.allCases) { kind in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(kind.label)
+                        Text(kind.subtitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .tag(kind)
+                }
+            }
+            .pickerStyle(.inline)
+
+            if neuralModelMissing {
+                Label(
+                    "Selected engine's model isn't downloaded yet — the system voice is used in the meantime.",
+                    systemImage: "info.circle"
+                )
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    // MARK: - Voice
+
+    /// Both voice pickers in ONE section: the neural engine's voice on top,
+    /// the Apple system voice beneath it (dimmed while a neural engine owns
+    /// playback). The old screen gave the system voice its own section with
+    /// a footer essay.
+    private var voiceSection: some View {
+        Section("Voice") {
+            Button {
+                showingVoicePicker = true
+            } label: {
+                HStack {
+                    Text("Voice")
+                    Spacer()
+                    Text(VoiceCatalog.subtitle(for: activeVoiceCodename, kind: player.engineKind))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .tint(.primary)
+
+            Menu {
+                systemVoiceRow(title: "Default (English)", identifier: nil)
+                ForEach(systemVoices, id: \.identifier) { voice in
+                    systemVoiceRow(title: systemVoiceTitle(voice), identifier: voice.identifier)
+                }
+            } label: {
+                HStack {
+                    Text("System voice")
+                    Spacer()
+                    Text(selectedSystemVoiceTitle)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .disabled(neuralEngineIsActive)
+
+            if neuralEngineIsActive {
+                Label(
+                    "A neural engine is active — the system voice applies only when Apple (system) is selected, or while a model is missing.",
+                    systemImage: "info.circle"
+                )
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    // MARK: - Quality dials
+
+    private var kokoroQualitySection: some View {
+        Section("Kokoro quality") {
+            Picker("Kokoro quality", selection: kokoroQuality) {
+                qualityRow(title: "High", subtitle: "Full precision · ~341 MB").tag("high")
+                qualityRow(title: "Compact", subtitle: "int8-quantized · ~92 MB · same 28 voices").tag("compact")
+            }
+            .pickerStyle(.inline)
+        }
+    }
+
+    private var supertonicQualitySection: some View {
+        Section("Supertonic quality") {
+            Picker("Supertonic quality", selection: $supertonicRenderQuality) {
+                qualityRow(title: "High", subtitle: "8 denoising steps on every chunk").tag("high")
+                qualityRow(title: "Balanced", subtitle: "6 steps — close to High at ~¾ of the render time").tag("balanced")
+                qualityRow(title: "Automatic", subtitle: "4 steps, only while the phone runs critically hot").tag("automatic")
+                qualityRow(title: "Fast", subtitle: "Always 4 steps — quickest, audible artifacts").tag("fast")
+            }
+            .pickerStyle(.inline)
+        }
+    }
+
+    /// Two-line picker row: option name + its factual detail underneath.
+    private func qualityRow(title: String, subtitle: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+            Text(subtitle)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var coreMLSection: some View {
+        Section {
+            Toggle("Render with Core ML (experimental)", isOn: $supertonicUseCoreML)
+                .onChange(of: supertonicUseCoreML) { _ in
+                    player.rebuildSupertonicEngineVariant()
+                }
+        }
+    }
+
+    // MARK: - Models
+
+    /// Every download in ONE section, smallest first / largest last
+    /// (2026-11-19 device feedback): one row per model — name + size, state
+    /// as the secondary line, and a single trailing button replacing the old
+    /// per-model section of full-width Download/Retry/Delete rows.
+    private var modelsSection: some View {
+        Section("Models") {
+            modelRow(name: "Kokoro (small)", size: "~92 MB",
+                     state: models.smallState,
+                     start: { models.startSmallDownload() },
+                     remove: { models.deleteSmallModel() })
+            modelRow(name: "Nano Edge", size: "~157 MB",
+                     state: models.nanoEdgeState,
+                     start: { models.startNanoEdgeDownload() },
+                     remove: { models.deleteNanoEdgeModels() })
+            modelRow(name: "Phonon", size: "~192 MB",
+                     state: models.phononState,
+                     start: { models.startPhononDownload() },
+                     remove: { models.deletePhononModels() })
+            modelRow(name: "Kokoro", size: "~341 MB",
+                     state: models.state,
+                     start: { models.startDownload() },
+                     remove: { models.deleteModels() })
+            modelRow(name: "Supertonic", size: "~399 MB",
+                     state: models.supertonicState,
+                     start: { models.startSupertonicDownload() },
+                     remove: { models.deleteSupertonicModels() })
+        }
+    }
+
+    /// One model download row: name + size on top, download state beneath,
+    /// Download / progress / Retry / Delete trailing. A `.bordered` style on
+    /// the trailing buttons keeps the tap scoped to the button — a plain
+    /// Button inside a Form row makes the WHOLE row the hit target.
+    @ViewBuilder
+    private func modelRow(name: String, size: String,
+                          state: ModelManager.State,
+                          start: @escaping () -> Void,
+                          remove: @escaping () -> Void) -> some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("\(name) · \(size)")
+                Text(stateText(state))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            Spacer(minLength: 8)
+            switch state {
+            case .notDownloaded:
+                Button("Download", action: start)
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+            case .downloading(let progress):
+                ProgressView(value: progress)
+                    .frame(width: 72)
+            case .failed:
+                Button("Retry", action: start)
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+            case .ready:
+                Button("Delete", role: .destructive, action: remove)
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func stateText(_ state: ModelManager.State) -> String {
+        switch state {
+        case .notDownloaded: return "Not downloaded"
+        case .downloading(let progress): return "Downloading… \(Int(progress * 100))%"
+        case .failed(let message): return "Failed — \(message)"
+        case .ready: return "Ready — fully offline"
+        }
+    }
+
+    // MARK: - System voice rows
 
     private func systemVoiceRow(title: String, identifier: String?) -> some View {
         Button {
@@ -365,5 +358,45 @@ struct SpeechSettingsView: View {
     private var selectedSystemVoiceTitle: String {
         guard let id = player.systemVoiceIdentifier, let v = systemVoices.first(where: { $0.identifier == id }) else { return "Default (English)" }
         return "\(v.name) (\(v.language))"
+    }
+}
+
+/// The nav-bar info button's sheet: the engine and model facts the old
+/// footer essays carried, stated once and verifiably — no quality rankings.
+private struct SpeechInfoSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                engineInfo("Apple system voice",
+                           "Uses the voices installed in iOS — enhanced and premium tiers sound richer. Download more under Settings → Accessibility → Spoken Content → Voices.")
+                engineInfo("Kokoro",
+                           "One fp32 graph with all 28 American and British voices plus the tokenizer, stored inside the app. The High/Compact quality choice is the model tier; Compact is the int8 build at about a quarter of the size. Fully offline.")
+                engineInfo("Nano Edge",
+                           "Kokoro's text encoder with its waveform decoder replaced by a distilled 1.75M-parameter one. Trained on Kokoro's own voice banks, so Heart sounds like Heart — the same 28 English voices at about a quarter of the fp32 footprint, with native speed control.")
+                engineInfo("Phonon",
+                           "Gradium Phonon — a 31M-parameter English streaming TTS: two fp32 graphs, a tokenizer and 27 voices. English only; the speed slider has no effect here (the model has no speed input).")
+                engineInfo("Supertonic",
+                           "Supertone supertonic-3 — flow-matching TTS with 31 languages and 10 voice styles; pick the language in the voice picker. ~399 MB and CPU-based. The quality dial trades render time against denoising steps and applies from the next chunk; exports always render full quality.")
+                engineInfo("Core ML experiment (Supertonic)",
+                           "Routes Supertonic's four ONNX sessions through Apple's Core ML execution provider (Apple Neural Engine / GPU where they fit) instead of pure CPU. Off by default — numerically identical in the lab; the on-device speed, battery and heat comparison is still pending. Toggling it rebuilds the engine; playing speech stops at the next sentence boundary. Benchmark Mode measures Core ML vs CPU back-to-back.")
+            }
+            .navigationTitle("About the engines")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+
+    private func engineInfo(_ name: String, _ detail: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(name).font(.subheadline.weight(.semibold))
+            Text(detail).font(.footnote).foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 2)
     }
 }

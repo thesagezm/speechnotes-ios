@@ -23,13 +23,31 @@ final class SpeechPlayer: ObservableObject {
 
         var id: String { rawValue }
 
+        /// Engine name only — the picker renders `subtitle` underneath in
+        /// the smaller secondary font. Marketing claims ("best quality",
+        /// "fastest") are deliberately absent: they go stale as engines
+        /// evolve, so rows state only verifiable facts (languages, voice
+        /// counts, download sizes).
         var label: String {
             switch self {
             case .system: return "Apple system voice"
-            case .kokoro: return "Kokoro — on-device neural, 28 voices"
-            case .nanoEdge: return "Nano Edge — distilled Kokoro, 28 voices (English)"
-            case .phonon: return "Phonon — compact on-device neural (English)"
-            case .supertonic: return "Supertonic — best quality, multilingual"
+            case .kokoro: return "Kokoro"
+            case .nanoEdge: return "Nano Edge"
+            case .phonon: return "Phonon"
+            case .supertonic: return "Supertonic"
+            }
+        }
+
+        /// The factual detail line under the engine name (sizes, voices,
+        /// languages) — everything the old picker/footer essays said without
+        /// the "on-device neural" filler.
+        var subtitle: String {
+            switch self {
+            case .system: return "Instant — no download"
+            case .kokoro: return "28 English voices · ~341 MB, or ~92 MB compact"
+            case .nanoEdge: return "Kokoro's 28 English voices, distilled · ~157 MB"
+            case .phonon: return "English · 27 voices · ~192 MB"
+            case .supertonic: return "Multilingual · 31 languages · 10 voice styles · ~399 MB"
             }
         }
 

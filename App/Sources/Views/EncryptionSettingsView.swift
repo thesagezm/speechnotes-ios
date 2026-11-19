@@ -26,6 +26,7 @@ struct EncryptionSettingsView: View {
     @State private var confirmation = ""
     @State private var message: String?
     @State private var showingDisableConfirm = false
+    @State private var showingInfo = false
     /// True while the enable/unlock path is deriving the key — the
     /// passphrase KDF is 220 000 PBKDF2 iterations by design, so this is
     /// not instant.
@@ -44,6 +45,19 @@ struct EncryptionSettingsView: View {
         // Passphrase fields release the keyboard on a tap outside / drag.
         .scrollDismissesKeyboard(.immediately)
         .dismissesKeyboardOnTapOutside()
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button {
+                    showingInfo = true
+                } label: {
+                    Image(systemName: "info.circle")
+                }
+                .accessibilityLabel("About the encryption format")
+            }
+        }
+        .sheet(isPresented: $showingInfo) {
+            EncryptionInfoSheet()
+        }
         .alert(
             "Encryption",
             isPresented: Binding(
@@ -88,8 +102,6 @@ struct EncryptionSettingsView: View {
                 }
             }
             .padding(.vertical, 4)
-        } footer: {
-            Text("Encryption uses the same format as Joplin: PBKDF2-HMAC-SHA512 (220 000 iterations) to wrap a 256-byte master key with your passphrase, then AES-256-GCM for the note text. A note encrypted here can be decrypted in Joplin, and one encrypted there decrypts here. The passphrase is never stored — if you forget it, the notes cannot be recovered.")
         }
     }
 
@@ -128,10 +140,9 @@ struct EncryptionSettingsView: View {
                 }
             }
             .disabled(!canEnable)
-        } header: {
-            Text("Set a passphrase")
         } footer: {
-            Text("At least 8 characters. This runs 220 000 key-derivation iterations by design, so it takes a moment — a slow unlock is what makes a stolen file useless.")
+            // The one line that MUST stay visible: no reset exists.
+            Text("If you forget the passphrase, your notes cannot be recovered.")
         }
     }
 
@@ -170,7 +181,7 @@ struct EncryptionSettingsView: View {
     // MARK: - Unlock
 
     private var unlockSection: some View {
-        Section {
+        Section("Unlock your notes") {
             SecureField("Passphrase", text: $passphrase)
                 .textContentType(.password)
             Button {
@@ -187,10 +198,6 @@ struct EncryptionSettingsView: View {
                 }
             }
             .disabled(working || passphrase.isEmpty)
-        } header: {
-            Text("Unlock your notes")
-        } footer: {
-            Text("Your notes are on the device but encrypted. Unlock to read them; the key stays in memory until you lock again.")
         }
     }
 
@@ -230,7 +237,7 @@ struct EncryptionSettingsView: View {
     // MARK: - Manage
 
     private var manageSection: some View {
-        Section {
+        Section("Unlocked") {
             Button {
                 vault.lock()
                 Haptics.tap()
@@ -243,10 +250,6 @@ struct EncryptionSettingsView: View {
             } label: {
                 Label("Turn off encryption", systemImage: "lock.slash")
             }
-        } header: {
-            Text("Unlocked")
-        } footer: {
-            Text("Locking drops the key from memory — the notes stay sealed on disk and the app shows nothing until unlocked. Turning encryption off rewrites the notes file unencrypted and deletes the key from this device.")
         }
     }
 
@@ -264,5 +267,43 @@ struct EncryptionSettingsView: View {
         vault.disable()
         Haptics.warning()
         message = "Encryption is off. Your notes are stored as a normal file."
+    }
+}
+
+/// The nav-bar info button's sheet: the format details the old footers
+/// carried, stated once.
+private struct EncryptionInfoSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                infoRow("Joplin-compatible format",
+                        "PBKDF2-HMAC-SHA512 (220 000 iterations) wraps a 256-byte master key with your passphrase, then AES-256-GCM seals the note text. A note encrypted here decrypts in Joplin, and one encrypted there decrypts here.")
+                infoRow("Key storage",
+                        "Only the passphrase-wrapped master key lives on the device, in the keychain — the same construction Joplin uses, so a keychain backup restored onto another device cannot be opened there. The passphrase itself is never stored anywhere.")
+                infoRow("Slow by design",
+                        "Enabling and unlocking each run 220 000 key-derivation iterations, so they take a moment — a slow unlock is what makes a stolen file useless.")
+                infoRow("Locking vs turning off",
+                        "Locking drops the key from memory: the notes stay sealed on disk and the app shows nothing until unlocked. Turning encryption off rewrites the notes file unencrypted and deletes the key from this device.")
+                infoRow("No recovery",
+                        "If you forget the passphrase, the notes cannot be recovered — there is no reset.")
+            }
+            .navigationTitle("About encryption")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+
+    private func infoRow(_ title: String, _ detail: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.subheadline.weight(.semibold))
+            Text(detail).font(.footnote).foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 2)
     }
 }

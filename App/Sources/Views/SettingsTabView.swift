@@ -1,97 +1,69 @@
 import SwiftUI
-import UniformTypeIdentifiers
-import SpeechLogic
 
+/// Settings root — speechnotes-android SettingsHomeScreen parity: a flat
+/// navigation list, one icon + title + subtitle row per area, no section
+/// headers repeating the row's own name ("Storage" header → "Storage" row
+/// read as a stutter). Diagnostics keeps its small group (Benchmark mode +
+/// Logs); About stands alone at the end.
 struct SettingsTabView: View {
-    @EnvironmentObject private var notes: NotesStore
-    @ObservedObject private var notebooks = NotebooksStore.shared
-    /// JEX import picker + result toast state.
-    @State private var showingJexImporter = false
-    @State private var jexImportMessage: String?
     /// Mini-player jump: push the Storage screen (the playing export's
     /// player surface) programmatically.
     @State private var pushStorageForExport = false
 
-    /// Keep Screen On (Settings → Reading): the key/default live in
-    /// `ScreenAwakePolicy` (SpeechLogic) so the toggle and the controller
-    /// cannot drift apart. The controller re-applies on this change via
-    /// `.onChange` below.
-    @AppStorage(ScreenAwakePolicy.preferenceKey) private var keepScreenOn = ScreenAwakePolicy.defaultEnabled
-
-    private static let jexType = UTType(importedAs: "com.joplin.jex")
-
     var body: some View {
         NavigationStack {
             Form {
-                Section("Speech") {
-                    NavigationLink("Speech Settings") {
-                        SpeechSettingsView()
-                    }
+                link("waveform", "Speech engine",
+                     "Engine, voices, model downloads") {
+                    SpeechSettingsView()
                 }
-                Section("Appearance") {
-                    NavigationLink("Appearance") {
-                        AppearanceSettingsView()
-                    }
+                link("paintbrush", "Appearance",
+                     "Theme, accent, reader, keep screen on") {
+                    AppearanceSettingsView()
                 }
-                Section("Reading") {
-                    Toggle("Keep Screen On", isOn: $keepScreenOn)
+                link("wifi", "BookDrop",
+                     "Books and audio to nearby devices") {
+                    BookDropView()
                 }
-                Section("Backup") {
-                    NavigationLink("Export notes to Joplin (.jex)") {
-                        BackupExportView()
-                    }
-                    Button {
-                        showingJexImporter = true
-                    } label: {
-                        Label("Import from Joplin (.jex)", systemImage: "square.and.arrow.down")
-                    }
+                link("arrow.down.doc", "Backup",
+                     "Joplin .jex export and import") {
+                    BackupExportView()
                 }
-                Section("Privacy") {
-                    NavigationLink("Encryption") {
-                        EncryptionSettingsView()
-                    }
+                link("lock", "Encryption",
+                     "Passphrase-sealed notes, Joplin-compatible") {
+                    EncryptionSettingsView()
                 }
-                Section("Integrations") {
-                    NavigationLink("BookDrop") {
-                        BookDropView()
-                    }
+                link("internaldrive", "Storage",
+                     "Usage, exports, cached images") {
+                    StorageSettingsView()
                 }
-                Section("Storage") {
-                    // Closure-based link (the value-based NavigationLink from
-                    // the first round-6 attempt never registered its
-                    // destination inside the lazy Form row on device — taps
-                    // highlighted and did nothing). The mini-player jump uses
-                    // navigationDestination(isPresented:) at the FORM level,
-                    // which registers reliably.
-                    NavigationLink("Storage") {
-                        StorageSettingsView()
-                    }
-                }
+
                 Section("Diagnostics") {
-                    NavigationLink("Benchmark mode") {
+                    link("gauge", "Benchmark mode",
+                         "Sustained synthesis harness") {
                         BenchmarkView()
                     }
-                }
-                Section("About") {
-                    NavigationLink("About") {
-                        AboutView()
-                    }
-                    NavigationLink("Logs") {
+                    link("doc.text.magnifyingglass", "Logs",
+                         "What the app has been doing") {
                         LogsView()
+                    }
+                }
+
+                // Headerless trailing group so "About" never sits under an
+                // "About" header saying the same thing twice.
+                Section {
+                    link("info.circle", "About",
+                         "Version and credits") {
+                        AboutView()
                     }
                 }
             }
             .navigationTitle("Settings")
-            // Text fields here (paywall domains) used to hold the keyboard
-            // hostage — no native tap-outside in SwiftUI. Both halves:
-            // drag the list, or tap anywhere that is not the field.
+            // Text fields downstream could hold the keyboard hostage — no
+            // native tap-outside in SwiftUI. Both halves: drag the list, or
+            // tap anywhere that is not the field.
             .scrollDismissesKeyboard(.immediately)
             .dismissesKeyboardOnTapOutside()
-            .onChange(of: keepScreenOn) { _ in
-                // The controller reads the preference fresh, so one nudge
-                // re-applies it to whatever is on screen right now.
-                ScreenAwake.shared.refresh()
-            }
             .onReceive(NotificationCenter.default.publisher(for: .miniPlayerJumpToExports)) { _ in
                 // Mini-player tap on a playing export → its player surface.
                 pushStorageForExport = true
@@ -99,57 +71,32 @@ struct SettingsTabView: View {
             .navigationDestination(isPresented: $pushStorageForExport) {
                 StorageSettingsView()
             }
-            .fileImporter(
-                isPresented: $showingJexImporter,
-                allowedContentTypes: [.data, Self.jexType],
-                allowsMultipleSelection: false
-            ) { result in
-                Task { @MainActor in
-                    switch result {
-                    case .success(let urls):
-                        guard let url = urls.first else { return }
-                        importJex(at: url)
-                    case .failure(let error):
-                        jexImportMessage = error.localizedDescription
-                    }
-                }
-            }
-            .alert(
-                "JEX import",
-                isPresented: Binding(
-                    get: { jexImportMessage != nil },
-                    set: { if !$0 { jexImportMessage = nil } }
-                )
-            ) {
-                Button("OK") { jexImportMessage = nil }
-            } message: {
-                Text(jexImportMessage ?? "")
-            }
         }
     }
 
-    /// Runs off-main (a JEX can be tens of MB) and reports what landed.
-    private func importJex(at url: URL) {
-        let scoped = url.startAccessingSecurityScopedResource()
-        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-        do {
-            let outcome = try JexImporter.importArchive(
-                at: url,
-                into: notes,
-                notebooks: notebooks
-            )
-            var parts: [String] = []
-            if outcome.notesCreated > 0 { parts.append("\(outcome.notesCreated) note\(outcome.notesCreated == 1 ? "" : "s")") }
-            if outcome.notebooksCreated > 0 { parts.append("\(outcome.notebooksCreated) notebook\(outcome.notebooksCreated == 1 ? "" : "s")") }
-            if outcome.imagesImported > 0 { parts.append("\(outcome.imagesImported) image\(outcome.imagesImported == 1 ? "" : "s")") }
-            if outcome.notebooksMerged > 0 { parts.append("\(outcome.notebooksMerged) merged into existing notebooks") }
-            jexImportMessage = parts.isEmpty
-                ? "Nothing to import — the archive had no notes."
-                : "Imported " + parts.joined(separator: ", ") + "."
-            Haptics.success()
-        } catch {
-            jexImportMessage = "Import failed — \(error.localizedDescription)"
-            Haptics.warning()
+    /// One Android-style row: accent-tinted icon, title with its one-line
+    /// subtitle underneath, chevron. Closure-based destination (the
+    /// value-based NavigationLink from the first round-6 attempt never
+    /// registered its destination inside the lazy Form row on device — taps
+    /// highlighted and did nothing).
+    private func link(_ icon: String, _ title: String, _ subtitle: String,
+                      @ViewBuilder destination: () -> some View) -> some View {
+        NavigationLink {
+            destination()
+        } label: {
+            HStack(spacing: 14) {
+                Image(systemName: icon)
+                    .font(.body)
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 28)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.vertical, 2)
         }
     }
 }

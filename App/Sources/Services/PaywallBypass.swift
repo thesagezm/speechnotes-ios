@@ -1,32 +1,17 @@
 import Foundation
 
-/// Settings + script loading for the Bypass Paywalls Clean (BPC) web-import
-/// pass. The BPC pair (`bpc_func.js` + `bpc.en.user.js`, userscript form by
+/// Script loading for the Bypass Paywalls Clean (BPC) web-import pass. The
+/// BPC pair (`bpc_func.js` + `bpc.en.user.js`, userscript form by
 /// magnolia1234) is vendored in App/Resources/JS — see its VENDOR-NOTES.md.
 ///
-/// BYPASS IS ON BY DEFAULT AND RUNS ON EVERY ARTICLE: the plain fetch cannot
-/// see past a publisher wall that kept its markers out of the HTML, so the
-/// heuristics no longer gate the pass — every import goes fetch → BPC and
-/// the better result wins. A copy dropped into Documents/BypassPaywalls/
-/// (visible in the Files app) overrides the bundled pair without a rebuild,
-/// so the script can be refreshed when sites change — keep both files'
-/// versions in lockstep.
+/// BYPASS ALWAYS RUNS ON EVERY ARTICLE (the Appearance toggle that gated it
+/// was removed 2026-11-19): the plain fetch cannot see past a publisher wall
+/// that kept its markers out of the HTML, so the heuristics no longer gate
+/// the pass — every import goes fetch → BPC and the better result wins. A
+/// copy dropped into Documents/BypassPaywalls/ (visible in the Files app)
+/// overrides the bundled pair without a rebuild, so the script can be
+/// refreshed when sites change — keep both files' versions in lockstep.
 enum PaywallBypass {
-
-    static let enabledKey = "webImport.bypassPaywalls"
-
-    /// Master toggle. Default ON: every import runs the BPC pass (clean
-    /// pages cost a slower second pass; walled ones recover their full text
-    /// with the script's own archive fallbacks — a user sharing a paywalled
-    /// article wants the text on the first try, not after a settings trip).
-    static var isEnabled: Bool {
-        get {
-            UserDefaults.standard.object(forKey: enabledKey) == nil
-                ? true
-                : UserDefaults.standard.bool(forKey: enabledKey)
-        }
-        set { UserDefaults.standard.set(newValue, forKey: enabledKey) }
-    }
 
     // MARK: - Scripts
 
@@ -122,8 +107,7 @@ enum PaywallBypass {
         )
     }()
 
-    /// `@version 4.4.7.4` out of the userscript header, for the Settings
-    /// footer and the import log.
+    /// `@version 4.4.7.4` out of the userscript header, for the import log.
     static func version(in mainScript: String) -> String? {
         guard let range = mainScript.range(of: "@version") else { return nil }
         let line = mainScript[range.upperBound...].prefix(60)

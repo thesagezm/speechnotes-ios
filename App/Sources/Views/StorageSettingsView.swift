@@ -237,8 +237,6 @@ struct StorageSettingsView: View {
             }
         } header: {
             Text("Storage used")
-        } footer: {
-            Text("Delete voice models in Settings → Speech Settings. Everything is stored on-device; nothing is uploaded. Tap \"Books library\" to list every book with its size — swipe a book to delete it or send it with BookDrop.")
         }
     }
 
@@ -761,8 +759,6 @@ struct StorageSettingsView: View {
             }
         } header: {
             Text("Per-note cached images")
-        } footer: {
-            Text("Web images each note has cached. Deleting one note's images keeps every other note's — an image two notes share stays until both are cleared. Purging a note from the recycle bin removes its images automatically.")
         }
     }
 
@@ -803,8 +799,6 @@ struct StorageSettingsView: View {
             }
         } header: {
             Text("Files app")
-        } footer: {
-            Text("Notes, books and exports live in this app's folder under \"On My iPhone → Speechnotes\". Files edited there are picked up here.")
         }
     }
 
@@ -819,8 +813,6 @@ struct StorageSettingsView: View {
             }
         } header: {
             Text("Maintenance")
-        } footer: {
-            Text("Removes partial downloads and cache leftovers. Books, notes, exports and models are not touched.")
         }
     }
 }

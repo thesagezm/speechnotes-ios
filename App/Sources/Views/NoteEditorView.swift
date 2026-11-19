@@ -152,12 +152,11 @@ struct NoteEditorView: View {
     /// keystroke blocked the main thread for long notes. Now we wait until
     /// ~300ms after typing stops, run the parse off-main, and hop back to
     /// update the cached values.
-    /// Automatic image caching (Appearance → Images): opening a note pulls
-    /// every web image it references into the disk cache in the background,
-    /// so scrolling the preview never waits on the network. Manual mode
-    /// leaves the fetch to the moment an image actually displays.
+    /// Automatic image caching: opening a note pulls every web image it
+    /// references into the disk cache in the background, so scrolling the
+    /// preview never waits on the network. (The Automatic/Manual setting was
+    /// removed 2026-11-19 — nobody ever picked Manual — so this always runs.)
     private func prefetchImagesIfAutomatic() {
-        guard UserDefaults.standard.object(forKey: "imageCacheAutomatic") as? Bool ?? true else { return }
         let markdown = draft
         Task.detached(priority: .utility) {
             let urls = RemoteImageStore.remoteImageURLs(in: markdown)
@@ -501,7 +500,17 @@ struct NoteEditorView: View {
             Button("Cancel", role: .cancel) {}
         }
         .sheet(isPresented: $showingSettings) {
-            SettingsView()
+            // The old modal was a second copy of the speech settings (engine,
+            // voice, models) that drifted from the real screen — present the
+            // real one, wrapped for sheet presentation.
+            NavigationStack {
+                SpeechSettingsView()
+                    .toolbar {
+                        ToolbarItem(placement: .navigationBarTrailing) {
+                            Button("Done") { showingSettings = false }
+                        }
+                    }
+            }
         }
         .sheet(isPresented: $showingVoicePicker) {
             VoicePickerSheet(scope: voicePickerScope)

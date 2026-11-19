@@ -1,22 +1,34 @@
 import SwiftUI
+import SpeechLogic
 
+/// Appearance settings. 2026-11-19 cleanup: the Bypass Paywalls and Image
+/// caching toggles are gone (bypass always runs on web import, images cache
+/// automatically — neither earned a switch), Keep Screen On moved here from
+/// the Settings tab root, and the per-section footer essays are gone.
 struct AppearanceSettingsView: View {
     @EnvironmentObject private var theme: AppTheme
     @AppStorage("renderMarkdown") private var renderMarkdown = false
     @AppStorage("hapticsEnabled") private var hapticsEnabled = true
-    /// True = Automatic: a note's web images download to the cache on open.
-    /// False = Manual: images download only when actually displayed.
-    @AppStorage("imageCacheAutomatic") private var imageCacheAutomatic = true
-    /// Web import (shared URLs → article notes): the Bypass Paywalls Clean
-    /// toggle. @AppStorage key is the one `PaywallBypass` reads, no glue.
-    @AppStorage(PaywallBypass.enabledKey) private var bypassEnabled = true
+    /// Keep Screen On (was on the Settings tab root): the key/default live
+    /// in `ScreenAwakePolicy` (SpeechLogic) so the toggle and the controller
+    /// cannot drift apart. The controller re-applies on this change via
+    /// `.onChange` below.
+    @AppStorage(ScreenAwakePolicy.preferenceKey) private var keepScreenOn = ScreenAwakePolicy.defaultEnabled
 
     var body: some View {
         Form {
-            Section {
-                // Dropdown (menu style): one row showing the current color,
-                // expanding to all 12 choices on tap — the inline list was
-                // too long (user feedback).
+            Section("Theme") {
+                Picker("Theme", selection: $theme.appearance) {
+                    Text("System").tag("system")
+                    Text("Light").tag("light")
+                    Text("Dark").tag("dark")
+                    Text("E-Ink").tag("eink")
+                }
+                .pickerStyle(.segmented)
+
+                // Menu style: one row showing the current color, expanding to
+                // all 12 choices on tap — the inline list was too long
+                // (user feedback).
                 Picker("Accent", selection: $theme.accentChoice) {
                     ForEach(AccentColorChoice.allCases) { c in
                         HStack {
@@ -26,124 +38,57 @@ struct AppearanceSettingsView: View {
                     }
                 }
                 .pickerStyle(.menu)
-            } header: {
-                Text("Accent Color")
-            } footer: {
-                Text("Used across notes, playback controls and highlights.")
             }
-            Section {
-                // (v1.7 round 5: moved here from Speech Settings — rendering
-                // is how a note LOOKS, not how it speaks.)
+
+            Section("Notes") {
                 Toggle("Render Markdown", isOn: $renderMarkdown)
-            } header: {
-                Text("Notes")
-            } footer: {
-                Text("When on, a note opens in reading mode (headings, emphasis and links rendered; eye button / double-tap to edit). Speech reads what you are looking at: rendered clean text in reading mode, the raw text while editing.")
-            }
-
-            Section {
                 Toggle("Haptic feedback", isOn: $hapticsEnabled)
-            } header: {
-                Text("Feedback")
-            } footer: {
-                Text("The short vibration on taps and presses. Off silences all haptics; nothing else changes.")
             }
 
-            Section {
-                Picker("Image caching", selection: $imageCacheAutomatic) {
-                    Text("Automatic").tag(true)
-                    Text("Manual").tag(false)
-                }
-                .pickerStyle(.menu)
-            } header: {
-                Text("Images")
-            } footer: {
-                Text("Automatic downloads every web image in a note to the cache as soon as you open it. Manual downloads an image only when you actually view it. Either way, Storage → Cached images can delete a single note's images, and permanently deleting a note from the recycle bin removes its web images with it.")
-            }
-
-            Section {
-                Toggle("Bypass Paywalls", isOn: $bypassEnabled)
-            } header: {
-                Text("Web Import")
-            } footer: {
-                Text("Fetches every shared article twice — a plain fetch, then the Bypass Paywalls Clean pass; the better result becomes the note, so paywalled pages recover their full text. Off means the plain fetch only, and imports faster.")
-            }
-            Section {
-                Picker("Theme", selection: $theme.appearance) {
-                    Text("System").tag("system")
-                    Text("Light").tag("light")
-                    Text("Dark").tag("dark")
-                    Text("E-Ink").tag("eink")
-                }
-                .pickerStyle(.segmented)
-            } header: {
-                Text("Appearance")
-            } footer: {
-                Text("E-Ink: paper white, ink black, square edges, hairline borders — no glass, no gradients, no color, no animation. The accent color only returns when you leave the mode.")
-            }
-            Section("Reading View") {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text("Text size")
-                        Spacer()
-                        Text("\(Int(round(theme.previewTextScale * 100)))%")
-                            .foregroundStyle(.secondary)
-                            .font(.callout.monospacedDigit())
+            Section("Reading") {
+                Toggle("Keep Screen On", isOn: $keepScreenOn)
+                    .onChange(of: keepScreenOn) { _ in
+                        // The controller reads the preference fresh, so one
+                        // nudge re-applies it to whatever is on screen.
+                        ScreenAwake.shared.refresh()
                     }
-                    // Steps of 5% feel right on a phone and stay audible to
-                    // VoiceOver.
-                    Slider(
-                        value: $theme.previewTextScale,
-                        in: 0.75...1.5,
-                        step: 0.05
-                    ) { _ in Haptics.tap() }
-                    Text("Scales the markdown preview's text (headings, lists, paragraphs).")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.vertical, 2)
-            }
-
-            // Spacing controls (v1.6.3) — the reader's rhythm, tunable after
-            // the "too crowded" report. Each slider scales the base values in
-            // ReaderSpacing; 100% is the new default (already roomier than the
-            // old hardcoded spacing).
-            Section {
-                spacingSlider(
+                readingSlider(
+                    title: "Text size",
+                    value: $theme.previewTextScale,
+                    range: 0.75...1.5,
+                    caption: "Scales the markdown preview's text (headings, lists, paragraphs)."
+                )
+                readingSlider(
                     title: "Line spacing",
                     value: $theme.readerLineSpacing,
                     range: 0.8...1.6,
                     caption: "Space between lines inside paragraphs and quotes."
                 )
-                spacingSlider(
+                readingSlider(
                     title: "Between blocks",
                     value: $theme.readerBlockSpacing,
                     range: 0.8...1.6,
                     caption: "Gap after paragraphs, lists and headings — the one to raise when notes feel cramped."
                 )
-                spacingSlider(
+                readingSlider(
                     title: "Tables",
                     value: $theme.readerTableSpacing,
                     range: 0.8...2.0,
-                    caption: "Row height and cell padding in tables. Its own slider because tables need visibly more air than prose."
+                    caption: "Row height and cell padding in tables."
                 )
                 Button("Reset spacing") {
                     Haptics.tap()
                     theme.resetReaderSpacing()
                 }
-            } header: {
-                Text("Spacing")
-            } footer: {
-                Text("Applies to the markdown reader and the read-along view. 100% is the default.")
             }
         }
         .navigationTitle("Appearance")
     }
 
-    /// One spacing slider: label + live percentage, matching the Text size
-    /// slider's layout so the section reads as one control group.
+    /// One slider row: label + live percentage + the short caption. Sliders
+    /// scale the base values in ReaderSpacing; 100% is the default.
     @ViewBuilder
-    private func spacingSlider(
+    private func readingSlider(
         title: String,
         value: Binding<Double>,
         range: ClosedRange<Double>,
@@ -157,6 +102,8 @@ struct AppearanceSettingsView: View {
                     .foregroundStyle(.secondary)
                     .font(.callout.monospacedDigit())
             }
+            // Steps of 5% feel right on a phone and stay audible to
+            // VoiceOver.
             Slider(value: value, in: range, step: 0.05) { _ in Haptics.tap() }
             Text(caption)
                 .font(.caption)

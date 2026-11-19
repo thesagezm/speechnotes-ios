@@ -71,8 +71,8 @@ struct WebArticle {
 final class WebArticleService {
 
     struct Options {
-        /// Run the BPC bypass pass on every import (still honors the global
-        /// toggle inside `PaywallBypass`).
+        /// Run the BPC bypass pass on every import. (The Appearance toggle
+        /// that gated this was removed 2026-11-19 — bypass always runs.)
         var allowBypass = true
         /// Try the plain rendered pass before giving up (JS app shells).
         var allowRenderedFallback = true
@@ -123,7 +123,7 @@ final class WebArticleService {
 
     func article(from url: URL, options: Options = Options()) async -> WebArticle? {
         guard url.scheme == "http" || url.scheme == "https" else { return nil }
-        let bypassAvailable = options.allowBypass && PaywallBypass.isEnabled && PaywallBypass.loadScripts() != nil
+        let bypassAvailable = options.allowBypass && PaywallBypass.loadScripts() != nil
 
         var direct: WebArticle?
 
