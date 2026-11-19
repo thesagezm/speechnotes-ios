@@ -247,6 +247,31 @@ public enum MobiParser {
         )
     }
 
+    /// Cover art only — the header records read, nothing decompressed.
+    ///
+    /// The import/migration paths that already have the ENGINE's cover
+    /// answer use this as the native second opinion before they synthesize
+    /// a tile: the engine's mobi getCover follows only the EXTH cover and
+    /// thumbnail offsets, while `coverImage` falls through to the first
+    /// image record — the layer MOBI6 books and writers that set neither
+    /// offset carry their real cover in (the publisher-logo-vs-real-cover
+    /// story this parser's coverImage documents).
+    ///
+    /// The full `parse` decompresses every text record; this stops after
+    /// the header records. The Data is the caller's (already a mapped read
+    /// of a file a few MB), so no new whole-file map enters the codebase.
+    public static func coverOnly(book data: Data) -> Data? {
+        guard let pdb = try? PalmDatabase(archive: data),
+              let headerRecord = pdb.record(0),
+              let header = try? MobiHeader(record: headerRecord) else { return nil }
+        // DRM lives in the TEXT records; the resource records (covers) stay
+        // readable in every mobi this handles, so the offsets still resolve
+        // on a locked book. Where they don't (imagePayload's magic check),
+        // nil is the honest answer and the caller synthesizes.
+        let exth = Exth(record: header.exthBlob)
+        return coverImage(pdb: pdb, header: header, exth: exth)
+    }
+
     /// True when `data` looks like a mobipocket book — cheap enough for an
     /// extension sniff, and it rejects a `.mobi` that is really a ZIP, which
     /// is the most common "wrong file" report.

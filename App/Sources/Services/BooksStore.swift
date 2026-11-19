@@ -382,6 +382,13 @@ final class BooksStore: ObservableObject {
                         // Pre-rev-1 manifests match via the rev clause above
                         // regardless of which source they froze with.
                         || (book.audioReaderRev ?? 0) < BooksStore.audioReaderRev))
+                // Documents imported before the native-cover fallback and the
+                // synthesized tile existed had NOTHING to heal them: this
+                // filter had no .document clause at all, so a cover-less
+                // document sat on the format glyph forever. The repair is
+                // cheap (one header read for the mobi family, a drawn tile
+                // otherwise) and runs with the other non-audio formats.
+                || (book.format.isDocument && !book.hasCover)
         }
         guard !pending.isEmpty else { return }
         didBackfillLegacyBooks = true
@@ -522,12 +529,24 @@ final class BooksStore: ObservableObject {
                         book.hasCover = true
                     }
                 case .document:
-                    // A native document's manifest comes complete from the
-                    // import (the parse wrote the spine, the TOC and the
-                    // cover in one pass) — there is nothing a backfill could
-                    // add, and the parse is not re-run lazily. The foliate
-                    // migration below owns the legacy-document upgrade.
-                    break
+                    // The parse is not re-run (the manifest's spine/TOC are
+                    // complete), but a cover-less document gets the same
+                    // repair the import gives a fresh one: the native
+                    // parser's mobi cover read first (the engine's mobi
+                    // getCover follows only the EXTH offsets), then the
+                    // synthesized tile. Before this clause existed the
+                    // filter never matched a document, so a cover-less one
+                    // sat on the format glyph forever.
+                    if !book.hasCover {
+                        let source = dir.appendingPathComponent("original.\(book.format.fileExtension)")
+                        if let cover = Self.nativeDocumentCover(ext: book.format.fileExtension, fileURL: source) {
+                            try? cover.write(to: dir.appendingPathComponent("cover.jpg"), options: .atomic)
+                            book.hasCover = true
+                        } else if let tile = Self.synthesizeDocCover(title: book.title, fileName: book.originalFileName) {
+                            try? tile.write(to: dir.appendingPathComponent("cover.jpg"), options: .atomic)
+                            book.hasCover = true
+                        }
+                    }
                 }
                 if let manifest = try? JSONEncoder().encode(book) {
                     try? manifest.write(to: BooksStore.manifestURL(book.id), options: .atomic)
@@ -616,6 +635,13 @@ final class BooksStore: ObservableObject {
             if let coverData = result.coverData {
                 try? coverData.write(to: dir.appendingPathComponent("cover.jpg"), options: .atomic)
                 hasCover = true
+            } else if !hasCover,
+                      let cover = nativeDocumentCover(ext: book.format.fileExtension, fileURL: source) {
+                // The engine's mobi getCover follows only the EXTH cover and
+                // thumbnail offsets; the native parser also falls through to
+                // the first image record. One bounded look before the tile.
+                try? cover.write(to: dir.appendingPathComponent("cover.jpg"), options: .atomic)
+                hasCover = true
             }
             updated.spine = (0..<result.sectionCount).map { "chapter-\($0)" }
             updated.spineCount = result.sectionCount
@@ -635,6 +661,18 @@ final class BooksStore: ObservableObject {
             updated.position = position
             if let title = result.title, !title.isEmpty { updated.title = title }
             if let author = result.author, !author.isEmpty { updated.author = author }
+            // Parity with the fresh-import path, which never leaves a
+            // document cover-less: if neither the engine nor the native
+            // parser produced one, a migration still synthesizes the tile
+            // — it must not leave the shelf tile WORSE than importing the
+            // same file today would (the fresh import synthesizes at the
+            // same spot). The tile gets the settled title, which is why
+            // this waits for the resolution above.
+            if !updated.hasCover,
+               let tile = synthesizeDocCover(title: updated.title, fileName: book.originalFileName) {
+                try? tile.write(to: dir.appendingPathComponent("cover.jpg"), options: .atomic)
+                updated.hasCover = true
+            }
             // The pre-parsed pages are dead weight now: the engine renders
             // the ORIGINAL file, so nothing reads doc/ any more. (Only on
             // the success path — a refused book keeps its pages renderer
@@ -762,6 +800,17 @@ final class BooksStore: ObservableObject {
                     var hasCover = false
                     if let coverData = result.coverData {
                         try? coverData.write(to: dir.appendingPathComponent("cover.jpg"), options: .atomic)
+                        hasCover = true
+                    }
+                    // The engine's mobi getCover follows only the EXTH cover
+                    // and thumbnail offsets; the native parser falls through
+                    // to the first image record — the layer MOBI6 books keep
+                    // their real cover in. Before the tile is synthesized for
+                    // a cover-less mobi-family file, give the native parser
+                    // one bounded look at the copied original.
+                    if !hasCover,
+                       let cover = Self.nativeDocumentCover(ext: docExt, fileURL: destination) {
+                        try? cover.write(to: dir.appendingPathComponent("cover.jpg"), options: .atomic)
                         hasCover = true
                     }
                     // The document's own title/author beat the filename when
@@ -1453,6 +1502,21 @@ final class BooksStore: ObservableObject {
     nonisolated static func isOfficeDocument(_ fileName: String) -> Bool {
         let ext = (fileName as NSString).pathExtension.lowercased()
         return DocumentBook.canNormalize(ext)
+    }
+
+    /// The document cover when the ENGINE returned none: for the mobi
+    /// family, the native parser's three-layer read (EXTH 201 → thumbnail →
+    /// first image record — the engine follows only the two EXTH offsets)
+    /// runs before the synthesized tile. nil for every other extension:
+    /// those formats either produced their cover or have none to find, and
+    /// the tile is the honest shelf state for them.
+    nonisolated private static func nativeDocumentCover(ext: String, fileURL: URL) -> Data? {
+        let lower = ext.lowercased()
+        guard ["mobi", "azw", "azw3", "prc", "pdb"].contains(lower) else { return nil }
+        // mappedIfSafe: no eager read — the parser touches three header
+        // records and (rarely) one image record; the OS pages the rest out.
+        guard let data = try? Data(contentsOf: fileURL, options: .mappedIfSafe) else { return nil }
+        return MobiParser.coverOnly(book: data)
     }
 
     /// A stylized shelf tile for office documents with no embedded
