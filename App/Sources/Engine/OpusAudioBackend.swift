@@ -290,7 +290,9 @@ final class OpusAudioBackend: BookAudioBackend {
         guard let stream else { return }
         let target = min(max(0, seconds), max(0, stream.duration - 0.01))
         let packetIndex = stream.packetIndex(at: target)
-        let firstAudio = stream.packets.firstIndex { $0.granule > 0 } ?? 0
+        // Cached at construction — before it was, this line walked up to
+        // 2 M packets linearly ON MAIN for every seek (the scrubber).
+        let firstAudio = stream.firstAudioIndex
         // A decode starting at the stream's first audio packet consumes the
         // pre-skip; a mid-stream start does not — its own granule already
         // places it on the timeline.

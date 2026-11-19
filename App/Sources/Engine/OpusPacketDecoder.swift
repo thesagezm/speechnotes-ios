@@ -101,7 +101,10 @@ public final class OpusPacketDecoder {
         self.packets = stream.packets
         self.stream = stream
         // Never start on the headers (granule 0, an Ogg-only concept).
-        let firstAudio = stream.packets.firstIndex { $0.granule > 0 } ?? stream.packets.count
+        // Cached on the stream at construction — this initializer runs on
+        // every seek, and the linear scan it replaced walked up to 2 M
+        // packets each time.
+        let firstAudio = stream.firstAudioIndex
         self.index = max(startAtPacket, firstAudio)
         self.pendingDrop = max(0, dropSamples)
         // One packet is at most 120 ms; two is a comfortable chunk.

@@ -56,6 +56,16 @@ public struct OpusPacketStream: Sendable {
     }
 
     public let packets: [Packet]
+    /// Packet index of the first packet that carries AUDIO — headers
+    /// (granule 0, an Ogg-only concept) are skipped. Both seek paths need
+    /// it: the backend's pre-skip decision and the decoder's start clamp.
+    /// Before it was cached here, every seek re-scanned the packet list
+    /// linearly for it — twice per drag, once in each path — and on the
+    /// 2.07 M-packet book that walk ran on the MAIN thread inside the
+    /// scrubber's own gesture. One pass at construction; O(1) ever after.
+    /// A stream of headers only (pathological) yields `packets.count`,
+    /// which reads as "no audio to decode" at both consumers.
+    public let firstAudioIndex: Int
     /// The book's `OpusHead` packet, when the container carries one (Ogg
     /// always does, as the stream's first packet). `OpusLib` needs it for
     /// the channel-mapping family, the stream count and the channel map —
@@ -89,6 +99,7 @@ public struct OpusPacketStream: Sendable {
         preSkip: Int
     ) {
         self.packets = packets
+        self.firstAudioIndex = Self.firstAudioIndex(of: packets)
         self.headerPacket = headerPacket
         self.sampleRate = sampleRate > 0 ? sampleRate : 48_000
         self.channels = max(1, channels)
@@ -106,11 +117,18 @@ public struct OpusPacketStream: Sendable {
         mappedSource: Data
     ) {
         self.packets = packets
+        self.firstAudioIndex = Self.firstAudioIndex(of: packets)
         self.headerPacket = headerPacket
         self.sampleRate = sampleRate > 0 ? sampleRate : 48_000
         self.channels = max(1, channels)
         self.preSkip = max(0, preSkip)
         self.mappedSource = mappedSource
+    }
+
+    /// The first packet whose granule advances — one linear pass at
+    /// construction, never again per seek.
+    private static func firstAudioIndex(of packets: [Packet]) -> Int {
+        packets.firstIndex { $0.granule > 0 } ?? packets.count
     }
 
     /// The payload of one packet, eager or lazy. nil only for a lazy packet

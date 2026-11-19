@@ -120,6 +120,19 @@ final class AudioBookPlayer: ObservableObject {
     private var pendingSeek: PendingSeek?
     private var seekCommitTimer: Timer?
 
+    /// The position a COMMITTED seek must reach before the ticker may
+    /// publish the backend's clock again. AVPlayer's `currentTime` keeps
+    /// reporting the PRE-seek position until the (async) seek lands, so the
+    /// first tick after a slider commit re-read the old spot — the thumb
+    /// snapped back before jumping forward, the "seeking with the slider is
+    /// not smooth" report. commitSeek publishes the TARGET and records it
+    /// here; tick() holds the surface until the backend is within ~1 s of
+    /// the target (looser than the 0.25 s seek tolerance: a buffered file
+    /// can land a hair off) or 3 s pass — a stream that never produces a
+    /// clock must not pin the playhead forever.
+    private var seekHoldTarget: Double?
+    private var seekHoldStartedAt: Date?
+
     /// Cover art for the mini-player thumbnail (loaded once per file).
     var artworkImage: UIImage? { cachedArtwork }
 
@@ -726,8 +739,16 @@ final class AudioBookPlayer: ObservableObject {
             backend.play()
             applyRate(force: true)
         }
-        chapterProgress = chapterProgressValue
+        // Publish the TARGET, not the backend's clock: `chapterProgressValue`
+        // reads `backend.currentTime`, which still reports the pre-seek
+        // position until the seek lands — publishing it here re-drew the
+        // thumb at the OLD spot first. The target-derived progress plus the
+        // ticker hold (seekHoldTarget) keeps the playhead where the user
+        // dropped it until the backend actually arrives.
+        chapterProgress = chapterProgress(at: target)
         elapsed = target
+        seekHoldTarget = target
+        seekHoldStartedAt = Date()
         if fileDuration > 0 { totalDuration = fileDuration }
         // VLC's rule: republish the full surface right after a seek — iOS
         // extrapolates the in-between from rate + elapsed.
@@ -767,13 +788,23 @@ final class AudioBookPlayer: ObservableObject {
     }
 
     private var chapterProgressValue: Double {
-        guard let backend, chapters.indices.contains(chapterIndex) else { return 0 }
+        guard let backend else { return 0 }
+        // Nil clock (stream loading) reads as the chapter's start — the
+        // value the surface showed before the backend had one.
+        let fallback = chapters.indices.contains(chapterIndex) ? chapters[chapterIndex].startSeconds : 0
+        return chapterProgress(at: backend.currentTime ?? fallback)
+    }
+
+    /// The chapter slider's 0…1 fraction for a position, WITHOUT touching
+    /// the backend — the seek path publishes the TARGET through this (the
+    /// backend's clock is stale until its seek lands).
+    private func chapterProgress(at position: Double) -> Double {
+        guard chapters.indices.contains(chapterIndex) else { return 0 }
         let chapter = chapters[chapterIndex]
         guard let end = effectiveChapterEnd(fileDuration: fileLength) else { return 0 }
         let span = end - chapter.startSeconds
         guard span > 0 else { return 0 }
-        let here = backend.currentTime ?? chapter.startSeconds
-        return min(1, max(0, (here - chapter.startSeconds) / span))
+        return min(1, max(0, (position - chapter.startSeconds) / span))
     }
 
     private var chapterIsFinished: Bool {
@@ -827,6 +858,24 @@ final class AudioBookPlayer: ObservableObject {
         // (mid-mash, chapterIsFinished still reads the OLD playhead and
         // would fire an auto-advance that fights the user's rewind).
         if pendingSeek != nil { return }
+        // A committed seek the backend has not reached yet: same steady-
+        // surface rule, over the (longer) window the seek itself takes.
+        // The Opus backend lands synchronously — the very next tick sees a
+        // clock at the target and releases. AVPlayer lands whenever its
+        // decoder gets there; while it has not, republishing its stale
+        // clock is what snapped the thumb back. A clock that has caught up,
+        // or 3 s without one, ends the hold.
+        if let held = seekHoldTarget {
+            if let now = backend.currentTime, abs(now - held) <= 1.0 {
+                seekHoldTarget = nil
+                seekHoldStartedAt = nil
+            } else if let started = seekHoldStartedAt, Date().timeIntervalSince(started) > 3 {
+                seekHoldTarget = nil
+                seekHoldStartedAt = nil
+            } else {
+                return
+            }
+        }
         // timeControlStatus is AVPlayer's "is it actually producing audio"
         // — .playing while rendering, .paused when paused, and
         // .waitingToPlayAtSpecifiedRate while buffering a big file.
@@ -1074,6 +1123,8 @@ final class AudioBookPlayer: ObservableObject {
         loadedItemJustCreated = false
         cachedFileDuration = nil
         pendingSeek = nil
+        seekHoldTarget = nil
+        seekHoldStartedAt = nil
         seekCommitTimer?.invalidate()
         seekCommitTimer = nil
         cachedArtwork = nil
