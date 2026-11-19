@@ -90,7 +90,10 @@ final class DocumentParseService: NSObject {
     /// watchdog, parse milestones); a step that is not waiting yet must not
     /// lose a message that arrived early.
     private var bufferedMessages: [[String: Any]] = []
-    private var waiters: [(types: Set<String>, continuation: CheckedContinuation<[String: Any], Never>)] = []
+    // The continuation is the THROWING variant (the walk can fail while a
+    // message is parked) — a non-throwing declaration made the append a
+    // type error CI caught.
+    private var waiters: [(types: Set<String>, continuation: CheckedContinuation<[String: Any], Error>)] = []
     /// Total budget for the whole walk — the JS watchdog catches a stuck
     /// boot at 45 s, this catches a stuck walk.
     private let deadline = Date().addingTimeInterval(180)
@@ -189,7 +192,10 @@ final class DocumentParseService: NSObject {
         guard coverMessage["type"] as? String == "parseCover" else {
             throw ParseError.timeout
         }
-        let coverData = (coverMessage["b64"] as? String).flatMap(Data.init(base64Encoded:))
+        // `Data.init(base64Encoded:)` as an unapplied reference does not
+        // resolve (failable init + defaulted options parameter) — the
+        // closure form is the one that compiles.
+        let coverData = (coverMessage["b64"] as? String).flatMap { Data(base64Encoded: $0) }
 
         let toc = (meta.toc ?? []).compactMap { row -> BookTocEntry? in
             guard let label = row.label, let href = row.href else { return nil }

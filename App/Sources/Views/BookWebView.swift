@@ -383,7 +383,7 @@ struct BookWebView: UIViewRepresentable {
             }
             let name = String(parts[2])
             let ext = (name as NSString).pathExtension.lowercased()
-            let allowed: Set<String> = ["epub"].union(BookFormat.documentExtensions)
+            let allowed = Set(["epub"]).union(BookFormat.documentExtensions)
             guard !ext.isEmpty, name == "original.\(ext)", allowed.contains(ext) else {
                 throw URLError(.fileDoesNotExist)
             }
