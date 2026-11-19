@@ -67,6 +67,19 @@ struct BooksRecycleBinView: View {
                             Label("Delete Now", systemImage: "trash")
                         }
                     }
+                    .contextMenu {
+                        Button {
+                            store.recover(book)
+                            Haptics.success()
+                        } label: {
+                            Label("Recover", systemImage: "arrow.uturn.backward")
+                        }
+                        Button(role: .destructive) {
+                            purge(book)
+                        } label: {
+                            Label("Delete Now", systemImage: "trash")
+                        }
+                    }
             }
         }
     }

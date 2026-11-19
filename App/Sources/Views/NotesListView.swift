@@ -13,6 +13,9 @@ struct NotesListView: View {
     @State private var sort: SortOrder = SortOrder.stored
     /// Note whose text the share sheet is presenting (leading swipe → Share).
     @State private var sharingNote: Note?
+    /// Note being renamed from the row context menu, and its draft name.
+    @State private var renamingNote: Note?
+    @State private var renameDraft = ""
     @State private var showingRecycleBin = false
     @State private var showingNotebookManager = false
     /// Set by the "notes are locked" empty state so the user lands directly
@@ -267,6 +270,22 @@ struct NotesListView: View {
             } message: {
                 Text("Paste a link — the article's text is fetched and saved as a note.")
             }
+            .alert(
+                "Rename note",
+                isPresented: Binding(
+                    get: { renamingNote != nil },
+                    set: { if !$0 { renamingNote = nil } }
+                )
+            ) {
+                TextField("Title", text: $renameDraft)
+                Button("Rename") {
+                    if let note = renamingNote {
+                        renameNote(note, to: renameDraft)
+                    }
+                    renamingNote = nil
+                }
+                Button("Cancel", role: .cancel) { renamingNote = nil }
+            }
         }
         .sheet(item: $sharingNote) { note in
             ShareSheet(items: [note.text])
@@ -408,6 +427,22 @@ struct NotesListView: View {
                                 notes.setFavorite(!note.isFavorite, noteId: note.id)
                             } label: {
                                 Label(note.isFavorite ? "Unfavorite" : "Favorite", systemImage: note.isFavorite ? "star.slash" : "star")
+                            }
+                            Button {
+                                renameDraft = note.title
+                                renamingNote = note
+                            } label: {
+                                Label("Rename…", systemImage: "pencil")
+                            }
+                            Button {
+                                sharingNote = note
+                            } label: {
+                                Label("Share", systemImage: "doc.on.doc")
+                            }
+                            Button {
+                                exportNote(note)
+                            } label: {
+                                Label("Export", systemImage: "square.and.arrow.up")
                             }
                             Button {
                                 sendToBookDrop(note)
@@ -630,6 +665,17 @@ struct NotesListView: View {
         // The file lands in Documents/Exports named for the TITLE — the old
         // "Note-2026-…" told the user nothing two days later.
         player.export(note.text, title: note.title)
+    }
+
+    /// Row-menu rename. A blank draft clears the explicit title so the row
+    /// falls back to the derived first-sentence title — the same fallback
+    /// the editor's title field uses.
+    private func renameNote(_ note: Note, to draft: String) {
+        var updated = note
+        let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        updated.explicitTitle = trimmed.isEmpty ? nil : String(trimmed.prefix(120))
+        notes.update(updated)
+        Haptics.success()
     }
 
     /// Hands the note to the app-level BookDrop send sheet (already ticked)

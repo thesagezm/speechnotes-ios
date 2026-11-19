@@ -60,6 +60,19 @@ struct RecycleBinView: View {
                             Label("Delete Now", systemImage: "trash")
                         }
                     }
+                    .contextMenu {
+                        Button {
+                            notes.recover(noteId: note.id)
+                            Haptics.success()
+                        } label: {
+                            Label("Recover", systemImage: "arrow.uturn.backward")
+                        }
+                        Button(role: .destructive) {
+                            notes.purge(noteId: note.id)
+                        } label: {
+                            Label("Delete Now", systemImage: "trash")
+                        }
+                    }
             }
         }
         .listStyle(.insetGrouped)

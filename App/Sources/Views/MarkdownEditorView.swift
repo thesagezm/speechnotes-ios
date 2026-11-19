@@ -16,11 +16,16 @@ struct MarkdownEditorView: UIViewRepresentable {
     /// User-selected reading size, forwarded to the UITextView's font so the
     /// edit buffer matches the preview scale.
     var textScale: CGFloat = 1.0
+    /// Whether "Play from selection" may appear in the built-in selection
+    /// menu right now — UIKit queries this each time the menu builds.
+    var canPlayFromSelection: (() -> Bool)? = nil
+    /// Performs the play — the menu item was tapped.
+    var onPlayFromSelection: (() -> Void)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeUIView(context: Context) -> UITextView {
-        let tv = UITextView()
+        let tv = EditorTextView()
         tv.delegate = context.coordinator
         tv.isEditable = true
         tv.isSelectable = true
@@ -48,6 +53,15 @@ struct MarkdownEditorView: UIViewRepresentable {
         tv.font = font
         tv.text = text
         tv.isUserInteractionEnabled = true
+        // The custom item registers through the legacy API on purpose — on
+        // iOS 16+ UIKit still surfaces UIMenuItems inside the built-in edit
+        // menu, and canPerformAction (on EditorTextView) gates when it
+        // appears. UIEditMenuInteraction cannot augment UITextView's own
+        // menu; it only drives menus on custom views.
+        UIMenuController.shared.menuItems = [UIMenuItem(
+            title: String(localized: "Play from selection"),
+            action: #selector(EditorTextView.playFromSelectionTapped)
+        )]
         context.coordinator.lastSentText = text
         context.coordinator.lastAppliedFontSize = font.pointSize
         return tv
@@ -61,6 +75,12 @@ struct MarkdownEditorView: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: UITextView, context: Context) {
+        // Keep the selection-menu handlers current — they read live SwiftUI
+        // state (playback state, caret) that UIKit cannot see on its own.
+        if let editor = uiView as? EditorTextView {
+            editor.canPlayFromSelection = canPlayFromSelection
+            editor.performPlayFromSelection = onPlayFromSelection
+        }
         // Only push `text` into the UITextView when it DIFFERS from what we
         // last sent — overwriting the editor mid-keystroke resets the caret
         // and the first responder, which made the old TextEditor wrapper
@@ -116,5 +136,27 @@ struct MarkdownEditorView: UIViewRepresentable {
                 parent.selection = range
             }
         }
+    }
+}
+
+/// UITextView subclass that offers "Play from selection" in the built-in
+/// edit menu. The item surfaces whenever `canPlayFromSelection` allows it
+/// at menu-build time (playback idle + a caret/selection in speakable
+/// text); tapping it calls `performPlayFromSelection`.
+final class EditorTextView: UITextView {
+    var canPlayFromSelection: (() -> Bool)?
+    var performPlayFromSelection: (() -> Void)?
+
+    override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+        if action == #selector(playFromSelectionTapped) {
+            return canPlayFromSelection?() ?? false
+        }
+        return super.canPerformAction(action, withSender: sender)
+    }
+
+    // Deliberately not `private`: #selector(...) from the representable
+    // above needs the member visible at its point of use.
+    @objc func playFromSelectionTapped() {
+        performPlayFromSelection?()
     }
 }

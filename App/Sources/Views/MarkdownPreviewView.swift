@@ -165,6 +165,7 @@ struct MarkdownPreviewView: View {
         switch block {
         case .heading(let level, _, let spans):
             styledSpans(spans)
+                .textSelection(.enabled)
                 .font(headingFont(level))
                 .padding(.top, level <= 2 ? ReaderSpacing.headingTopLevel1 * theme.readerBlockSpacing
                                          : ReaderSpacing.headingTopLevel3Plus * theme.readerBlockSpacing)
@@ -175,6 +176,7 @@ struct MarkdownPreviewView: View {
             // gone (the alt text took its place) — an inline image rendered
             // only when the paragraph was exactly one image.
             runsView(MarkdownText.runs(from: spans))
+                .textSelection(.enabled)
                 .lineSpacing(lineSpacing)
                 .padding(.bottom, blockGap)
         case .bulletList(let items):
@@ -197,6 +199,7 @@ struct MarkdownPreviewView: View {
                         .padding(.top, 2)
                 }
                 styledSpans(spans)
+                    .textSelection(.enabled)
                     .foregroundStyle(.secondary)
                     .lineSpacing(quoteLineSpacing)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -271,6 +274,7 @@ struct MarkdownPreviewView: View {
                             .foregroundStyle(.secondary)
                     }
                     styledSpans(item.spans.isEmpty ? [.plain(item.text)] : item.spans)
+                        .textSelection(.enabled)
                         .strikethrough(item.isDone)
                         .foregroundStyle(item.isDone ? .secondary : .primary)
                 }
@@ -483,6 +487,7 @@ struct MarkdownPreviewView: View {
             content = content.bold()
         }
         return content
+            .textSelection(.enabled)
             .monospacedDigit(numeric)
             .multilineTextAlignment(numeric ? .trailing : .leading)
             .fixedSize(horizontal: false, vertical: true)

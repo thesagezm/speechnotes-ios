@@ -795,7 +795,23 @@ struct NoteEditorView: View {
                     text: $draft,
                     selection: $selectionUTF16,
                     onCaretMoved: { updateSlashMenu() },
-                    textScale: theme.previewTextScale
+                    textScale: theme.previewTextScale,
+                    // "Play from selection" rides the built-in long-press
+                    // menu (the same logic as the ⋯ menu's "Play from
+                    // caret" — selectionUTF16.lowerBound covers both).
+                    canPlayFromSelection: {
+                        player.state == .idle && playFromCaretOffset != nil
+                    },
+                    onPlayFromSelection: {
+                        guard let caret = playFromCaretOffset, player.state == .idle else { return }
+                        Haptics.tap()
+                        updateSpeechCaches()
+                        player.playFrom(
+                            SpeechText.forText(speechText),
+                            at: caret,
+                            note: currentNote
+                        )
+                    }
                 )
                 .font(.body)
                 .padding(.horizontal, 12)

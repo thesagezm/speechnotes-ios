@@ -186,6 +186,11 @@ private struct ReadAlongRow: View, Equatable {
             }
         }
         .font(.system(size: pointSize))
+        // Long-press a passage to select and copy it (the book read-along
+        // surfaces had no way to lift text out at all). The row's tap-to-
+        // speak gesture is untouched: selection starts on long-press, taps
+        // still bubble to the parent's onTapGesture.
+        .textSelection(.enabled)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
