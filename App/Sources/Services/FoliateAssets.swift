@@ -28,6 +28,11 @@ enum FoliateAssets {
         "foliate.html", "sn-shell-ios.js",
         "view.js", "paginator.js", "epubcfi.js", "progress.js",
         "overlayer.js", "text-walker.js", "section-chunks.js",
+        // The pre-paginated renderer: view.js imports it dynamically for a
+        // book whose rendition is "pre-paginated" (a KF8 MOBI with
+        // fixedLayout=true). Without it the import 404s and view.open()
+        // throws — the book cannot open at all.
+        "fixed-layout.js", "construct-style-sheets-polyfill.js",
         "mobi.js", "fb2.js", "sn-txt.js", "sn-docbook.js",
         "sn-html.js", "sn-rtf.js", "zip.js", "fflate.js",
     ]

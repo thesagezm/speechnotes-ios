@@ -42,6 +42,13 @@ struct BookWebView: UIViewRepresentable {
     var onRelocated: (Int, Double, Int, String?) -> Void
     var onTOC: ([BookTocEntry]) -> Void
     var onError: (String) -> Void
+    /// The engine's report on the book it opened — title, author, section
+    /// count and the book's own contents. For an engine-rendered book this
+    /// is the truth about its chaptering (the manifest's rows can be stale
+    /// or off by one), and the reader writes it back to the manifest.
+    var onBook: ((String, String, Int, [BookTocEntry]) -> Void)? = nil
+    /// A section's prose, as the engine rendered it (the TTS path).
+    var onSectionText: ((Int, String) -> Void)? = nil
     /// Hands the live WKWebView to the parent so it can evaluate commands.
     var onWebViewReady: (WKWebView) -> Void
     /// Fired when the user taps the reading surface without hitting a link
@@ -60,6 +67,23 @@ struct BookWebView: UIViewRepresentable {
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
+    }
+
+    /// The contents rows a shell posted. The foliate shell resolves every
+    /// row against the book's own href table (mobi.js decompresses KF8
+    /// sections on demand, hence optional); the epub.js shell posts no
+    /// spineIndex — nil keeps the manifest's rows authoritative there.
+    static func tocEntries(_ items: [[String: Any]]) -> [BookTocEntry] {
+        items.compactMap { item -> BookTocEntry? in
+            guard let label = item["label"] as? String,
+                  let href = item["href"] as? String else { return nil }
+            return BookTocEntry(
+                label: label,
+                href: href,
+                spineIndex: (item["spineIndex"] as? NSNumber)?.intValue,
+                depth: (item["depth"] as? NSNumber)?.intValue
+            )
+        }
     }
 
     func makeUIView(context: Context) -> WKWebView {
@@ -439,23 +463,26 @@ struct BookWebView: UIViewRepresentable {
                 parent.onRelocated(index, fraction, total, cfi)
             case "toc":
                 guard let items = body["items"] as? [[String: Any]] else { return }
-                let entries = items.compactMap { item -> BookTocEntry? in
-                    guard let label = item["label"] as? String,
-                          let href = item["href"] as? String else { return nil }
-                    // The foliate shell resolves every row against the book's
-                    // own href table (mobi.js decompresses KF8 sections on
-                    // demand, hence optional); the epub.js shell posts no
-                    // spineIndex — nil keeps the manifest's rows authoritative.
-                    return BookTocEntry(
-                        label: label,
-                        href: href,
-                        spineIndex: (item["spineIndex"] as? NSNumber)?.intValue,
-                        depth: (item["depth"] as? NSNumber)?.intValue
-                    )
-                }
-                parent.onTOC(entries)
+                parent.onTOC(BookWebView.tocEntries(items))
             case "error":
                 parent.onError(body["message"] as? String ?? "Unknown reader error")
+            case "book":
+                // The engine's report on the book it opened: its identity,
+                // its chaptering and its own contents. For an
+                // engine-rendered book this is the truth — the manifest's
+                // rows can be stale or off by one.
+                let sectionCount = (body["sectionCount"] as? NSNumber)?.intValue ?? 0
+                let title = body["title"] as? String ?? ""
+                let author = body["author"] as? String ?? ""
+                let items = body["toc"] as? [[String: Any]] ?? []
+                parent.onBook?(title, author, sectionCount, BookWebView.tocEntries(items))
+            case "text":
+                // A section's prose — the TTS path. The engine reports the
+                // text of every section it renders, so the voice reads
+                // exactly what the page shows.
+                let index = (body["index"] as? NSNumber)?.intValue ?? 0
+                let text = body["text"] as? String ?? ""
+                parent.onSectionText?(index, text)
             case "chromeTap":
                 parent.onChromeTap?()
             case "pageTurn":
@@ -540,12 +567,22 @@ extension BookWebView {
       // This page IS one spine item: "cover" (ordinal -1) or "chapter-K"
       // (ordinal K). The book's offset between ordinals and spine indexes is
       // constant, so a turn issued from any page can name every other one.
+      //
+      // The page's path is /<book-uuid>/<spine-name> — the scheme handler
+      // serves the spine under the book's own directory and refuses
+      // anything else, so a jump must keep the book prefix and replace only
+      // the LAST segment. (A jump to "/chapter-K" dropped the uuid and the
+      // handler answered badURL — every chapter turn died there.)
       var ordinal;
-      var pathName = location.pathname.replace(/^\/+/, "");
-      if (pathName === "cover") {
+      var segments = location.pathname.replace(/^\/+/, "").split("/");
+      var spineName = segments.length ? segments[segments.length - 1] : "";
+      var bookPrefix = segments.length > 1
+        ? "/" + segments.slice(0, -1).join("/") + "/"
+        : "/";
+      if (spineName === "cover") {
         ordinal = -1;
       } else {
-        var match = /^chapter-(\d+)$/.exec(pathName);
+        var match = /^chapter-(\d+)$/.exec(spineName);
         ordinal = match ? parseInt(match[1], 10) : STATE.chapter;
       }
       var ordinalOffset = STATE.chapter - ordinal;
@@ -558,7 +595,7 @@ extension BookWebView {
         var query = new URLSearchParams(location.search);
         query.set("chapter", String(index));
         query.delete("fraction"); // a jump starts the new page at its top
-        location.href = "/" + (nextOrdinal < 0 ? "cover" : "chapter-" + nextOrdinal)
+        location.href = bookPrefix + (nextOrdinal < 0 ? "cover" : "chapter-" + nextOrdinal)
           + "?" + query.toString();
       }
 

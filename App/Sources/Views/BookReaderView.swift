@@ -2,6 +2,16 @@ import SwiftUI
 import WebKit
 import SpeechLogic
 
+/// The prose of the sections the engine has rendered, by section index. The
+/// engine reports a section's text as it loads; the voice reads the page
+/// the reader is looking at — no second parse of the book, no stale copy
+/// on disk.
+final class ReaderSectionTexts {
+    private var texts: [Int: String] = [:]
+    func set(_ text: String, for index: Int) { texts[index] = text }
+    func text(for index: Int) -> String? { texts[index] }
+}
+
 /// The EPUB reader: vendored epub.js in a single WKWebView (BookWebView),
 /// chapter-paged scroll flow. TOC and appearance are native sheets; position
 /// (chapter + scroll fraction) persists to the book's manifest so reopening
@@ -23,6 +33,9 @@ struct BookReaderView: View {
     @State private var chapterFraction: Double
     @State private var totalChapters: Int
     @State private var toc: [BookTocEntry] = []
+    /// The engine's prose for every section it has rendered — the speech
+    /// text of an engine-rendered book, read from the page on screen.
+    @State private var sectionTexts = ReaderSectionTexts()
     /// Collapsed TOC row offsets (drop-down tree, round 6).
     @State private var collapsedTocRows: Set<Int> = []
 
@@ -311,6 +324,13 @@ struct BookReaderView: View {
             // The reader shows its own player bar — the global mini-player
             // yields while THIS book is the one speaking (editor pattern).
             player.miniPlayerSuppressed = player.nowPlayingBookId == book.id.uuidString
+            // The engine's section texts are the speech text of an
+            // engine-rendered book: the voice reads the page on screen.
+            let texts = sectionTexts
+            let bookID = book.id
+            BookPlaybackController.shared.bindLiveSectionText { id, index in
+                id == bookID ? texts.text(for: index) : nil
+            }
         }
         .onChange(of: player.nowPlayingBookId) { _ in
             player.miniPlayerSuppressed = player.nowPlayingBookId == book.id.uuidString
@@ -335,6 +355,9 @@ struct BookReaderView: View {
         }
         .onDisappear {
             player.miniPlayerSuppressed = false
+            // The live section texts go with the reader — the engine is
+            // asked for a section's text instead.
+            BookPlaybackController.shared.clearLiveSectionText()
             // Flush the throttled mid-chapter write — the exact spot must
             // not be lost because the reader closed inside the throttle
             // window.
@@ -403,11 +426,41 @@ struct BookReaderView: View {
             startCFI: lastKnownCFI,
             onRelocated: handleRelocated,
             onTOC: { entries in
-                // Manifest toc wins (it has depth); webview toc is the
-                // fallback for books imported before the manifest carried one.
-                if (book.toc ?? []).isEmpty { toc = entries }
+                // An engine-rendered book takes the ENGINE's contents: the
+                // manifest's rows can be stale or off by one (the pages
+                // pipeline's cover offset), while the engine's rows are
+                // resolved against the very sections the reader shows. The
+                // epub path keeps the manifest's rows (they carry the
+                // nesting depth the flat runtime TOC lacks).
+                if book.rendersWithFoliate {
+                    toc = entries
+                } else if (book.toc ?? []).isEmpty {
+                    toc = entries
+                }
             },
             onError: { errorMessage = $0 },
+            onBook: { title, author, sectionCount, entries in
+                // The engine's report on the book it opened: its chaptering
+                // and its contents are the truth now.
+                if sectionCount > 0 { totalChapters = sectionCount }
+                if !entries.isEmpty { toc = entries }
+                // …and the manifest learns them, so the shelf, the next
+                // session and the TTS chain speak the same chaptering.
+                store.mutate(book) { updated in
+                    if !title.isEmpty { updated.title = title }
+                    if !author.isEmpty { updated.author = author }
+                    updated.spineCount = sectionCount
+                    updated.spine = (0..<sectionCount).map { "chapter-\($0)" }
+                    if !entries.isEmpty { updated.toc = entries }
+                    updated.docRenderer = "foliate"
+                    updated.docEngineTried = true
+                }
+            },
+            onSectionText: { index, text in
+                // The engine's words for a section it rendered — the voice
+                // reads exactly the page on screen.
+                sectionTexts.set(text, for: index)
+            },
             // The pending jump is retried from `handleRelocated` — the webview
             // being READY is not the same as the rendition being up, and
             // `readerGoChapter` needs the book.

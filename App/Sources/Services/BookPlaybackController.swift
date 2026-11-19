@@ -14,6 +14,23 @@ final class BookPlaybackController: ObservableObject {
     static let shared = BookPlaybackController()
 
     private weak var player: SpeechPlayer?
+    /// The open reader's section texts — the engine's own words for the
+    /// sections it has rendered (book id, section index) → prose. The
+    /// reader installs it while it is on screen; nil when no reader is
+    /// open, and the engine is asked for the text instead.
+    private var liveSectionText: ((UUID, Int) -> String?)?
+
+    /// The reader hands over its section texts while it is open. The voice
+    /// then reads exactly the page the reader is looking at — no second
+    /// parse of the book, no stale copy on disk.
+    func bindLiveSectionText(_ provider: @escaping (UUID, Int) -> String?) {
+        liveSectionText = provider
+    }
+
+    /// The reader goes away: the live texts go with it.
+    func clearLiveSectionText() {
+        liveSectionText = nil
+    }
     private(set) var activeBook: Book?
     @Published private(set) var activeChapterIndex = 0
     /// "Ch 12 — The Reunion" style label for the reader's player bar —
@@ -265,8 +282,14 @@ final class BookPlaybackController: ObservableObject {
         case .epub: return book.spine?.count ?? 0
         // A native document speaks the same units it renders: the spine's
         // pages ("cover", "chapter-N") — the cover extracts to no speakable
-        // text and is skipped like any image-only spine item.
-        case .document: return book.spine?.count ?? 0
+        // text and is skipped like any image-only spine item. An
+        // engine-rendered book speaks the ENGINE's sections, whose count
+        // the engine's own report carries.
+        case .document:
+            if book.rendersWithFoliate {
+                return book.spineCount ?? book.spine?.count ?? 0
+            }
+            return book.spine?.count ?? 0
         case .pdf: return book.pdfChapters?.count ?? 0
         case .audio: return book.audioChapters?.count ?? 0
         case .slides: return book.spine?.count ?? book.spineCount ?? 0
@@ -422,24 +445,45 @@ final class BookPlaybackController: ObservableObject {
             }
             extracted = result.map { (text: $0.text, pageOffsets: nil as [PdfPageOffset]?) }
         case .document:
-            // A native document's speech text is the persisted parse: the
-            // reader's scheme handler serves doc/<spine name> to the webview
-            // and the TTS chapter reader extracts the very same file. The
-            // extract runs off-main like every chapter read; the cache below
-            // makes it once-per-book.
-            guard let spine = book.spine, chapterIndex >= 0, chapterIndex < spine.count else { return nil }
-            let pageURL = BooksStore.documentFileURL(book.id, virtualName: spine[chapterIndex])
-            let result = await Task.detached(priority: .userInitiated) { () -> (text: String, parseCompleted: Bool)? in
-                guard let url = pageURL,
-                      let html = try? Data(contentsOf: url) else { return nil }
-                let extraction = XhtmlText.extract(from: html)
-                return extraction.text.isEmpty ? nil : (extraction.text, extraction.parseCompleted)
-            }.value
-            if let result, !result.parseCompleted {
-                suspectParse = true
-                Log.shared.error("BookPlayback: ch\(chapterIndex) of \(book.title) — XML parse aborted near char \(result.text.utf16.count); NOT caching")
+            if book.rendersWithFoliate {
+                // An engine-rendered book has NO extracted copy on disk: the
+                // reader renders the original file in the foliate engine, and
+                // the engine's own words are the speech text. The live
+                // reader's copy first (the section the reader has shown —
+                // the voice reads exactly what is on the screen), then a
+                // headless engine for a section nobody has visited yet.
+                if let live = liveSectionText?(book.id, chapterIndex), !live.isEmpty {
+                    extracted = (live, nil as [PdfPageOffset]?)
+                } else {
+                    let sourceURL = BooksStore.originalFileURL(book)
+                    let ext = book.format.fileExtension
+                    let text = try? await DocumentParseService.sectionText(
+                        fileExtension: ext,
+                        sourceURL: sourceURL,
+                        index: chapterIndex
+                    )
+                    extracted = text.map { (text: $0, pageOffsets: nil as [PdfPageOffset]?) }
+                }
+            } else {
+                // A pre-parsed document book keeps its persisted pages: the
+                // reader's scheme handler serves doc/<spine name> to the
+                // webview and the TTS chapter reader extracts the very same
+                // file. The extract runs off-main like every chapter read;
+                // the cache below makes it once-per-book.
+                guard let spine = book.spine, chapterIndex >= 0, chapterIndex < spine.count else { return nil }
+                let pageURL = BooksStore.documentFileURL(book.id, virtualName: spine[chapterIndex])
+                let result = await Task.detached(priority: .userInitiated) { () -> (text: String, parseCompleted: Bool)? in
+                    guard let url = pageURL,
+                          let html = try? Data(contentsOf: url) else { return nil }
+                    let extraction = XhtmlText.extract(from: html)
+                    return extraction.text.isEmpty ? nil : (extraction.text, extraction.parseCompleted)
+                }.value
+                if let result, !result.parseCompleted {
+                    suspectParse = true
+                    Log.shared.error("BookPlayback: ch\(chapterIndex) of \(book.title) — XML parse aborted near char \(result.text.utf16.count); NOT caching")
+                }
+                extracted = result.map { (text: $0.text, pageOffsets: nil as [PdfPageOffset]?) }
             }
-            extracted = result.map { (text: $0.text, pageOffsets: nil as [PdfPageOffset]?) }
         case .pdf:
             guard let result = await PdfSpeechText.chapterText(book: book, chapterIndex: chapterIndex) else {
                 return nil

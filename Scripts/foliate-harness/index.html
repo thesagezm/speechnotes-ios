@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>foliate engine harness</title>
+<!-- The engine harness: it drives the REAL iOS shell
+     (App/Resources/foliatejs/sn-shell-ios.js) inside a hidden iframe and
+     reports, per book file, what the engine actually produces:
+
+       * parse mode — the identity the iOS manifest must carry: title,
+         author, section count, the resolved TOC rows, and the first
+         section's text (the TTS source). This is the SAME code path
+         DocumentParseService.probe() drives on the device.
+       * reader mode — the report the reader lives on: the section index
+         and section-local fraction the shell reports, a chapter jump to
+         the next section (the chevron), and the live text the TTS path
+         reads back from the engine.
+
+     Nothing is re-implemented here: the shell is the shipped file, and
+     the harness only asks it questions. -->
+<style>
+  :root { color-scheme: light dark; }
+  body {
+      font: 13px/1.45 -apple-system, "Segoe UI", Roboto, sans-serif;
+      margin: 0; padding: 18px 22px 60px; background: #fbfbfd; color: #16181d;
+  }
+  h1 { font-size: 17px; margin: 0 0 2px; }
+  .sub { color: #6b7280; margin: 0 0 14px; font-size: 12px; }
+  .bar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+  button, select {
+      font: inherit; padding: 5px 11px; border-radius: 7px;
+      border: 1px solid #c9ced8; background: #fff; color: inherit;
+  }
+  button { cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  #status { color: #374151; font-variant-numeric: tabular-nums; }
+  table { border-collapse: collapse; width: 100%; background: #fff; font-size: 12px; }
+  th, td { border: 1px solid #e3e6ec; padding: 5px 7px; text-align: left; vertical-align: top; }
+  th { background: #f2f4f8; font-weight: 600; position: sticky; top: 0; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .name { max-width: 320px; overflow-wrap: anywhere; }
+  .bad { color: #b42318; }
+  .good { color: #067647; }
+  .dim { color: #6b7280; }
+  .toc { max-height: 190px; overflow: auto; font-size: 11px; }
+  .toc div { padding: 1px 0; }
+  .toc .ix { color: #6b7280; }
+  pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; font-size: 11px; color: #4b5563; }
+  /* The live stage: the reader frame is rendered HERE, in view, because a
+     frame that is parked off-screen (or in a background tab) has its
+     animation frames throttled — and the foliate paginator lays out on
+     rAF. An off-screen reader would measure a stalled engine, not a
+     broken one. */
+  #stage {
+      width: 100%; height: 480px; margin: 0 0 14px; background: #fff;
+      border: 1px solid #d7dbe3; border-radius: 8px; overflow: hidden;
+      position: relative;
+  }
+  #stage iframe { width: 100%; height: 100%; border: 0; display: block; }
+  #stage:empty::after {
+      content: 'idle — no book open'; color: #9aa1ad; font-size: 12px;
+      position: absolute; left: 12px; top: 10px;
+  }
+  .log { font-size: 11px; color: #4b5563; max-height: 120px; overflow: auto; }
+  .log div { padding: 0; }
+</style>
+</head>
+<body>
+<h1>foliate engine harness</h1>
+<p class="sub">
+  Drives the shipped <code>sn-shell-ios.js</code> (parse mode = the import
+  probe, reader mode = the live reader) over the real files in
+  <code>~/Downloads</code>. One book at a time; each run tears its frame down
+  before the next.
+</p>
+<div class="bar">
+  <button id="runAll">Run all</button>
+  <select id="pick"></select>
+  <button id="runOne">Run selected</button>
+  <span id="status">idle</span>
+</div>
+<div id="stage"></div>
+<table id="table">
+  <thead>
+    <tr>
+      <th>file</th>
+      <th>fmt</th>
+      <th class="num">KB</th>
+      <th class="num">sections</th>
+      <th class="num">TOC rows</th>
+      <th>title / author</th>
+      <th class="num">sec-0 chars</th>
+      <th>reader: first → jump → landed</th>
+      <th class="num">live chars</th>
+      <th>TOC rows (label → section index)</th>
+      <th>notes</th>
+    </tr>
+  </thead>
+  <tbody id="rows"></tbody>
+</table>
+
+<script>
+'use strict'
+
+const sleep = ms => new Promise(r => setTimeout(r, ms))
+
+// -- the message bridge ------------------------------------------------------
+// frame.html forwards every shell message to us, tagged with the frame's
+// name. Messages are kept in a per-frame inbox so a waiter can also see
+// messages that arrived before it started waiting.
+
+const inbox = new Map()
+const logs = new Map()
+const waiters = new Set()
+
+window.addEventListener('message', event => {
+    const data = event.data
+    if (!data) return
+    if (data.__snShellLog === true) {
+        const name = data.frame
+        if (!logs.has(name)) logs.set(name, [])
+        logs.get(name).push(data.level + ': ' + data.text)
+        return
+    }
+    if (data.__snShell !== true) return
+    const name = data.frame
+    if (!inbox.has(name)) inbox.set(name, [])
+    inbox.get(name).push(data.message)
+    for (const waiter of Array.from(waiters)) {
+        if (waiter.name === name && waiter.pred(data.message)) {
+            waiters.delete(waiter)
+            clearTimeout(waiter.timer)
+            waiter.res(data.message)
+        }
+    }
+})
+
+function inboxOf(name) { return inbox.get(name) ?? [] }
+
+function waitFor(name, pred, timeoutMs = 60000, since = 0) {
+    const queued = inboxOf(name)
+    for (let i = since; i < queued.length; i++)
+        if (pred(queued[i])) return Promise.resolve(queued[i])
+    return new Promise((res, rej) => {
+        const waiter = { name, pred, res }
+        waiter.timer = setTimeout(() => {
+            waiters.delete(waiter)
+            rej(new Error('timed out after ' + timeoutMs + ' ms waiting for a message'))
+        }, timeoutMs)
+        waiters.add(waiter)
+    })
+}
+
+function lastOf(name, pred) {
+    const queued = inboxOf(name)
+    for (let i = queued.length - 1; i >= 0; i--)
+        if (pred(queued[i])) return queued[i]
+    return null
+}
+
+// -- the frame ----------------------------------------------------------------
+
+let frameCount = 0
+
+function makeFrame(name, query) {
+    const frame = document.createElement('iframe')
+    frameCount++
+    frame.name = name
+    frame.width = 900
+    frame.height = 480
+    frame.src = '/Scripts/foliate-harness/frame.html?' + query
+    // The VISIBLE stage — see the #stage rule: an off-screen frame has its
+    // rAF throttled and the paginator would never lay out.
+    document.getElementById('stage').appendChild(frame)
+    return frame
+}
+
+function frameLoaded(frame) {
+    // An iframe fires 'load' for its initial about:blank too, so the event
+    // alone proves nothing. The frame's own probe function appearing is
+    // the real signal that frame.html's script has run.
+    return new Promise(res => {
+        const started = Date.now()
+        const check = () => {
+            if (frame.contentWindow && typeof frame.contentWindow.__diag === 'function') {
+                res(); return
+            }
+            if (Date.now() - started > 30000) { res(); return }
+            setTimeout(check, 100)
+        }
+        check()
+    })
+}
+
+// A frame that has not been laid out yet has a zero-width viewport, and a
+// paginator with nothing to measure lays out nonsense — the probe would
+// measure the harness, not the engine. Wait for a real size.
+function frameSized(frame) {
+    return new Promise(res => {
+        const started = Date.now()
+        const check = () => {
+            let width = 0
+            try { width = frame.contentWindow?.innerWidth ?? 0 } catch (e) {}
+            if (width > 0 || Date.now() - started > 15000) {
+                res({ width, waited: Date.now() - started })
+                return
+            }
+            setTimeout(check, 100)
+        }
+        check()
+    })
+}
+
+function dropFrame(frame) {
+    try { frame.contentWindow?.readerDestroy?.() } catch (e) {}
+    try { frame.contentWindow?.__snParse?.destroy?.() } catch (e) {}
+    try { frame.remove() } catch (e) {}
+}
+
+function logsOf(name) { return (logs.get(name) ?? []).slice(-40) }
+
+// -- the probes ---------------------------------------------------------------
+
+async function probeParse(file) {
+    const name = 'parse-' + (frameCount++) + '-' + file.name
+    const query = new URLSearchParams({
+        mode: 'parse', format: file.format, src: file.url,
+        title: '', author: '',
+    })
+    const frame = makeFrame(name, query)
+    const out = { name: file.name, format: file.format, size: file.size }
+    try {
+        const ready = await waitFor(name,
+            m => m.type === 'parseReady' || m.type === 'error', 180000)
+        if (ready.type === 'error') { out.error = ready.message; return out }
+        const api = frame.contentWindow?.__snParse
+        if (!api) { out.error = 'the engine exposed no __snParse surface'; return out }
+        const meta = JSON.parse(api.meta())
+        out.title = meta.title
+        out.author = meta.author
+        out.language = meta.language
+        out.sectionCount = meta.sectionCount
+        out.toc = (meta.toc ?? []).map(row => ({
+            label: row.label, index: row.index, depth: row.depth, href: row.href,
+        }))
+        api.prepareSectionText(0)
+        const text = await waitFor(name,
+            m => m.type === 'parseSectionText' || m.type === 'error', 180000)
+        if (text.type === 'parseSectionText') {
+            out.section0Chars = (text.text ?? '').length
+            out.section0Preview = (text.text ?? '').slice(0, 240).replace(/\s+/g, ' ').trim()
+        } else {
+            out.section0Error = text.message
+        }
+    } catch (e) {
+        out.error = String(e?.message ?? e)
+    } finally {
+        out.logs = logsOf(name)
+        dropFrame(frame)
+    }
+    return out
+}
+
+async function probeReader(file) {
+    const name = 'reader-' + (frameCount++) + '-' + file.name
+    const query = new URLSearchParams({
+        mode: 'reader', format: file.format, src: file.url,
+        theme: 'light', flow: 'scrolled', fontSize: '100',
+    })
+    const frame = makeFrame(name, query)
+    const out = {}
+    try {
+        // Is the frame actually being painted? A frame that is not
+        // rendering has throttled animation frames, and the paginator
+        // lays out on them — that is a harness artefact, not an engine
+        // fault, and the two must not be confused.
+        await frameLoaded(frame)
+        out.size = await frameSized(frame)
+        out.diag = await Promise.race([
+            frame.contentWindow.__diag(),
+            sleep(5000).then(() => ({ error: 'the diagnostic timed out' })),
+        ])
+        out.engine = await frame.contentWindow.__engineInfo?.() ?? null
+        const ready = await waitFor(name,
+            m => m.type === 'ready' || m.type === 'error', 240000)
+        if (ready.type === 'error') { out.error = ready.message; return out }
+        const book = lastOf(name, m => m.type === 'book')
+        if (book) {
+            out.bookTitle = book.title
+            out.bookAuthor = book.author
+            out.bookSectionCount = book.sectionCount
+            out.bookTocRows = (book.toc ?? []).length
+        }
+        // The first relocation settles a beat after 'ready'.
+        await sleep(1500)
+        const first = lastOf(name, m => m.type === 'relocated')
+        if (first) {
+            out.firstIndex = first.index
+            out.firstFraction = first.fraction
+            out.firstTotal = first.total
+            out.firstCfi = first.cfi
+        }
+        const total = out.bookSectionCount ?? 0
+        const target = total > 1 ? 1 : 0
+        out.jumpTarget = target
+        const since = inboxOf(name).length
+        frame.contentWindow?.readerGoChapter?.(target)
+        const landed = await waitFor(name,
+            m => m.type === 'relocated' && m.index === target, 120000, since)
+            .catch(() => null)
+        out.landedIndex = landed?.index ?? null
+        out.landedFraction = landed?.fraction ?? null
+        await sleep(500)
+        const live = frame.contentWindow?.readerSectionText?.(target) ?? ''
+        out.liveTextChars = live.length
+        out.liveTextPreview = live.slice(0, 200).replace(/\s+/g, ' ').trim()
+        const failure = lastOf(name, m => m.type === 'goChapterFailed')
+        if (failure) out.goChapterFailed = failure.reason
+    } catch (e) {
+        out.error = String(e?.message ?? e)
+    } finally {
+        out.logs = logsOf(name)
+        dropFrame(frame)
+    }
+    return out
+}
+
+// -- the run ------------------------------------------------------------------
+
+const results = []
+window.__harnessReport = null
+window.__harnessDone = false
+
+function setStatus(text) {
+    document.getElementById('status').textContent = text
+}
+
+function render() {
+    const tbody = document.getElementById('rows')
+    tbody.textContent = ''
+    for (const r of results) {
+        const tr = document.createElement('tr')
+        const cells = []
+        const name = document.createElement('td')
+        name.className = 'name'
+        name.textContent = r.name
+        cells.push(name)
+        cells.push(textCell(r.format))
+        cells.push(numCell(Math.round((r.size ?? 0) / 1024)))
+        cells.push(numCell(r.parse?.sectionCount))
+        cells.push(numCell(r.parse?.toc?.length))
+        const ident = document.createElement('td')
+        ident.innerHTML = ''
+        ident.appendChild(line(r.parse?.title || '—'))
+        ident.appendChild(line((r.parse?.author || '') + (r.parse?.language ? '  · ' + r.parse.language : '')))
+        cells.push(ident)
+        cells.push(numCell(r.parse?.section0Chars))
+        const nav = document.createElement('td')
+        nav.innerHTML = ''
+        if (r.reader?.error) nav.appendChild(bad(r.reader.error))
+        else {
+            nav.appendChild(line('first: ' + fmt(r.reader?.firstIndex) + '  frac ' +
+                (r.reader?.firstFraction != null ? Number(r.reader.firstFraction).toFixed(3) : '—')))
+            nav.appendChild(line('jump → ' + fmt(r.reader?.jumpTarget) + '  landed: ' +
+                fmt(r.reader?.landedIndex)))
+            if (r.reader?.goChapterFailed) nav.appendChild(bad('failed: ' + r.reader.goChapterFailed))
+        }
+        cells.push(nav)
+        cells.push(numCell(r.reader?.liveTextChars))
+        const toc = document.createElement('td')
+        toc.className = 'toc'
+        if (r.parse?.toc?.length) {
+            for (const row of r.parse.toc.slice(0, 40)) {
+                const div = document.createElement('div')
+                div.textContent = '· ' + row.label
+                const ix = document.createElement('span')
+                ix.className = 'ix'
+                ix.textContent = '  → ' + row.index
+                div.appendChild(ix)
+                toc.appendChild(div)
+            }
+            if (r.parse.toc.length > 40) {
+                const more = document.createElement('div')
+                more.className = 'dim'
+                more.textContent = '… ' + (r.parse.toc.length - 40) + ' more'
+                toc.appendChild(more)
+            }
+        } else toc.textContent = '—'
+        cells.push(toc)
+        const notes = document.createElement('td')
+        notes.innerHTML = ''
+        if (r.parse?.error) notes.appendChild(bad('parse: ' + r.parse.error))
+        if (r.parse?.section0Error) notes.appendChild(bad('text: ' + r.parse.section0Error))
+        if (r.parse?.section0Preview) notes.appendChild(line(r.parse.section0Preview))
+        const diag = r.reader?.diag
+        if (diag) {
+            notes.appendChild(line('frame: ' + (diag.visibilityState ?? '?') +
+                ' · rAF/s ' + (diag.rafTicksPerSecond ?? '?') +
+                (diag.rafMode ? ' (' + diag.rafMode + ')' : '') +
+                ' · focus ' + (diag.hasFocus ? 'yes' : 'no') +
+                ' · ' + (diag.size ?? []).join('×')))
+        }
+        const log = document.createElement('div')
+        log.className = 'log'
+        for (const entry of (r.reader?.logs ?? []).slice(-12)) {
+            const div = document.createElement('div')
+            div.textContent = entry
+            log.appendChild(div)
+        }
+        if (log.childNodes.length) notes.appendChild(log)
+        if (!notes.childNodes.length) notes.textContent = '—'
+        cells.push(notes)
+        for (const cell of cells) tr.appendChild(cell)
+        tbody.appendChild(tr)
+    }
+}
+
+function textCell(text) { const td = document.createElement('td'); td.textContent = text ?? '—'; return td }
+function numCell(value) {
+    const td = document.createElement('td')
+    td.className = 'num'
+    td.textContent = value == null ? '—' : String(value)
+    return td
+}
+function line(text) { const div = document.createElement('div'); div.textContent = text; return div }
+function bad(text) { const div = document.createElement('div'); div.className = 'bad'; div.textContent = text; return div }
+function fmt(value) { return value == null ? '—' : String(value) }
+
+async function run(files) {
+    window.__harnessDone = false
+    document.getElementById('runAll').disabled = true
+    document.getElementById('runOne').disabled = true
+    for (let i = 0; i < files.length; i++) {
+        const file = files[i]
+        setStatus(`(${i + 1}/${files.length}) ${file.name} — parse…`)
+        const parsed = await probeParse(file)
+        setStatus(`(${i + 1}/${files.length}) ${file.name} — reader…`)
+        const reader = await probeReader(file)
+        results.push({ name: file.name, format: file.format, size: file.size, parse: parsed, reader })
+        render()
+        await sleep(400)
+    }
+    window.__harnessReport = {
+        generatedAt: new Date().toISOString(),
+        results,
+    }
+    window.__harnessDone = true
+    setStatus('done — ' + results.length + ' file(s)')
+    document.getElementById('runAll').disabled = false
+    document.getElementById('runOne').disabled = false
+    try {
+        await fetch('/save-report', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(window.__harnessReport),
+        })
+        setStatus('done — ' + results.length + ' file(s) — report saved')
+    } catch (e) {
+        setStatus('done — report NOT saved: ' + e)
+    }
+}
+
+async function boot() {
+    const list = await (await fetch('/files.json')).json()
+    const pick = document.getElementById('pick')
+    for (const file of list) {
+        const option = document.createElement('option')
+        option.value = file.name
+        option.textContent = file.name
+        pick.appendChild(option)
+    }
+    document.getElementById('runAll').onclick = () => run(list)
+    document.getElementById('runOne').onclick = () => {
+        const chosen = list.find(f => f.name === pick.value)
+        if (chosen) run([chosen])
+    }
+    setStatus(list.length + ' book file(s) found')
+}
+
+boot()
+</script>
+</body>
+</html>

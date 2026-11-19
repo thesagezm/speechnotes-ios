@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>harness frame</title>
+<!-- The harness frame: the page the REAL iOS shell runs inside.
+
+     The shell talks to Swift through
+     window.webkit.messageHandlers.reader.postMessage(obj). A browser has no
+     such handler, so this file installs a shim that forwards every message
+     to the harness page (window.postMessage). The shell itself is untouched
+     and is the SAME file the app splices into foliate.html — the harness
+     therefore exercises the shipped code path, not a copy of it.
+
+     The shim is a CLASSIC script and the shell is a module script, so the
+     shim is always in place before the module graph evaluates. The error
+     hooks mirror foliate.html's, so a failed import is reported instead of
+     dying silently. -->
+<script>
+(function () {
+    var parentWindow = window.parent
+    window.webkit = {
+        messageHandlers: {
+            reader: {
+                postMessage: function (message) {
+                    try {
+                        parentWindow.postMessage({
+                            __snShell: true,
+                            frame: window.name,
+                            message: message
+                        }, '*')
+                    } catch (e) { /* a message that will not clone is dropped */ }
+                }
+            }
+        }
+    }
+    window.__snLastError = null
+
+    // The shell's own console output, forwarded to the harness. The shell
+    // narrates its boot ('book built', 'initialising the view', …), so
+    // this is where a stall shows up.
+    var forward = function (level) {
+        var original = console[level].bind(console)
+        console[level] = function () {
+            try {
+                var parts = []
+                for (var i = 0; i < arguments.length; i++) {
+                    var a = arguments[i]
+                    parts.push(typeof a === 'string' ? a : safeString(a))
+                }
+                parentWindow.postMessage({
+                    __snShellLog: true,
+                    frame: window.name,
+                    level: level,
+                    text: parts.join(' ')
+                }, '*')
+            } catch (e) {}
+            return original.apply(null, arguments)
+        }
+    }
+    var safeString = function (value) {
+        try { return JSON.stringify(value) } catch (e) { return String(value) }
+    }
+    forward('log')
+    forward('warn')
+    forward('error')
+
+    // Diagnostics: is this frame actually being rendered? A backgrounded or
+    // offscreen frame has its animation frames throttled, and the foliate
+    // paginator lays out on rAF — a stall there is a harness artefact, not
+    // an engine fault.
+    //
+    // The in-app browser pane does not composite a tab that is not in the
+    // foreground, and a Chromium that is not compositing NEVER fires
+    // requestAnimationFrame — measured here: 0 ticks in 2.5 s. That would
+    // stall the engine's own animation-driven paths (the section load, the
+    // relocation settle) for reasons that have nothing to do with the
+    // engine. So the harness frame stands in a 16 ms timer for rAF — the
+    // same cadence a 60 Hz display gives — and says so in the report.
+    var rafMode = 'timer-stand-in'
+    window.requestAnimationFrame = function (callback) {
+        return setTimeout(function () { callback(performance.now()) }, 16)
+    }
+    window.cancelAnimationFrame = function (id) { clearTimeout(id) }
+
+    // What the engine made of the book: which renderer it picked (the
+    // paginator for reflowable books, the fixed-layout renderer for a
+    // pre-paginated one) and how many sections it has. The fixed-layout
+    // renderer reports a SPREAD index where the paginator reports a
+    // SECTION index — the difference decides how a relocation's index is
+    // read.
+    window.__engineInfo = function () {
+        var view = document.querySelector('foliate-view')
+        var renderer = view && view.shadowRoot
+            ? view.shadowRoot.querySelector('foliate-paginator, foliate-fxl')
+            : null
+        return {
+            renderer: renderer ? renderer.localName : null,
+            isFixedLayout: view ? view.isFixedLayout === true : null,
+            sectionCount: view && view.book ? view.book.sections.length : null,
+        }
+    }
+
+    window.__diag = function () {
+        return new Promise(function (resolve) {
+            var ticks = 0
+            var start = performance.now()
+            var step = function () {
+                ticks++
+                if (performance.now() - start < 1000) requestAnimationFrame(step)
+                else resolve({
+                    visibilityState: document.visibilityState,
+                    hidden: document.hidden,
+                    hasFocus: document.hasFocus(),
+                    rafTicksPerSecond: ticks,
+                    rafMode: rafMode,
+                    size: [window.innerWidth, window.innerHeight]
+                })
+            }
+            requestAnimationFrame(step)
+        })
+    }
+
+    window.addEventListener('error', function (e) {
+        var message = e.message ||
+            (e.target && (e.target.src || e.target.href)) ||
+            String(e.type || 'error')
+        window.__snLastError = message
+        try {
+            window.webkit.messageHandlers.reader.postMessage(
+                { type: 'error', message: message })
+        } catch (_) {}
+    })
+    window.addEventListener('unhandledrejection', function (e) {
+        var reason = e.reason && e.reason.message ? e.reason.message
+            : String(e.reason === undefined ? 'rejection' : e.reason)
+        if (!window.__snLastError) window.__snLastError = reason
+        try {
+            window.webkit.messageHandlers.reader.postMessage(
+                { type: 'error', message: reason })
+        } catch (_) {}
+    })
+})()
+</script>
+<!-- The shell, by its path in the app bundle. Its relative imports
+     (./view.js, ./mobi.js, ./vendor/…) resolve against its own URL. -->
+<script type="module" src="/App/Resources/foliatejs/sn-shell-ios.js"></script>
+</head>
+<body></body>
+</html>

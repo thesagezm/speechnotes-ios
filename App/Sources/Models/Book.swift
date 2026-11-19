@@ -111,6 +111,14 @@ struct Book: Identifiable, Codable, Equatable, Hashable {
     /// serves one per chapter. nil = written before the flag existed — every
     /// book that predates foliate renders "pages", exactly as it did.
     var docRenderer: String?
+    /// Whether the foliate engine has had its try at this book. false for a
+    /// book the engine has not been asked about yet (every book imported
+    /// before the flag existed, and every fresh import until the engine
+    /// reports back). true once the engine has answered: it opened the file
+    /// (docRenderer "foliate") or it refused it (docRenderer "pages" — a
+    /// DRM'd book, a .pdb that is really another Palm format). A refusal is
+    /// terminal, so it is never asked again.
+    var docEngineTried: Bool = false
     /// Soft-delete stamp for the books recycle bin — nil while the book is
     /// on the shelf. Optional so manifests written before the bin existed
     /// keep decoding exactly as they did.
@@ -138,7 +146,8 @@ struct Book: Identifiable, Codable, Equatable, Hashable {
         position: BookPosition? = nil,
         importError: String? = nil,
         deletedAt: Date? = nil,
-        docRenderer: String? = nil
+        docRenderer: String? = nil,
+        docEngineTried: Bool = false
     ) {
         self.id = id
         self.title = title
@@ -161,6 +170,7 @@ struct Book: Identifiable, Codable, Equatable, Hashable {
         self.importError = importError
         self.deletedAt = deletedAt
         self.docRenderer = docRenderer
+        self.docEngineTried = docEngineTried
     }
 
     /// The document book renders through the foliate webview (the Linux

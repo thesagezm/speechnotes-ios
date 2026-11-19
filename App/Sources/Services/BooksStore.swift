@@ -553,13 +553,18 @@ final class BooksStore: ObservableObject {
 
     private func migrateLegacyDocumentBooksToFoliate() {
         guard !didMigrateFoliateBooks, !foliateMigrationInFlight else { return }
+        // EVERY document book the engine has not yet had its try at: the
+        // books that predate the flag, and the books imported while the
+        // engine's own bytes route was broken (they were stamped "pages"
+        // without the engine ever opening them — the reader showed the
+        // pre-parsed pages, which cannot navigate).
         let pending = books.filter {
-            $0.format.isDocument && $0.docRenderer == nil && $0.importError == nil
+            $0.format.isDocument && !$0.docEngineTried && $0.importError == nil
         }
         guard !pending.isEmpty else { return }
         didMigrateFoliateBooks = true
         foliateMigrationInFlight = true
-        Log.shared.info("BooksStore: foliate migration — \(pending.count) legacy document book(s)")
+        Log.shared.info("BooksStore: foliate migration — \(pending.count) document book(s) to verify")
         Task { @MainActor in
             var migrated = 0
             for book in pending {
@@ -576,32 +581,22 @@ final class BooksStore: ObservableObject {
     @MainActor private static func foliateMigrate(book: Book) async -> Bool {
         let dir = bookDirectory(book.id)
         let source = dir.appendingPathComponent("original.\(book.format.fileExtension)")
-        guard FileManager.default.fileExists(atPath: source.path) else { return false }
+        guard FileManager.default.fileExists(atPath: source.path) else {
+            // No original to open — the book keeps whatever it had.
+            return false
+        }
         do {
-            let result = try await DocumentParseService.parse(
+            let result = try await DocumentParseService.probe(
                 fileExtension: book.format.fileExtension,
                 sourceURL: source
             )
             guard result.sectionCount > 0 else { return false }
-            // doc/ replaced wholesale — the two renderers are never mixed for
-            // one book (the pages renderer's spine carries a cover entry the
-            // foliate one does not).
-            let docDir = dir.appendingPathComponent("doc", isDirectory: true)
-            try? FileManager.default.removeItem(at: docDir)
-            try FileManager.default.createDirectory(at: docDir, withIntermediateDirectories: true)
-            for file in result.sectionFiles {
-                let target = docDir.appendingPathComponent(file.path)
-                try FileManager.default.createDirectory(
-                    at: target.deletingLastPathComponent(), withIntermediateDirectories: true
-                )
-                try file.data.write(to: target, options: .atomic)
-            }
             var updated = book
             // The pages spine's cover entry ("cover" at index 0) shifted
-            // every saved position forward by one — the foliate spine is 1:1
-            // with the sections, so a resume lands on the same TEXT chapter
-            // only if that offset comes off. The doc@ pseudo-CFI is not a
-            // foliate CFI; the fraction survives.
+            // every saved position forward by one — the engine's spine is
+            // 1:1 with its sections, so a resume lands on the same TEXT
+            // chapter only if that offset comes off. The doc@ pseudo-CFI is
+            // not a foliate CFI; the fraction survives.
             let hadCoverPage = book.spine?.first == "cover"
             var position = book.position
             if hadCoverPage {
@@ -620,10 +615,10 @@ final class BooksStore: ObservableObject {
             updated.spine = (0..<result.sectionCount).map { "chapter-\($0)" }
             updated.spineCount = result.sectionCount
             // Stale TOC rows point at the pages spine's indexes — a cover
-            // shift makes every one of them one chapter off, so a foliate
-            // TOC replaces them when the format carries one, and a TOC-less
-            // format drops the stale rows outright (the reader shell reports
-            // the book's own contents as the fallback).
+            // shift makes every one of them one chapter off, so the engine's
+            // own contents replace them when the format carries some, and a
+            // TOC-less format drops the stale rows outright (the reader
+            // shell reports the book's own contents as the fallback).
             if !result.toc.isEmpty {
                 updated.toc = result.toc
             } else if hadCoverPage {
@@ -631,17 +626,30 @@ final class BooksStore: ObservableObject {
             }
             updated.hasCover = hasCover
             updated.docRenderer = "foliate"
+            updated.docEngineTried = true
             updated.position = position
             if let title = result.title, !title.isEmpty { updated.title = title }
             if let author = result.author, !author.isEmpty { updated.author = author }
+            // The pre-parsed pages are dead weight now: the engine renders
+            // the ORIGINAL file, so nothing reads doc/ any more. (Only on
+            // the success path — a refused book keeps its pages renderer
+            // and needs them.)
+            let docDir = dir.appendingPathComponent("doc", isDirectory: true)
+            try? FileManager.default.removeItem(at: docDir)
             let data = try JSONEncoder().encode(updated)
             try data.write(to: manifestURL(book.id), options: .atomic)
             Log.shared.info("BooksStore: migrated «\(book.title)» to the foliate renderer — \(result.sectionCount) section(s)")
             return true
         } catch {
-            // The old pipeline still renders this book — one failed attempt
-            // is terminal for the launch (the gate above), never a loop.
-            Log.shared.info("BooksStore: foliate migration skipped «\(book.title)» — \(error.localizedDescription)")
+            // The engine refuses this file (DRM, an exotic PDB). The old
+            // pipeline still renders it — but the refusal is remembered, so
+            // the book is not asked again on the next launch.
+            var updated = book
+            updated.docEngineTried = true
+            if let data = try? JSONEncoder().encode(updated) {
+                try? data.write(to: manifestURL(book.id), options: .atomic)
+            }
+            Log.shared.info("BooksStore: the foliate engine refused «\(book.title)» — \(error.localizedDescription)")
             return false
         }
     }
@@ -730,32 +738,21 @@ final class BooksStore: ObservableObject {
                 }
             } else if case .document(let docExt) = format {
                 // A headless document keeps its file WHOLE (original.<ext>)
-                // and the import parses it with the SAME engine the reader
-                // renders it: the foliate webview (DocumentParseService) —
-                // the Linux reader's architecture, where importer and view
-                // share one parse. The walk persists doc/chapter-N.html —
-                // one per foliate section, the TTS chapter text source — and
-                // the cover. The manifest stamps docRenderer:"foliate": the
-                // reader opens the ORIGINAL file in the foliate shell and its
-                // section indexes ARE these chapters' indexes. Nothing here
-                // is an EPUB and nothing becomes one.
+                // and is RENDERED by the foliate engine from that original
+                // file — the Linux reader's architecture, where the importer
+                // and the view run on one engine. The import asks the engine
+                // what the book IS (title, author, section count, the book's
+                // own contents) and records that; the book's TEXT is never
+                // copied out. The reader opens the ORIGINAL file in the same
+                // engine, and TTS pulls a section's text when it needs one.
                 try FileManager.default.copyItem(at: sourceURL, to: destination)
                 do {
-                    let result = try await DocumentParseService.parse(
+                    let result = try await DocumentParseService.probe(
                         fileExtension: docExt,
                         sourceURL: sourceURL
                     )
                     guard result.sectionCount > 0 else {
-                        throw DocumentParseError.malformed("the document has no readable chapters")
-                    }
-                    let docDir = dir.appendingPathComponent("doc", isDirectory: true)
-                    try FileManager.default.createDirectory(at: docDir, withIntermediateDirectories: true)
-                    for file in result.sectionFiles {
-                        let target = docDir.appendingPathComponent(file.path)
-                        try FileManager.default.createDirectory(
-                            at: target.deletingLastPathComponent(), withIntermediateDirectories: true
-                        )
-                        try file.data.write(to: target, options: .atomic)
+                        throw DocumentParseService.ParseError.malformed("the document has no readable chapters")
                     }
                     var hasCover = false
                     if let coverData = result.coverData {
@@ -774,32 +771,32 @@ final class BooksStore: ObservableObject {
                         try? tile.write(to: dir.appendingPathComponent("cover.jpg"), options: .atomic)
                         hasCover = true
                     }
-                    // The spine: one entry per foliate section ("chapter-0",
+                    // The spine: one entry per engine section ("chapter-0",
                     // … — the Linux spine's names, 0-based). No cover entry:
                     // the cover lives on the shelf (cover.jpg), and keeping
-                    // the spine 1:1 with the foliate sections is what lets
+                    // the spine 1:1 with the engine's sections is what lets
                     // the reader's chapter bar, the TTS chain and the TOC
                     // share one index without offsets.
                     let spine = (0..<result.sectionCount).map { "chapter-\($0)" }
-                    let toc = result.toc
                     Log.shared.info(
-                        "BooksStore: parsed .\(docExt) with the foliate engine — \(result.sectionCount) section(s), "
-                            + "\(toc.count) toc row(s), cover \(hasCover ? "yes" : "none")"
+                        "BooksStore: the foliate engine opened .\(docExt) — \(result.sectionCount) section(s), "
+                            + "\(result.toc.count) toc row(s), cover \(hasCover ? "yes" : "none")"
                     )
                     documentImport = DocumentImportBits(
                         title: title, author: author,
-                        spine: spine, toc: toc, hasCover: hasCover,
-                        docRenderer: "foliate"
+                        spine: spine, toc: result.toc, hasCover: hasCover,
+                        docRenderer: "foliate", docEngineTried: true
                     )
                 } catch {
-                    // The foliate engine could not open this file (DRM, an
-                    // exotic PDB that is really some other Palm format, a
-                    // truncated download). The pre-foliate Swift parse is
-                    // the fallback — same doc/ contract, the "pages"
-                    // renderer — so the book still imports, speaks and
-                    // renders exactly as it did before foliate existed.
+                    // The engine could not open this file (DRM, an exotic
+                    // PDB that is really some other Palm format, a truncated
+                    // download). The pre-foliate Swift parse is the fallback
+                    // — same doc/ contract, the "pages" renderer — so the
+                    // book still imports, speaks and renders exactly as it
+                    // did before foliate existed. The refusal is remembered:
+                    // the engine is not asked about this book again.
                     Log.shared.info(
-                        "BooksStore: foliate parse failed for .\(docExt) (\(error.localizedDescription)) — falling back to the Swift parse"
+                        "BooksStore: the foliate engine refused .\(docExt) (\(error.localizedDescription)) — falling back to the Swift parse"
                     )
                     do {
                         let sourceData = try Data(contentsOf: sourceURL, options: .mappedIfSafe)
@@ -853,7 +850,7 @@ final class BooksStore: ObservableObject {
                         documentImport = DocumentImportBits(
                             title: title, author: author,
                             spine: spine, toc: toc, hasCover: hasCover,
-                            docRenderer: "pages"
+                            docRenderer: "pages", docEngineTried: true
                         )
                     } catch {
                         importError = "Could not read the \(docExt.uppercased()) document: \(error.localizedDescription)"
@@ -928,6 +925,7 @@ final class BooksStore: ObservableObject {
             parsed.toc = bits.toc
             parsed.hasCover = bits.hasCover
             parsed.docRenderer = bits.docRenderer
+            parsed.docEngineTried = bits.docEngineTried
             if bits.spine.isEmpty {
                 parsed.importError = "The document has no readable chapters."
             }
@@ -957,6 +955,9 @@ final class BooksStore: ObservableObject {
         var toc: [BookTocEntry]
         var hasCover: Bool
         var docRenderer: String
+        /// The engine has had its try at this file (it opened it, or it
+        /// refused it) — either way it is not asked again.
+        var docEngineTried: Bool
     }
 
     /// Runs off-main. Reads only a few zip entries (epub) or the lazy

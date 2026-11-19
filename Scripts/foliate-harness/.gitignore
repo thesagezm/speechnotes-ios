@@ -1,0 +1,4 @@
+# The generated run: the harness writes it on every "Run all". It holds
+# short text excerpts of the books it probed, so it stays out of the repo —
+# the recorded numbers live in Docs/FOLIATE-ENGINE-PROBE.md.
+report.json

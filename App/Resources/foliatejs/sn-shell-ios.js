@@ -21,12 +21,12 @@
 //   BookWebView command surface), which land on view.goTo/next/prev —
 //   in-renderer navigation, no page reload, which is why a chapter jump
 //   lands immediately.
-// * parse — the importer's headless boot (DocumentParseService): no view,
-//   just the parsed book exposed on window.__snParse for Swift to pull
-//   (metadata, resolved TOC, per-section XHTML, cover). The per-section
-//   XHTML is what lands in doc/chapter-N.html as the TTS text source —
-//   the same chaptering the reader shows, so TTS chapter indexes and
-//   reader section indexes can never drift apart.
+// * parse — the engine's headless boot (DocumentParseService): no view,
+//   just the opened book exposed on window.__snParse. Swift pulls the
+//   book's IDENTITY from it (title, author, section count, the resolved
+//   TOC, the cover) and one section's TEXT when TTS asks for it. The
+//   content itself is never copied out: the reader renders the original
+//   file, in this very engine.
 //
 // The dispatch mirrors the Linux shell's (readest's DocumentLoader.open()):
 // a .txt/.md goes through the chapteriser, .html/.htmlz through the HTML
@@ -146,7 +146,38 @@ const openFile = async bytes => {
 const unescapeXml = str => str
     .replace(/&(amp|lt|gt|quot|#39);/g, (_, ent) => ({
         amp: '&', lt: '<', gt: '>', quot: '"', '#39': "'",
-    }[ent]))
+    }[ent] ?? `&${ent};`))
+
+// The engine's metadata is NOT uniform across formats: a Kindle book
+// reports `language: ['en']` (a list), an FB2 `language: 'en'` (a string),
+// and a title can be a list too. The native side decodes these fields as
+// plain strings — a list would fail the decode and take the whole import
+// down to the fallback renderer — so every one of them is flattened here,
+// once, at the boundary.
+const metaTitle = meta => {
+    const t = meta?.title
+    if (typeof t === 'string') return t
+    if (Array.isArray(t)) return t.filter(x => typeof x === 'string').join(', ')
+    return ''
+}
+
+const metaAuthor = meta => {
+    const a = meta?.author
+    if (typeof a === 'string') return a
+    if (Array.isArray(a)) {
+        return a.map(x => typeof x === 'string' ? x : x?.name ?? '')
+            .filter(Boolean).join(', ')
+    }
+    return ''
+}
+
+const metaLanguage = meta => {
+    const l = meta?.language
+    if (typeof l === 'string') return l
+    if (Array.isArray(l)) return l.filter(x => typeof x === 'string').join(', ')
+    return ''
+}
+
 
 const resolveIndex = async (book, href) => {
     if (!book) return 0
@@ -172,7 +203,7 @@ const flattenToc = async (book, items, depth) => Promise.all(items.map(async ite
 // A loaded section document: strip the scripts and script-bearing
 // attributes the book carried (the paginator's iframe sandbox allows
 // scripts because of a WebKit bug that renders the sandbox useless without
-// it), and serialize — the importer's per-chapter XHTML.
+// it).
 const cleanSectionDoc = doc => {
     for (const script of Array.from(doc.querySelectorAll('script'))) script.remove()
     for (const el of Array.from(doc.querySelectorAll('*'))) {
@@ -182,9 +213,6 @@ const cleanSectionDoc = doc => {
     }
     return doc
 }
-
-const serializeSection = doc =>
-    new XMLSerializer().serializeToString(cleanSectionDoc(doc))
 
 const blobToBase64 = blob => new Promise(resolve => {
     if (!blob) { resolve(null); return }
@@ -198,14 +226,14 @@ const blobToBase64 = blob => new Promise(resolve => {
     reader.readAsDataURL(blob)
 })
 
-// -- parse mode: the importer's headless boot --------------------------------
-// Swift drives one section at a time and waits for the message each step
-// posts when done: evaluateJavaScript cannot await a Promise, so the
-// result of an async step is stashed and handed over synchronously —
-// `prepareSection(i)` posts `parseSection` when the string is ready, and
-// `takeSection()` hands it over and drops it (RAM hygiene: one section in
-// the JS heap at a time). The cover, small enough for one message body,
-// arrives whole on `parseCover`.
+// -- parse mode: the engine's headless boot ----------------------------------
+// Swift asks the engine two things and nothing else:
+//   * meta() — what the book IS: title, author, section count and the
+//     book's own (resolved) table of contents. The import records that and
+//     stops; the CONTENT is never copied out.
+//   * prepareSectionText(i) — one section's prose, for TTS only. The
+//     engine builds the section's document (decompressing it when the
+//     format needs that) and posts its text back.
 
 const bootParse = async () => {
     const res = await fetch(bookUrl)
@@ -217,38 +245,25 @@ const bootParse = async () => {
     say('parse: book built,', book?.sections?.length, 'sections')
 
     const toc = await flattenToc(book, book.toc ?? [], 0)
-    const author = typeof book.metadata?.author === 'string'
-        ? book.metadata.author
-        : Array.isArray(book.metadata?.author)
-            ? book.metadata.author.map(a =>
-                typeof a === 'string' ? a : a?.name ?? '').join(', ')
-            : ''
     window.__snParse = {
         meta: () => JSON.stringify({
-            title: typeof book.metadata?.title === 'string' ? book.metadata.title : '',
-            author,
-            language: book.metadata?.language ?? '',
+            title: metaTitle(book.metadata),
+            author: metaAuthor(book.metadata),
+            language: metaLanguage(book.metadata),
             sectionCount: book.sections.length,
             toc,
         }),
-        _section: null,
-        prepareSection: async index => {
+        prepareSectionText: async index => {
             try {
                 const section = book.sections[index]
                 if (!section) throw new Error(`no section ${index}`)
                 const doc = await section.createDocument()
-                window.__snParse._section = serializeSection(doc)
-                post({ type: 'parseSection', index, ok: true })
+                post({ type: 'parseSectionText', index, ok: true,
+                    text: doc.body?.textContent ?? '' })
             } catch (e) {
-                window.__snParse._section = null
-                post({ type: 'parseSection', index, ok: false,
+                post({ type: 'parseSectionText', index, ok: false,
                     message: String(e?.message ?? e) })
             }
-        },
-        takeSection: () => {
-            const s = window.__snParse._section
-            window.__snParse._section = null
-            return s
         },
         prepareCover: async () => {
             let b64 = null
@@ -269,6 +284,59 @@ const bootParse = async () => {
 // -- reader mode: the foliate-view boot --------------------------------------
 
 let view = null
+// The view is up only after init() has finished: a chapter jump that
+// arrives before that would race the initial layout. Such a jump is
+// HELD here and run the moment the book is ready — and the native side is
+// told it was held (the epub shell's "book-not-ready" reason), so its bar
+// does not claim a chapter the reader is not on yet.
+let readerReady = false
+let queuedJump = null
+
+// -- the reader's position ----------------------------------------------------
+// The native side's chapter bar reads these: the section on screen and the
+// fraction INSIDE it. The view's own report cannot supply them (it keeps
+// the index under section.current and the fraction is a whole-book one),
+// so they come from the renderer.
+
+let lastCfi = ''
+let sectionIndex = 0
+let sectionFraction = 0
+
+// The section the renderer is showing. The paginator knows it even when it
+// reports nothing: a section with no text (an image-only page) has no
+// visible range to measure, so the renderer dispatches NO relocation for it
+// and a bar that waits for one stays behind — the "the next button does
+// nothing" report. The fixed-layout renderer is NOT asked: it counts
+// SPREADS (a page of a two-page spread), not sections.
+const rendererSectionIndex = () => {
+    if (!view || view.isFixedLayout) return null
+    const primary = view.renderer?.primaryIndex
+    return typeof primary === 'number' && primary >= 0 ? primary : null
+}
+
+const postRelocated = () => post({
+    type: 'relocated',
+    index: sectionIndex,
+    fraction: sectionFraction,
+    total: view?.book?.sections.length ?? 0,
+    // A real foliate CFI — restore lands mid-chapter on reopen. (A
+    // `doc@…` pseudo-CFI from the old pre-foliate pipeline is never
+    // sent back here: the shell filters it out of the resume param.)
+    cfi: lastCfi,
+})
+
+// The position after a navigation the reader made: if the renderer moved to
+// another section, the bar follows it — even when the renderer itself said
+// nothing. The fraction restarts at the new section's top; a move inside
+// one section keeps the fraction it had.
+const reportPosition = () => {
+    const primary = rendererSectionIndex()
+    if (primary != null && primary !== sectionIndex) {
+        sectionIndex = primary
+        sectionFraction = 0
+    }
+    postRelocated()
+}
 
 // The appearance state — the query params are ReaderAppearance.queryItems'
 // exact names (the epub shell's set), and readerAppearance({...}) pushes
@@ -435,12 +503,27 @@ const startAutoScroll = () => {
     AUTO.raf = requestAnimationFrame(autoScrollFrame)
 }
 
-// A loaded section document: dress it (type layer), and attach the
-// per-document listeners — neither scroll nor click nor selection crosses
-// the iframe boundary, so a top-document listener never hears them.
+// The prose of every section the reader has shown, by section index. The
+// voice reads exactly what the page shows — the engine's own
+// decompression included, which is the point — and the cache lets the
+// native side ask for a section's text again after a late relocation.
+const loadedTexts = new Map()
+
+// A loaded section document: dress it (type layer), report its prose, and
+// attach the per-document listeners — neither scroll nor click nor
+// selection crosses the iframe boundary, so a top-document listener never
+// hears them.
 const onSectionLoad = ({ doc, index }) => {
     cleanSectionDoc(doc)
     applyTypeLayer(doc)
+
+    // The section's own prose, reported once it lands. The TTS path reads
+    // the page the reader is actually looking at.
+    try {
+        const text = doc.body?.textContent ?? ''
+        loadedTexts.set(index, text)
+        post({ type: 'text', index, text })
+    } catch (e) { /* a section without a body reports nothing */ }
 
     const win = doc.defaultView
     if (!win) return
@@ -526,18 +609,21 @@ const bootReader = async () => {
     document.body.append(view)
 
     view.addEventListener('load', e => onSectionLoad(e.detail))
+    // The view's own relocation carries the CFI, but NOT the section index:
+    // view.js re-emits the progress report, which keeps the index at
+    // `section.current` and the fraction as a WHOLE-BOOK fraction. The
+    // renderer below it knows both — `detail.index` is the section index
+    // and `detail.fraction` is the fraction INSIDE that section — so the
+    // two are combined here: the index and the section-local fraction the
+    // native side expects, with the view's CFI for the resume.
     view.addEventListener('relocate', e => {
-        const { cfi, index, fraction } = e.detail
-        post({
-            type: 'relocated',
-            index: index ?? 0,
-            fraction: fraction ?? 0,
-            total: view.book.sections.length,
-            // A real foliate CFI — restore lands mid-chapter on reopen. (A
-            // `doc@…` pseudo-CFI from the old pre-foliate pipeline is never
-            // sent back here: the shell filters it out of the resume param.)
-            cfi: cfi ?? '',
-        })
+        const { cfi } = e.detail
+        if (cfi) lastCfi = cfi
+        // The view's own report still names the section (progress.section
+        // .current) — the fallback when the renderer has not spoken yet.
+        const fromView = e.detail.section?.current
+        if (typeof fromView === 'number') sectionIndex = fromView
+        postRelocated()
     })
     view.addEventListener('external-link', e => {
         // The reader keeps its book: an external link posts and stands down
@@ -555,13 +641,26 @@ const bootReader = async () => {
     // stays loaded (each section is its own iframe; neighbours are destroyed
     // once off-screen) — a 50 MB book never holds its whole render.
     view.renderer.setAttribute('no-continuous-scroll', '')
+    // The renderer's own relocation: the section index and the fraction
+    // INSIDE that section. The view drops both when it re-emits (it keeps
+    // the whole-book fraction), so the truth is taken from here. Attached
+    // after open() — the renderer exists from there on — and before
+    // init(), so the first relocation is caught too.
+    view.renderer.addEventListener('relocate', e => {
+        const { index, fraction } = e.detail
+        // The paginator's index IS the section index (the manifest's spine
+        // numbering). The fixed-layout renderer's is a SPREAD index (a page
+        // of a two-page spread) — the same number the view's own report
+        // carries for such a book.
+        if (typeof index === 'number') sectionIndex = index
+        if (typeof fraction === 'number') sectionFraction = fraction
+        postRelocated()
+    })
     applyRendererAttributes()
     applyShellGround()
 
     // The book's own nested contents — real chapters, real depths, straight
-    // from the format's structure. The manifest carries the same rows (the
-    // importer parsed with this very module), so this is a fallback for
-    // books imported before the manifest had them.
+    // from the format's structure.
     const toc = await flattenToc(book, book.toc ?? [], 0)
     const tocItems = toc.map(item => ({
         label: item.label,
@@ -571,24 +670,48 @@ const bootReader = async () => {
     }))
     post({ type: 'toc', items: tocItems })
 
+    // The book report — the Linux shell's `book:` message, adapted to the
+    // iOS object channel. The native side takes the engine's chaptering
+    // (sectionCount) and the engine's contents as the truth for an
+    // engine-rendered book, and writes them into the manifest.
+    const meta = book.metadata ?? {}
+    post({
+        type: 'book',
+        title: metaTitle(meta),
+        author: metaAuthor(meta),
+        language: metaLanguage(meta),
+        sectionCount: book.sections.length,
+        toc: tocItems,
+    })
+
     // Resume: a real foliate CFI when there is one; else the manifest's
-    // chapter + mid-chapter fraction (the old persistence — and the first
-    // open's start chapter). The `doc@…` pseudo-CFI the pre-foliate
-    // pipeline persisted is not a foliate CFI — it resumes by chapter +
-    // fraction instead.
+    // chapter (the old persistence — and the first open's start chapter).
+    // The `doc@…` pseudo-CFI the pre-foliate pipeline persisted is not a
+    // foliate CFI. Without one, the manifest's chapter + the fraction
+    // INSIDE that chapter are the resume target: the paginator's anchor
+    // IS a section fraction (0…1 of the section), which is exactly the
+    // unit the reader reports and persists — the whole-book fraction the
+    // old pipeline stored would have pointed at the wrong place, and it
+    // is gone.
     say('initialising the view')
     const realCfi = resumeCfi && !resumeCfi.startsWith('doc@') ? resumeCfi : ''
     await view.init({ lastLocation: realCfi || undefined, showTextStart: !realCfi })
     if (!realCfi && (resumeChapter > 0 || resumeFraction > 0)) {
         const index = Math.max(0, Math.min(
             view.book.sections.length - 1, resumeChapter))
-        await view.renderer.goTo({
-            index,
-            anchor: resumeFraction > 0 && resumeFraction <= 1
-                ? resumeFraction : undefined,
-        })
+        const anchor = resumeFraction > 0 && resumeFraction <= 1
+            ? resumeFraction : undefined
+        await view.renderer.goTo({ index, anchor })
     }
     say('view ready')
+    readerReady = true
+    // A jump that arrived while the book was still opening runs now.
+    if (queuedJump != null) {
+        const target = queuedJump
+        queuedJump = null
+        say('running the held jump to', target)
+        view.goTo(target).then(() => reportPosition()).catch(() => {})
+    }
     post({ type: 'ready' })
 }
 
@@ -623,22 +746,58 @@ boot()
 // epub.js shell answers, landing on the view (in-renderer, immediate).
 
 window.readerGoChapter = index => {
-    if (!view) return
     const target = parseInt(index, 10)
     if (!Number.isFinite(target)) return
-    view.goTo(target).catch(() => {
-        // An out-of-range index foliate could not resolve: the reader falls
-        // back to the chapter it came from rather than keeping a bar that
-        // lies.
+    // The epub shell's exact contract, so the native side needs no special
+    // case: a jump that arrives before the book is up is HELD and retried
+    // when the book reports its first position (the chevrons pressed during
+    // the open used to be dropped silently — the "the buttons do nothing"
+    // report).
+    if (!view || !view.book) {
+        post({ type: 'goChapterFailed', index: target, reason: 'book-not-ready' })
+        return
+    }
+    if (!readerReady) {
+        // The book is still opening: HOLD the jump and say so. It runs the
+        // moment the view is ready, and the native side's own retry lands
+        // on the same chapter.
+        queuedJump = target
+        post({ type: 'goChapterFailed', index: target, reason: 'book-not-ready' })
+        return
+    }
+    const total = view.book.sections.length
+    if (target < 0 || target >= total) {
         post({ type: 'goChapterFailed', index: target, reason: 'bad-target' })
-    })
+        return
+    }
+    // foliate's own goTo swallows its errors (it logs and resolves), so the
+    // jump cannot report a failure through a rejection — the range check
+    // above is what stands in for it.
+    // The position is reported once the jump settles: a section with no
+    // text reports NO relocation of its own, and the bar would stay behind
+    // on the chapter it came from.
+    view.goTo(target).then(() => reportPosition()).catch(() => {})
 }
 window.readerGoToHref = href => {
     if (!view || !href) return
-    view.goTo(String(href)).catch(() => {})
+    view.goTo(String(href)).then(() => reportPosition()).catch(() => {})
 }
-window.readerNext = () => { view?.next() }
-window.readerPrev = () => { view?.prev() }
+window.readerNext = () => {
+    const turn = view?.next()
+    if (turn?.then) turn.then(() => reportPosition()).catch(() => {})
+}
+window.readerPrev = () => {
+    const turn = view?.prev()
+    if (turn?.then) turn.then(() => reportPosition()).catch(() => {})
+}
+window.readerSectionText = index => {
+    // The prose of a section the reader has shown — the TTS path. An absent
+    // key and a loaded-but-blank section are different answers, so the
+    // caller can tell "not shown yet" from "shown, and empty".
+    const key = parseInt(index, 10)
+    if (!Number.isFinite(key)) return ''
+    return loadedTexts.get(key) ?? ''
+}
 window.readerAppearance = json => {
     if (!json) return
     const a = typeof json === 'string' ? JSON.parse(json) : json
