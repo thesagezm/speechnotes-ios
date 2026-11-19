@@ -14,6 +14,7 @@ struct BenchmarkView: View {
     @State private var tier: BenchmarkTier = .kokoroFP32
     @State private var durationSeconds: Double = 180
     @State private var threads: Int? = nil
+    @State private var showingInfo = false
 
     var body: some View {
         Form {
@@ -40,8 +41,6 @@ struct BenchmarkView: View {
                 Toggle("Run at next launch", isOn: $runAtNextLaunch)
             } header: {
                 Text("Configuration")
-            } footer: {
-                Text("«Run at next launch» starts this configuration as soon as the app opens — the device-side replacement for launch arguments. Corpus: \(BenchmarkCorpus.chars) chars (\(BenchmarkCorpus.id)).")
             }
 
             Section {
@@ -61,10 +60,6 @@ struct BenchmarkView: View {
                 }
             } header: {
                 Text("Session")
-            } footer: {
-                if model.phase == .running {
-                    Text("You can leave this screen, lock the phone, or background the app — the run holds its own audio assertion. Stop lands between chunks and still exports.")
-                }
             }
 
             Section {
@@ -80,11 +75,22 @@ struct BenchmarkView: View {
                         ))
                     }
                 }
-            } footer: {
-                Text("Protocol for comparable numbers: charge ≥ 80 %, airplane mode, auto-brightness off, fixed brightness, start, then lock the screen. Don't play notes while a run is active — a live engine competes for the same cores and poisons the RTF.")
             }
         }
         .navigationTitle("Benchmark mode")
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button {
+                    showingInfo = true
+                } label: {
+                    Image(systemName: "info.circle")
+                }
+                .accessibilityLabel("About benchmark mode")
+            }
+        }
+        .sheet(isPresented: $showingInfo) {
+            BenchmarkInfoSheet()
+        }
     }
 
     @ViewBuilder
@@ -137,5 +143,41 @@ struct BenchmarkView: View {
             sample.levelPercent.map { String(format: "%.0f %%", $0) } ?? "?"
         }
         return "\(level(s.batteryStart)) → \(level(s.batteryEnd)) (\(s.batteryEnd.state))"
+    }
+}
+
+/// The nav-bar info button's sheet: the run protocol and the caveats the old
+/// footers carried, stated once (the EncryptionSettingsView template).
+private struct BenchmarkInfoSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                infoRow("Protocol for comparable numbers",
+                        "Charge to at least 80 %, switch on airplane mode, turn auto-brightness off and fix the brightness, start the run, then lock the screen.")
+                infoRow("During a run",
+                        "You can leave this screen, lock the phone or background the app — the run holds its own audio assertion. Stop lands between chunks and still exports. Don't play notes while a run is active: a live engine competes for the same cores and poisons the RTF.")
+                infoRow("Run at next launch",
+                        "Starts this configuration as soon as the app opens — the device-side replacement for launch arguments.")
+                infoRow("Corpus",
+                        "The text every tier reads: \(BenchmarkCorpus.chars) chars (\(BenchmarkCorpus.id)).")
+            }
+            .navigationTitle("About benchmark mode")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+
+    private func infoRow(_ title: String, _ detail: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.subheadline.weight(.semibold))
+            Text(detail).font(.footnote).foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 2)
     }
 }

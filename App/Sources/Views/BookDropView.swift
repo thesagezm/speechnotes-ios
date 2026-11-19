@@ -25,6 +25,7 @@ struct BookDropView: View {
     }
 
     @State private var showingSend = false
+    @State private var showingInfo = false
 
     var body: some View {
         Form {
@@ -53,8 +54,6 @@ struct BookDropView: View {
                     .buttonStyle(.bordered)
                     .accessibilityLabel(enabled ? "Stop receiving" : "Start receiving")
                 }
-            } footer: {
-                Text("Send a book or audiobook, a note, an exported recording or a .jex archive to a computer running LocalSend or another Speechnotes device. Receiving stays on its own toggle below.")
             }
 
             Section {
@@ -71,8 +70,6 @@ struct BookDropView: View {
                 Toggle("Accept transfers automatically", isOn: $autoAccept)
             } header: {
                 Text("Receive")
-            } footer: {
-                Text("Devices on the same network can send files to this iPhone. Nothing leaves the network and no account is involved. An access code, when set, must be typed on the sending device before any transfer starts.")
             }
 
             // A transfer streaming in right now: which file, and how much
@@ -102,25 +99,6 @@ struct BookDropView: View {
                 } header: {
                     Text("Receiving")
                 }
-            }
-
-            Section {
-                instructionRow(
-                    step: "1",
-                    text: "Open LocalSend on your computer (or another BookDrop app)."
-                )
-                instructionRow(
-                    step: "2",
-                    text: "Pick a book, audiobook, note, exported recording or .jex archive and hit Send."
-                )
-                instructionRow(
-                    step: "3",
-                    text: "Choose this iPhone (\(deviceAlias)) as the recipient. Books land on the Books shelf; JEX archives and markdown notes import into Notes; WAVs land in Storage."
-                )
-            } header: {
-                Text("How to send from a PC")
-            } footer: {
-                Text("BookDrop speaks the open LocalSend protocol — the same one the LocalSend desktop and mobile apps use.")
             }
 
             Section("Recent transfers") {
@@ -166,6 +144,19 @@ struct BookDropView: View {
             }
         }
         .navigationTitle("BookDrop")
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button {
+                    showingInfo = true
+                } label: {
+                    Image(systemName: "info.circle")
+                }
+                .accessibilityLabel("About BookDrop")
+            }
+        }
+        .sheet(isPresented: $showingInfo) {
+            BookDropInfoSheet(deviceAlias: deviceAlias)
+        }
         // The access-code field must release the keyboard: tap outside or
         // drag the list.
         .scrollDismissesKeyboard(.immediately)
@@ -204,16 +195,43 @@ struct BookDropView: View {
         }
         return receiver.lastError == nil ? "Starting…" : "Unavailable"
     }
+}
 
-    private func instructionRow(step: String, text: String) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            Text(step)
-                .font(.caption.weight(.bold))
-                .foregroundStyle(.white)
-                .frame(width: 20, height: 20)
-                .background(Color.accentColor, in: Circle())
-            Text(text)
-                .font(.subheadline)
+/// The nav-bar info button's sheet: the setup steps and the privacy/protocol
+/// facts the old footers carried, stated once (the EncryptionSettingsView
+/// template — footers out, info button in).
+private struct BookDropInfoSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let deviceAlias: String
+
+    var body: some View {
+        NavigationStack {
+            List {
+                infoRow("What BookDrop moves",
+                        "A book or audiobook, a note, an exported recording or a .jex archive — to a computer running LocalSend or another Speechnotes device, and back the other way.")
+                infoRow("Sending from a PC",
+                        "Open LocalSend on the computer (or another BookDrop app), pick the file and hit Send, then choose this iPhone (\(deviceAlias)) as the recipient. Books land on the Books shelf; JEX archives and markdown notes import into Notes; WAVs land in Storage.")
+                infoRow("Receiving",
+                        "Devices on the same network can send files to this iPhone once receiving is on. An access code, when set, must be typed on the sending device before any transfer starts.")
+                infoRow("Stays on the network",
+                        "Nothing leaves the local network and no account is involved.")
+                infoRow("The protocol",
+                        "BookDrop speaks the open LocalSend protocol — the same one the LocalSend desktop and mobile apps use.")
+            }
+            .navigationTitle("About BookDrop")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+
+    private func infoRow(_ title: String, _ detail: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.subheadline.weight(.semibold))
+            Text(detail).font(.footnote).foregroundStyle(.secondary)
         }
         .padding(.vertical, 2)
     }
