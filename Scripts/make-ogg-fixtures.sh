@@ -51,6 +51,20 @@ gen -f lavfi -i "sine=frequency=330:duration=5" \
 gen -f lavfi -i "sine=frequency=220:duration=2" \
     -c:a libvorbis -b:a 64k "$OUT/realvorbis.oga"
 
+# The same 3 s sine with an embedded COVER, the shape every store-bought
+# Opus encode carries. ffmpeg 7.1+ can mux a real attached_pic; the 6.x
+# on this box cannot (`Unsupported codec id in stream 1`), so the picture
+# goes through the muxer's metadata passthrough instead — it lands as the
+# SAME METADATA_BLOCK_PICTURE Vorbis comment an attached_pic would write,
+# which is what OggReader.artwork parses. The constant is the FLAC picture
+# block, big-endian throughout: type 3 (front cover) | mime "image/png" |
+# description "Cover" | width/height/depth/colours = 0 (unknown) | the
+# bytes of a stock 1×1 steelblue PNG.
+gen -f lavfi -i "sine=frequency=440:duration=3" \
+    -c:a libopus -b:a 32k \
+    -metadata title="Cover Fixture" -metadata artist="Speechnotes" \
+    -metadata METADATA_BLOCK_PICTURE="AAAAAwAAAAlpbWFnZS9wbmcAAAAFQ292ZXIAAAAAAAAAAAAAAAAAAAAAAAAARolQTkcNChoKAAAADUlIRFIAAAABAAAAAQgGAAAAHxXEiQAAAA1JREFUeNpj/M/AUA8ABIUBgISpjCEAAAAASUVORK5CYII=" "$OUT/cover.opus"
+
 # A file whose bytes are NOT Ogg at all, with an Ogg-ish name — the shape a
 # mis-muxed or truncated download takes. Hand-written on purpose: no encoder
 # will produce it.

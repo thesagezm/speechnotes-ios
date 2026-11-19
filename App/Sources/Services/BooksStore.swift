@@ -184,7 +184,12 @@ final class BooksStore: ObservableObject {
     /// shape; manifests below the current rev get ONE repair pass even if
     /// their `-verified` terminal stamp says otherwise. Rev 1 = the adaptive
     /// moov slice (Dune's 16.3 MB faststart moov sat past the old 8 MB cut).
-    nonisolated static let audioReaderRev = 1
+    /// Rev 2 = Ogg/Opus artwork extraction. Every existing Opus book was
+    /// stamped `ogg-chapters-verified` (or `ogg-uniform-verified`) by rev 1,
+    /// and WITHOUT the bump those terminal stamps would keep the new cover
+    /// reader away from the books already on the shelf — the same repair
+    /// pass that carried the Dune moov fix to the existing library.
+    nonisolated static let audioReaderRev = 2
 
     /// Hard ceiling on the ADAPTIVE MP4 head read (`audioChapterHeadSlice`):
     /// a faststart file whose moov exceeds the 8 MB default gets re-read to
@@ -1198,6 +1203,17 @@ final class BooksStore: ObservableObject {
         // 8 MB tail for the final page's granule (the total sample count).
         // A 664 MB book is read in 16 MB.
         if Self.isOggContainer(original), let ogg = oggSummary(url: original) {
+            // The container's own artwork (METADATA_BLOCK_PICTURE in the
+            // OpusTags comments) is written the moment the summary hands it
+            // over — this branch runs BEFORE the duration wait and the
+            // metadata read below, which is exactly where a cover belongs:
+            // it is the first thing the shelf tile asks for. AVFoundation
+            // has no Ogg demuxer, so before rev 2 every Opus book's tile
+            // stayed on the format glyph no matter what the file carried.
+            if let artwork = ogg.artwork,
+               Self.writeAudioCover(artwork, to: directory) {
+                book.hasCover = true
+            }
             if book.audioDuration == nil, ogg.duration > 0 {
                 book.audioDuration = ogg.duration
             }
@@ -1397,6 +1413,20 @@ final class BooksStore: ObservableObject {
     nonisolated private static func metadataData(_ items: [AVMetadataItem], key: String) -> Data? {
         guard let item = items.first(where: { $0.commonKey?.rawValue == key }) else { return nil }
         return item.dataValue
+    }
+
+    /// Normalizes one embedded artwork payload into the shelf's cover.jpg.
+    /// Re-encoded through UIImage on purpose: some covers arrive as PNG or
+    /// odd-size HEIC payloads that a raw `.write` would store under a .jpg
+    /// name the shelf's UIImage(data:) still decodes, but the FILES app and
+    /// QuickLook reject. One normalized JPEG, always decodable. False when
+    /// the payload does not decode — the tile keeps the format glyph rather
+    /// than a file nothing can open.
+    nonisolated private static func writeAudioCover(_ artwork: Data, to directory: URL) -> Bool {
+        guard let image = UIImage(data: artwork),
+              let jpeg = image.jpegData(compressionQuality: 0.85) else { return false }
+        try? jpeg.write(to: directory.appendingPathComponent("cover.jpg"), options: [.atomic])
+        return true
     }
 
     /// Renders one PDF page as a shelf-cover JPEG. Width-fixed (600 pt),

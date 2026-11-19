@@ -178,6 +178,15 @@ public enum OggReader {
         /// them — empty means the stream has none and the caller falls back
         /// to uniform division.
         public let chapters: [OggChapter]
+        /// The embedded cover art, when the OpusTags comments carry one
+        /// (`METADATA_BLOCK_PICTURE`, or the legacy `COVERART`). Raw image
+        /// bytes — JPEG or PNG, whatever the muxer embedded; the caller
+        /// re-encodes to the shelf's cover.jpg. nil is the "no cover in the
+        /// container" state, and it was the state of EVERY Opus book's shelf
+        /// tile before rev 2: AVFoundation has no Ogg demuxer, so the
+        /// metadata read the other formats get their cover from never saw
+        /// anything here.
+        public let artwork: Data?
 
         public var duration: TimeInterval {
             guard sampleRate > 0 else { return 0 }
@@ -191,6 +200,7 @@ public enum OggReader {
     public static func summary(head: Data, tail: Data) throws -> Summary {
         var info: StreamInfo?
         var tagsChapters: [OggChapter] = []
+        var tagsArtwork: Data?
         var lastGranule: UInt64 = 0
         var sawPage = false
         // Packets assemble ACROSS pages, exactly as `read` assembles them.
@@ -234,8 +244,19 @@ public enum OggReader {
                 if info == nil, packet.starts(with: Data(Self.opusHeadMagic)) {
                     info = streamInfo(firstPacket: packet)
                 }
-                if tagsChapters.isEmpty, packet.starts(with: tagsMagic) {
-                    tagsChapters = chapters(fromTagsPacket: packet)
+                if packet.starts(with: tagsMagic), tagsChapters.isEmpty || tagsArtwork == nil {
+                    // Chapters and artwork live in the same comment list,
+                    // but a muxer can write either without the other — and
+                    // a multiplexed stream can carry a second OpusTags
+                    // packet with the one the first lacked. Each is latched
+                    // on its own first parseable source, the same
+                    // keep-scanning rule the chapter latch already used.
+                    if tagsChapters.isEmpty {
+                        tagsChapters = chapters(fromTagsPacket: packet)
+                    }
+                    if tagsArtwork == nil {
+                        tagsArtwork = artwork(fromTagsPacket: packet)
+                    }
                 }
             }
             if page.granule > 0 { lastGranule = page.granule }
@@ -257,7 +278,8 @@ public enum OggReader {
             preSkip: info.preSkip,
             totalSamples: lastGranule,
             variant: info.codec == .opus ? "opus" : "ogg",
-            chapters: tagsChapters
+            chapters: tagsChapters,
+            artwork: tagsArtwork
         )
     }
 
@@ -276,19 +298,13 @@ public enum OggReader {
     private static let tagsMagic = Data(opusTagsMagic)
     private static let opusHeadMagic: [UInt8] = [0x4F, 0x70, 0x75, 0x73, 0x48, 0x65, 0x61, 0x64]
 
-    /// Chapter marks out of an OpusTags packet: magic(8), vendor length (4
-    /// LE) + vendor, comment count (4 LE), then count × (length (4 LE) +
-    /// UTF-8 comment).
-    ///
-    /// Chapter comments follow the Xiph chapter extension as ffmpeg and
-    /// m4b-tool actually write it: `CHAPTER001=00:00:00.000` (the BARE key
-    /// carries the TIMECODE) and `CHAPTER001NAME=Chapter 1` (the NAME suffix
-    /// carries the title). `CHAPTER001URL=…` is a literal URL in the spec,
-    /// but some writers put a timecode there instead — accepted as a
-    /// fallback when it parses as one. Suffix matching is case-insensitive;
-    /// anything unparseable is skipped, and a stream with no usable marks
-    /// yields [] (the caller's uniform fallback takes over).
-    static func chapters(fromTagsPacket packet: Data) -> [OggChapter] {
+    /// The comment key/value pairs of an OpusTags packet, in stream order:
+    /// magic(8), vendor length (4 LE) + vendor, comment count (4 LE), then
+    /// count × (length (4 LE) + UTF-8 comment). The shared walker for
+    /// everything the comments carry — chapters and artwork both read this
+    /// list, and a corrupt count or a truncated packet stops the walk the
+    /// same way for both (partial, never wedged).
+    static func comments(fromTagsPacket packet: Data) -> [(key: String, value: String)] {
         let bytes = [UInt8](packet)
         guard bytes.count >= 8, Array(bytes.prefix(8)) == opusTagsMagic else { return [] }
         func le32(_ index: Int) -> Int {
@@ -303,9 +319,7 @@ public enum OggReader {
         let count = le32(cursor)
         cursor += 4
         guard count >= 0, count <= 100_000 else { return [] }
-        var titles: [String: String] = [:]   // "001" → title
-        var times: [String: String] = [:]    // "001" → bare-key timecode
-        var urlTimes: [String: String] = [:] // "001" → url-field timecode
+        var out: [(key: String, value: String)] = []
         for _ in 0..<count {
             guard cursor + 4 <= bytes.count else { break }
             let length = le32(cursor)
@@ -314,8 +328,26 @@ public enum OggReader {
             let line = String(bytes: bytes[cursor..<(cursor + length)], encoding: .utf8) ?? ""
             cursor += length
             guard let separator = line.firstIndex(of: "=") else { continue }
-            let key = String(line[..<separator])
-            let value = String(line[line.index(after: separator)...])
+            out.append((String(line[..<separator]), String(line[line.index(after: separator)...])))
+        }
+        return out
+    }
+
+    /// Chapter marks out of an OpusTags packet.
+    ///
+    /// Chapter comments follow the Xiph chapter extension as ffmpeg and
+    /// m4b-tool actually write it: `CHAPTER001=00:00:00.000` (the BARE key
+    /// carries the TIMECODE) and `CHAPTER001NAME=Chapter 1` (the NAME suffix
+    /// carries the title). `CHAPTER001URL=…` is a literal URL in the spec,
+    /// but some writers put a timecode there instead — accepted as a
+    /// fallback when it parses as one. Suffix matching is case-insensitive;
+    /// anything unparseable is skipped, and a stream with no usable marks
+    /// yields [] (the caller's uniform fallback takes over).
+    static func chapters(fromTagsPacket packet: Data) -> [OggChapter] {
+        var titles: [String: String] = [:]   // "001" → title
+        var times: [String: String] = [:]    // "001" → bare-key timecode
+        var urlTimes: [String: String] = [:] // "001" → url-field timecode
+        for (key, value) in comments(fromTagsPacket: packet) {
             // Vorbis comment field names are case-insensitive.
             let upperKey = key.uppercased()
             guard upperKey.hasPrefix("CHAPTER") else { continue }
@@ -364,6 +396,83 @@ public enum OggReader {
             seconds = seconds * 60 + value
         }
         return seconds
+    }
+
+    // MARK: - Embedded artwork
+
+    /// Cover art out of an OpusTags packet. Two conventions exist in the
+    /// wild, and both must be understood because the books on the shelf were
+    /// muxed years apart:
+    ///
+    ///  - `METADATA_BLOCK_PICTURE` — base64 of the FLAC picture block; what
+    ///    ffmpeg, foobar2000 and every current muxer write. Preferred.
+    ///  - `COVERART` — base64 of the RAW image bytes (its `COVERARTMIME`
+    ///    companion names the type); the pre-2012 form old rippers still
+    ///    produce. The MIME companion is ignored: the caller re-encodes
+    ///    through UIImage, which sniffs the bytes itself.
+    ///
+    /// Every picture comment is scanned and a FLAC `front cover` (type 3)
+    /// wins over any other type — muxers that embed several write the scans
+    /// and thumbnails in tag order, and the shelf tile wants the front. No
+    /// comment that parses → nil, the caller's "no cover" state.
+    static func artwork(fromTagsPacket packet: Data) -> Data? {
+        var anyPicture: Data?          // first METADATA_BLOCK_PICTURE that parses, any type
+        var legacyCover: Data?         // legacy COVERART, the last resort
+        for (key, value) in comments(fromTagsPacket: packet) {
+            switch key.uppercased() {
+            case "METADATA_BLOCK_PICTURE":
+                guard let picture = Self.flacPictureBlock(value) else { break }
+                if picture.type == 3 { return picture.image }
+                if anyPicture == nil { anyPicture = picture.image }
+            case "COVERART":
+                if legacyCover == nil,
+                   let raw = Data(base64Encoded: value, options: [.ignoreUnknownCharacters]),
+                   !raw.isEmpty {
+                    legacyCover = raw
+                }
+            default:
+                break
+            }
+        }
+        return anyPicture ?? legacyCover
+    }
+
+    /// The image inside one METADATA_BLOCK_PICTURE comment value: base64 of
+    /// the FLAC picture block — type (4 BE), mime length (4 BE) + mime,
+    /// description length (4 BE) + description, width/height/depth/colours
+    /// (4×4 BE), data length (4 BE) + data. Every field is BIG-endian here
+    /// (FLAC's streamable-metadata layout), unlike the Vorbis comment
+    /// lengths around it, which are little-endian — the pairing trips
+    /// hand-rolled parsers, and the type-first/BE contrast is exactly why.
+    ///
+    /// The structure validates before anything is handed back: sane lengths
+    /// that stay inside the block, and a data length that reaches to (or
+    /// past) the end — some writers pad the base64, so trailing bytes are
+    /// tolerated but a short block is rejected. nil for anything that does
+    /// not hold together: a random base64 blob fails the length checks, and
+    /// half an image is worse than none.
+    static func flacPictureBlock(_ base64: String) -> (type: Int, image: Data)? {
+        guard let block = Data(base64Encoded: base64, options: [.ignoreUnknownCharacters]),
+              block.count >= 32 else { return nil }
+        let bytes = [UInt8](block)
+        func be32(_ index: Int) -> Int {
+            (Int(bytes[index]) << 24) | (Int(bytes[index + 1]) << 16)
+                | (Int(bytes[index + 2]) << 8) | Int(bytes[index + 3])
+        }
+        let type = be32(0)
+        var cursor = 4
+        let mimeLength = be32(cursor)
+        cursor += 4 + mimeLength
+        guard mimeLength >= 0, cursor + 4 <= bytes.count else { return nil }
+        let descriptionLength = be32(cursor)
+        cursor += 4 + descriptionLength
+        guard descriptionLength >= 0, cursor + 20 <= bytes.count else { return nil }
+        // width, height, depth, colours — skipped: the shelf scales the image itself.
+        cursor += 16
+        let dataLength = be32(cursor)
+        cursor += 4
+        guard dataLength > 0, dataLength <= bytes.count - cursor else { return nil }
+        return (type, Data(bytes[cursor..<(cursor + dataLength)]))
     }
 
     /// The last `OggS` capture pattern at or after `from` whose page header

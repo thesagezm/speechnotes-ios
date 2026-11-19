@@ -357,4 +357,196 @@ final class OggReaderTests: XCTestCase {
         XCTAssertNil(OggReader.chapterTimecode("not a time"))
         XCTAssertNil(OggReader.chapterTimecode(""))
     }
+
+    // MARK: - Embedded artwork
+
+    /// The FLAC picture block a muxer writes into METADATA_BLOCK_PICTURE —
+    /// big-endian throughout, the deliberate contrast with the
+    /// little-endian Vorbis comment lengths around it.
+    private func flacPictureBlock(type: UInt32 = 3, mime: String = "image/jpeg", description: String = "", image: Data) -> Data {
+        var out = Data()
+        var t = type.bigEndian
+        withUnsafeBytes(of: &t) { out.append(contentsOf: $0) }
+        var mimeLength = UInt32(mime.utf8.count).bigEndian
+        withUnsafeBytes(of: &mimeLength) { out.append(contentsOf: $0) }
+        out.append(contentsOf: mime.utf8)
+        var descriptionLength = UInt32(description.utf8.count).bigEndian
+        withUnsafeBytes(of: &descriptionLength) { out.append(contentsOf: $0) }
+        out.append(contentsOf: description.utf8)
+        // width/height/depth/colours — all zero, "unknown", which the spec allows.
+        out.append(contentsOf: [UInt8](repeating: 0, count: 16))
+        var dataLength = UInt32(image.count).bigEndian
+        withUnsafeBytes(of: &dataLength) { out.append(contentsOf: $0) }
+        out.append(image)
+        return out
+    }
+
+    /// Bytes with a JPEG's SOI marker — artwork() does not (and must not)
+    /// validate image content; the caller's UIImage decode is the validator.
+    private let sampleImage = Data([0xFF, 0xD8, 0xFF, 0xE0]) + Data(repeating: 0xAB, count: 16)
+
+    private func tagsPacket(comments: [String]) -> Data {
+        var out = Data("OpusTags".utf8)
+        var vendor = UInt32(0).littleEndian
+        withUnsafeBytes(of: &vendor) { out.append(contentsOf: $0) }
+        var count = UInt32(comments.count).littleEndian
+        withUnsafeBytes(of: &count) { out.append(contentsOf: $0) }
+        for comment in comments {
+            var length = UInt32(comment.utf8.count).littleEndian
+            withUnsafeBytes(of: &length) { out.append(contentsOf: $0) }
+            out.append(contentsOf: comment.utf8)
+        }
+        return out
+    }
+
+    func testArtworkComesFromMetadataBlockPicture() {
+        let picture = flacPictureBlock(image: sampleImage)
+        let artwork = OggReader.artwork(fromTagsPacket: tagsPacket(comments: [
+            "ENCODER=Lavf62.12.101",
+            "TITLE=Dune",
+            "METADATA_BLOCK_PICTURE=" + picture.base64EncodedString(),
+        ]))
+        XCTAssertEqual(artwork, sampleImage)
+    }
+
+    /// Muxers that embed several images (a scan, a thumbnail, THEN the
+    /// front cover) write them in tag order — the shelf tile wants the
+    /// front cover (FLAC picture type 3), whichever position it holds.
+    func testFrontCoverPictureWinsOverOtherTypes() {
+        let icon = flacPictureBlock(type: 2, image: Data(repeating: 0x11, count: 8))
+        let front = flacPictureBlock(type: 3, image: sampleImage)
+        XCTAssertEqual(
+            OggReader.artwork(fromTagsPacket: tagsPacket(comments: [
+                "METADATA_BLOCK_PICTURE=" + icon.base64EncodedString(),
+                "METADATA_BLOCK_PICTURE=" + front.base64EncodedString(),
+            ])),
+            sampleImage)
+        XCTAssertEqual(
+            OggReader.artwork(fromTagsPacket: tagsPacket(comments: [
+                "METADATA_BLOCK_PICTURE=" + front.base64EncodedString(),
+                "METADATA_BLOCK_PICTURE=" + icon.base64EncodedString(),
+            ])),
+            sampleImage)
+    }
+
+    /// The legacy form old rippers wrote before METADATA_BLOCK_PICTURE
+    /// existed: the raw image bytes, base64, in COVERART (COVERARTMIME
+    /// names the type and is ignored — the caller's decode sniffs the
+    /// bytes itself).
+    func testLegacyCoverArtIsReadWhenNoPictureBlock() {
+        let artwork = OggReader.artwork(fromTagsPacket: tagsPacket(comments: [
+            "COVERARTMIME=image/jpeg",
+            "COVERART=" + sampleImage.base64EncodedString(),
+        ]))
+        XCTAssertEqual(artwork, sampleImage)
+    }
+
+    /// Both forms in one packet: the modern picture block wins.
+    func testPictureBlockWinsOverLegacyCoverArt() {
+        let artwork = OggReader.artwork(fromTagsPacket: tagsPacket(comments: [
+            "COVERART=" + Data(repeating: 0x22, count: 8).base64EncodedString(),
+            "METADATA_BLOCK_PICTURE=" + flacPictureBlock(image: sampleImage).base64EncodedString(),
+        ]))
+        XCTAssertEqual(artwork, sampleImage)
+    }
+
+    /// Corruption must yield "no cover", never half an image or a crash:
+    /// base64 that does not decode, a block too short for its header, and
+    /// a data length that lies past the block's end all fall to nil.
+    func testCorruptPictureCommentsYieldNoArtwork() {
+        let notBase64 = OggReader.artwork(fromTagsPacket: tagsPacket(comments: [
+            "METADATA_BLOCK_PICTURE=this is not base64 !!!",
+        ]))
+        XCTAssertNil(notBase64)
+
+        let truncated = OggReader.artwork(fromTagsPacket: tagsPacket(comments: [
+            "METADATA_BLOCK_PICTURE=" + Data(repeating: 0x00, count: 10).base64EncodedString(),
+        ]))
+        XCTAssertNil(truncated)
+
+        // A block whose declared image length overshoots the actual bytes.
+        // dataLength is the 4 big-endian bytes immediately BEFORE the image
+        // data, so its low byte sits at (end − image − 1) — 20→84, well
+        // past the 20 bytes that actually follow it.
+        var lying = flacPictureBlock(image: sampleImage)
+        lying[lying.count - sampleImage.count - 1] = lying[lying.count - sampleImage.count - 1] &+ 0x40
+        let overshoot = OggReader.artwork(fromTagsPacket: tagsPacket(comments: [
+            "METADATA_BLOCK_PICTURE=" + lying.base64EncodedString(),
+        ]))
+        XCTAssertNil(overshoot)
+
+        // Legacy base64 that does not decode, either.
+        XCTAssertNil(OggReader.artwork(fromTagsPacket: tagsPacket(comments: [
+            "COVERART=%not-base64%",
+        ])))
+    }
+
+    /// Chapters and artwork ride the SAME tags packet, assembled across
+    /// pages — the Harry Potter shape (933 KB of comments) with a cover on
+    /// top. summary() must hand back both, not trade one for the other.
+    func testSummaryCarriesArtworkAndChaptersFromOneSpanningPacket() throws {
+        let tags = tagsPacket(comments: [
+            "ENCODER=Lavf62.12.101",
+            "LYRICS=" + String(repeating: "x", count: 100_000),
+            "METADATA_BLOCK_PICTURE=" + flacPictureBlock(image: sampleImage).base64EncodedString(),
+            "CHAPTER000=00:00:00.000",
+            "CHAPTER000NAME=Opening Credits",
+            "CHAPTER001=00:01:04.208",
+            "CHAPTER001NAME=Chapter One",
+        ])
+        let bytes = [UInt8](tags)
+        var segments: [Data] = []
+        var cursor = 0
+        while cursor + 255 < bytes.count {
+            segments.append(Data(bytes[cursor..<(cursor + 255)]))
+            cursor += 255
+        }
+        segments.append(Data(bytes[cursor...]))
+
+        var head = oggPage(segments: [opusHeadPacket()], seq: 0)
+        var seq: UInt32 = 1
+        while !segments.isEmpty {
+            let group = Array(segments.prefix(16))
+            segments.removeFirst(group.count)
+            head += oggPage(segments: group, seq: seq)
+            seq += 1
+        }
+        let tail = oggPage(segments: [Data(repeating: 0xFC, count: 100)], granule: 4_800_000, seq: seq)
+
+        let summary = try OggReader.summary(head: head, tail: tail)
+        XCTAssertEqual(summary.artwork, sampleImage)
+        XCTAssertEqual(summary.chapters.count, 2)
+        XCTAssertEqual(summary.chapters[0].title, "Opening Credits")
+    }
+
+    /// A file with no picture comments reports no artwork — nil, the
+    /// caller's "no cover" state — and chapters still parse from the same
+    /// packet.
+    func testSummaryWithoutPicturesReportsNoArtwork() throws {
+        let head = oggPage(segments: [opusHeadPacket()], seq: 0)
+            + oggPage(segments: [tagsPacket(comments: [
+                "CHAPTER001=00:00:00.000",
+                "CHAPTER001NAME=Only Mark",
+            ])], seq: 1)
+        let tail = oggPage(segments: [Data(repeating: 0xFC, count: 100)], granule: 4_800_000, seq: 2)
+        let summary = try OggReader.summary(head: head, tail: tail)
+        XCTAssertNil(summary.artwork)
+        XCTAssertEqual(summary.chapters.count, 1)
+    }
+
+    /// The real-muxer counterpart: a fixture ffmpeg produced with an
+    /// attached cover (`-disposition:v attached_pic`), the exact way a
+    /// store book's Opus encode carries its art. The block inside is
+    /// base64-of-PNG with a front-cover type; the summary must surface the
+    /// image bytes AND still read duration and chapters off the same file.
+    func testSummaryExtractsArtworkFromRealMuxer() throws {
+        let summary = try OggReader.summary(
+            head: try load("cover.opus"),
+            tail: try load("cover.opus"))
+        XCTAssertEqual(summary.variant, "opus")
+        XCTAssertGreaterThan(summary.duration, 2.5)
+        let artwork = try XCTUnwrap(summary.artwork, "ffmpeg's attached_pic cover did not survive the summary")
+        XCTAssertEqual(Array(artwork.prefix(8)), [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A],
+                       "expected PNG magic — ffmpeg embeds the attached_pic as PNG")
+    }
 }
