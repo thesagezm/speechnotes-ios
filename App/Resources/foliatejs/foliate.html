@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<!-- The foliate-js shell page for the headless document family
+     (.mobi/.azw3/.fb2/.rtf/.html/…): the vendored readest-fork modules
+     (see foliatejs/LICENSE) parse the book's ORIGINAL file in the webview —
+     nothing is converted or pre-parsed on the native side. Ported from the
+     Linux reader's sn-ui/assets/sn-shell.html, with the same load-bearing
+     quirk: an external <script type="module" src> never executes on this
+     WebKit's custom-scheme pages (measured on WebKitGTK there, true here
+     too), so the scheme handler splices sn-shell-ios.js INLINE over the
+     sn-shell-module marker below. Book content stays guarded twice over:
+     the paginator renders sections into sandboxed blob: iframes, and the
+     shell strips script elements from every loaded document as well. -->
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'self' blob: data:; script-src 'self' 'unsafe-inline' blob:; style-src 'self' blob: 'unsafe-inline'; img-src 'self' blob: data:; font-src 'self' blob: data:; media-src 'self' blob: data:; object-src 'none'; frame-src blob:;">
+<!-- viewport-fit=cover so env(safe-area-inset-bottom) is real — the view
+     stops above the floating transport the same way the epub shell does. -->
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>book</title>
+<style>
+  html, body {
+      margin: 0; padding: 0; width: 100%; height: 100%;
+      background: #ffffff; overflow: hidden;
+  }
+  foliate-view {
+      width: 100%; height: 100%;
+      /* The floating transport sits over the bottom safe area; the page's
+         last lines must stay clear of it in BOTH flows (the epub shell's
+         applyPadding rule — paginated columns are measured off the
+         container, scrolled sections just end higher). */
+      height: calc(100% - env(safe-area-inset-bottom));
+  }
+  /* The shell's ground colour follows the reader's scheme so a dark theme
+     never flashes white before the book's own page paints. */
+  html.sn-dark, html.sn-dark body { background: var(--sn-bg, #1c1c1e); }
+</style>
+</head>
+<body>
+<!-- The error hook: a classic script, installed before the module — if the
+     module graph fails for any reason, the failure still reaches Swift
+     through the reader channel instead of dying silently in a white pane.
+     Capture phase, so a resource's load error (a 404'd import) lands here
+     too. -->
+<script>
+window.__snLastError = null
+window.addEventListener('error', function (e) {
+    var message = e.message ||
+        (e.target && (e.target.src || e.target.href)) ||
+        String(e.type || 'error')
+    window.__snLastError = message
+    try {
+        window.webkit.messageHandlers.reader.postMessage(
+            { type: 'error', message: message })
+    } catch (_) {}
+})
+window.addEventListener('unhandledrejection', function (e) {
+    var reason = e.reason && e.reason.message ? e.reason.message
+        : String(e.reason === undefined ? 'rejection' : e.reason)
+    if (!window.__snLastError) window.__snLastError = reason
+    try {
+        window.webkit.messageHandlers.reader.postMessage(
+            { type: 'error', message: reason })
+    } catch (_) {}
+})
+</script>
+<!-- sn-shell-module -->
+</body>
+</html>

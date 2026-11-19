@@ -4,19 +4,31 @@ import SpeechLogic
 
 /// The book rendering surface (Plan B's "eyes"): ONE WKWebView per reader
 /// presentation, everything served from a custom `bookscheme://` scheme so
-/// the reader is fully offline. Two modes by format:
+/// the reader is fully offline. Three modes by format:
 ///
 /// * EPUB (and the office normalizations) — the vendored epub.js in the
 ///   `shell/index.html` glue, fetching the book's archive.
-/// * The headless document family (.mobi/.azw3/.fb2/.rtf/…) — NATIVE pages:
-///   the import persisted the parse under the book's `doc/` directory, the
-///   scheme handler serves each spine page (`cover`, `chapter-N`) as the
-///   top-level document, and the injected reader script (nativeReaderScript)
-///   dresses it and reports position — the Linux reader's exact pipeline.
+/// * Headless documents stamped docRenderer "foliate" — the vendored
+///   foliate-js engine (the Linux reader's viewer, Resources/foliatejs): the
+///   `shell/foliate.html` shell fetches the book's ORIGINAL file and parses
+///   it in the webview (mobi.js for the Mobipocket/Kindle family, fb2.js,
+///   the RTF/HTML/txt builders). One page for the whole book; chapter turns
+///   navigate in-renderer, which is why the chapter buttons land
+///   immediately. Nothing is converted and the native side never pre-parses
+///   for rendering.
+/// * Headless documents stamped docRenderer "pages" (the pre-foliate
+///   pipeline and the Swift-parse fallback) — NATIVE pages: the import
+///   persisted the parse under the book's `doc/` directory, the scheme
+///   handler serves each spine page (`cover`, `chapter-N`) as the top-level
+///   document, and the injected reader script (nativeReaderScript) dresses
+///   it and reports position — the Linux reader's exact pipeline.
 ///
-/// Native -> JS goes through `evaluateJavaScript` on the webview handed to
-/// `onWebViewReady`; JS -> native through the `reader` message channel
-/// (relocated / toc / error). TTS text extraction reuses the same spine.
+/// All three speak the same bridge: native -> JS through evaluateJavaScript
+/// on the webview handed to `onWebViewReady` (readerGoChapter / readerNext /
+/// readerPrev / readerAppearance / …), JS -> native through the `reader`
+/// message channel (relocated / toc / error / chromeTap / pageTurn). TTS
+/// text extraction reuses the same chaptering (doc/ pages or the foliate
+/// parse, whichever built the manifest).
 struct BookWebView: UIViewRepresentable {
     let book: Book
     let startChapter: Int
@@ -54,12 +66,14 @@ struct BookWebView: UIViewRepresentable {
         let config = WKWebViewConfiguration()
         config.setURLSchemeHandler(context.coordinator, forURLScheme: "bookscheme")
         config.userContentController.add(context.coordinator, name: "reader")
-        // A NATIVE document book has no epub.js shell: each chapter page is
-        // the top-level document, and the reader script rides in as a user
+        // A NATIVE document book rendered by the OLD pages pipeline has no
+        // epub.js shell and no foliate view: each chapter page is the
+        // top-level document, and the reader script rides in as a user
         // script at document start — every page load of this webview (each
         // chapter turn is a navigation) gets it, exactly like the Linux
-        // reader's injected `__sn` script.
-        if book.format.isDocument {
+        // reader's injected `__sn` script. The foliate pipeline boots its
+        // own shell page instead (the shell module is the reader script).
+        if book.format.isDocument && !book.rendersWithFoliate {
             config.userContentController.addUserScript(
                 WKUserScript(
                     source: Self.nativeReaderScript,
@@ -109,6 +123,35 @@ struct BookWebView: UIViewRepresentable {
     /// fraction, read from the book's manifest (the reader persists it on
     /// every jump and throttled mid-chapter).
     static func shellURL(book: Book, chapter: Int, appearance: ReaderAppearance, cfi: String?) -> URL? {
+        if book.rendersWithFoliate {
+            // The foliate shell: ONE page for the whole book — the vendored
+            // foliate-js parses the ORIGINAL file (fetched under the shell
+            // origin, same cross-origin rule as the epub shell) and the view
+            // navigates sections in-renderer. The resume target rides as
+            // chapter + fraction (the manifest's persistence shape) with the
+            // CFI as the better key when it is a real foliate CFI; the
+            // pre-foliate `doc@…` pseudo-CFIs are not foliate CFIs and the
+            // shell falls back to chapter + fraction for them.
+            var items = appearance.queryItems
+            items.append(URLQueryItem(name: "mode", value: "reader"))
+            items.append(URLQueryItem(
+                name: "src",
+                value: "/book/\(book.id.uuidString)/original.\(book.format.fileExtension)"
+            ))
+            items.append(URLQueryItem(
+                name: "format",
+                value: book.format.fileExtension
+            ))
+            items.append(URLQueryItem(name: "chapter", value: String(max(0, chapter))))
+            if let cfi, !cfi.isEmpty {
+                items.append(URLQueryItem(name: "cfi", value: cfi))
+            } else if let fraction = book.position?.chapterFraction, fraction > 0 {
+                items.append(URLQueryItem(name: "fraction", value: String(fraction)))
+            }
+            var components = URLComponents(string: "bookscheme://shell/foliate.html")
+            components?.queryItems = items
+            return components?.url
+        }
         if book.format.isDocument {
             let spine = book.spine ?? []
             guard !spine.isEmpty else { return nil }
@@ -325,18 +368,26 @@ struct BookWebView: UIViewRepresentable {
             }
         }
 
-        /// Opens the EPUB of the book named by a /book/<uuid>/original.epub
-        /// path — only ever from that book's own directory. Returns the
-        /// handle and its byte size; the caller streams it (no whole-file
-        /// RAM copy — a 50 MB book used to be fully materialized here).
+        /// Opens the book archive of a /book/<uuid>/original.<ext> path —
+        /// only ever from that book's own directory, and only a name the
+        /// manifest format can own (the epub.js shell's original.epub, or
+        /// a headless document's original.<ext> the foliate shell fetches).
+        /// Returns the handle and its byte size; the caller streams it (no
+        /// whole-file RAM copy — a 50 MB book used to be fully materialized
+        /// here).
         private static func openBookFile(path: String) throws -> (FileHandle, Int64) {
             let parts = path.split(separator: "/")
             guard parts.count == 3, parts[0] == "book",
-                  UUID(uuidString: String(parts[1])) != nil else {
+                  let id = UUID(uuidString: String(parts[1])) else {
                 throw URLError(.badURL)
             }
-            let url = BooksStore.bookDirectory(UUID(uuidString: String(parts[1]))!)
-                .appendingPathComponent("original.epub")
+            let name = String(parts[2])
+            let ext = (name as NSString).pathExtension.lowercased()
+            let allowed: Set<String> = ["epub"].union(BookFormat.documentExtensions)
+            guard !ext.isEmpty, name == "original.\(ext)", allowed.contains(ext) else {
+                throw URLError(.fileDoesNotExist)
+            }
+            let url = BooksStore.bookDirectory(id).appendingPathComponent(name)
             let handle = try FileHandle(forReadingFrom: url)
             let size = try handle.seekToEnd()
             try handle.seek(toOffset: 0)
@@ -360,27 +411,10 @@ struct BookWebView: UIViewRepresentable {
         }
 
         private static func bundleResource(_ name: String) -> (Data, String)? {
-            // Path allow-list: the shell host only serves the vendored epub.js
-            // glue from the bundle. The old code served ANY bundle resource by
-            // path — combined with allowScriptedContent:true and CORS:* that
-            // was an exfiltration path for malicious EPUBs.
-            let allowed: Set<String> = ["index.html", "reader.js", "epub.min.js", "jszip.min.js"]
-            guard allowed.contains(name) else { return nil }
-            let (base, ext) = splitName(name)
-            guard let url = Bundle.main.url(forResource: base, withExtension: ext) else { return nil }
-            guard let data = try? Data(contentsOf: url) else { return nil }
-            let mime: String
-            switch ext {
-            case "html": mime = "text/html"
-            case "js": mime = "text/javascript"
-            default: mime = "application/octet-stream"
-            }
-            return (data, mime)
-        }
-
-        private static func splitName(_ name: String) -> (String, String) {
-            guard let idx = name.lastIndex(of: ".") else { return (name, "") }
-            return (String(name[name.startIndex..<idx]), String(name[name.index(after: idx)...]))
+            // The shared engine-asset table (epub.js shell + foliate-js
+            // engine) — see FoliateAssets for the allow-list and the
+            // inline-module splice.
+            FoliateAssets.serve(name)
         }
 
         // MARK: WKScriptMessageHandler ("reader" channel)
@@ -408,7 +442,16 @@ struct BookWebView: UIViewRepresentable {
                 let entries = items.compactMap { item -> BookTocEntry? in
                     guard let label = item["label"] as? String,
                           let href = item["href"] as? String else { return nil }
-                    return BookTocEntry(label: label, href: href, spineIndex: nil, depth: (item["depth"] as? NSNumber)?.intValue)
+                    // The foliate shell resolves every row against the book's
+                    // own href table (mobi.js decompresses KF8 sections on
+                    // demand, hence optional); the epub.js shell posts no
+                    // spineIndex — nil keeps the manifest's rows authoritative.
+                    return BookTocEntry(
+                        label: label,
+                        href: href,
+                        spineIndex: (item["spineIndex"] as? NSNumber)?.intValue,
+                        depth: (item["depth"] as? NSNumber)?.intValue
+                    )
                 }
                 parent.onTOC(entries)
             case "error":

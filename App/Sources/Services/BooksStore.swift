@@ -304,6 +304,7 @@ final class BooksStore: ObservableObject {
         books = allBooks.filter { !$0.isDeleted }
         pruneExpiredBooks()
         backfillMissingBooks(maxAudioBooks: 2)
+        migrateLegacyDocumentBooksToFoliate()
     }
 
     /// One backfill pass per launch: PDFs/EPUBs imported before covers,
@@ -519,7 +520,8 @@ final class BooksStore: ObservableObject {
                     // A native document's manifest comes complete from the
                     // import (the parse wrote the spine, the TOC and the
                     // cover in one pass) — there is nothing a backfill could
-                    // add, and the parse is not re-run lazily.
+                    // add, and the parse is not re-run lazily. The foliate
+                    // migration below owns the legacy-document upgrade.
                     break
                 }
                 if let manifest = try? JSONEncoder().encode(book) {
@@ -529,6 +531,114 @@ final class BooksStore: ObservableObject {
             await MainActor.run { [weak self] in
                 self?.refresh()
             }
+        }
+    }
+
+    // MARK: - Foliate migration (legacy document books)
+
+    /// One pass per launch: every headless document imported before the
+    /// foliate engine (docRenderer nil) gets ONE foliate parse and the
+    /// manifest re-stamp — the reader then opens the book's ORIGINAL file
+    /// with the Linux reader's viewer instead of the persisted-pages
+    /// pipeline, and the chapter buttons navigate in-renderer. Books the
+    /// engine could not parse at import (docRenderer "pages" — the Swift
+    /// fallback) are terminal: the engine already had its one try.
+    ///
+    /// Sequential, one book at a time — each pass owns a hidden webview for
+    /// the walk, released before the next starts (the import parse's RAM
+    /// discipline). Runs off the shelf refresh, after the backfill, so a
+    /// launch's first paints never wait on it.
+    private var didMigrateFoliateBooks = false
+    private var foliateMigrationInFlight = false
+
+    private func migrateLegacyDocumentBooksToFoliate() {
+        guard !didMigrateFoliateBooks, !foliateMigrationInFlight else { return }
+        let pending = books.filter {
+            $0.format.isDocument && $0.docRenderer == nil && $0.importError == nil
+        }
+        guard !pending.isEmpty else { return }
+        didMigrateFoliateBooks = true
+        foliateMigrationInFlight = true
+        Log.shared.info("BooksStore: foliate migration — \(pending.count) legacy document book(s)")
+        Task { @MainActor in
+            var migrated = 0
+            for book in pending {
+                if await Self.foliateMigrate(book: book) { migrated += 1 }
+            }
+            foliateMigrationInFlight = false
+            if migrated > 0 {
+                Log.shared.info("BooksStore: foliate migration finished — \(migrated)/\(pending.count) migrated")
+                refresh()
+            }
+        }
+    }
+
+    @MainActor private static func foliateMigrate(book: Book) async -> Bool {
+        let dir = bookDirectory(book.id)
+        let source = dir.appendingPathComponent("original.\(book.format.fileExtension)")
+        guard FileManager.default.fileExists(atPath: source.path) else { return false }
+        do {
+            let result = try await DocumentParseService.parse(
+                fileExtension: book.format.fileExtension,
+                sourceURL: source
+            )
+            guard result.sectionCount > 0 else { return false }
+            // doc/ replaced wholesale — the two renderers are never mixed for
+            // one book (the pages renderer's spine carries a cover entry the
+            // foliate one does not).
+            let docDir = dir.appendingPathComponent("doc", isDirectory: true)
+            try? FileManager.default.removeItem(at: docDir)
+            try FileManager.default.createDirectory(at: docDir, withIntermediateDirectories: true)
+            for file in result.sectionFiles {
+                let target = docDir.appendingPathComponent(file.path)
+                try FileManager.default.createDirectory(
+                    at: target.deletingLastPathComponent(), withIntermediateDirectories: true
+                )
+                try file.data.write(to: target, options: .atomic)
+            }
+            var updated = book
+            // The pages spine's cover entry ("cover" at index 0) shifted
+            // every saved position forward by one — the foliate spine is 1:1
+            // with the sections, so a resume lands on the same TEXT chapter
+            // only if that offset comes off. The doc@ pseudo-CFI is not a
+            // foliate CFI; the fraction survives.
+            let hadCoverPage = book.spine?.first == "cover"
+            var position = book.position
+            if hadCoverPage {
+                position?.chapterIndex = max(0, (position?.chapterIndex ?? 0) - 1)
+            }
+            position?.cfi = nil
+            var hasCover = book.hasCover
+            if let coverData = result.coverData {
+                try? coverData.write(to: dir.appendingPathComponent("cover.jpg"), options: .atomic)
+                hasCover = true
+            }
+            updated.spine = (0..<result.sectionCount).map { "chapter-\($0)" }
+            updated.spineCount = result.sectionCount
+            // Stale TOC rows point at the pages spine's indexes — a cover
+            // shift makes every one of them one chapter off, so a foliate
+            // TOC replaces them when the format carries one, and a TOC-less
+            // format drops the stale rows outright (the reader shell reports
+            // the book's own contents as the fallback).
+            if !result.toc.isEmpty {
+                updated.toc = result.toc
+            } else if hadCoverPage {
+                updated.toc = nil
+            }
+            updated.hasCover = hasCover
+            updated.docRenderer = "foliate"
+            updated.position = position
+            if let title = result.title, !title.isEmpty { updated.title = title }
+            if let author = result.author, !author.isEmpty { updated.author = author }
+            let data = try JSONEncoder().encode(updated)
+            try data.write(to: manifestURL(book.id), options: .atomic)
+            Log.shared.info("BooksStore: migrated «\(book.title)» to the foliate renderer — \(result.sectionCount) section(s)")
+            return true
+        } catch {
+            // The old pipeline still renders this book — one failed attempt
+            // is terminal for the launch (the gate above), never a loop.
+            Log.shared.info("BooksStore: foliate migration skipped «\(book.title)» — \(error.localizedDescription)")
+            return false
         }
     }
 
@@ -567,9 +677,12 @@ final class BooksStore: ObservableObject {
         // the reader, the TOC and the TTS spine pipeline all consume the
         // generated EPUB unchanged. The mobipocket/Kindle family,
         // FictionBook, RTF, HTML/HTMLZ and plain-text/Markdown instead KEEP
-        // their file whole (original.<ext>) and persist the parse — the
-        // Linux reader's native pipeline (ServedBookDoc): the scheme
-        // handler serves doc/chapter-N.html pages, nothing becomes an EPUB.
+        // their file whole (original.<ext>) and parse it with the foliate
+        // engine — the Linux reader's architecture, where the import and the
+        // reader share one parse: doc/chapter-N.html lands as the TTS text
+        // source, and the reader views the ORIGINAL file with the foliate
+        // viewer (docRenderer "foliate"). A file the engine cannot open
+        // falls back to the pre-foliate Swift parse (docRenderer "pages").
         case _ where DocumentBook.canNormalize(ext):
             format = BookFormat.documentExtensions.contains(ext) ? .document(ext) : .epub
         default:
@@ -613,28 +726,83 @@ final class BooksStore: ObservableObject {
                 }
             } else if case .document(let docExt) = format {
                 // A headless document keeps its file WHOLE (original.<ext>)
-                // and the import persists the parse: doc/chapter-N.html
-                // standalone pages, the images they reference and the cover.
-                // The reader's scheme handler serves those pages directly —
-                // the Linux reader's ServedBookDoc model. Nothing here is
-                // EPUB and nothing becomes one.
+                // and the import parses it with the SAME engine the reader
+                // renders it: the foliate webview (DocumentParseService) —
+                // the Linux reader's architecture, where importer and view
+                // share one parse. The walk persists doc/chapter-N.html —
+                // one per foliate section, the TTS chapter text source — and
+                // the cover. The manifest stamps docRenderer:"foliate": the
+                // reader opens the ORIGINAL file in the foliate shell and its
+                // section indexes ARE these chapters' indexes. Nothing here
+                // is an EPUB and nothing becomes one.
                 try FileManager.default.copyItem(at: sourceURL, to: destination)
                 do {
-                    // Read + parse OFF the main actor. A 50 MB `.azw3` spends
-                    // real seconds decompressing, and this used to run inline
-                    // on the main actor — the "the app freezes while importing
-                    // a book" report.
-                    documentImport = try await Task.detached(priority: .userInitiated) { () -> DocumentImportBits in
+                    let result = try await DocumentParseService.parse(
+                        fileExtension: docExt,
+                        sourceURL: sourceURL
+                    )
+                    guard result.sectionCount > 0 else {
+                        throw DocumentParseError.malformed("the document has no readable chapters")
+                    }
+                    let docDir = dir.appendingPathComponent("doc", isDirectory: true)
+                    try FileManager.default.createDirectory(at: docDir, withIntermediateDirectories: true)
+                    for file in result.sectionFiles {
+                        let target = docDir.appendingPathComponent(file.path)
+                        try FileManager.default.createDirectory(
+                            at: target.deletingLastPathComponent(), withIntermediateDirectories: true
+                        )
+                        try file.data.write(to: target, options: .atomic)
+                    }
+                    var hasCover = false
+                    if let coverData = result.coverData {
+                        try? coverData.write(to: dir.appendingPathComponent("cover.jpg"), options: .atomic)
+                        hasCover = true
+                    }
+                    // The document's own title/author beat the filename when
+                    // the format carries them (every family member does).
+                    // A cover-less book gets the same synthesized shelf tile
+                    // the EPUB path gives its office kin.
+                    let fallback = (sourceURL.lastPathComponent as NSString).deletingPathExtension
+                        .replacingOccurrences(of: "_", with: " ")
+                    let title = result.title?.isEmpty == false ? result.title! : fallback
+                    let author = result.author?.isEmpty == false ? result.author : nil
+                    if !hasCover, let tile = Self.synthesizeDocCover(title: title, fileName: sourceURL.lastPathComponent) {
+                        try? tile.write(to: dir.appendingPathComponent("cover.jpg"), options: .atomic)
+                        hasCover = true
+                    }
+                    // The spine: one entry per foliate section ("chapter-0",
+                    // … — the Linux spine's names, 0-based). No cover entry:
+                    // the cover lives on the shelf (cover.jpg), and keeping
+                    // the spine 1:1 with the foliate sections is what lets
+                    // the reader's chapter bar, the TTS chain and the TOC
+                    // share one index without offsets.
+                    let spine = (0..<result.sectionCount).map { "chapter-\($0)" }
+                    let toc = result.toc
+                    Log.shared.info(
+                        "BooksStore: parsed .\(docExt) with the foliate engine — \(result.sectionCount) section(s), "
+                            + "\(toc.count) toc row(s), cover \(hasCover ? "yes" : "none")"
+                    )
+                    documentImport = DocumentImportBits(
+                        title: title, author: author,
+                        spine: spine, toc: toc, hasCover: hasCover,
+                        docRenderer: "foliate"
+                    )
+                } catch {
+                    // The foliate engine could not open this file (DRM, an
+                    // exotic PDB that is really some other Palm format, a
+                    // truncated download). The pre-foliate Swift parse is
+                    // the fallback — same doc/ contract, the "pages"
+                    // renderer — so the book still imports, speaks and
+                    // renders exactly as it did before foliate existed.
+                    Log.shared.info(
+                        "BooksStore: foliate parse failed for .\(docExt) (\(error.localizedDescription)) — falling back to the Swift parse"
+                    )
+                    do {
                         let sourceData = try Data(contentsOf: sourceURL, options: .mappedIfSafe)
                         let result = try DocumentBook.parse(fileExtension: docExt, data: sourceData)
                         guard !result.chapters.isEmpty else {
                             throw DocumentParseError.malformed("the document has no readable chapters")
                         }
-                        // Persist the parse under doc/. The cover ALSO rides
-                        // as the shelf's cover.jpg (bytes are bytes — the
-                        // shelf decodes them however the source mime spells
-                        // them) and as doc/img/cover.<ext> for the reader's
-                        // cover page.
                         let docDir = dir.appendingPathComponent("doc", isDirectory: true)
                         try FileManager.default.createDirectory(at: docDir, withIntermediateDirectories: true)
                         for file in DocumentPages.files(
@@ -651,10 +819,6 @@ final class BooksStore: ObservableObject {
                             try? coverData.write(to: dir.appendingPathComponent("cover.jpg"), options: .atomic)
                             hasCover = true
                         }
-                        // The document's own title/author beat the filename
-                        // when the format carries them (every family member
-                        // does). A cover-less book gets the same synthesized
-                        // shelf tile the EPUB path gives its office kin.
                         let meta = DocumentBook.metadata(fileExtension: docExt, data: sourceData)
                         let fallback = (sourceURL.lastPathComponent as NSString).deletingPathExtension
                             .replacingOccurrences(of: "_", with: " ")
@@ -664,12 +828,6 @@ final class BooksStore: ObservableObject {
                             try? tile.write(to: dir.appendingPathComponent("cover.jpg"), options: .atomic)
                             hasCover = true
                         }
-                        // The spine: the cover page first (opening a book
-                        // starts on its cover — the converted-EPUB pipeline's
-                        // behavior, kept), then one entry per chapter
-                        // ("chapter-0", … — the Linux spine's names, 0-based).
-                        // The TTS pipeline skips the cover: an image-only
-                        // page extracts to no speakable text.
                         let spine = (result.cover != nil ? ["cover"] : [])
                             + (0..<result.chapters.count).map { "chapter-\($0)" }
                         let chapterOffset = result.cover != nil ? 1 : 0
@@ -681,10 +839,6 @@ final class BooksStore: ObservableObject {
                                 label: label,
                                 href: "chapter-\(index)",
                                 spineIndex: index + chapterOffset,
-                                // The parse's own nesting depth (the mobi
-                                // index's CNCX tag 4); the Linux manifest
-                                // derives 0 rows for the depth-less formats,
-                                // and nil renders identically to 0 here.
                                 depth: chapter.tocDepth
                             )
                         }
@@ -692,15 +846,16 @@ final class BooksStore: ObservableObject {
                             "BooksStore: parsed .\(docExt) natively — \(result.chapters.count) chapter(s), "
                                 + "\(result.images.count) image(s), cover \(hasCover ? "yes" : "none")"
                         )
-                        return DocumentImportBits(
+                        documentImport = DocumentImportBits(
                             title: title, author: author,
-                            spine: spine, toc: toc, hasCover: hasCover
+                            spine: spine, toc: toc, hasCover: hasCover,
+                            docRenderer: "pages"
                         )
-                    }.value
-                } catch {
-                    importError = "Could not read the \(docExt.uppercased()) document: \(error.localizedDescription)"
-                    try? FileManager.default.removeItem(at: dir)
-                    return nil
+                    } catch {
+                        importError = "Could not read the \(docExt.uppercased()) document: \(error.localizedDescription)"
+                        try? FileManager.default.removeItem(at: dir)
+                        return nil
+                    }
                 }
             } else if DocumentBook.canNormalize(ext) {
                 // Normalize-to-EPUB: parse the document into chapters and emit
@@ -768,6 +923,7 @@ final class BooksStore: ObservableObject {
             parsed.spineCount = bits.spine.isEmpty ? nil : bits.spine.count
             parsed.toc = bits.toc
             parsed.hasCover = bits.hasCover
+            parsed.docRenderer = bits.docRenderer
             if bits.spine.isEmpty {
                 parsed.importError = "The document has no readable chapters."
             }
@@ -786,15 +942,17 @@ final class BooksStore: ObservableObject {
     }
 
     /// What a native document import hands the manifest: the parse-derived
-    /// spine (cover page first, then `chapter-N`), the TOC snapshot and the
-    /// cover stamp, plus the document's own title/author. Filled by the
-    /// detached import task, merged into the Book after buildManifest.
+    /// spine (`chapter-N`, 1:1 with the foliate sections for a foliate
+    /// import; the cover-first pages shape for a Swift-parse fallback), the
+    /// TOC snapshot and the cover stamp, plus the document's own title/author
+    /// and the renderer stamp the reader routes on.
     private struct DocumentImportBits {
         var title: String?
         var author: String?
         var spine: [String]
         var toc: [BookTocEntry]
         var hasCover: Bool
+        var docRenderer: String
     }
 
     /// Runs off-main. Reads only a few zip entries (epub) or the lazy

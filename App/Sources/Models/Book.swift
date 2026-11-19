@@ -102,6 +102,15 @@ struct Book: Identifiable, Codable, Equatable, Hashable {
     /// container) — the shelf explains WHY instead of shelving a silent
     /// husk with no TOC and no TTS.
     var importError: String?
+    /// Which engine renders a headless document (.mobi/.fb2/.rtf/…), stamped
+    /// at import. "foliate" = the vendored foliate-js modules parse the book's
+    /// ORIGINAL file in the reader webview (the Linux reader's pipeline — the
+    /// import's TTS parse ran in the same engine, so the manifest's chapter
+    /// indexes ARE the foliate section indexes). "pages" = the pre-foliate
+    /// pipeline: the Swift-side parse persisted doc/ pages the scheme handler
+    /// serves one per chapter. nil = written before the flag existed — every
+    /// book that predates foliate renders "pages", exactly as it did.
+    var docRenderer: String?
     /// Soft-delete stamp for the books recycle bin — nil while the book is
     /// on the shelf. Optional so manifests written before the bin existed
     /// keep decoding exactly as they did.
@@ -128,7 +137,8 @@ struct Book: Identifiable, Codable, Equatable, Hashable {
         toc: [BookTocEntry]? = nil,
         position: BookPosition? = nil,
         importError: String? = nil,
-        deletedAt: Date? = nil
+        deletedAt: Date? = nil,
+        docRenderer: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -150,6 +160,16 @@ struct Book: Identifiable, Codable, Equatable, Hashable {
         self.position = position
         self.importError = importError
         self.deletedAt = deletedAt
+        self.docRenderer = docRenderer
+    }
+
+    /// The document book renders through the foliate webview (the Linux
+    /// reader's pipeline). Anything that predates the flag — or that fell
+    /// back to the Swift-side parse at import — renders the persisted
+    /// doc/ pages as before.
+    var rendersWithFoliate: Bool {
+        guard format.isDocument else { return false }
+        return docRenderer == "foliate"
     }
 
     /// True when the book sits in the recycle bin.
