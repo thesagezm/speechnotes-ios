@@ -30,6 +30,11 @@ struct AboutView: View {
             Section("License") {
                 Text("MIT")
             }
+            Section("Credits") {
+                NavigationLink("Acknowledgements") {
+                    AcknowledgementsView()
+                }
+            }
         }
         .navigationTitle("About")
     }
