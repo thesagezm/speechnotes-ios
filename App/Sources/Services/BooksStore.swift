@@ -1262,7 +1262,52 @@ final class BooksStore: ObservableObject {
         }
 
         let asset = AVURLAsset(url: original, options: [AVURLAssetPreferPreciseDurationAndTimingKey: false])
-        // Same awaited-load discipline as the metadata read below: the sync
+
+        // Tags + cover BEFORE the duration/chapter work. The metadata read
+        // IS the cover's only source for M4B/MP3, and it used to run LAST —
+        // after the 5 s-bounded duration wait and the whole chapter pass —
+        // so the shelf tile sat on the format glyph through the longest
+        // stretch of the import, the "artwork takes ages to show" report.
+        // It is the cheapest read here (a header read, not a slice walk)
+        // and the cover is the first thing the tile asks for, so it is
+        // written the moment it is known.
+        //
+        // Tags: read the two common keys the shelf shows. `AVMetadataItem`
+        // is created by asking the asset's metadata array for a key, not by
+        // a static constructor — the asset loads its metadata lazily, so this
+        // is a header read, not a whole-file scan.
+        // Cover: MP4/M4B often embeds one. Without it the shelf shows the
+        // format glyph, exactly as a cover-less PDF does.
+        //
+        // The metadata read must go through `load(.metadata)` FIRST on a
+        // background thread: `asset.metadata` returns [] until the status
+        // becomes .loaded, and the sync getter raced that load on device —
+        // titles, authors AND covers all came back empty for files that
+        // plainly had them (the "no thumbnail" report; the title survived
+        // only because the filename fallback covered it).
+        let metadataSem = DispatchSemaphore(value: 0)
+        final class MetaBox { var value: [AVMetadataItem] = [] }
+        let metaBox = MetaBox()
+        Task.detached {
+            if let items = try? await asset.load(.metadata) {
+                metaBox.value = items
+            }
+            metadataSem.signal()
+        }
+        _ = metadataSem.wait(timeout: .now() + 5)
+        let metadata = metaBox.value.isEmpty ? asset.metadata : metaBox.value
+
+        let title = Self.metadataString(metadata, key: AVMetadataKey.commonKeyTitle.rawValue)
+        if let title, !title.isEmpty { book.title = title }
+        let artist = Self.metadataString(metadata, key: AVMetadataKey.commonKeyArtist.rawValue)
+        if let artist, !artist.isEmpty { book.author = artist }
+        if let artwork = Self.metadataData(metadata, key: AVMetadataKey.commonKeyArtwork.rawValue),
+           !artwork.isEmpty,
+           Self.writeAudioCover(artwork, to: directory) {
+            book.hasCover = true
+        }
+
+        // Same awaited-load discipline as the metadata read above: the sync
         // `asset.duration` raced the async property load on device and could
         // come back 0 for files that play for hours (the last chapter then
         // ended at start+1s — one more contributor to "it stops after two
@@ -1348,47 +1393,6 @@ final class BooksStore: ObservableObject {
                 endSeconds: book.audioDuration ?? 0
             )]
             book.audioChapterSource = "single"
-        }
-
-        // Tags: read the two common keys the shelf shows. `AVMetadataItem`
-        // is created by asking the asset's metadata array for a key, not by
-        // a static constructor — the asset loads its metadata lazily, so this
-        // is a header read, not a whole-file scan.
-        // Cover: MP4/M4B often embeds one. Without it the shelf shows the
-        // format glyph, exactly as a cover-less PDF does.
-        //
-        // The metadata read must go through `load(.metadata)` FIRST on a
-        // background thread: `asset.metadata` returns [] until the status
-        // becomes .loaded, and the sync getter raced that load on device —
-        // titles, authors AND covers all came back empty for files that
-        // plainly had them (the "no thumbnail" report; the title survived
-        // only because the filename fallback covered it).
-        let metadataSem = DispatchSemaphore(value: 0)
-        final class MetaBox { var value: [AVMetadataItem] = [] }
-        let metaBox = MetaBox()
-        Task.detached {
-            if let items = try? await asset.load(.metadata) {
-                metaBox.value = items
-            }
-            metadataSem.signal()
-        }
-        _ = metadataSem.wait(timeout: .now() + 5)
-        let metadata = metaBox.value.isEmpty ? asset.metadata : metaBox.value
-
-        let title = Self.metadataString(metadata, key: AVMetadataKey.commonKeyTitle.rawValue)
-        if let title, !title.isEmpty { book.title = title }
-        let artist = Self.metadataString(metadata, key: AVMetadataKey.commonKeyArtist.rawValue)
-        if let artist, !artist.isEmpty { book.author = artist }
-        if let artwork = Self.metadataData(metadata, key: AVMetadataKey.commonKeyArtwork.rawValue),
-           !artwork.isEmpty,
-           let image = UIImage(data: artwork),
-           let jpeg = image.jpegData(compressionQuality: 0.85) {
-            // Re-encode through UIImage: some M4B covers are PNG or odd-size
-            // HEIC payloads that a raw `.write` stores with a .jpg name the
-            // shelf's UIImage(data:) still decodes, but the FILES app and
-            // QuickLook reject. One normalized JPEG, always decodable.
-            try? jpeg.write(to: directory.appendingPathComponent("cover.jpg"), options: [.atomic])
-            book.hasCover = true
         }
 
         // One line that says what the file actually gave us — the device

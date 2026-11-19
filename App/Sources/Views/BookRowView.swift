@@ -95,14 +95,49 @@ struct BookCoverView: View {
                     .strokeBorder(.primary.opacity(0.08))
             }
         }
-        .task(id: book.id) {
-            guard image == nil else { return }
+        // Keyed on hasCover too, and this matters: a cover that arrives
+        // AFTER the cell first painted (the launch backfill, the foliate
+        // migration, an Ogg book's rev-2 re-read — all write cover.jpg off
+        // the main thread while the shelf is already up) never re-ran a
+        // book-id-keyed task, so the tile kept the format glyph until
+        // SwiftUI tore the cell down and rebuilt it. The flag flips when
+        // the cover lands, and the flip re-runs this task.
+        .task(id: "\(book.id)-\(book.hasCover)") {
+            let key = "\(book.id)-\(book.hasCover)" as NSString
+            // Cache-hit check is cheap and main-safe — the shelf re-creates
+            // these cells on every scroll pass, and without the cache each
+            // one re-read AND re-decoded cover.jpg at full size.
+            if let cached = Self.cache.object(forKey: key) {
+                image = cached
+                return
+            }
+            guard book.hasCover else { return }
             let url = BooksStore.coverFileURL(book)
-            image = await Task.detached(priority: .userInitiated) { () -> UIImage? in
+            let decoded = await Task.detached(priority: .userInitiated) { () -> UIImage? in
                 guard let data = try? Data(contentsOf: url) else { return nil }
                 return UIImage(data: data)
             }.value
+            guard let decoded else { return }
+            Self.cache.setObject(decoded, forKey: key, cost: Self.cost(of: decoded))
+            image = decoded
         }
+    }
+
+    /// Decoded cover thumbnails, keyed "bookID-hasCover". `NSCache` evicts
+    /// under memory pressure; the cost is the DECODED bitmap size —
+    /// compressed bytes undercount 4–30× and a byte-based budget would hold
+    /// hundreds of megabytes of bitmaps (the reasoning ImageCache.swift
+    /// documents for its own cost line).
+    private static let cache: NSCache<NSString, UIImage> = {
+        let cache = NSCache<NSString, UIImage>()
+        cache.countLimit = 200
+        cache.totalCostLimit = 48 * 1024 * 1024   // decoded budget
+        return cache
+    }()
+
+    private static func cost(of image: UIImage) -> Int {
+        guard let cg = image.cgImage else { return 1 }
+        return max(1, cg.bytesPerRow * cg.height)
     }
 }
 
