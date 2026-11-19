@@ -11,13 +11,14 @@ handover — the architecture and the five root causes it lists).**
 - Branch `batch-c-d-session`. Commit **`e9b3fc3`** is **pushed**:
   *"fix(foliate): the engine opens every mobi/azw3, the chapter bar follows
   the page, and the corpus is pinned"*. The tree is clean.
-- **CI is running on `e9b3fc3`: run `44481980089`** (`gh run view
-  44481980089`). The workflow only triggers on a push to `main` /
-  `sage-upgrades`, so this branch needs `gh workflow run build.yml --ref
-  batch-c-d-session` — that is how the previous rounds were gated too.
-- **There is no Swift toolchain on this box**, so CI is the compile gate.
-  The next agent's first job is to watch that run (the "Build unsigned IPA"
-  job is the Swift compile) and fix whatever it catches.
+- **CI IS GREEN — run `44481980089` on `e9b3fc3`, all 8 jobs success**
+  (9 min; the **SpeechnotesIOS** IPA artifact 23.0 MB + dSYMs uploaded —
+  **this is the device-test build for the round**; no release/tag, per the
+  ask). **The Swift code compiles.** The workflow only triggers on a push to
+  `main` / `sage-upgrades`, so a further round on this branch needs
+  `gh workflow run build.yml --ref batch-c-d-session`.
+- **There is no Swift toolchain on this box**, so CI is the compile gate —
+  and it has just passed for this round.
 - The corpus run is recorded in **`Docs/FOLIATE-ENGINE-PROBE.md`**; the raw
   JSON is `Scripts/foliate-harness/report.json` (gitignored — it holds
   short text excerpts of the books).
@@ -70,12 +71,10 @@ chapter + the fraction inside it).
 
 ## 4. What is left
 
-1. **Watch CI run `44481980089`.** If the Swift compile fails, fix it, commit
-   and re-dispatch (`gh workflow run build.yml --ref batch-c-d-session`).
-   The riskiest spots are the ones §5.1 of the original handover lists, plus
-   the argument-order fix (already applied).
-2. **The device round** — what the harness cannot see (real WKWebView, the
-   custom scheme, SwiftUI, the voice):
+1. **The device round** — the real acceptance test, and the only thing left.
+   The harness cannot see the device (real WKWebView, the custom scheme,
+   SwiftUI, the voice). The IPA artifact from run `44481980089` is the build
+   to install:
    - import a fresh `.mobi` → the manifest must show `docRenderer: "foliate"`,
      the engine's section count and the publisher's TOC;
    - open an existing shelf book → the migration re-stamps it;
@@ -85,8 +84,9 @@ chapter + the fraction inside it).
      the right section;
    - a TTS play speaks the chapter on screen;
    - close mid-chapter and reopen → the CFI resume lands mid-chapter.
-3. **Log the round in `PROGRESS_LOG.md`** when the CI result is known (the
-   entry for this round is already there; add the CI line).
+2. **Only if the device round finds something:** fix, commit, re-dispatch CI
+   (`gh workflow run build.yml --ref batch-c-d-session`) and re-test on the
+   new IPA.
 
 ## 5. Gotchas (read before touching anything)
 
