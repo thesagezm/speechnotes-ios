@@ -605,7 +605,11 @@ final class BooksStore: ObservableObject {
             let hadCoverPage = book.spine?.first == "cover"
             var position = book.position
             if hadCoverPage {
-                position?.chapterIndex = max(0, (position?.chapterIndex ?? 0) - 1)
+                // Copy first: the read and write touch the same nested
+                // property in one statement — an exclusivity violation the
+                // CI compile rejects.
+                let idx = position?.chapterIndex ?? 0
+                position?.chapterIndex = max(0, idx - 1)
             }
             position?.cfi = nil
             var hasCover = book.hasCover
