@@ -452,6 +452,7 @@ struct NoteEditorView: View {
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar(chromeHidden ? .hidden : .visible, for: .navigationBar)
+            .immersiveTabBar(chromeHidden)
             // Switching between preview (speech reads clean) and edit (speech
             // reads raw) changes what the engine should hear — refresh the
             // speech cache for the new state.

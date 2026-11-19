@@ -384,7 +384,11 @@ public enum DeckHTML {
     static let deckCSS = """
     html,body{margin:0;padding:0;background:transparent;}
     body{overflow-x:hidden;}
-    .slide{position:relative;width:calc(var(--dw) * 1pt * var(--zoom,1));height:calc(var(--dh) * 1pt * var(--zoom,1));margin:14px auto;background:#FFFFFF;box-shadow:0 2px 10px rgba(0,0,0,0.28);scroll-snap-align:center;}
+    /* iOS: slides sit edge-to-edge (margin 0) and the fit zoom consumes the
+       FULL viewport — the Linux viewer's 14px gutters read as wasted screen
+       on a phone, and the box-shadow still separates stacked slides while
+       scrolling. */
+    .slide{position:relative;width:calc(var(--dw) * 1pt * var(--zoom,1));height:calc(var(--dh) * 1pt * var(--zoom,1));margin:0 auto;background:#FFFFFF;box-shadow:0 2px 10px rgba(0,0,0,0.28);scroll-snap-align:center;}
     .stage{position:absolute;top:0;left:0;width:calc(var(--dw) * 1pt);height:calc(var(--dh) * 1pt);transform:scale(var(--zoom,1));transform-origin:top left;overflow:hidden;}
     .item{position:absolute;}
     .item > svg.shape{position:absolute;top:0;left:0;width:100%;height:100%;}
@@ -421,10 +425,13 @@ public enum DeckHTML {
             var de = document.documentElement;
             var dw = +de.dataset.w || 720, dh = +de.dataset.h || 405;
             if (mode === 'none') { return Math.max(0.05, Math.min(+manual || 1, 8)); }
-            var availW = Math.max(window.innerWidth - 28, 120);
+            // The slide IS the page: fit the FULL viewport (the Linux
+            // gutter allowance went away with the 14px margins). The 4/3
+            // stays — deck points are CSS points, and 1pt renders at 4/3px.
+            var availW = Math.max(window.innerWidth, 120);
             var byW = availW / (dw * 4 / 3);
             if (mode === 'page') {
-                var availH = Math.max(window.innerHeight - 28, 90);
+                var availH = Math.max(window.innerHeight, 90);
                 return Math.max(Math.min(byW, availH / (dh * 4 / 3)), 0.05);
             }
             return Math.max(Math.min(byW, 8.0), 0.05);

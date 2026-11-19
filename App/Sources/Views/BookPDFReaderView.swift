@@ -330,6 +330,7 @@ struct BookPDFReaderView: View {
             .navigationBarTitleDisplayMode(.inline)
         // Tap the page to hide/show the title + toolbar (immersive reading).
         .toolbar(immersiveBarsHidden ? .hidden : .visible, for: .navigationBar)
+        .immersiveTabBar(immersiveBarsHidden)
         .contentShape(Rectangle())
         .onTapGesture {
             Haptics.tap()

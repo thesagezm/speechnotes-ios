@@ -47,4 +47,21 @@ extension View {
     func landscapeAware() -> some View {
         modifier(LandscapeInjector())
     }
+
+    /// The bottom tab bar follows a reading surface's tap-to-hide chrome
+    /// toggle — the title bar's partner, not a survivor of it (user round:
+    /// "the bottom tabs bar should also be hidden the way the title bar
+    /// does").
+    ///
+    /// Hiding `.tabBar` (iOS 18's toolbar placement, this app's floor)
+    /// removes the bar AND its safe-area inset, and that inset is the handoff
+    /// mechanism: the portrait bottom controls' `safeAreaInset` docks down
+    /// into the strip the tabs vacated (more display above them), and in
+    /// landscape the reader surface simply runs to the screen's bottom edge.
+    /// Each call site keeps ownership of WHEN — its own per-surface
+    /// `immersiveBars.*` key, exactly like the navigation-bar line it sits
+    /// beside; this one extension keeps the WHY in one place.
+    func immersiveTabBar(_ hidden: Bool) -> some View {
+        toolbar(hidden ? .hidden : .visible, for: .tabBar)
+    }
 }

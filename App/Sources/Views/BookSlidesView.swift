@@ -153,6 +153,7 @@ struct BookSlidesView: View {
             .navigationTitle(book.title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar(immersiveBarsHidden ? .hidden : .visible, for: .navigationBar)
+            .immersiveTabBar(immersiveBarsHidden)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button {

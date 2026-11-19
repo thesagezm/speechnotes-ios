@@ -186,6 +186,7 @@ struct BookAudioReaderView: View {
         .navigationBarTitleDisplayMode(.inline)
         // Tap the cover to hide/show the title + toolbar (immersive reading).
         .toolbar(immersiveBarsHidden ? .hidden : .visible, for: .navigationBar)
+        .immersiveTabBar(immersiveBarsHidden)
         .contentShape(Rectangle())
         .onTapGesture {
             Haptics.tap()

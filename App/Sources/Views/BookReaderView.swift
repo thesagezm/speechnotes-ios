@@ -245,6 +245,7 @@ struct BookReaderView: View {
         // gestures, which is exactly why the bar could never be un-hidden);
         // epub.js link handling is untouched — taps on links never report.
         .toolbar(immersiveBarsHidden ? .hidden : .visible, for: .navigationBar)
+        .immersiveTabBar(immersiveBarsHidden)
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
                 Button {
