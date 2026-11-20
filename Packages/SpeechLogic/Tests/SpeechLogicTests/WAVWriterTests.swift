@@ -175,7 +175,7 @@ final class WAVWriterTests: XCTestCase {
     }
 }
 
-// MARK: - Streaming writer (v1.5 sage round)
+// MARK: - Streaming writer (v1.5 round)
 
 extension WAVWriterTests {
 

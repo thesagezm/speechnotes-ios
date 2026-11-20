@@ -196,9 +196,9 @@ push = one run; overlapping dispatches cancel the earlier run.
 
 ## Reference map (for the next round of work)
 
-- Rust truth: `/home/sagestation/code/speechnotes-linux-rust` —
+- Rust truth: the Linux repo's checkout —
   crates/sn-doc/src/slides.rs (1,662), crates/sn-ui/src/slideview/
   {document,script}.rs, crates/sn-doc/src/odp.rs (1,582).
 - deckcraft @ a0eeb34 vendored at
-  `/home/sagestation/.cargo/git/checkouts/deckcraft-80b967a9065386ec/a0eeb34`.
+  the deckcraft cargo checkout.
 - The port's own progress notes: PROGRESS_LOG.md (M1 entry) + this file.

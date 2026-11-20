@@ -16,7 +16,7 @@ your device yet — it is verified only against one local file (ffprobe
 cross-check).
 
 The reference: the user's own MOODY release
-`/home/sagestation/Downloads/When.Breath.Becomes.Air.Paul.Kalanithi.M4B.128k-MOODY/`
+`~/Downloads/When.Breath.Becomes.Air.Paul.Kalanithi.M4B.128k-MOODY/`
 (266 MB m4b, ffprobe reports 12 chapters). ffmpeg/ffprobe are installed
 locally. A Python vs-Swift parser harness was used at `/tmp/soprano/repro.py`
 (ephemeral — recreate if needed).

@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-23 · **Branch:** `batch-c-d-session` · **HEAD:** `e680114`
 (pushed, CI **green** — run
-[39939815899](https://github.com/thesagezm/speechnotes-ios/actions/runs/39939815899))
+run 39939815899)
 **Scope:** both open asks from `HANDOVER-BOOKDROP-NETWORK-TTS.md` are now
 IMPLEMENTED and CI-verified. **No device round yet** — that is the next
 session's job.

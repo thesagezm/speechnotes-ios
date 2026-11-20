@@ -20,7 +20,7 @@ contract on the vendored ORT 1.24.2 every CI run.
   decoder + kokoro tokenizer + 28 voice banks) — "Kokoro pronunciation,
   compact tier cost", with native speed control (unlike Phonon).
 - The published weights are PyTorch; the installed files are the ONNX
-  export speechnotes-linux produces (`thesagezm/speechnotes-models`, the
+  export speechnotes-linux produces (the speechnotes models repo, the
   same repo the Linux catalog pins). Tokenizer + voice banks are kokoro's
   own files fetched from `onnx-community/Kokoro-82M-v1.0-ONNX`.
 
@@ -28,8 +28,8 @@ contract on the vendored ORT 1.24.2 every CI run.
 
 | File | Bytes | From | Role |
 |---|---:|---|---|
-| `text-side.onnx` | 112,134,174 | thesagezm/speechnotes-models | kokoro text encoder + prosody predictor |
-| `nano-decoder.onnx` | 30,420,126 | thesagezm/speechnotes-models | the distilled decoder (external-data blob inlined) |
+| `text-side.onnx` | 112,134,174 | speechnotes models repo | kokoro text encoder + prosody predictor |
+| `nano-decoder.onnx` | 30,420,126 | speechnotes models repo | the distilled decoder (external-data blob inlined) |
 | `tokenizer.json` | 3,497 | onnx-community Kokoro | per-char phoneme vocab (same file the Kokoro tiers use) |
 | `voices/<code>.bin` × 28 | 522,240 each | onnx-community Kokoro | the English banks (af/am/bf/bm; `af.bin` is an aggregate, excluded) |
 

@@ -125,7 +125,7 @@ note plays through (streaming parity); download ≤ ~270 MB with progress.
 - HF download flakiness seen with Kokoro (one -1005 + one TLS error,
   recovered by resume) — reuse the retrying downloader as-is; if HF stays
   flaky from the user's network, mirror model files to a GitHub Release in
-  `thesagezm/speechnotes-ios` (GitHub CDN proved solid for 342 MB).
+  this repo (GitHub CDN proved solid for 342 MB).
 
 ## Suggested order
 

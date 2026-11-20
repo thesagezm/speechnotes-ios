@@ -6,9 +6,8 @@
 > architecture. Do not refactor code the steps don't touch. When CI fails,
 > fix and push again — never leave the branch red.
 >
-> **Repo:** `~/.zcode/workspace/default/speechnotes-ios` (GitHub:
-> `thesagezm/speechnotes-ios`, public). You MAY push directly (creds + `gh`
-> CLI are authenticated on this PC). Build loop: edit → `git add -A && git
+> **Repo:** this checkout (a public GitHub repo). You MAY push directly
+> (the `gh` CLI is authenticated on the dev box). Build loop: edit → `git add -A && git
 > commit -m "<message>" && git push` → watch CI with
 > `./Scripts/watch_ci.sh <full-sha>` (run it in the background; exit 0 =
 > green). If it fails: `gh run view --log-failed` or check-run annotations.
@@ -1431,7 +1430,7 @@ About section:
                 Section {
                     LabeledContent("Version", value: appVersion)
                     LabeledContent("Developer", value: "TheSageZM")
-                    Link("Source code on GitHub", destination: URL(string: "https://github.com/thesagezm/speechnotes-ios")!)
+                    Link("Source code on GitHub", destination: URL(string: "https://example.org/speechnotes")!)
                 } header: {
                     Text("About")
                 } footer: {

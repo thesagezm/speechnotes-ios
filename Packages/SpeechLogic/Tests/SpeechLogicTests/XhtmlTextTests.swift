@@ -64,7 +64,7 @@ final class XhtmlTextTests: XCTestCase {
     }
 }
 
-// MARK: - Named entities + parse diagnostics (v1.5 sage round)
+// MARK: - Named entities + parse diagnostics (v1.5 round)
 
 extension XhtmlTextTests {
     func testNamedEntitiesNoLongerTruncateTheChapter() {
@@ -117,7 +117,7 @@ extension XhtmlTextTests {
     }
 }
 
-// MARK: - Footnote scrubbing (v1.5 sage round)
+// MARK: - Footnote scrubbing (v1.5 round)
 
 extension XhtmlTextTests {
 

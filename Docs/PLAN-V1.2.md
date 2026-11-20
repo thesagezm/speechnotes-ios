@@ -6,9 +6,8 @@
 > translation (permanently dropped by user decision). When CI fails, fix and
 > push again — never leave the branch red.
 >
-> **Repo:** `~/.zcode/workspace/default/speechnotes-ios` (GitHub:
-> `thesagezm/speechnotes-ios`, public). You MAY push directly (creds + `gh` CLI
-> are authenticated on this PC). Build loop: edit → `git add -A && git commit
+> **Repo:** this checkout (a public GitHub repo). You MAY push directly
+> (the `gh` CLI is authenticated on the dev box). Build loop: edit → `git add -A && git commit
 > -m "<message>" && git push` → watch CI with `./Scripts/watch_ci.sh <full-sha>`
 > (run in background, exit 0 = green). If it fails: `gh run view --log-failed`
 > or check-run annotations via `gh api`. HEAD at plan time: `9ba9633`, CI green,

@@ -140,7 +140,7 @@ final class EpubInfoTests: XCTestCase {
     }
 }
 
-// MARK: - CRC verification (v1.5 sage round)
+// MARK: - CRC verification (v1.5 round)
 
 extension ZipReaderTests {
 

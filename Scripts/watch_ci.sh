@@ -16,9 +16,10 @@
 # one process (no curl/pipe/stdin juggling).
 
 set -uo pipefail
-export REPO="thesagezm/speechnotes-ios"
-POLL="${POLL:-45}"
+# The repo this checkout belongs to, read from git — REPO= overrides.
 cd "$(dirname "$0")/.."
+export REPO="${REPO:-$(git remote get-url origin | sed -E 's#.*github\.com[:/]##; s#\.git$##')}"
+POLL="${POLL:-45}"
 TARGET="${1:-$(git rev-parse HEAD)}"
 
 # Prints "id|status|conclusion|url" for the target run, or nothing.

@@ -3,7 +3,7 @@
 > **Resuming in a new session?** You're building "Speechnotes iOS" — an offline
 > Speech Note (Linux) clone for iPhone, native Swift/SwiftUI, built from Linux
 > via GitHub Actions (no Mac), sideloaded unsigned via LiveContainer.
-> Repo: `~/.zcode/workspace/default/speechnotes-ios` (GitHub: `thesagezm/speechnotes-ios`, public).
+> Repo: this checkout (a public GitHub repo).
 > **Read this file fully, plus `Docs/SETUP.md`.** Working loop: agent writes
 > code → user pushes → CI builds IPA → user installs via LiveContainer → user
 > reports / agent reads CI results via the unauthenticated GitHub API

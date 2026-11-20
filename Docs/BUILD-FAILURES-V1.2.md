@@ -1,6 +1,6 @@
 # v1.2.0 Build Failure Log — Type-Checker Complexity Budget Exhausted
 
-**Repo:** `thesagezm/speechnotes-ios` | **Branch:** `main` | **Period:** 2026-08-18  
+**Repo:** this repo | **Branch:** `main` | **Period:** 2026-08-18  
 **Total CI attempts:** 19 | **All failures:** `Build unsigned IPA` job → `Archive` step → Swift type-checker error
 
 ---
