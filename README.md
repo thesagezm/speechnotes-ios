@@ -3,31 +3,32 @@
 An offline, Speech Note (Linux)-style app for iPhone — built entirely from Linux,
 compiled on GitHub Actions macOS runners, sideloaded via SideStore + LiveContainer.
 
-**Current status: v1.8.0 — a books release and a focus release.** The readers
-show the book behind the tab bar and the hidden chrome (EPUB and PDF; EPUB's
-portrait controls float like Notes; the landscape rail is untouched); wide
-converted tables pan to their lateral end; TTS starts at the page you're
-viewing and chapter jumps always land; the minimised transport is one shared
-Notes-style pill; maths renders AND speaks; Pomodoro (Structured / Flowmodoro /
-free timer) lives on the Stats tab; **Keep Screen On** holds any reading
-surface; BookDrop scans any LAN interface (hotspot transfers work), keeps its
-port stable across toggles, launches OFF, and recovers from access-code
-prompts; shared URLs become formatted notes — headings, lists, quotes,
-images and the article's own hyperlinks render (Readability → markdown
-walker, then a Bypass-Paywalls-Clean pass on every import by default so
-paywalled pages recover their full text; Safari's share sheet hands
-links straight over on native installs via the Share Extension —
-`Docs/WEB-ARTICLE-IMPORT.md`); JEX exports import into real Joplin (full metadata
-set) and Joplin's end-to-end encryption round-trips; .mobi/azw books, scanned
-PDF OCR and m4b chapter audiobooks all read and play. Pick an
-engine in Speech Settings, download
+**Current status: v1.8.2 — the document family reads in the real reader.**
+mobi/azw3/fb2/rtf/html/txt render in the vendored foliate-js engine — the
+original file, never converted — with the publisher's own table of contents
+and instant chapter jumps; PowerPoint decks import whole and speak in visual
+order; **Nano Edge** joins as a fifth engine (Kokoro's 28 voices, distilled,
+~157 MB); every reading surface lets you copy a passage out (long-press
+selection in read-along, selectable preview prose, "Play from selection" in
+the editor); note rows and both recycle bins carry full long-press menus;
+tap-to-hide takes the tab bar too, in both orientations; settings are
+rebuilt to the Android reference (info buttons instead of footer essays,
+one Models list by size); Ogg/Opus audiobooks finally show their embedded
+artwork; and About gained a real acknowledgements screen. The v1.8.0
+headlines — transparent books readers, maths that renders AND speaks,
+Pomodoro, Keep Screen On, BookDrop over any LAN (hotspot transfers, stable
+port), web-article import with a paywall-bypass pass and the Share
+Extension (`Docs/WEB-ARTICLE-IMPORT.md`), Joplin round-trip (JEX + E2EE),
+mobi/azw, scanned-PDF OCR and m4b chapter audiobooks — are all still here.
+Pick an engine in Speech Settings, download
 its model once, and notes are spoken fully offline (airplane-mode tested):
 
 | Engine | Model size | Voices | Notes |
 |---|---|---|---|
 | Apple (system) | 0 | all system voices | Instant, no download |
 | **Kokoro** (ONNX, CPU) | ~341 MB High (fp32) / ~92 MB Compact (int8) | 28 (US/UK, m/f) | One engine, a quality dial |
-| **Phonon** (ONNX, CPU) | ~192 MB | 27 (US/UK + default) | Compact English streaming TTS — new, no speed control yet |
+| **Nano Edge** (ONNX, CPU) | ~157 MB | 28 (US/UK, m/f — Kokoro's banks) | Kokoro's voices, distilled two-graph decoder |
+| **Phonon** (ONNX, CPU) | ~192 MB | 27 (US/UK + default) | Compact English streaming TTS — no speed control yet |
 | **Supertonic** (ONNX, CPU) | ~399 MB | 10 styles × 31 languages | Multilingual — flow-matching TTS |
 
 Kokoro's Compact tier is the dynamic-int8 `model_quantized.onnx` (~92 MB) —
@@ -41,84 +42,92 @@ same text fails the same way, and the wait for it is silence the listener pays
 for. Text is cleaned at import so the things that used to fail (soft hyphens,
 zero-width joiners, control bytes, embedded-font glyphs) never reach the model.
 
-## What's new in v1.8.0
+## What's new in v1.8.2
 
-- **Books readers, transparent.** The page colour runs behind the tab bar to
-  the bottom of the screen and behind the status bar when the chrome is
-  hidden (tap-to-immersive), in the EPUB and PDF readers. EPUB portrait
-  controls float over the book like Notes; a chapter always ends with its
-  last lines readable above the chrome. The landscape playback rail is
-  unchanged.
-- **Wide tables pan.** Many-column tables from converted books become
-  laterally pannable blocks in the EPUB reader; nested tables keep their
-  layout, and a swipe on a table pans the table instead of turning the page.
-- **TTS starts where you look.** Play begins at the viewed page/spot (a
-  stored bookmark still wins); in read-along, tapping a Contents row moves
-  the speech to that chapter. Chapter jumps land or report back — no more
-  silent dead chevrons — and the mid-chapter position survives scrolling.
-- **Maths, rendered and spoken.** LaTeX in notes renders as display glyphs in
-  the preview and speaks as words in TTS (exports keep the glyphs).
-- **Pomodoro on Stats.** Structured work/break cycles, Flowmodoro (a break
-  claimable once 3 break minutes are banked) and a free timer, with a gentle
-  app-wide banner and juice in the fill.
-- **Keep Screen On.** A Reading setting (default ON) holds the screen awake
-  on all four reading surfaces — EPUB, PDF, audiobook and note reading —
-  registry-based so tab switches can't wedge it.
-- **BookDrop everywhere, and stable.** Multi-select send sheet from storage,
-  backups, swipes and context menus; JEX/note/book/WAV routing on receive;
-  hotspot transfers (any LAN interface); the port stays 53317 across toggles;
-  launches OFF; a 401 offers a prefilled access-code retry.
-- **Web articles become notes.** Share a URL (share sheet on native
-  installs, clipboard, drag & drop or the scheme elsewhere) — Readability
-  extracts it, and the content DOM becomes markdown so headings, lists,
-  images and the page's hyperlinks survive into the note. Every import
-  also runs the Bypass-Paywalls-Clean userscript pass (toggle in
-  Appearance → Web Import) and the fuller text wins, so paywalled pages
-  recover their article.
-- **Joplin, both ways.** JEX exports carry the full metadata set and import
-  into real Joplin; Joplin's end-to-end encryption (KeyV1/StringV1) is
-  supported in the notes library.
-- **Under the hood from the 1.7.x line, now solid:** mobi/azw reading with
-  Calibre-exact text extraction, OCR for CamScanner scans (per-book
-  force-OCR), m4b chapter audiobooks, the seconds-based TTS chunk schedule
-  (the audible-gap fix), the background silence bridge, and exact
-  stop→play resume.
+- **The document family reads in the real reader.** mobi, azw, azw3, prc,
+  pdb, fb2, rtf, html and txt render in the vendored foliate-js engine —
+  the original file, never converted to EPUB — with the publisher's own
+  table of contents, instant in-renderer chapter jumps (no page reload, so
+  the mobi chevron lag is gone structurally), CFI resume, and one section
+  in memory at a time. Reader, TTS and TOC share one chapter numbering.
+  Existing books migrate on launch; a refused file falls back and is
+  stamped honestly in the manifest.
+- **The mobi/azw3 TOC is the publisher's.** The real Kindle index layout is
+  parsed — publisher chapter names replace the "Chapter N" heuristic; RTF
+  bold-title chapter splitting is fixed; the EPUB TOC tree renders (the
+  depth field survives the manifest).
+- **Slide decks are a book format.** PPTX imports whole and renders —
+  preset shapes, gradients, Wingdings/Symbol bullets — and speech reads
+  slides in visual order; the deck re-fits on rotation and fills the
+  viewport edge-to-edge.
+- **Nano Edge, a fifth engine.** Kokoro's 28 English voices over a
+  distilled two-graph ONNX decoder (~157 MB, 24 kHz, fully offline).
+- **Copy out of every surface.** Long-press selects a passage in the
+  read-along of EPUB/PDF/slides/notes and the markdown preview's prose;
+  the editor's native selection menu carries "Play from selection".
+- **Row menus and bins.** Note rows gain Rename/Share/Export on
+  long-press; both recycle bins gain Recover / Delete Now menus.
+- **Immersive chrome takes the tab bar too** — all four reading surfaces,
+  both orientations; the portrait rail docks into the vacated strip.
+- **Settings rebuilt to the Android reference** — flat rows, factual
+  engine subtitles, one Models list smallest→largest, info sheets instead
+  of footer essays, Bypass-Paywalls always on, Logs + Benchmark under
+  Diagnostics.
+- **Covers and the scrubber.** Ogg/Opus artwork extracts (existing books
+  self-heal a few per launch); M4B covers read first; late covers repaint
+  tiles; cover-less documents heal; the seek scrubber holds where dropped.
+- **Acknowledgements** — the About row's promised screen: every vendored,
+  SPM and model piece with what it does here, its license and source.
+- **Phonon playback repairs** — the chunk-boundary click and the dead air
+  after each chunk are gone (boundary fades + a shorter silence bridge).
 
 Feature tour:
 
 - **Notes** — create/edit/delete, autosave (debounced, flushed on exit and
   backgrounding), search, sort (edited/created/title), date sections, swipe
-  actions (pin / delete / share text / export audio), drag & drop.
+  actions (pin / delete / share text / export audio), a long-press row menu
+  (pin / favorite / rename / share / export / send with BookDrop / move),
+  drag & drop.
 - **Notebooks & organization** (Joplin-style) — flat notebooks with a chip
   row for scoping, move notes between them, plus pin (Pinned section on top)
   and favorite (star). Titles auto-derive from the note's first sentence.
   Backup exports one notebook, the unfiled notes, or the whole library.
 - **Books** — the Books tab: import EPUB, PDF, mobi
-  (`.mobi`/`.azw`/`.azw3`/`.prc`/`.pdb`), office documents, FictionBook,
-  RTF, HTML and plain text, plus audiobooks (M4B / M4A / MP3 / Ogg Opus /
-  Opus-in-MP4, Files picker or Open-In) into a cover grid with
-  search. Kindle books decode their own Huff/CDIC compression, carry
-  their own flow/chapter structure, and show the cover their metadata
-  declares. An audiobook plays the audio it already contains, with the
+  (`.mobi`/`.azw`/`.azw3`/`.prc`/`.pdb`), PowerPoint decks (.pptx), office
+  documents, FictionBook, RTF, HTML and plain text, plus audiobooks (M4B /
+  M4A / MP3 / Ogg Opus / Opus-in-MP4, Files picker or Open-In) into a cover
+  grid with search. Kindle books decode their own Huff/CDIC compression,
+  carry the publisher's own table of contents and flow/chapter structure,
+  and show the cover their metadata declares (embedded Ogg/Opus artwork
+  included). An audiobook plays the audio it already contains, with the
   chapter list read from the file's own metadata (a `chpl` atom, ID3
   `CHAP` frames, or Ogg/Opus chapter tags) and no synthesis at all;
   Opus books of any size open (lazy packet streams) and play with the
   full multichannel mix intact down to stereo. EPUBs render
-  chapter-by-chapter in a real book reader (themes, text size, native table of
-  contents, per-book position); PDFs open in a full-fidelity PDFKit viewer with
-  an outline sidebar. Any book can be spoken: chapter narration with
+  chapter-by-chapter in a real book reader, and so does the whole document
+  family — mobi/azw3/fb2/rtf/html/txt via the vendored foliate-js engine on
+  the original file (themes, text size, native table of contents, per-book
+  position); PDFs open in a full-fidelity PDFKit viewer with an outline
+  sidebar. Any book can be spoken: chapter narration with
   auto-advance (exact audio-completion signal, no stranding at chapter
   boundaries), sentence-snapped resume, and the same read-along highlighting as
   notes. PDF chapters come from the document's own outline, with font-size
   heading detection and honest page ranges as fallbacks; scanned pages speak
   via Vision OCR, and two-column papers read left→right. Per-chapter WAV
   export. DRM/locked books explain themselves on the shelf.
+- **Slide decks** — a PPTX deck imports whole and renders with its preset
+  shapes, gradients and symbol bullets; speech reads slides in visual
+  order (top→bottom), so a repeated footer never ends the slide; the deck
+  re-fits on rotation, rail changes and hidden chrome, and fills the
+  viewport like the PDF does.
 - **Streaming playback** — sentence-chunked generation with playback starting
   after the first sentence; pause/resume/stop; speed slider; phone-call
   interruption handling; lock-screen / Control Center controls.
 - **Read-along highlighting** — a dedicated reader replaces the editor while
   a note speaks (toggleable from the player bar), highlighting the sentence
-  actually sounding via play-time position tracking, with auto-scroll.
+  actually sounding via play-time position tracking, with auto-scroll;
+  long-press selects and copies a passage, and tapping a paragraph starts
+  speaking from it.
 - **Resume bookmarks** — stopped notes resume from the prior sentence
   boundary (valid 30 days); auto-resume after a brief backgrounding.
 - **Mini-player** — rounded card above the tab bar, minimizable to a
@@ -128,8 +137,8 @@ Feature tour:
   (hear a voice before committing). Supertonic adds a language selector
   (English, Korean, Japanese, German, French, +26 more).
 - **Markdown option** (Settings → Notes) — preview rendered markdown in the
-  editor (eye/pencil toggle), and speech reads the plain text without
-  markdown symbols.
+  editor (eye/pencil toggle), speech reads the plain text without markdown
+  symbols, and the preview's prose is selectable/copyable.
 - **E-Ink mode** (Settings → Appearance → Theme) — paper white, ink black,
   square edges, hairline borders: no glass, no gradients, no color, no
   animation, anywhere in the app (notes list and editor included). The
@@ -144,8 +153,11 @@ Feature tour:
   list, and a usage breakdown.
 - **Onboarding** — a five-page first-launch tour (welcome → scanned-PDF OCR
   → audiobooks → voices → Pomodoro & Stats).
-- **Logs** (Settings → About) — crash-persistent on-device logs, shareable
-  for debugging.
+- **Diagnostics** (Settings) — Benchmark mode (a sustained-synthesis
+  harness with CSV/JSON exports) and crash-persistent on-device logs,
+  shareable for debugging.
+- **Acknowledgements** (Settings → About) — what each vendored, SPM and
+  model piece does here, with its license and source.
 
 Speech-to-text and translation were on the roadmap once — dropped; this is a
 speech *notes* app and TTS is the mission.
@@ -157,8 +169,9 @@ speech *notes* app and TTS is the mission.
   - `logic-tests` — SpeechLogic unit tests (sentence chunker, WAV writer,
     markdown, XHTML, EPUB/ZIP, PDF chapter logic, Pomodoro engine, JEX/Joplin
     crypto).
-  - `kokoro-small-spike` (compact int8 on ORT CPU) / `supertonic-spike` /
-    `epub-spike` / `pdf-spike` — non-blocking contract tests that run each
+  - `kokoro-small-spike` (compact int8 on ORT CPU) / `nano-edge-spike` /
+    `supertonic-spike` / `phonon-spike` / `epub-spike` / `pdf-spike` —
+    non-blocking contract tests that run each
     ONNX model (or the EPUB parser against real Gutenberg books / the PDF
     chapter resolver against real documents) on the macOS runner and assert
     valid output.
@@ -175,7 +188,7 @@ speechnotes-ios/
 ├── project.yml                  # XcodeGen spec (targets, pins, version)
 ├── .github/workflows/build.yml  # CI: tests + spikes + unsigned IPA
 ├── App/Sources/
-│   ├── Engine/                  # SpeechEngine protocol + 4 engines
+│   ├── Engine/                  # SpeechEngine protocol + 5 engines
 │   │   │                        #   + PlayPositionTracker (read-along sync)
 │   │   └── Supertonic/Helper.swift  # vendored upstream runner (MIT)
 │   ├── Services/                # NotesStore, NotebooksStore, BooksStore,
@@ -188,6 +201,7 @@ speechnotes-ios/
 │                                #   epub/pdf readers, notebooks, picker,
 │                                #   settings, mini-player, onboarding…
 ├── App/Resources/epubjs/        # vendored epub.js + JSZip (offline EPUB reader)
+├── App/Resources/foliatejs/     # vendored foliate-js (document reader engine)
 ├── Packages/SpeechLogic/        # pure-logic SPM package (tested on CI)
 │                                #   SentenceChunker, WAVWriter, MarkdownText,
 │                                #   MarkdownSlashMenu, ZipReader, EpubInfo,
@@ -197,6 +211,7 @@ speechnotes-ios/
 ├── Tests/KokoroSmallSpike/      # standalone ONNX contract spike
 ├── Tests/SupertonicSpike/       # standalone ONNX contract spike
 ├── Tests/PhononSpike/           # standalone ONNX contract spike
+├── Tests/NanoEdgeSpike/         # standalone ONNX contract spike
 ├── Tests/EpubSpike/             # EPUB parser contract spike (real books)
 ├── Tests/PdfSpike/              # PDF chapter resolver contract spike
 ├── Scripts/                     # package-ipa.sh, watch_ci.sh, make_icon.py,
@@ -223,7 +238,9 @@ inside LiveContainer.
 - [Kokoro](https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX) — Apache-2.0 (model), voice bank from the KokoroTestApp project
 - [Phonon](https://huggingface.co/onnx-community/phonon-31m-en-ONNX) — Gradium phonon-31m-en via the onnx-community conversion; Apache-2.0 (model, conversion, voices)
 - [supertonic-3](https://huggingface.co/Supertone/supertonic-3) — Supertone; the vendored Swift Helper is MIT
-- [epub.js](https://github.com/futurepress/epub.js) — FreeBSD, vendored under `App/Resources/epubjs/` for the offline EPUB reader
+- [foliate-js](https://github.com/johnfactotum/foliate-js) — MIT; the readest fork vendored under `App/Resources/foliatejs/` for the document reader
+- Nano Edge — distilled from Kokoro's weights (Apache-2.0 lineage); the model set rides the project's Hugging Face repo
+- SlideDeckKit — the OOXML slide renderer ported from the deckcraft-lineage reference implementation (MIT)
 - ONNX Runtime (MIT), XcodeGen, and Apple's AVFoundation do the heavy lifting.
 
 Personal sideload project — model licenses permit personal use; revisit before
