@@ -487,11 +487,14 @@ struct MarkdownPreviewView: View {
             content = content.bold()
         }
         return content
-            .textSelection(.enabled)
             .monospacedDigit(numeric)
             .multilineTextAlignment(numeric ? .trailing : .leading)
             .fixedSize(horizontal: false, vertical: true)
             .frame(width: max(1, width), alignment: numeric ? .trailing : .leading)
+            // Last in the chain: before this point every call is a Text
+            // overload (monospacedDigit(_:) takes an argument on Text, not
+            // on the plain View chain).
+            .textSelection(.enabled)
     }
 
     /// The hard ceiling on one column's word floor, and how many words one
