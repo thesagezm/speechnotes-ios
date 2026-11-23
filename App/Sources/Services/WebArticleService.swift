@@ -126,6 +126,11 @@ final class WebArticleService {
         let bypassAvailable = options.allowBypass && PaywallBypass.loadScripts() != nil
 
         var direct: WebArticle?
+        /// Whether the DIRECT pass's result looks like a wall's teaser.
+        /// It does NOT gate the bypass pass (the bypass runs for every
+        /// import anyway) — it decides which of the two results WINS when
+        /// both came back (see PaywallHeuristics.bypassWins).
+        var directPaywalled = false
 
         if let html = await fetchHTML(url) {
             if let parsed = await parse(html: html, baseURL: url) {
@@ -138,6 +143,7 @@ final class WebArticleService {
                     html: html,
                     extractedTextLength: parsed.text.count
                 )
+                directPaywalled = inspection.paywalled
                 if inspection.paywalled {
                     Log.shared.info("WebArticle: paywall signals (\(inspection.reasons.joined(separator: "; "))) — \(url.absoluteString)")
                 }
@@ -158,7 +164,7 @@ final class WebArticleService {
         if bypassAvailable {
             Log.shared.info("WebArticle: BPC pass starting — \(url.absoluteString)")
             if let bypassed = await render(url: url, bypass: true) {
-                if Self.bypassResultWins(bypassed, over: direct) {
+                if Self.bypassResultWins(bypassed, over: direct, directPaywalled: directPaywalled) {
                     Log.shared.info("WebArticle: BPC pass won (\(bypassed.text.count) chars vs \(direct?.text.count ?? 0)) — \(url.absoluteString)")
                     return bypassed
                 }
@@ -194,9 +200,23 @@ final class WebArticleService {
 
     /// DIRECT pass's comparison rule: the bypass result must beat the
     /// direct one by a real margin, not by navigation chrome noise.
-    private static func bypassResultWins(_ bypassed: WebArticle, over direct: WebArticle?) -> Bool {
-        guard let direct, direct.text.count >= 40 else { return bypassed.text.count >= 40 }
-        return bypassed.text.count >= direct.text.count + 150
+    /// Which of the two passes' results the import keeps.
+    ///
+    /// The decision itself lives in the package (`PaywallHeuristics.
+    /// bypassWins`) so the logic-tests job pins it: the plain rule is
+    /// "the bypass must be clearly longer", and the exception is a DIRECT
+    /// result the heuristics flagged as a WALL — that one is a teaser, and
+    /// an equally long bypass result beats it.
+    private static func bypassResultWins(
+        _ bypassed: WebArticle,
+        over direct: WebArticle?,
+        directPaywalled: Bool = false
+    ) -> Bool {
+        PaywallHeuristics.bypassWins(
+            bypassedLength: bypassed.text.count,
+            directLength: direct?.text.count ?? 0,
+            directPaywalled: directPaywalled
+        )
     }
 
     // MARK: - Fetch
@@ -399,12 +419,94 @@ private final class HeadlessArticlePass: NSObject, WKNavigationDelegate, WKScrip
     /// — evaluateJavaScript's bridging chokes on nothing that way.
     @MainActor private func readabilityExtract(route: WebArticle.Route, sourceURL: URL?) async -> WebArticle? {
         guard Self.readabilitySource != nil else { return nil }
+        // The reader-mode plan: the chrome to strip, the article roots to
+        // try, and the threshold a root must clear. The lists come from
+        // the package (SpeechLogic's ReaderModeExtraction), so the script
+        // and the plan cannot drift.
+        let planJSON = ReaderModeExtraction.selectorsJSON
         let js = """
         (function () {
           if (typeof Readability === 'undefined')
             return JSON.stringify({ ok: false, error: 'readability-missing' });
           try {
+            var PLAN = \(planJSON);
+
+            // The chrome comes off the CLONE before anything is scored:
+            // a sticky header, a "related articles" rail or a footer full
+            // of links must not be able to out-score the story.
+            function stripChrome(root) {
+              var selectors = PLAN.stripSelectors || [];
+              for (var i = 0; i < selectors.length; i++) {
+                var nodes = root.querySelectorAll(selectors[i]);
+                for (var j = nodes.length - 1; j >= 0; j--) {
+                  var node = nodes[j];
+                  if (node && node.parentNode) { node.parentNode.removeChild(node); }
+                }
+              }
+            }
+
+            function textOf(root) {
+              if (!root) { return ''; }
+              return (root.innerText || root.textContent || '').trim();
+            }
+
+            function metaValue(name) {
+              var el = document.querySelector('meta[name="' + name + '"]')
+                || document.querySelector('meta[property="' + name + '"]');
+              return el && el.getAttribute('content') ? el.getAttribute('content') : '';
+            }
+
+            function toMarkdown(root, title) {
+              var markdown = '';
+              try {
+                if (typeof __snArticleToMarkdown === 'function' && root) {
+                  markdown = __snArticleToMarkdown(root, document.baseURI, title || '') || '';
+                }
+              } catch (e) {
+                markdown = '';
+              }
+              return markdown;
+            }
+
+            // --- 1. The ARTICLE FAST PATH ---------------------------------
+            // A page that carries a real <article> (or <main>) already
+            // says where its article is: the scoring can be skipped. The
+            // root must carry real text — a stub <article> (a "related
+            // posts" box, an empty app shell) must not win over the story.
+            //
+            // The fast path returns the article as MARKDOWN only: the
+            // DOM's textContent runs the paragraphs together ("onetwo"),
+            // while the markdown walker keeps the block structure. The
+            // plain text is derived from that markdown on the native side
+            // (the same MarkdownText machinery the notes use).
+            var roots = PLAN.articleRootSelectors || [];
+            for (var r = 0; r < roots.length; r++) {
+              var candidate = null;
+              try { candidate = document.querySelector(roots[r]); } catch (e) { candidate = null; }
+              if (!candidate) { continue; }
+              if (textOf(candidate).length < PLAN.minArticleChars) { continue; }
+              // The title first: the walker drops a leading heading equal
+              // to it, so the note does not print its own headline twice.
+              var fastTitle = metaValue('og:title') || document.title || '';
+              var fastClone = candidate.cloneNode(true);
+              stripChrome(fastClone);
+              var fastMarkdown = toMarkdown(fastClone, fastTitle);
+              if (fastMarkdown.length < PLAN.minArticleChars) { continue; }
+              return JSON.stringify({
+                ok: true,
+                title: fastTitle,
+                byline: metaValue('author'),
+                siteName: metaValue('og:site_name'),
+                excerpt: fastMarkdown.slice(0, 100),
+                text: '',
+                markdown: fastMarkdown,
+                textFromMarkdown: true
+              });
+            }
+
+            // --- 2. The scored path --------------------------------------
             var clone = document.cloneNode(true);
+            stripChrome(clone);
             var parsed = new Readability(clone, { charThreshold: 80 }).parse();
             if (!parsed || !parsed.textContent || parsed.textContent.trim().length < 1)
               return JSON.stringify({ ok: false, error: 'unreadable' });
@@ -494,11 +596,25 @@ private final class HeadlessArticlePass: NSObject, WKNavigationDelegate, WKScrip
             Log.shared.info("WebArticle: extraction call failed on \(route.rawValue) pass\(error.map { ": \($0.localizedDescription)" } ?? "")")
             return nil
         }
-        guard decoded.ok, let decodedText = decoded.text, !decodedText.isEmpty else {
+        guard decoded.ok else {
             Log.shared.info("WebArticle: \(route.rawValue) extraction: \(decoded.error ?? "empty")")
             return nil
         }
-        let text = Self.postprocess(decodedText)
+        // The reader-mode FAST PATH hands the article back as markdown
+        // only: the DOM's textContent runs the paragraphs together
+        // ("onetwo"), while the markdown walker keeps the block
+        // structure. The plain text is derived from that markdown — the
+        // same MarkdownText machinery the notes use, so an imported
+        // article reads exactly like a typed one.
+        var rawText = decoded.text ?? ""
+        if decoded.textFromMarkdown == true {
+            rawText = decoded.markdown.map { MarkdownText.plainText($0) } ?? ""
+        }
+        guard !rawText.isEmpty else {
+            Log.shared.info("WebArticle: \(route.rawValue) extraction: \(decoded.error ?? "empty")")
+            return nil
+        }
+        let text = Self.postprocess(rawText)
         guard text.count >= 40 else {
             Log.shared.info("WebArticle: \(route.rawValue) pass produced only \(text.count) chars — treating as nothing")
             return nil
@@ -537,6 +653,11 @@ private final class HeadlessArticlePass: NSObject, WKNavigationDelegate, WKScrip
         var excerpt: String?
         var text: String?
         var markdown: String?
+        /// The article came back as MARKDOWN only (the reader-mode fast
+        /// path): the plain text is derived from the markdown on this
+        /// side, because the DOM's textContent runs the paragraphs
+        /// together.
+        var textFromMarkdown: Bool?
         var error: String?
     }
 

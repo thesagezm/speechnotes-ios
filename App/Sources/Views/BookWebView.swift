@@ -2,6 +2,23 @@ import SwiftUI
 import WebKit
 import SpeechLogic
 
+/// A passage the reader selected in a book's web surface.
+///
+/// The web page knows WHAT was selected and WHERE it sits; the native side
+/// knows what the ENGINE will say. The two are joined by
+/// `SelectionOffsetMapper`, which maps the selection's position inside its
+/// block onto the same position in the chapter's speech text.
+struct BookSelection: Sendable {
+    /// The selected passage — what "Copy" puts on the pasteboard and the
+    /// fallback search when the block cannot be located in the speech text.
+    let selectedText: String
+    /// The text of the block the selection sits in (the paragraph, list
+    /// item or table cell the DOM put it in).
+    let blockText: String
+    /// The selection's start, as a UTF-16 offset into `blockText`.
+    let blockOffset: Int
+}
+
 /// The book rendering surface (Plan B's "eyes"): ONE WKWebView per reader
 /// presentation, everything served from a custom `bookscheme://` scheme so
 /// the reader is fully offline. Three modes by format:
@@ -64,6 +81,11 @@ struct BookWebView: UIViewRepresentable {
     /// own position instead of leaving the bar on a chapter the reader is
     /// not actually on.
     var onGoChapterFailed: ((Int, String) -> Void)? = nil
+    /// The reader selected a passage and picked "Read from here" from the
+    /// native menu the selection raised. The reader owns the playback (it
+    /// knows the chapter and the book); the webview only reports WHAT was
+    /// selected.
+    var onReadFromHere: ((BookSelection) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -90,6 +112,19 @@ struct BookWebView: UIViewRepresentable {
         let config = WKWebViewConfiguration()
         config.setURLSchemeHandler(context.coordinator, forURLScheme: "bookscheme")
         config.userContentController.add(context.coordinator, name: "reader")
+        // The selection channel: the page reports what the reader selected,
+        // the native side answers with a menu ("Read from here" + "Copy").
+        config.userContentController.add(context.coordinator, name: "snsel")
+        // The selection script runs in EVERY frame: the epub.js and foliate
+        // readers render the book inside an IFRAME, and a top-frame-only
+        // script would never see the selection at all.
+        config.userContentController.addUserScript(
+            WKUserScript(
+                source: Self.selectionScript,
+                injectionTime: .atDocumentEnd,
+                forMainFrameOnly: false
+            )
+        )
         // A NATIVE document book rendered by the OLD pages pipeline has no
         // epub.js shell and no foliate view: each chapter page is the
         // top-level document, and the reader script rides in as a user
@@ -114,6 +149,16 @@ struct BookWebView: UIViewRepresentable {
         webView.backgroundColor = .clear
         webView.scrollView.backgroundColor = .clear
         context.coordinator.parent = self
+        // The native selection menu. `UIContextMenuInteraction` is the
+        // CERTAIN API for this (iOS 13+): the older `UIMenuController`
+        // writes to a PROCESS-WIDE menu list, which is exactly what broke
+        // Copy in the notes (see MarkdownEditorView), and
+        // `UIEditMenuInteraction` has no reliable way to present a menu at
+        // a point of the caller's choosing.
+        let selectionMenu = UIContextMenuInteraction(delegate: context.coordinator)
+        webView.addInteraction(selectionMenu)
+        context.coordinator.selectionMenu = selectionMenu
+        context.coordinator.webView = webView
 
         if let url = Self.shellURL(book: book, chapter: startChapter, appearance: appearance, cfi: startCFI) {
             webView.load(URLRequest(url: url))
@@ -206,7 +251,7 @@ struct BookWebView: UIViewRepresentable {
 
     // MARK: - Coordinator: scheme handler + message bridge
 
-    final class Coordinator: NSObject, WKURLSchemeHandler, WKScriptMessageHandler {
+    final class Coordinator: NSObject, WKURLSchemeHandler, WKScriptMessageHandler, UIContextMenuInteractionDelegate {
         var parent: BookWebView?
         /// Scheme tasks currently being served. `stop` removes the task, and
         /// every didReceive/didFinish/didFail below checks membership first —
@@ -219,6 +264,24 @@ struct BookWebView: UIViewRepresentable {
         private let liveTasksLock = NSLock()
         /// File reads run off the main thread; deliveries hop back to main.
         private let ioQueue = DispatchQueue(label: "com.speechnotes.bookscheme", qos: .userInitiated)
+        /// The native selection menu's interaction. Weak — the webview owns
+        /// it (UIKit retains the interactions attached to a view).
+        weak var selectionMenu: UIContextMenuInteraction?
+        /// The webview this coordinator drives — the menu is anchored in it.
+        weak var webView: WKWebView?
+        /// The passage the last selection reported — what the native menu
+        /// offers ("Read from here" / "Copy").
+        private var pendingSelection: BookSelection?
+
+        /// What the page reported, unpacked on the callback's thread: the
+        /// selection itself plus the rect it sits at (viewport-relative).
+        /// Sendable, because it crosses into the main actor to present the
+        /// menu.
+        private struct SelectionPayload: Sendable {
+            let selection: BookSelection
+            let rectX: Double?
+            let rectY: Double?
+        }
 
         // Classes get no memberwise init — one must be explicit.
         init(parent: BookWebView?) {
@@ -441,14 +504,99 @@ struct BookWebView: UIViewRepresentable {
             FoliateAssets.serve(name)
         }
 
-        // MARK: WKScriptMessageHandler ("reader" channel)
+        // MARK: WKScriptMessageHandler ("reader" + "snsel" channels)
 
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            if message.name == "snsel" {
+                handleSelectionMessage(message)
+                return
+            }
             guard message.name == "reader",
                   let body = message.body as? [String: Any],
                   let type = body["type"] as? String else { return }
             Task { @MainActor [weak self] in
                 self?.handleMessage(type: type, body: body)
+            }
+        }
+
+        /// The reader selected a passage: raise the native menu at the
+        /// selection ("Read from here" + "Copy").
+        ///
+        /// WebKit's own callout was suppressed in the page (the script calls
+        /// `preventDefault` on the `contextmenu` event when there is a live
+        /// selection), so the native menu is the ONLY menu on screen — which
+        /// is why it has to carry Copy itself.
+        ///
+        /// The message is unpacked HERE, on the callback's own thread, into
+        /// a Sendable payload: the `WKScriptMessage` itself is not
+        /// Sendable, and it must not travel into the main-actor hop that
+        /// presents the menu.
+        private func handleSelectionMessage(_ message: WKScriptMessage) {
+            guard let body = message.body as? [String: Any] else { return }
+            let selectedText = body["selectedText"] as? String ?? ""
+            guard !selectedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            let rect = body["rect"] as? [String: Any]
+            let payload = SelectionPayload(
+                selection: BookSelection(
+                    selectedText: selectedText,
+                    blockText: body["blockText"] as? String ?? "",
+                    blockOffset: (body["blockOffset"] as? NSNumber)?.intValue ?? 0
+                ),
+                rectX: (rect?["x"] as? NSNumber)?.doubleValue,
+                rectY: (rect?["y"] as? NSNumber)?.doubleValue
+            )
+            Task { @MainActor [weak self] in
+                self?.presentSelection(payload)
+            }
+        }
+
+        @MainActor private func presentSelection(_ payload: SelectionPayload) {
+            pendingSelection = payload.selection
+            guard let x = payload.rectX, let y = payload.rectY else { return }
+            presentSelectionMenu(at: CGPoint(x: x, y: y))
+        }
+
+        /// Presents the native menu where the selection is.
+        ///
+        /// The page reports a VIEWPORT-relative rect; the webview's scroll
+        /// view holds CONTENT coordinates, so the rect is moved by the
+        /// scroll offset and the safe-area inset before it is converted into
+        /// the webview's own space.
+        @MainActor private func presentSelectionMenu(at point: CGPoint) {
+            guard let webView else { return }
+            let scrollView = webView.scrollView
+            let inset = scrollView.adjustedContentInset
+            let contentPoint = CGPoint(
+                x: point.x + scrollView.contentOffset.x + inset.left,
+                y: point.y + scrollView.contentOffset.y + inset.top
+            )
+            let viewPoint = scrollView.convert(contentPoint, to: webView)
+            selectionMenu?.presentMenu(at: viewPoint)
+        }
+
+        // MARK: UIContextMenuInteractionDelegate (the native selection menu)
+
+        func contextMenuInteraction(
+            _ interaction: UIContextMenuInteraction,
+            configurationForMenuAtLocation location: CGPoint
+        ) -> UIContextMenuConfiguration? {
+            guard let selection = pendingSelection else { return nil }
+            return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
+                UIMenu(title: "", children: [
+                    UIAction(
+                        title: String(localized: "Read from here"),
+                        image: UIImage(systemName: "play.circle")
+                    ) { _ in
+                        guard let self, let parent = self.parent else { return }
+                        parent.onReadFromHere?(selection)
+                    },
+                    UIAction(
+                        title: String(localized: "Copy"),
+                        image: UIImage(systemName: "doc.on.doc")
+                    ) { _ in
+                        UIPasteboard.general.string = selection.selectedText
+                    }
+                ])
             }
         }
 
@@ -932,6 +1080,165 @@ extension BookWebView {
       window.readerDestroy = function () {
         stopAutoScroll();
       };
+    })();
+    """#
+}
+
+// MARK: - Selection script
+
+extension BookWebView {
+    /// The selection script: a small, pipeline-agnostic listener that
+    /// reports what the reader selected so the native side can offer
+    /// "Read from here" and "Copy" at the selection.
+    ///
+    /// It is injected at DOCUMENT END into EVERY frame (`forMainFrameOnly:
+    /// false`) because the epub.js and foliate readers render the book
+    /// inside an IFRAME — a top-frame-only script would never see the
+    /// selection at all. No vendored shell is touched: the script rides
+    /// beside them, so all three pipelines get the feature at once.
+    ///
+    /// WebKit's own callout is suppressed ONLY when there is a live text
+    /// selection: the native menu replaces it (and carries Copy itself, so
+    /// copying still works). A long-press on a LINK is left alone — the
+    /// link menu (open in Safari, copy link) must survive.
+    ///
+    /// WHAT is reported: the selected text, the text of the block the
+    /// selection sits in, the selection's offset inside that block, and the
+    /// selection's rect. The block is what makes "read from here" possible:
+    /// it is the unit the engine reads as one paragraph, so the offset can
+    /// be mapped onto the chapter's speech text.
+    static let selectionScript: String = #"""
+    (function () {
+      if (window.__snSelection) { return; }
+      window.__snSelection = true;
+
+      var CHANNEL = 'snsel';
+
+      function postToNative(payload) {
+        try {
+          if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers[CHANNEL]) {
+            window.webkit.messageHandlers[CHANNEL].postMessage(payload);
+          }
+        } catch (e) {}
+      }
+
+      // --- the frame offset --------------------------------------------------
+      // A selection inside the epub.js / foliate IFRAME reports a rect that
+      // is relative to the IFRAME's viewport, while the native menu is
+      // anchored in the webview. The frame cannot work the offset out
+      // itself — the shell and the book's own pages are different hosts of
+      // the same custom scheme, so the frame is CROSS-ORIGIN and cannot
+      // reach its parent's DOM. The parent CAN see the iframe element, so
+      // the frame asks and the parent answers.
+      var frameOffset = null;
+      var frameOffsetAsked = false;
+
+      window.addEventListener('message', function (event) {
+        var data = event.data;
+        if (!data || data.snSel !== 'frame-reply') { return; }
+        frameOffset = { x: data.x || 0, y: data.y || 0 };
+      });
+
+      if (window.parent && window.parent !== window) {
+        window.addEventListener('message', function (event) {
+          var data = event.data;
+          if (!data || data.snSel !== 'frame-request') { return; }
+          var source = event.source;
+          if (!source) { return; }
+          var frames = document.querySelectorAll('iframe');
+          for (var i = 0; i < frames.length; i++) {
+            // Identity only — no cross-origin property access.
+            if (frames[i].contentWindow === source) {
+              var r = frames[i].getBoundingClientRect();
+              try {
+                source.postMessage({ snSel: 'frame-reply', x: r.left, y: r.top }, '*');
+              } catch (e) {}
+              return;
+            }
+          }
+        });
+      }
+
+      function report(payload) {
+        if (window.parent && window.parent !== window) {
+          if (!frameOffsetAsked) {
+            frameOffsetAsked = true;
+            try { window.parent.postMessage({ snSel: 'frame-request' }, '*'); } catch (e) {}
+          }
+          // The parent answers in a turn of the event loop; if it does not
+          // (a frame the shell does not own), post anyway with a zero
+          // offset — a menu in the wrong place beats no menu.
+          setTimeout(function () {
+            if (frameOffset) {
+              payload.rect.x += frameOffset.x;
+              payload.rect.y += frameOffset.y;
+            }
+            postToNative(payload);
+          }, 25);
+          return;
+        }
+        postToNative(payload);
+      }
+
+      // --- the block ----------------------------------------------------------
+      // The nearest block-level ancestor of the selection.
+      function blockOf(node) {
+        var n = node;
+        while (n && n.nodeType === 3) { n = n.parentNode; }
+        while (n && n.nodeType === 1) {
+          var tag = n.tagName ? n.tagName.toLowerCase() : '';
+          if (tag === 'p' || tag === 'div' || tag === 'li' || tag === 'blockquote'
+              || tag === 'h1' || tag === 'h2' || tag === 'h3' || tag === 'h4'
+              || tag === 'h5' || tag === 'h6' || tag === 'td' || tag === 'th'
+              || tag === 'pre' || tag === 'section' || tag === 'article') {
+            return n;
+          }
+          n = n.parentNode;
+        }
+        return null;
+      }
+
+      function insideLink(node) {
+        var n = node;
+        while (n && n.nodeType === 1) {
+          if (n.tagName && n.tagName.toLowerCase() === 'a') { return true; }
+          n = n.parentNode;
+        }
+        return false;
+      }
+
+      document.addEventListener('contextmenu', function (event) {
+        var sel = window.getSelection ? window.getSelection() : null;
+        if (!sel || sel.isCollapsed || sel.rangeCount === 0) { return; }
+        var text = String(sel);
+        if (!text || !text.trim()) { return; }
+        var range = sel.getRangeAt(0);
+        // A link's own menu (open in Safari, copy link) must survive.
+        if (insideLink(range.startContainer)) { return; }
+        event.preventDefault();
+
+        var block = blockOf(range.startContainer);
+        var blockText = '';
+        var blockOffset = 0;
+        if (block) {
+          blockText = block.textContent || '';
+          try {
+            var pre = range.cloneRange();
+            pre.selectNodeContents(block);
+            pre.setEnd(range.startContainer, range.startOffset);
+            blockOffset = String(pre).length;
+          } catch (e) {
+            blockOffset = 0;
+          }
+        }
+        var rect = range.getBoundingClientRect();
+        report({
+          selectedText: text,
+          blockText: blockText,
+          blockOffset: blockOffset,
+          rect: { x: rect.left, y: rect.top, w: rect.width, h: rect.height }
+        });
+      }, true);
     })();
     """#
 }

@@ -113,4 +113,26 @@ public enum PaywallHeuristics {
         }
         return nil
     }
+
+    /// Whether the BYPASS pass's result should replace the DIRECT pass's.
+    ///
+    /// The plain rule is "the bypass must be CLEARLY longer" — on a clean
+    /// page the two passes extract the same article, and a tie means the
+    /// bypass added nothing, so the direct result stands (it carries the
+    /// real title and byline).
+    ///
+    /// The exception: a DIRECT result the heuristics flagged as a WALL is
+    /// a stub — the server cut the article and served the teaser. The
+    /// bypass pass cleared the wall's cookies and re-read the page, so an
+    /// equally long bypass result is the BETTER one even when it is not
+    /// 150 characters longer. Without this, a walled page that BOTH
+    /// passes see as a stub keeps the stub.
+    ///
+    /// Pure decision, no I/O — so the logic-tests job pins it.
+    public static func bypassWins(bypassedLength: Int, directLength: Int, directPaywalled: Bool) -> Bool {
+        // No usable direct result: anything the bypass found is better.
+        if directLength < 40 { return bypassedLength >= 40 }
+        if directPaywalled, bypassedLength >= directLength { return true }
+        return bypassedLength >= directLength + 150
+    }
 }

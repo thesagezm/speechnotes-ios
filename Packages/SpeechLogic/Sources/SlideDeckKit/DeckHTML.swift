@@ -32,6 +32,30 @@ public enum DeckHTML {
         return out
     }
 
+    /// ONE slide as a standalone HTML document — the deck thumbnail's
+    /// input.
+    ///
+    /// The same CSS and the same slide markup as the reader, but without
+    /// the fit script: the thumbnail renderer sizes the webview to the
+    /// slide's own aspect, so the slide lands at the requested zoom and
+    /// nothing scrolls. The page is opaque (white) — a transparent page
+    /// snapshots as black.
+    public static func slidePreviewHTML(_ deck: SlideDeck, index: Int, zoom: Double = 1) -> String {
+        guard deck.slides.indices.contains(index) else { return "" }
+        var out = ""
+        out += "<!DOCTYPE html><html data-w=\"\(num(deck.w))\" data-h=\"\(num(deck.h))\">"
+        out += "<head><meta charset=\"utf-8\">"
+        out += "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+        out += "<style>"
+        out += ":root{--dw:\(num(deck.w));--dh:\(num(deck.h));--zoom:\(num(zoom));}"
+        out += deckCSS
+        out += "html,body{background:#FFFFFF;overflow:hidden;}"
+        out += "</style></head><body>"
+        out += slideHTML(deck, index, deck.slides[index])
+        out += "</body></html>"
+        return out
+    }
+
     /// One slide: its stage and its items in z-order (document order).
     static func slideHTML(_ deck: SlideDeck, _ index: Int, _ slide: Slide) -> String {
         // The highlight targets: (item, para) → byte range for text

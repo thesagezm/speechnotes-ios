@@ -498,6 +498,13 @@ struct BookReaderView: View {
                     persistPosition()
                 }
                 pendingJumpFrom = nil
+            },
+            // "Read from here": the reader selected a passage in the web
+            // surface and picked it from the native selection menu.
+            onReadFromHere: { selection in
+                Task { @MainActor in
+                    await readFromHere(selection)
+                }
             }
         )
         .id(reloadToken)
@@ -882,6 +889,47 @@ struct BookReaderView: View {
     }
 
     // MARK: - Actions & plumbing
+
+    /// "Read from here": the reader selected a passage in the web surface
+    /// and picked it from the native selection menu.
+    ///
+    /// The web page and the engine do not read the same bytes — the page
+    /// shows the rendered book, the engine reads the chapter's extracted
+    /// (and sanitised) text — so the selection's position inside its block
+    /// is mapped onto that text by `SelectionOffsetMapper`. The selected
+    /// passage alone is the fallback when the block cannot be located.
+    @MainActor
+    private func readFromHere(_ selection: BookSelection) async {
+        guard let text = await BookPlaybackController.shared.chapterText(
+            for: book,
+            chapterIndex: chapterIndex
+        ), !text.isEmpty else {
+            Log.shared.info("BookReader: read-from-here — no speech text for chapter \(chapterIndex)")
+            return
+        }
+        let offset = SelectionOffsetMapper.speechOffset(
+            blockText: selection.blockText,
+            blockOffset: selection.blockOffset,
+            speechText: text
+        ) ?? SelectionOffsetMapper.speechOffset(
+            selectedText: selection.selectedText,
+            speechText: text
+        )
+        guard let offset else {
+            Log.shared.info("BookReader: read-from-here — the selection could not be located in the chapter text")
+            return
+        }
+        Haptics.tap()
+        player.playFrom(
+            text,
+            at: offset,
+            book: SpeechPlayer.BookPlaybackRef(
+                id: book.id.uuidString,
+                title: book.title,
+                chapterIndex: chapterIndex
+            )
+        )
+    }
 
     private func handleRelocated(index: Int, fraction: Double, total: Int, cfi: String?) {
         let chapterChanged = index != chapterIndex

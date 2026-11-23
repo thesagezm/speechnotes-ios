@@ -3,7 +3,9 @@
 An offline, Speech Note (Linux)-style app for iPhone — built entirely from Linux,
 compiled on GitHub Actions macOS runners, sideloaded via SideStore + LiveContainer.
 
-**Current status: v1.8.2 — the document family reads in the real reader.**
+**Current status: v1.8.2 — the document family reads in the real reader**
+(plus the unreleased round below: Copy is back in the notes, "Read from
+here" on three surfaces, real deck thumbnails, reader-mode imports).
 mobi/azw3/fb2/rtf/html/txt render in the vendored foliate-js engine — the
 original file, never converted — with the publisher's own table of contents
 and instant chapter jumps; PowerPoint decks import whole and speak in visual
@@ -41,6 +43,33 @@ soft tone, then the next sentence. There is no retry: a second attempt at the
 same text fails the same way, and the wait for it is silence the listener pays
 for. Text is cleaned at import so the things that used to fail (soft hyphens,
 zero-width joiners, control bytes, embedded-font glyphs) never reach the model.
+
+## What's new in v1.8.3 (unreleased — device-test build)
+
+Work in progress — not a release yet; this is the device-test build.
+
+- **Copy works again in the notes.** The v1.8.2 release registered the
+  editor's custom menu item in a way that replaced the built-in edit menu
+  for every text view in the app, so Cut/Copy/Paste/Select All vanished
+  from the notes. The custom item now rides the system's own selection
+  menu and is appended to it, so the built-in actions always stay.
+- **"Play from caret" is always in the ⋯ menu.** It used to appear only
+  after you had tapped into the note with the caret past the first
+  character. It is now always listed, and when it cannot run yet it says
+  why ("tap into the note first", "stop playback first", "the caret is at
+  the top").
+- **"Read from here."** Select a passage and start the voice at that
+  point — in the notes editor's selection menu, in the markdown preview's
+  prose, and in a book's reader (epub, mobi/azw3/fb2/rtf/html). The
+  selection is mapped onto the text the engine will actually read, so the
+  voice starts at the word you touched. The book's menu also carries Copy.
+- **Decks show their first slide on the shelf.** A PowerPoint deck used to
+  wear the same generic "SLIDES" tile as every other deck; it now shows
+  its own first slide, rendered by the same engine the reader uses.
+- **Web imports strip the chrome.** Nav bars, footers, sidebars and
+  comment boxes are removed before the article is chosen, and a page that
+  carries a real `<article>` is taken as-is instead of being re-scored. A
+  paywalled page imports the full story rather than the teaser.
 
 ## What's new in v1.8.2
 
@@ -119,7 +148,8 @@ Feature tour:
   shapes, gradients and symbol bullets; speech reads slides in visual
   order (top→bottom), so a repeated footer never ends the slide; the deck
   re-fits on rotation, rail changes and hidden chrome, and fills the
-  viewport like the PDF does.
+  viewport like the PDF does; the shelf shows the deck's own first slide
+  as its picture.
 - **Streaming playback** — sentence-chunked generation with playback starting
   after the first sentence; pause/resume/stop; speed slider; phone-call
   interruption handling; lock-screen / Control Center controls.
@@ -138,7 +168,9 @@ Feature tour:
   (English, Korean, Japanese, German, French, +26 more).
 - **Markdown option** (Settings → Notes) — preview rendered markdown in the
   editor (eye/pencil toggle), speech reads the plain text without markdown
-  symbols, and the preview's prose is selectable/copyable.
+  symbols, and the preview's prose is selectable/copyable — and carries
+  "Read from here", so a selected passage can be spoken from where it
+  starts.
 - **E-Ink mode** (Settings → Appearance → Theme) — paper white, ink black,
   square edges, hairline borders: no glass, no gradients, no color, no
   animation, anywhere in the app (notes list and editor included). The
@@ -146,7 +178,9 @@ Feature tour:
   EPUB reader gets its own E-Ink page theme to match.
 - **Import** — .txt / .md / .pdf via the Files picker, drag & drop,
   `speechnotes://import?text=…` links, and clipboard; iCloud-aware with
-  encoding fallbacks (UTF-8/16/32, latin-1).
+  encoding fallbacks (UTF-8/16/32, latin-1). Web articles import with the
+  page's chrome stripped and a real `<article>` preferred over a scored
+  guess (`Docs/WEB-ARTICLE-IMPORT.md`).
 - **Export** — WAV audio of any note via the Share Sheet; share note text too.
 - **Storage** (Settings → Storage) — browsable gallery of every cached image
   (attached AND web-downloaded, tap to zoom, share/delete), exported audio

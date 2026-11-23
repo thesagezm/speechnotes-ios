@@ -14,11 +14,18 @@ import UIKit
 /// read-through cache. Links open in an in-app Safari sheet.
 struct MarkdownPreviewView: View {
     let markdown: String
+    /// The note's SPEECH text — what the engine will read. "Read from here"
+    /// (the native selection menu on the prose) maps the selection onto it.
+    var speechText: String = ""
+    /// The reader picked "Read from here" — the argument is a UTF-16 offset
+    /// into `speechText`.
+    var onReadFromHere: ((Int) -> Void)? = nil
 
     @State private var safariURL: URL?
     @State private var zoomedImage: (url: URL, alt: String)?
     @Environment(\.noteId) private var envNoteId
     @Environment(\.isEInk) private var isEInk
+    @Environment(\.accentColor) private var accentColor
     @EnvironmentObject private var theme: AppTheme
 
     // MARK: - Spacing (user-tunable in Appearance → Reading View)
@@ -62,15 +69,20 @@ struct MarkdownPreviewView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
-                    blockView(block)
+                ForEach(Array(renderedItems.enumerated()), id: \.offset) { _, item in
+                    switch item {
+                    case .prose(let group):
+                        proseView(group)
+                    case .block(let block):
+                        blockView(block)
+                    }
                 }
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
             .frame(maxWidth: .infinity, alignment: .leading)
             // Reading text scale (user-controlled in Appearance settings).
-            // Muliply only Text-bearing content — code is monospaced already.
+            // Multiply only Text-bearing content — code is monospaced already.
             .font(.system(size: bodyFontSize))
         }
         // The note should not drift once you open it: vertical bounce is off
@@ -159,6 +171,90 @@ struct MarkdownPreviewView: View {
     }
 
     // MARK: - Blocks
+
+    /// What the preview renders, in reading order: a GROUP of prose blocks
+    /// (one native text view) or a single block that keeps its own
+    /// renderer.
+    ///
+    /// The grouping is what keeps the view count BOUNDED: a note with two
+    /// hundred paragraphs is two hundred paragraphs in ONE text view, not
+    /// two hundred views.
+    private enum RenderedItem {
+        case prose([MarkdownText.MarkdownBlock])
+        case block(MarkdownText.MarkdownBlock)
+    }
+
+    private var renderedItems: [RenderedItem] {
+        var items: [RenderedItem] = []
+        var group: [MarkdownText.MarkdownBlock] = []
+        func flush() {
+            if !group.isEmpty {
+                items.append(.prose(group))
+                group = []
+            }
+        }
+        for block in blocks {
+            if Self.isProse(block) {
+                group.append(block)
+            } else {
+                flush()
+                items.append(.block(block))
+            }
+        }
+        flush()
+        return items
+    }
+
+    /// Whether a block belongs in the native prose text view.
+    ///
+    /// The quote keeps its SwiftUI renderer — its vertical rule is drawn
+    /// there, and a text view has no paragraph border. A block carrying an
+    /// INLINE IMAGE does too: the picture is a SwiftUI view, so the whole
+    /// block stays on the SwiftUI path (the prose text view cannot draw a
+    /// picture inline).
+    static func isProse(_ block: MarkdownText.MarkdownBlock) -> Bool {
+        switch block {
+        case .heading(_, _, let spans):
+            return !spans.contains(where: \.isImage)
+        case .paragraph(_, let spans):
+            return !spans.contains(where: \.isImage)
+        case .bulletList(let items), .orderedList(let items):
+            return !items.contains { item in
+                item.spans.contains(where: \.isImage)
+            }
+        default:
+            return false
+        }
+    }
+
+    /// The prose group, drawn by the native text view — the surface that
+    /// carries Copy AND "Read from here" in one menu.
+    @ViewBuilder
+    private func proseView(_ group: [MarkdownText.MarkdownBlock]) -> some View {
+        MarkdownProseTextView(
+            blocks: group,
+            speechText: speechText,
+            style: proseStyle,
+            accent: UIColor(accentColor),
+            onReadFromHere: onReadFromHere,
+            onOpenURL: { url in safariURL = url }
+        )
+    }
+
+    /// The reading-view metrics the prose text view draws with — the same
+    /// numbers the SwiftUI blocks use, so the two agree.
+    private var proseStyle: MarkdownProseStyle {
+        MarkdownProseStyle(
+            bodyFontSize: bodyFontSize,
+            headingScale: CGFloat(theme.previewTextScale),
+            lineSpacing: lineSpacing,
+            blockGap: blockGap,
+            listRowSpacing: listRowSpacing,
+            headingBottom: headingBottom,
+            headingTopLevel1: ReaderSpacing.headingTopLevel1 * theme.readerBlockSpacing,
+            headingTopLevel3Plus: ReaderSpacing.headingTopLevel3Plus * theme.readerBlockSpacing
+        )
+    }
 
     @ViewBuilder
     private func blockView(_ block: MarkdownText.MarkdownBlock) -> some View {

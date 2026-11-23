@@ -145,6 +145,48 @@ final class BooksStore: ObservableObject {
         bookDirectory(book.id).appendingPathComponent("cover.jpg")
     }
 
+    /// The deck thumbnail's marker file: it says the shelf picture IS the
+    /// deck's own first slide.
+    ///
+    /// The backfill reads it. A deck imported before the first-slide
+    /// thumbnail existed carries the SYNTHESIZED tile, and the tile says
+    /// nothing about the deck — so the marker is what tells the backfill
+    /// "this deck still wants its real picture". "failed" is written when a
+    /// render failed once, so a deck that cannot be rasterized never costs
+    /// a parse on every launch.
+    nonisolated private static func deckThumbnailMarkerURL(_ id: UUID) -> URL {
+        bookDirectory(id).appendingPathComponent("cover.kind")
+    }
+
+    nonisolated private static func markDeckThumbnail(_ id: UUID) {
+        try? "slide".write(
+            to: deckThumbnailMarkerURL(id),
+            atomically: true,
+            encoding: .utf8
+        )
+    }
+
+    nonisolated private static func markDeckThumbnailFailed(_ id: UUID) {
+        try? "failed".write(
+            to: deckThumbnailMarkerURL(id),
+            atomically: true,
+            encoding: .utf8
+        )
+    }
+
+    /// Whether this deck still wants its first-slide thumbnail.
+    nonisolated private static func needsDeckThumbnail(_ id: UUID) -> Bool {
+        guard let text = try? String(
+            contentsOf: deckThumbnailMarkerURL(id),
+            encoding: .utf8
+        ) else {
+            // No marker at all: a deck imported before the thumbnail
+            // existed, or one whose render has not been tried yet.
+            return true
+        }
+        return text != "slide" && text != "failed"
+    }
+
     /// Cancellation token for the in-flight shelf backfill. Replaced per
     /// pass; the watchdog cancels the current one when it sees the main
     /// thread blocked.
@@ -389,6 +431,15 @@ final class BooksStore: ObservableObject {
                 // cheap (one header read for the mobi family, a drawn tile
                 // otherwise) and runs with the other non-audio formats.
                 || (book.format.isDocument && !book.hasCover)
+                // A deck's shelf picture is its OWN FIRST SLIDE. The
+                // filter had no .slides clause at all (a deck is not
+                // .isDocument), so every deck imported before the
+                // first-slide thumbnail existed — and every deck whose
+                // picture is still the synthesized tile — was never
+                // re-looked. The marker file says whether the deck
+                // already has its real picture, so a deck that renders
+                // once is never parsed again.
+                || (book.format.isSlides && Self.needsDeckThumbnail(book.id))
         }
         guard !pending.isEmpty else { return }
         didBackfillLegacyBooks = true
@@ -521,12 +572,32 @@ final class BooksStore: ObservableObject {
                         book.hasCover = true
                     }
                 case .slides:
-                    // A deck's manifest comes complete from the import; one
-                    // re-look gives a cover-less deck its synthesized tile.
-                    if !book.hasCover, Self.isOfficeDocument(book.originalFileName),
-                       let tile = Self.synthesizeDocCover(title: book.title, fileName: book.originalFileName) {
-                        try? tile.write(to: dir.appendingPathComponent("cover.jpg"), options: .atomic)
-                        book.hasCover = true
+                    // The deck's shelf picture is its FIRST SLIDE — the
+                    // same slide the reader opens on, drawn by the same
+                    // document the reader draws. The render needs the main
+                    // actor (the webview does), so it hops over; the parse
+                    // stays off-main inside the renderer.
+                    if Self.needsDeckThumbnail(book.id) {
+                        if let jpeg = await DeckThumbnailRenderer.firstSlideJPEG(
+                            bookDirectory: dir,
+                            format: book.format
+                        ) {
+                            try? jpeg.write(to: dir.appendingPathComponent("cover.jpg"), options: .atomic)
+                            Self.markDeckThumbnail(book.id)
+                            book.hasCover = true
+                        } else {
+                            // The render failed: keep whatever picture the
+                            // deck has (the synthesized tile), and do not
+                            // try again — a deck that cannot be
+                            // rasterized must not cost a parse on every
+                            // launch.
+                            if !book.hasCover, Self.isOfficeDocument(book.originalFileName),
+                               let tile = Self.synthesizeDocCover(title: book.title, fileName: book.originalFileName) {
+                                try? tile.write(to: dir.appendingPathComponent("cover.jpg"), options: .atomic)
+                                book.hasCover = true
+                            }
+                            Self.markDeckThumbnailFailed(book.id)
+                        }
                     }
                 case .document:
                     // The parse is not re-run (the manifest's spine/TOC are
@@ -984,6 +1055,27 @@ final class BooksStore: ObservableObject {
                 parsed.importError = "The document has no readable chapters."
             }
         }
+        // A deck's shelf picture is its OWN FIRST SLIDE — the same slide
+        // the reader opens on, drawn by the same document the reader
+        // draws, rasterized offscreen. A deck that cannot be rendered
+        // keeps the synthesized tile (the same deliberate fallback every
+        // other office import has).
+        if case .slides = format {
+            if let jpeg = await DeckThumbnailRenderer.firstSlideJPEG(
+                bookDirectory: dir,
+                format: format
+            ) {
+                try? jpeg.write(to: dir.appendingPathComponent("cover.jpg"), options: .atomic)
+                parsed.hasCover = true
+                Self.markDeckThumbnail(id)
+                Log.shared.info("BooksStore: deck «\(parsed.title)» — first slide rendered as the shelf picture")
+            } else if Self.isOfficeDocument(fileName),
+                      let tile = Self.synthesizeDocCover(title: parsed.title, fileName: fileName) {
+                try? tile.write(to: dir.appendingPathComponent("cover.jpg"), options: .atomic)
+                parsed.hasCover = true
+                Log.shared.info("BooksStore: deck «\(parsed.title)» — the first slide could not be rendered, using the tile")
+            }
+        }
 
         do {
             let data = try JSONEncoder().encode(parsed)
@@ -1164,15 +1256,10 @@ final class BooksStore: ObservableObject {
             let label = slide.title.isEmpty ? "Slide \(index + 1)" : slide.title
             return BookTocEntry(label: label, href: "slide-\(index + 1)", spineIndex: index, depth: 0)
         }
-        // A deck ships no cover image of its own in general — the shelf's
-        // synthesized tile keeps the row deliberate (and the first slide
-        // picture becomes the real cover when one exists, via the reader's
-        // cover pass in a later milestone).
-        if !book.hasCover, Self.isOfficeDocument(book.originalFileName),
-           let tile = Self.synthesizeDocCover(title: book.title, fileName: book.originalFileName) {
-            try? tile.write(to: directory.appendingPathComponent("cover.jpg"), options: .atomic)
-            book.hasCover = true
-        }
+        // A deck ships no cover image of its own — its shelf picture is its
+        // OWN FIRST SLIDE, rasterized by the importer (DeckThumbnailRenderer)
+        // once the manifest is built. The synthesized tile is only the
+        // fallback for a deck that cannot be rendered.
         Log.shared.info(
             "BooksStore: imported deck «\(book.title)» — \(deck.slides.count) slide(s), "
                 + "\(deck.media.count) image(s)"

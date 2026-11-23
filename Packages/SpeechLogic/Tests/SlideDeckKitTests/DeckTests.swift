@@ -671,6 +671,27 @@ final class DeckTests: XCTestCase {
         XCTAssertFalse(html.contains("&amp;lt;"), "escaping stays single-pass")
     }
 
+    /// The deck thumbnail's document: ONE slide, the same CSS, and NO fit
+    /// script — the thumbnail renderer sizes the webview to the slide's own
+    /// aspect, so the slide lands at the requested zoom and nothing
+    /// scrolls.
+    func testSlidePreviewHTMLIsOneSlideAtTheRequestedZoom() throws {
+        let deck = try fixtureDeck()
+        let html = DeckHTML.slidePreviewHTML(deck, index: 0)
+        XCTAssertTrue(html.contains(#"data-w="720""#))
+        XCTAssertTrue(html.contains(#"class="slide" id="s0""#))
+        XCTAssertFalse(html.contains(#"id="s1""#), "the preview carries ONE slide, not the deck")
+        XCTAssertFalse(html.contains("<script"), "the fit script is the reader's, not the thumbnail's")
+        XCTAssertTrue(html.contains("--zoom:1"))
+        XCTAssertTrue(html.contains("background:#FFFFFF"), "the page is opaque — a transparent page snapshots as black")
+        XCTAssertTrue(html.contains("deck://media/0/"), "the picture still rides the scheme handler")
+
+        let zoomed = DeckHTML.slidePreviewHTML(deck, index: 0, zoom: 0.5)
+        XCTAssertTrue(zoomed.contains("--zoom:0.5"))
+
+        XCTAssertEqual(DeckHTML.slidePreviewHTML(deck, index: 99), "", "an out-of-range slide has no preview")
+    }
+
     func testNotesTailOnlyAfterNonEmptyNotes() throws {
         let deck = try fixtureDeck()
         let (text2, spans2) = DeckSlides.slideText(deck, 1)

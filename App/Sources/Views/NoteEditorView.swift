@@ -228,16 +228,48 @@ struct NoteEditorView: View {
     /// be mapped. Used by the ⋯ menu's "Play from caret" (way #1 of the
     /// 2026-10-13 start-from-point set).
     private var playFromCaretOffset: Int? {
+        playFromCaretOffset(at: selectionUTF16?.lowerBound)
+    }
+
+    /// The same mapping for an EXPLICIT offset. The editor's native edit
+    /// menu hands over the MENU'S OWN range — the loupe can move the
+    /// selection after the last one the editor reported, so the reported
+    /// selection is not authoritative and every caller must ask about the
+    /// offset it is actually going to play from.
+    private func playFromCaretOffset(at offset: Int?) -> Int? {
         // Raw-draft caret → speech-text offset: with rendering off they are
         // the same string; with rendering on, map by prefix — the stripped
         // text is always a subsequence of the draft, and the caret's
         // character position in the draft upper-bounds its position in the
         // stripped text. The snap inside SpeechPlayer makes exact mapping
         // unnecessary — it lands on the sentence boundary anyway.
-        guard let selection = selectionUTF16, selection.lowerBound > 0 else { return nil }
+        guard let offset, offset > 0 else { return nil }
         let rawText = SpeechText.forText(draft)
         guard rawText.utf16.count > 40 else { return nil }
-        return min(selection.lowerBound, rawText.utf16.count - 1)
+        return min(offset, rawText.utf16.count - 1)
+    }
+
+    /// Why the ⋯ menu's "Play from caret" cannot run right now (nil = it
+    /// can). The entry itself is ALWAYS in the menu: it used to appear only
+    /// after the user had tapped into the text AND the caret sat past the
+    /// first character, which reads as "the option is missing" — the
+    /// 2026-11-23 device report. A permanently visible entry that explains
+    /// itself when it is greyed out is discoverable; a menu item that
+    /// appears and disappears is not.
+    private var playFromCaretUnavailableReason: String? {
+        if player.state != .idle {
+            return String(localized: "Play from caret (stop playback first)")
+        }
+        if selectionUTF16 == nil {
+            return String(localized: "Play from caret (tap into the note first)")
+        }
+        if selectionUTF16?.lowerBound == 0 {
+            return String(localized: "Play from caret (the caret is at the top)")
+        }
+        if playFromCaretOffset == nil {
+            return String(localized: "Play from caret (add a little more text first)")
+        }
+        return nil
     }
 
     private var draftWordCount: Int { cachedWordCount }
@@ -455,8 +487,13 @@ struct NoteEditorView: View {
             .immersiveTabBar(chromeHidden)
             // Switching between preview (speech reads clean) and edit (speech
             // reads raw) changes what the engine should hear — refresh the
-            // speech cache for the new state.
-            .onChange(of: showPreview) { _ in scheduleSpeechCacheUpdate() }
+            // speech cache for the new state. The refresh is SYNCHRONOUS
+            // here (not debounced): the preview's "Read from here" maps the
+            // selection onto the cached speech text, and a cache that is
+            // still empty for the first 300 ms would silently drop the
+            // menu item. One markdown parse on an explicit toggle costs the
+            // same as the preview's own parse.
+            .onChange(of: showPreview) { _ in updateSpeechCaches() }
             .toolbar {
                 // The title lives IN the nav bar — centered between the back
                 // button and the ⋯ menu — instead of occupying a content row
@@ -741,22 +778,41 @@ struct NoteEditorView: View {
     /// MarkdownPreviewView; tap anywhere to return to editing.
     private var markdownPreview: some View {
         ZStack(alignment: .topTrailing) {
-            MarkdownPreviewView(markdown: draft)
-                .onTapGesture(count: 2) {
+            MarkdownPreviewView(
+                markdown: draft,
+                speechText: speechText,
+                // "Read from here": the native selection menu on the prose
+                // (the preview's UITextView surface) maps the selection
+                // onto this note's speech text and starts the engine
+                // there.
+                onReadFromHere: { offset in
                     Haptics.tap()
-                    showPreview = false
-                    // Leaving the reading surface restores the chrome — the
-                    // edit surface never hides it (see chromeHidden).
-                    immersiveBarsHidden = false
+                    player.playFrom(
+                        SpeechText.forText(speechText),
+                        at: offset,
+                        note: currentNote
+                    )
                 }
-                // Single tap in preview: toggles the immersive (tap-to-hide)
-                // chrome — the same gesture everywhere else. We don't want
-                // readers accidentally switching to edit mode while
-                // scrolling, so only the double-tap edits.
-                .onTapGesture(count: 1) {
-                    Haptics.tap()
-                    immersiveBarsHidden.toggle()
-                }
+            )
+                // ONE simultaneous tap for the chrome toggle. The old pair
+                // (a double-tap to edit + a single tap to toggle) attached
+                // PLAIN gestures to the whole preview container, and a
+                // container gesture competes with — and can swallow — the
+                // child's own selection gesture: double-tap-to-select-a-word
+                // and double-tap-to-edit fought over the same touch, and the
+                // selection never took hold. `simultaneousGesture` lets the
+                // child's selection win while the chrome still toggles.
+                //
+                // Double-tap-to-edit is GONE from the content: it collides
+                // with double-tap-to-select-a-word (the very gesture a reader
+                // needs to copy a phrase), and the pencil button in the
+                // corner already switches to edit mode.
+                .simultaneousGesture(
+                    TapGesture(count: 1).onEnded {
+                        Haptics.tap()
+                        immersiveBarsHidden.toggle()
+                    }
+                )
             // Reading-mode indicator with pencil affordance at the corner so
             // the editor hint is discoverable without a double-tap mystery.
             Image(systemName: "pencil.circle.fill")
@@ -771,7 +827,7 @@ struct NoteEditorView: View {
                     immersiveBarsHidden = false
                 }
                 .accessibilityLabel("Switch to edit")
-                .accessibilityHint("Double-tap to switch to edit mode")
+                .accessibilityHint("Tap to switch to edit mode")
         }
         .environmentObject(theme)
         .environment(\.noteId, noteId)
@@ -798,12 +854,14 @@ struct NoteEditorView: View {
                     textScale: theme.previewTextScale,
                     // "Play from selection" rides the built-in long-press
                     // menu (the same logic as the ⋯ menu's "Play from
-                    // caret" — selectionUTF16.lowerBound covers both).
-                    canPlayFromSelection: {
-                        player.state == .idle && playFromCaretOffset != nil
+                    // caret"). The offset handed over is the MENU'S OWN
+                    // range — the loupe can move the selection after the
+                    // editor last reported one.
+                    canPlayFromSelection: { offset in
+                        player.state == .idle && playFromCaretOffset(at: offset) != nil
                     },
-                    onPlayFromSelection: {
-                        guard let caret = playFromCaretOffset, player.state == .idle else { return }
+                    onPlayFromSelection: { offset in
+                        guard let caret = playFromCaretOffset(at: offset), player.state == .idle else { return }
                         Haptics.tap()
                         updateSpeechCaches()
                         player.playFrom(
@@ -1009,6 +1067,12 @@ struct NoteEditorView: View {
                 // one menu tap — no selection gymnastics. The offset is
                 // snapped to a sentence boundary inside SpeechPlayer, so a
                 // caret mid-word still starts on the sentence it sits in.
+                //
+                // The entry is ALWAYS here. It used to be conditional, so it
+                // only appeared after the user had tapped into the text AND
+                // the caret sat past the first character — which the user
+                // read as "the option is missing". Disabled with a reason
+                // beats hidden.
                 if let caret = playFromCaretOffset, player.state == .idle {
                     Button {
                         Haptics.tap()
@@ -1021,6 +1085,17 @@ struct NoteEditorView: View {
                     } label: {
                         Label("Play from caret", systemImage: "play.circle")
                     }
+                } else {
+                    Button {
+                        // Unreachable while disabled — the entry turns
+                        // live the moment its reason is gone.
+                    } label: {
+                        Label(
+                            playFromCaretUnavailableReason ?? "Play from caret",
+                            systemImage: "play.circle"
+                        )
+                    }
+                    .disabled(true)
                 }
                 if player.hasResumeOption(for: noteId, text: speechText) {
                     Button {

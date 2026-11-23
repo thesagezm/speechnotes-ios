@@ -511,38 +511,3 @@ private struct DeckWebView: UIViewRepresentable {
         }
     }
 }
-
-/// Serves the deck's own images to the webview: `deck://media/<index>/<name>`
-/// (and the `…/fill` spelling a picture FILL uses) resolves to the parsed
-/// deck's media entry at `<index>`.
-private final class DeckMediaSchemeHandler: NSObject, WKURLSchemeHandler {
-    private let media: [DeckMedia]
-
-    init(media: [DeckMedia]) {
-        self.media = media
-    }
-
-    func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
-        let url = urlSchemeTask.request.url
-        // deck://media/<index>/<name>
-        let parts = url?.path.split(separator: "/").map(String.init) ?? []
-        guard parts.first.flatMap(Int.init) != nil, !parts.isEmpty,
-              let index = Int(parts[0]), index >= 0, index < media.count else {
-            urlSchemeTask.didFailWithError(URLError(.fileDoesNotExist))
-            return
-        }
-        let entry = media[index]
-        let data = Data(entry.data)
-        let response = URLResponse(
-            url: url ?? URL(string: "\(DeckHTML.mediaScheme)://media/\(index)")!,
-            mimeType: entry.contentType,
-            expectedContentLength: data.count,
-            textEncodingName: nil
-        )
-        urlSchemeTask.didReceive(response)
-        urlSchemeTask.didReceive(data)
-        urlSchemeTask.didFinish()
-    }
-
-    func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {}
-}

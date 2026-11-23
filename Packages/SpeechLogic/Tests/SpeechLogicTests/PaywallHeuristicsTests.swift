@@ -108,4 +108,39 @@ final class PaywallHeuristicsTests: XCTestCase {
         XCTAssertTrue(inspection.paywalled)
         XCTAssertEqual(inspection.reasons, ["marker: subscription required"])
     }
+
+    // MARK: - Which pass wins
+
+    func testTheBypassMustBeClearlyLongerOnACleanPage() {
+        XCTAssertFalse(PaywallHeuristics.bypassWins(
+            bypassedLength: 1_000, directLength: 900, directPaywalled: false
+        ))
+        XCTAssertTrue(PaywallHeuristics.bypassWins(
+            bypassedLength: 1_050, directLength: 900, directPaywalled: false
+        ))
+    }
+
+    func testAWalledDirectResultLosesToAnEquallyLongBypass() {
+        // The direct pass saw a teaser (the server cut the article); the
+        // bypass cleared the wall and re-read the page. An equally long
+        // bypass result is the better one.
+        XCTAssertTrue(PaywallHeuristics.bypassWins(
+            bypassedLength: 800, directLength: 800, directPaywalled: true
+        ))
+    }
+
+    func testAWalledDirectResultStillWinsWhenTheBypassIsShorter() {
+        XCTAssertFalse(PaywallHeuristics.bypassWins(
+            bypassedLength: 200, directLength: 800, directPaywalled: true
+        ))
+    }
+
+    func testWithoutADirectResultAnythingRealWins() {
+        XCTAssertTrue(PaywallHeuristics.bypassWins(
+            bypassedLength: 60, directLength: 0, directPaywalled: false
+        ))
+        XCTAssertFalse(PaywallHeuristics.bypassWins(
+            bypassedLength: 12, directLength: 0, directPaywalled: false
+        ))
+    }
 }

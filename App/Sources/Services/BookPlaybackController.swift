@@ -418,7 +418,11 @@ final class BookPlaybackController: ObservableObject {
     /// for every later play/resume. epub = one zip entry → XhtmlText; pdf =
     /// per-page PdfText extraction with Vision OCR for scanned pages, plus
     /// the per-page offsets sidecar for read-along page sync.
-    private func chapterText(for book: Book, chapterIndex: Int) async -> String? {
+    ///
+    /// NOT private: the reader's "Read from here" needs the same text the
+    /// voice would read, so a selection in the web surface can be mapped
+    /// onto it (see BookWebView's selection menu).
+    func chapterText(for book: Book, chapterIndex: Int) async -> String? {
         let cacheURL = BooksStore.speechTextURL(book, chapterIndex: chapterIndex)
         if let cached = try? String(contentsOf: cacheURL, encoding: .utf8), !cached.isEmpty {
             return cached

@@ -17,15 +17,20 @@ struct MarkdownEditorView: UIViewRepresentable {
     /// edit buffer matches the preview scale.
     var textScale: CGFloat = 1.0
     /// Whether "Play from selection" may appear in the built-in selection
-    /// menu right now — UIKit queries this each time the menu builds.
-    var canPlayFromSelection: (() -> Bool)? = nil
-    /// Performs the play — the menu item was tapped.
-    var onPlayFromSelection: (() -> Void)? = nil
+    /// menu right now — UIKit asks this each time the menu builds, for the
+    /// menu's OWN range (the loupe can move the selection after the last
+    /// one the editor reported, so the reported range is not authoritative).
+    /// The argument is the selection's start, as a UTF-16 offset into the
+    /// editor's text.
+    var canPlayFromSelection: ((Int) -> Bool)? = nil
+    /// Performs the play — the menu item was tapped. The argument is the
+    /// UTF-16 offset the play starts from.
+    var onPlayFromSelection: ((Int) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeUIView(context: Context) -> UITextView {
-        let tv = EditorTextView()
+        let tv = UITextView()
         tv.delegate = context.coordinator
         tv.isEditable = true
         tv.isSelectable = true
@@ -53,15 +58,16 @@ struct MarkdownEditorView: UIViewRepresentable {
         tv.font = font
         tv.text = text
         tv.isUserInteractionEnabled = true
-        // The custom item registers through the legacy API on purpose — on
-        // iOS 16+ UIKit still surfaces UIMenuItems inside the built-in edit
-        // menu, and canPerformAction (on EditorTextView) gates when it
-        // appears. UIEditMenuInteraction cannot augment UITextView's own
-        // menu; it only drives menus on custom views.
-        UIMenuController.shared.menuItems = [UIMenuItem(
-            title: String(localized: "Play from selection"),
-            action: #selector(EditorTextView.playFromSelectionTapped)
-        )]
+        // NOTE: the old path registered "Play from selection" through the
+        // PROCESS-WIDE `UIMenuController.shared.menuItems`. That was the
+        // regression that killed Copy in the notes (v1.8.2): assigning the
+        // shared controller's items REPLACES the built-in edit menu for every
+        // text view in the app — the legacy contract is "your list IS the
+        // menu", not "your list is ADDED to the menu" — so Cut/Copy/Paste/
+        // Select All vanished from the editor AND from SwiftUI's selectable
+        // preview, while Books (a WKWebView with WebKit's own edit menu)
+        // was untouched. The modern hook below APPENDS to the system's
+        // suggested actions instead, so the built-in items always survive.
         context.coordinator.lastSentText = text
         context.coordinator.lastAppliedFontSize = font.pointSize
         return tv
@@ -75,12 +81,10 @@ struct MarkdownEditorView: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: UITextView, context: Context) {
-        // Keep the selection-menu handlers current — they read live SwiftUI
-        // state (playback state, caret) that UIKit cannot see on its own.
-        if let editor = uiView as? EditorTextView {
-            editor.canPlayFromSelection = canPlayFromSelection
-            editor.performPlayFromSelection = onPlayFromSelection
-        }
+        // The coordinator holds the CURRENT view: the edit-menu hook asks it
+        // whether playback may start, and that answer depends on live state
+        // (player state, caret) the coordinator cannot see on its own.
+        context.coordinator.parent = self
         // Only push `text` into the UITextView when it DIFFERS from what we
         // last sent — overwriting the editor mid-keystroke resets the caret
         // and the first responder, which made the old TextEditor wrapper
@@ -108,7 +112,11 @@ struct MarkdownEditorView: UIViewRepresentable {
     }
 
     final class Coordinator: NSObject, UITextViewDelegate {
-        let parent: MarkdownEditorView
+        /// The CURRENT view. `var` (not `let`) because `updateUIView` hands
+        /// the fresh struct over — the closures below read live SwiftUI
+        /// state, and a coordinator frozen on the first render would ask a
+        /// question about a world that no longer exists.
+        var parent: MarkdownEditorView
         /// Tracks the last value we pushed *into* UITextView from SwiftUI
         /// so we can skip redundant writes that would clobber the caret.
         var lastSentText: String = ""
@@ -136,27 +144,39 @@ struct MarkdownEditorView: UIViewRepresentable {
                 parent.selection = range
             }
         }
-    }
-}
 
-/// UITextView subclass that offers "Play from selection" in the built-in
-/// edit menu. The item surfaces whenever `canPlayFromSelection` allows it
-/// at menu-build time (playback idle + a caret/selection in speakable
-/// text); tapping it calls `performPlayFromSelection`.
-final class EditorTextView: UITextView {
-    var canPlayFromSelection: (() -> Bool)?
-    var performPlayFromSelection: (() -> Void)?
-
-    override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
-        if action == #selector(playFromSelectionTapped) {
-            return canPlayFromSelection?() ?? false
+        /// The modern edit-menu hook (iOS 16+): "Play from selection" is
+        /// APPENDED to the menu the system suggests, so Cut / Copy / Paste /
+        /// Select All / Look Up stay exactly where iOS puts them.
+        ///
+        /// The range handed over is the MENU'S OWN range — the loupe can
+        /// move the selection after the editor last reported one, so the
+        /// reported selection is not authoritative and the offset the play
+        /// starts from must come from here.
+        ///
+        /// The default menu is returned (rebuilt from the suggested actions)
+        /// whenever the custom item cannot be offered. Returning `nil` was
+        /// the other option, but rebuilding from `suggestedActions` is
+        /// exactly what the system does by default AND cannot be misread as
+        /// "suppress the menu" — the one failure mode this whole round
+        /// exists to undo.
+        func textView(
+            _ textView: UITextView,
+            editMenuForTextIn range: NSRange,
+            suggestedActions: [UIMenuElement]
+        ) -> UIMenu? {
+            guard let canPlay = parent.canPlayFromSelection,
+                  let onPlay = parent.onPlayFromSelection,
+                  canPlay(range.location) else {
+                return UIMenu(title: "", children: suggestedActions)
+            }
+            let action = UIAction(
+                title: String(localized: "Play from selection"),
+                image: UIImage(systemName: "play.circle")
+            ) { _ in
+                onPlay(range.location)
+            }
+            return UIMenu(title: "", children: suggestedActions + [action])
         }
-        return super.canPerformAction(action, withSender: sender)
-    }
-
-    // Deliberately not `private`: #selector(...) from the representable
-    // above needs the member visible at its point of use.
-    @objc func playFromSelectionTapped() {
-        performPlayFromSelection?()
     }
 }
