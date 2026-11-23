@@ -645,8 +645,10 @@ struct BookWebView: UIViewRepresentable {
             suggestedActions: [UIMenuElement]
         ) -> UIMenu? {
             guard let selection = pendingSelection else { return nil }
+            // `UIMenuElement.title` is NONNULL (a plain String, not an
+            // optional) — `UIMenu`'s own title is the nullable one.
             let extras = suggestedActions.filter {
-                !($0.title?.localizedCaseInsensitiveContains("copy") ?? false)
+                !$0.title.localizedCaseInsensitiveContains("copy")
             }
             return UIMenu(title: "", children: extras + [
                 UIAction(
