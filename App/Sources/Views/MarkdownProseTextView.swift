@@ -355,7 +355,14 @@ struct MarkdownProseTextView: UIViewRepresentable {
                 // A formula is typeset in the maths face and tinted — what
                 // tells the reader "this is a formula", not a stray Greek
                 // letter in the prose.
-                let font = UIFont.systemFont(ofSize: baseFont.pointSize * 1.02, design: .serif)
+                //
+                // The serif face comes from the font DESCRIPTOR:
+                // `UIFont.systemFont(ofSize:weight:)` has no design
+                // parameter, so the serif variant is asked for by name.
+                let size = baseFont.pointSize * 1.02
+                let system = UIFont.systemFont(ofSize: size)
+                let descriptor = system.fontDescriptor.withDesign(.serif) ?? system.fontDescriptor
+                let font = UIFont(descriptor: descriptor, size: size)
                 result.append(NSAttributedString(string: span.text, attributes: [
                     .font: font,
                     .foregroundColor: accent

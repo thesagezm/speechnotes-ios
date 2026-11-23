@@ -149,14 +149,46 @@ struct BookWebView: UIViewRepresentable {
         webView.backgroundColor = .clear
         webView.scrollView.backgroundColor = .clear
         context.coordinator.parent = self
-        // The native selection menu. `UIContextMenuInteraction` is the
-        // CERTAIN API for this (iOS 13+): the older `UIMenuController`
-        // writes to a PROCESS-WIDE menu list, which is exactly what broke
-        // Copy in the notes (see MarkdownEditorView), and
-        // `UIEditMenuInteraction` has no reliable way to present a menu at
-        // a point of the caller's choosing.
-        let selectionMenu = UIContextMenuInteraction(delegate: context.coordinator)
-        webView.addInteraction(selectionMenu)
+        // The native selection menu. `UIEditMenuInteraction` (iOS 16+) is
+        // the API that can present a menu ON DEMAND: the page reports a
+        // selection, and the menu is raised over it.
+        //
+        // Why not the other two: `UIContextMenuInteraction` only answers a
+        // long press the user made on its OWN view and has no way to
+        // present a menu programmatically (`presentMenu(at:)` does not
+        // exist on it), and the older `UIMenuController` writes to a
+        // PROCESS-WIDE menu list — which is exactly what broke Copy in the
+        // notes (see MarkdownEditorView).
+        //
+        // The menu is presented through a `UIEditMenuConfiguration` (the
+        // source point + the arrow direction), and the delegate answers
+        // with the menu for that configuration — see
+        // `editMenuInteraction(_:menuFor:suggestedActions:)` below.
+        //
+        // The interaction lives on an ANCHOR — a clear view that does not
+        // intercept touches — rather than on the webview itself. An
+        // interaction attached to the webview would also answer the user's
+        // own long presses, and a long press on a LINK must reach WebKit
+        // (its link menu must survive). On a non-intercepting anchor the
+        // interaction can only ever appear because WE present it, which is
+        // exactly the one case the reader asks for.
+        let anchor = UIView(frame: webView.bounds)
+        anchor.isUserInteractionEnabled = false
+        anchor.backgroundColor = .clear
+        let selectionMenu = UIEditMenuInteraction(delegate: context.coordinator)
+        anchor.addInteraction(selectionMenu)
+        webView.addSubview(anchor)
+        // The anchor is pinned to the webview, not sized from its frame: the
+        // webview is born with a ZERO frame, and an autoresizing mask from
+        // zero stays zero. The anchor's coordinate space is the webview's,
+        // which is where the selection rect is converted to.
+        anchor.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            anchor.leadingAnchor.constraint(equalTo: webView.leadingAnchor),
+            anchor.trailingAnchor.constraint(equalTo: webView.trailingAnchor),
+            anchor.topAnchor.constraint(equalTo: webView.topAnchor),
+            anchor.bottomAnchor.constraint(equalTo: webView.bottomAnchor)
+        ])
         context.coordinator.selectionMenu = selectionMenu
         context.coordinator.webView = webView
 
@@ -251,7 +283,7 @@ struct BookWebView: UIViewRepresentable {
 
     // MARK: - Coordinator: scheme handler + message bridge
 
-    final class Coordinator: NSObject, WKURLSchemeHandler, WKScriptMessageHandler, UIContextMenuInteractionDelegate {
+    final class Coordinator: NSObject, WKURLSchemeHandler, WKScriptMessageHandler, UIEditMenuInteractionDelegate {
         var parent: BookWebView?
         /// Scheme tasks currently being served. `stop` removes the task, and
         /// every didReceive/didFinish/didFail below checks membership first —
@@ -264,23 +296,29 @@ struct BookWebView: UIViewRepresentable {
         private let liveTasksLock = NSLock()
         /// File reads run off the main thread; deliveries hop back to main.
         private let ioQueue = DispatchQueue(label: "com.speechnotes.bookscheme", qos: .userInitiated)
-        /// The native selection menu's interaction. Weak — the webview owns
+        /// The native selection menu's interaction. Weak — the anchor owns
         /// it (UIKit retains the interactions attached to a view).
-        weak var selectionMenu: UIContextMenuInteraction?
+        weak var selectionMenu: UIEditMenuInteraction?
         /// The webview this coordinator drives — the menu is anchored in it.
         weak var webView: WKWebView?
         /// The passage the last selection reported — what the native menu
         /// offers ("Read from here" / "Copy").
         private var pendingSelection: BookSelection?
+        /// Where that selection sits, in the interaction's view — the menu's
+        /// arrow points at this rect.
+        private var menuTargetRect: CGRect = .null
 
         /// What the page reported, unpacked on the callback's thread: the
         /// selection itself plus the rect it sits at (viewport-relative).
         /// Sendable, because it crosses into the main actor to present the
-        /// menu.
+        /// menu. The rect rides as four numbers, not a `CGRect`, so the
+        /// payload stays a plain Sendable value type.
         private struct SelectionPayload: Sendable {
             let selection: BookSelection
             let rectX: Double?
             let rectY: Double?
+            let rectWidth: Double?
+            let rectHeight: Double?
         }
 
         // Classes get no memberwise init — one must be explicit.
@@ -543,7 +581,9 @@ struct BookWebView: UIViewRepresentable {
                     blockOffset: (body["blockOffset"] as? NSNumber)?.intValue ?? 0
                 ),
                 rectX: (rect?["x"] as? NSNumber)?.doubleValue,
-                rectY: (rect?["y"] as? NSNumber)?.doubleValue
+                rectY: (rect?["y"] as? NSNumber)?.doubleValue,
+                rectWidth: (rect?["w"] as? NSNumber)?.doubleValue,
+                rectHeight: (rect?["h"] as? NSNumber)?.doubleValue
             )
             Task { @MainActor [weak self] in
                 self?.presentSelection(payload)
@@ -553,51 +593,98 @@ struct BookWebView: UIViewRepresentable {
         @MainActor private func presentSelection(_ payload: SelectionPayload) {
             pendingSelection = payload.selection
             guard let x = payload.rectX, let y = payload.rectY else { return }
-            presentSelectionMenu(at: CGPoint(x: x, y: y))
+            let size = CGSize(
+                width: payload.rectWidth ?? 1,
+                height: payload.rectHeight ?? 1
+            )
+            presentSelectionMenu(at: CGRect(x: x, y: y, width: size.width, height: size.height))
         }
 
-        /// Presents the native menu where the selection is.
+        /// Presents the native menu over the selection.
         ///
         /// The page reports a VIEWPORT-relative rect; the webview's scroll
         /// view holds CONTENT coordinates, so the rect is moved by the
         /// scroll offset and the safe-area inset before it is converted into
-        /// the webview's own space.
-        @MainActor private func presentSelectionMenu(at point: CGPoint) {
+        /// the webview's own space (the anchor the interaction lives on
+        /// covers the webview, so its coordinates are the webview's).
+        ///
+        /// The menu is raised through a `UIEditMenuConfiguration` — the
+        /// interaction has no `presentMenu(at:)`; `presentEditMenu(with:)`
+        /// takes the configuration, and the delegate is then asked for the
+        /// menu (the source point is in the interaction's view).
+        @MainActor private func presentSelectionMenu(at rect: CGRect) {
             guard let webView else { return }
             let scrollView = webView.scrollView
             let inset = scrollView.adjustedContentInset
             let contentPoint = CGPoint(
-                x: point.x + scrollView.contentOffset.x + inset.left,
-                y: point.y + scrollView.contentOffset.y + inset.top
+                x: rect.minX + scrollView.contentOffset.x + inset.left,
+                y: rect.minY + scrollView.contentOffset.y + inset.top
             )
-            let viewPoint = scrollView.convert(contentPoint, to: webView)
-            selectionMenu?.presentMenu(at: viewPoint)
+            let origin = scrollView.convert(contentPoint, to: webView)
+            let targetRect = CGRect(origin: origin, size: rect.size)
+            menuTargetRect = targetRect
+            let configuration = UIEditMenuConfiguration(
+                identifier: nil,
+                sourcePoint: CGPoint(x: targetRect.midX, y: targetRect.midY)
+            )
+            selectionMenu?.presentEditMenu(with: configuration)
         }
 
-        // MARK: UIContextMenuInteractionDelegate (the native selection menu)
+        // MARK: UIEditMenuInteractionDelegate (the native selection menu)
 
-        func contextMenuInteraction(
-            _ interaction: UIContextMenuInteraction,
-            configurationForMenuAtLocation location: CGPoint
-        ) -> UIContextMenuConfiguration? {
+        /// The menu at the selection.
+        ///
+        /// UIKit's own suggestions for a webview selection are usually
+        /// EMPTY (UIKit cannot see a selection that lives inside the web
+        /// content), and the page's WebKit callout is suppressed — so this
+        /// menu has to carry Copy itself. Any suggested action that is
+        /// already a Copy is dropped, so the menu never shows two of them.
+        func editMenuInteraction(
+            _ interaction: UIEditMenuInteraction,
+            menuFor configuration: UIEditMenuConfiguration,
+            suggestedActions: [UIMenuElement]
+        ) -> UIMenu? {
             guard let selection = pendingSelection else { return nil }
-            return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
-                UIMenu(title: "", children: [
-                    UIAction(
-                        title: String(localized: "Read from here"),
-                        image: UIImage(systemName: "play.circle")
-                    ) { _ in
-                        guard let self, let parent = self.parent else { return }
-                        parent.onReadFromHere?(selection)
-                    },
-                    UIAction(
-                        title: String(localized: "Copy"),
-                        image: UIImage(systemName: "doc.on.doc")
-                    ) { _ in
-                        UIPasteboard.general.string = selection.selectedText
-                    }
-                ])
+            let extras = suggestedActions.filter {
+                !($0.title?.localizedCaseInsensitiveContains("copy") ?? false)
             }
+            return UIMenu(title: "", children: extras + [
+                UIAction(
+                    title: String(localized: "Read from here"),
+                    image: UIImage(systemName: "play.circle")
+                ) { [weak self] _ in
+                    guard let self, let parent = self.parent else { return }
+                    parent.onReadFromHere?(selection)
+                },
+                UIAction(
+                    title: String(localized: "Copy"),
+                    image: UIImage(systemName: "doc.on.doc")
+                ) { _ in
+                    UIPasteboard.general.string = selection.selectedText
+                }
+            ])
+        }
+
+        /// Where the menu points: the selection's own rect in the
+        /// interaction's view, so the arrow lands on the selected passage
+        /// and not on the middle of the screen. `CGRect.null` (the default
+        /// before a selection) tells UIKit to use its own centred rect.
+        func editMenuInteraction(
+            _ interaction: UIEditMenuInteraction,
+            targetRectFor configuration: UIEditMenuConfiguration
+        ) -> CGRect {
+            menuTargetRect
+        }
+
+        /// The menu is gone: the selection it described is stale, and a
+        /// later menu must not offer it again.
+        func editMenuInteraction(
+            _ interaction: UIEditMenuInteraction,
+            willDismissMenuFor configuration: UIEditMenuConfiguration,
+            animator: UIEditMenuInteractionAnimating
+        ) {
+            pendingSelection = nil
+            menuTargetRect = .null
         }
 
         @MainActor private func handleMessage(type: String, body: [String: Any]) {

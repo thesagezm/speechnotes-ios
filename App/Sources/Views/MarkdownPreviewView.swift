@@ -25,7 +25,11 @@ struct MarkdownPreviewView: View {
     @State private var zoomedImage: (url: URL, alt: String)?
     @Environment(\.noteId) private var envNoteId
     @Environment(\.isEInk) private var isEInk
-    @Environment(\.accentColor) private var accentColor
+    // The accent comes from the THEME, not from `\.accentColor`: the
+    // SwiftUI environment key for the accent is `package`-level in the
+    // iOS 26 SDK (not public API), so it cannot be read from the app
+    // target. `theme.accentColor` is the same value the root view sets
+    // with `.accentColor(theme.accentColor)`.
     @EnvironmentObject private var theme: AppTheme
 
     // MARK: - Spacing (user-tunable in Appearance → Reading View)
@@ -235,7 +239,7 @@ struct MarkdownPreviewView: View {
             blocks: group,
             speechText: speechText,
             style: proseStyle,
-            accent: UIColor(accentColor),
+            accent: UIColor(theme.accentColor),
             onReadFromHere: onReadFromHere,
             onOpenURL: { url in safariURL = url }
         )

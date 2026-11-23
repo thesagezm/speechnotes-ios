@@ -1,6 +1,7 @@
 import UIKit
 import WebKit
 import SlideDeckKit
+import SpeechLogic
 
 /// The deck thumbnail: the FIRST slide, rasterized into the shelf's
 /// cover.jpg.
